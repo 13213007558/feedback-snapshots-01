@@ -4,7 +4,7 @@ Sanitize is an allowlist-based HTML and CSS sanitizer. It removes all HTML and/o
 
 Using a simple configuration syntax, you can tell Sanitize to allow certain HTML elements, certain attributes within those elements, and even certain URL protocols within attributes that contain URLs. You can also allow specific CSS properties, @ rules, and URL protocols in elements or attributes containing CSS. Any HTML or CSS that you don't explicitly allow will be removed.
 
-Sanitize is based on the [Nokogiri HTML5 parser][nokogiri], which parses HTML the same way modern browsers do, and [Crass][crass], which parses CSS the same way modern browsers do. As long as your allowlist config only allows safe markup and CSS, even the most malformed or malicious input will be transformed into safe output.
+Sanitize is based on the [Nokogiri HTML5 parser][nokogiri], which parses HTML the same way modern browsers do, and [Crass][crass], which parses CSS the same way modern browsers do.
 
 [![Gem Version](https://badge.fury.io/rb/sanitize.svg)](http://badge.fury.io/rb/sanitize)
 [![Tests](https://github.com/rgrove/sanitize/workflows/Tests/badge.svg)](https://github.com/rgrove/sanitize/actions?query=workflow%3ATests)
@@ -50,6 +50,9 @@ Sanitize::CSS.stylesheet(css, Sanitize::Config::RELAXED)
 # Clean up some CSS properties using the Relaxed config.
 Sanitize::CSS.properties(css, Sanitize::Config::RELAXED)
 ```
+
+> [!IMPORTANT]
+> Input that can't be parsed as HTML or CSS may cause an exception to be raised. How you handle exceptions (or whether you allow them to crash your application) is up to you, but be sure to keep this in mind if you're passing untrusted content to Sanitize.
 
 ## Usage
 
