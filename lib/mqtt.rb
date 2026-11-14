@@ -23,6 +23,16 @@ module MQTT
   class ProtocolException < MQTT::Exception
   end
 
+  # A MigrationError is raised when a connection cannot be migrated to
+  # another protocol version without changing its identity.
+  class MigrationError < ::ArgumentError
+  end
+
+  # Raised when a persistent session was requested but the server did not
+  # report that it had resumed the previously stored session.
+  class SessionNotResumedException < MQTT::ProtocolException
+  end
+
   # A NotConnectedException will be raised when trying to
   # perform a function but no connection has been
   # established
@@ -32,6 +42,8 @@ module MQTT
   autoload :Client,   'mqtt/client'
   autoload :Packet,   'mqtt/packet'
   autoload :Proxy,    'mqtt/proxy'
+  autoload :Migration, 'mqtt/migration'
+  autoload :MemoryTransport, 'mqtt/memory_transport'
 
   # MQTT-SN
   module SN

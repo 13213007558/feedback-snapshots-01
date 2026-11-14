@@ -48,7 +48,12 @@ module MQTT
       packet.instance_variable_set('@body_length', body_length)
 
       # Read in the packet body
-      packet.parse_body(socket.read(body_length))
+      body = socket.read(body_length)
+      if body.nil? && body_length > 0
+        raise ProtocolException, 'Failed to read packet body from socket'
+      end
+
+      packet.parse_body(body)
 
       packet
     end
@@ -253,6 +258,13 @@ module MQTT
       encode_short(str.bytesize) + str
     end
 
+    # Encode a binary field and return it
+    # (preceded by the length of the field, without changing the bytes)
+    def encode_binary(data)
+      data = data.to_s.dup.force_encoding('ASCII-8BIT')
+      encode_short(data.bytesize) + data
+    end
+
     # Remove a 16-bit unsigned integer from the front of buffer
     def shift_short(buffer)
       bytes = buffer.slice!(0..1)
@@ -428,6 +440,9 @@ module MQTT
       # The password for authenticating with the server
       attr_accessor :password
 
+      # The Connect Flags byte of the last serialised or parsed packet
+      attr_reader :connect_flags
+
       # Default attribute values
       ATTR_DEFAULTS = {
         :client_id => nil,
@@ -458,39 +473,24 @@ module MQTT
 
       # Get serialisation of packet's body
       def encode_body
+        validate_connect_attributes!
+
         body = ''
-
-        if @version == '3.1.0'
-          raise 'Client identifier too short while serialising packet' if @client_id.nil? || @client_id.bytesize < 1
-          raise 'Client identifier too long when serialising packet' if @client_id.bytesize > 23
-        end
-
         body += encode_string(@protocol_name)
         body += encode_bytes(@protocol_level.to_i)
 
-        if @keep_alive < 0
-          raise 'Invalid keep-alive value: cannot be less than 0'
-        end
-
         # Set the Connect flags
-        @connect_flags = 0
-        @connect_flags |= 0x02 if @clean_session
-        @connect_flags |= 0x04 unless @will_topic.nil?
-        @connect_flags |= ((@will_qos & 0x03) << 3)
-        @connect_flags |= 0x20 if @will_retain
-        @connect_flags |= 0x40 unless @password.nil?
-        @connect_flags |= 0x80 unless @username.nil?
+        @connect_flags = build_connect_flags
         body += encode_bytes(@connect_flags)
 
         body += encode_short(@keep_alive)
         body += encode_string(@client_id)
         unless will_topic.nil?
           body += encode_string(@will_topic)
-          # The MQTT v3.1 specification says that the payload is a UTF-8 string
-          body += encode_string(@will_payload)
+          body += encode_connect_field(@will_payload)
         end
         body += encode_string(@username) unless @username.nil?
-        body += encode_string(@password) unless @password.nil?
+        body += encode_connect_field(@password) unless @password.nil?
         body
       end
 
@@ -508,22 +508,48 @@ module MQTT
         end
 
         @connect_flags = shift_byte(buffer)
+        validate_connect_flags! if base_version == '3.1.1'
+
         @clean_session = ((@connect_flags & 0x02) >> 1) == 0x01
         @keep_alive = shift_short(buffer)
         @client_id = shift_string(buffer)
-        if ((@connect_flags & 0x04) >> 2) == 0x01
+
+        if base_version == '3.1.1' && @client_id.empty? && !@clean_session
+          raise ProtocolException, 'Empty Client Identifier requires Clean Session'
+        end
+
+        @will_topic = nil
+        @will_payload = nil
+        @will_qos = 0
+        @will_retain = false
+        @username = nil
+        @password = nil
+
+        if will_flag?
           # Last Will and Testament
           @will_qos = ((@connect_flags & 0x18) >> 3)
           @will_retain = ((@connect_flags & 0x20) >> 5) == 0x01
-          @will_topic = shift_string(buffer)
-          # The MQTT v3.1 specification says that the payload is a UTF-8 string
-          @will_payload = shift_string(buffer)
+          if base_version == '3.1.0'
+            @will_topic = shift_string(buffer)
+            @will_payload = shift_string(buffer)
+          else
+            @will_topic = shift_connect_string(buffer, 'Will Topic')
+            @will_payload = shift_connect_binary(buffer, 'Will Message')
+          end
         end
-        if ((@connect_flags & 0x80) >> 7) == 0x01 && buffer.bytesize > 0
-          @username = shift_string(buffer)
-        end
-        if ((@connect_flags & 0x40) >> 6) == 0x01 && buffer.bytesize > 0 # rubocop: disable Style/GuardClause
-          @password = shift_string(buffer)
+
+        if base_version == '3.1.0'
+          # Keep the legacy 3.1 parsing behaviour: missing optional fields are
+          # left as nil rather than rejected.
+          @username = shift_string(buffer) if username_flag? && buffer.bytesize > 0
+          @password = shift_string(buffer) if password_flag? && buffer.bytesize > 0
+        else
+          @username = shift_connect_string(buffer, 'User Name') if username_flag?
+          @password = shift_connect_binary(buffer, 'Password') if password_flag?
+
+          unless buffer.empty?
+            raise ProtocolException, 'Extra bytes at end of Connect packet'
+          end
         end
       end
 
@@ -538,7 +564,144 @@ module MQTT
         str + '>'
       end
 
+      protected
+
+      # True if the Will Flag is set
+      def will_flag?
+        (@connect_flags & 0x04) != 0
+      end
+
+      # True if the User Name Flag is set
+      def username_flag?
+        (@connect_flags & 0x80) != 0
+      end
+
+      # True if the Password Flag is set
+      def password_flag?
+        (@connect_flags & 0x40) != 0
+      end
+
+      # Encode a CONNECT payload field.
+      #
+      # The Will Message and Password are binary data in MQTT 3.1.1.
+      # In MQTT 3.1.0 the Will Message is a UTF-8 string.
+      def encode_connect_field(value)
+        base_version == '3.1.0' ? encode_string(value) : encode_binary(value)
+      end
+
+      # Remove a length-prefixed UTF-8 field, rejecting a truncated field
+      def shift_connect_string(buffer, name)
+        len = shift_connect_length(buffer, name)
+        shift_connect_data(buffer, len, name).force_encoding('UTF-8')
+      end
+
+      # Remove a length-prefixed binary field, rejecting a truncated field
+      def shift_connect_binary(buffer, name)
+        len = shift_connect_length(buffer, name)
+        shift_connect_data(buffer, len, name).force_encoding('ASCII-8BIT')
+      end
+
+      def shift_connect_length(buffer, name)
+        if buffer.bytesize < 2
+          raise ProtocolException, "Missing #{name} field in Connect packet"
+        end
+
+        shift_short(buffer)
+      end
+
+      def shift_connect_data(buffer, len, name)
+        if buffer.bytesize < len
+          raise ProtocolException, "Truncated #{name} field in Connect packet"
+        end
+
+        shift_data(buffer, len)
+      end
+
+      # The protocol version, without the deprecated '3.1' alias
+      def base_version
+        @version.to_s == '3.1' ? '3.1.0' : @version.to_s
+      end
+
+      # Build the CONNECT flags from the fields that are actually present.
+      # Validation has already rejected any combination that cannot be
+      # represented, so nothing is silently rewritten here.
+      def build_connect_flags
+        will_flag = !@will_topic.nil?
+        username_flag = !@username.nil?
+        password_flag = !@password.nil?
+
+        flags = 0
+        flags |= 0x02 if @clean_session
+        flags |= 0x04 if will_flag
+        flags |= ((will_qos_value & 0x03) << 3) if will_flag
+        flags |= 0x20 if will_flag && @will_retain
+        flags |= 0x40 if password_flag
+        flags |= 0x80 if username_flag
+        flags
+      end
+
+      def will_qos_value
+        (@will_qos || 0).to_i
+      end
+
+      # Validate attributes before serialising, so that a configuration that
+      # cannot be represented on the wire is rejected instead of being rewritten.
+      def validate_connect_attributes!
+        if base_version == '3.1.0'
+          raise 'Client identifier too short while serialising packet' if @client_id.nil? || @client_id.bytesize < 1
+          raise 'Client identifier too long when serialising packet' if @client_id.bytesize > 23
+        elsif @client_id.nil? || @client_id.to_s.empty?
+          # MQTT 3.1.1 allows a zero-byte ClientId only with CleanSession set.
+          raise 'Must provide a client_id if clean_session is set to false' unless @clean_session
+        end
+
+        if @keep_alive < 0
+          raise 'Invalid keep-alive value: cannot be less than 0'
+        end
+
+        if @keep_alive > 0xffff
+          raise 'Invalid keep-alive value: cannot be greater than 65535'
+        end
+
+        if will_qos_value < 0 || will_qos_value > 2
+          raise 'Invalid Will QoS value: must be 0, 1 or 2'
+        end
+
+        if @will_topic.nil?
+          raise 'Will topic cannot be empty' if @will_retain || !will_qos_value.zero?
+          unless @will_payload.nil? || @will_payload.to_s.empty?
+            raise 'Will payload cannot be set without a Will topic'
+          end
+        elsif @will_topic.to_s.empty?
+          raise 'Will topic cannot be empty'
+        end
+
+        if @password && @username.nil?
+          raise 'Password cannot be set without a username'
+        end
+      end
+
+      # Validate the flags on a received packet against the fields present
+      def validate_connect_flags!
+        if (@connect_flags & 0x01) != 0
+          raise ProtocolException, 'Reserved flag in Connect flags is not zero'
+        end
+
+        if password_flag? && !username_flag?
+          raise ProtocolException, 'Password flag set without User Name flag'
+        end
+
+        if !will_flag? && ((@connect_flags & 0x38) != 0)
+          raise ProtocolException, 'Will QoS and Will Retain must be zero when Will flag is not set'
+        end
+
+        if will_flag? && ((@connect_flags & 0x18) >> 3) == 0x03
+          raise ProtocolException, 'Invalid Will QoS value of 3'
+        end
+      end
+
       # ---- Deprecated attributes and methods  ---- #
+      public
 
       # @deprecated Please use {#protocol_level} instead
       def protocol_version

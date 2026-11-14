@@ -187,6 +187,53 @@ socket << MQTT::SN::Packet::Publish.new(
 socket.close
 ~~~
 
+Migration and strict sessions
+-----------------------------
+
+MQTT 3.1.0 and 3.1.1 encode the CONNECT packet differently: the protocol name
+and level change, and the Will Message and Password are binary fields in 3.1.1
+but UTF-8 strings in 3.1.0. The client identifier, the Clean Session flag, the
+credentials and the Will must nevertheless stay byte-for-byte equivalent when
+a deployment moves between the two versions.
+
+`MQTT::Migration` provides checks that refuse a configuration rather than
+silently rewriting it:
+
+~~~ ruby
+client = MQTT::Client.new(:host => 'server', :client_id => 'stable-id',
+                          :clean_session => false)
+client.username = 'user'
+client.password = 'secret'
+client.set_will('status', 'offline', true, 1)
+
+MQTT::Migration.check!(client)                        # raises MigrationError
+comparison = MQTT::Migration.compare_handshakes(client, '3.1.0', '3.1.1')
+comparison[:changed]                                  # => []
+~~~
+
+`compare_handshakes` returns the complete CONNECT bytes for both versions, the
+parsed identity of each, and the attributes that differ. `compare_connections`
+does the same over the in-memory transport, sending exactly one CONNECT per
+version. `MQTT::MemoryTransport.pair` is a full-duplex IO-like transport for
+exercising handshakes without a server.
+
+`connect_once` performs a single attempt over the memory transport and returns
+a `MQTT::Migration::Result`; a refusal is reported, never retried. `connect!`
+is the production entry point: it sets `strict_client_id`, refuses an implicit
+or empty client identifier, optionally requires a resumed session, and re-raises
+on any failure without changing the protocol version or client identifier.
+
+`Client#require_session_resumed` and `Client#strict_client_id` are also
+available directly. A CONNACK with return code 0x00 only means that the network
+connection was accepted. When `clean_session` is false it does **not** prove
+that the server resumed the stored session: only `Session Present = 1` does.
+Return codes 0x01-0x05, an unknown return code, a non-CONNACK response, or a
+CONNACK with reserved flags set are all failures. `Client#session_present`
+records what the server actually reported.
+
+A failed connect closes the socket and raises. It never falls back to another
+protocol version and never generates or replaces a `client_id` to retry.
+
 Limitations
 -----------
 

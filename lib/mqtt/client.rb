@@ -26,14 +26,52 @@ module MQTT
     # Set to false to skip tls hostname verification
     attr_accessor :verify_host
 
+    # Optional IO-like transport to use instead of opening a TCP socket
+    #
+    # The object must provide write, read, getbyte, closed?, close and to_io.
+    # This is primarily useful for embedding the client in another transport.
+    attr_accessor :transport
+
+    # Start the background packet reader after a successful connect (default true)
+    #
+    # Set to false for a handshake-only probe, so that no reader thread owns
+    # the socket after the CONNACK has been checked.
+    attr_accessor :start_read_thread
+
     # Time (in seconds) between pings to remote server (default is 15 seconds)
     attr_accessor :keep_alive
 
     # Set the 'Clean Session' flag when connecting? (default is true)
     attr_accessor :clean_session
 
+    # Refuse to connect unless the CONNACK reports that the stored session was resumed
+    #
+    # Only meaningful when clean_session is false. When enabled, a server that
+    # reports Session Present = 0 is rejected instead of being treated as a
+    # successful connection to the previous session.
+    attr_accessor :require_session_resumed
+
+    # Never replace or generate a client identifier while connecting
+    #
+    # When enabled, an empty client_id is rejected instead of being replaced by
+    # a generated one. Recommended when migrating between protocol versions.
+    attr_accessor :strict_client_id
+
     # Client Identifier
-    attr_accessor :client_id
+    def client_id
+      @client_id
+    end
+
+    # Set the Client Identifier, marking it as explicitly supplied
+    def client_id=(value)
+      @client_id_generated = false
+      @client_id = value
+    end
+
+    # True if the client identifier was generated implicitly by the client
+    def client_id_generated?
+      !!@client_id_generated
+    end
 
     # Number of seconds to wait for acknowledgement packets (default is 5 seconds)
     attr_accessor :ack_timeout
@@ -62,6 +100,9 @@ module MQTT
     # Last ping response time
     attr_reader :last_ping_response
 
+    # Whether the server reported that the stored session was resumed
+    attr_reader :session_present
+
     # Timeout between select polls (in seconds)
     SELECT_TIMEOUT = 0.5
 
@@ -72,6 +113,8 @@ module MQTT
       :version => '3.1.1',
       :keep_alive => 15,
       :clean_session => true,
+      :require_session_resumed => false,
+      :strict_client_id => nil,
       :client_id => nil,
       :ack_timeout => 5,
       :connect_timeout => 30,
@@ -82,7 +125,9 @@ module MQTT
       :will_qos => 0,
       :will_retain => false,
       :ssl => false,
-      :verify_host => true
+      :verify_host => true,
+      :transport => nil,
+      :start_read_thread => true
     }
 
     # Create and connect a new MQTT Client
@@ -174,6 +219,7 @@ module MQTT
       # Initialise private instance variables
       @last_ping_request = current_time
       @last_ping_response = current_time
+      @session_present = false
       @socket = nil
       @read_queue = Queue.new
       @pubacks = {}
@@ -228,23 +274,21 @@ module MQTT
 
     # Connect to the MQTT server
     # If a block is given, then yield to that block and then disconnect again.
+    #
+    # A failed attempt is final for this call: the socket is closed and the
+    # exception is raised. The protocol version and client identifier are not
+    # changed in order to retry.
     def connect(clientid = nil)
-      @client_id = clientid unless clientid.nil?
+      self.client_id = clientid unless clientid.nil?
 
-      if @client_id.nil? || @client_id.empty?
-        raise 'Must provide a client_id if clean_session is set to false' unless @clean_session
-
-        # Empty client id is not allowed for version 3.1.0
-        @client_id = MQTT::Client.generate_client_id if @version == '3.1.0'
-      end
-
+      validate_connect_identity!
       raise 'No MQTT server host set when attempting to connect' if @host.nil?
 
       unless connected?
         # Create network socket
-        tcp_socket = open_tcp_socket
+        tcp_socket = @transport.nil? ? open_tcp_socket : @transport
 
-        if @ssl
+        if @ssl && @transport.nil?
           # Set the protocol version
           ssl_context.ssl_version = @ssl if @ssl.is_a?(Symbol)
 
@@ -261,7 +305,12 @@ module MQTT
           @socket = tcp_socket
         end
 
-        # Construct a connect packet
+        # Every attempt starts with no knowledge of server-side session state.
+        @session_present = false
+
+        # Construct a connect packet. The packet is built from the fields that
+        # were configured: any combination that cannot be represented on the
+        # wire raises instead of being silently corrected.
         packet = MQTT::Packet::Connect.new(
           :version => @version,
           :clean_session => @clean_session,
@@ -276,15 +325,29 @@ module MQTT
         )
 
         # Send packet
-        send_packet(packet)
+        begin
+          send_packet(packet)
+        rescue ::Exception
+          close_socket_after_failed_connect
+          raise
+        end
 
-        # Receive response
-        receive_connack
+        # Receive response. A failed CONNACK is final for this attempt: the
+        # socket is closed and no fallback protocol version or new client
+        # identifier is attempted.
+        begin
+          receive_connack
+        rescue ::Exception
+          close_socket_after_failed_connect
+          raise
+        end
 
         # Start packet reading thread
-        @read_thread = Thread.new(Thread.current) do |parent|
-          Thread.current[:parent] = parent
-          receive_packet while connected?
+        if @start_read_thread
+          @read_thread = Thread.new(Thread.current) do |parent|
+            Thread.current[:parent] = parent
+            receive_packet while connected?
+          end
         end
       end
 
@@ -564,7 +627,68 @@ module MQTT
           @socket.close
           raise MQTT::ProtocolException, packet.return_msg
         end
+
+        # A zero return code only says that the connection was accepted.
+        # It does not say that the previously stored session was resumed.
+        @session_present = packet.session_present
+
+        if !@clean_session && @require_session_resumed && !packet.session_present
+          raise MQTT::SessionNotResumedException,
+                'Server accepted the connection but did not resume the stored session'
+        end
       end
+    end
+
+    # Reject configurations that cannot keep the same identity on the wire.
+    def validate_connect_identity!
+      unless ['3.1.0', '3.1', '3.1.1'].include?(@version.to_s)
+        raise MQTT::MigrationError, "Unsupported protocol version: #{@version}"
+      end
+
+      if @client_id.nil? || @client_id.to_s.empty?
+        raise MQTT::MigrationError, 'Must provide a client_id if clean_session is set to false' unless @clean_session
+
+        # An empty client id requests that the server assigns a new identity.
+        # Only MQTT 3.1.0 clients generate an id locally, and only when strict
+        # mode has not been requested.
+        if @strict_client_id
+          raise MQTT::MigrationError, 'Must provide a client_id when strict_client_id is enabled'
+        end
+
+        if @version.to_s == '3.1.0'
+          @client_id = MQTT::Client.generate_client_id
+          @client_id_generated = true
+        end
+      end
+
+      raise MQTT::MigrationError, 'Password cannot be set without a username' if @password && @username.nil?
+
+      if @will_topic.nil?
+        if @will_retain || (@will_qos || 0).to_i != 0
+          raise MQTT::MigrationError, 'Will QoS and Will Retain cannot be set without a Will topic'
+        end
+        unless @will_payload.nil? || @will_payload.to_s.empty?
+          raise MQTT::MigrationError, 'Will payload cannot be set without a Will topic'
+        end
+      elsif @will_topic.to_s.empty?
+        raise MQTT::MigrationError, 'Will topic cannot be empty'
+      end
+
+      unless (@will_qos || 0).to_i.between?(0, 2)
+        raise MQTT::MigrationError, 'Invalid Will QoS value: must be 0, 1 or 2'
+      end
+
+      if @clean_session && @require_session_resumed
+        raise MQTT::MigrationError, 'Cannot require a resumed session when clean_session is enabled'
+      end
+    end
+
+    def close_socket_after_failed_connect
+      @socket.close unless @socket.nil? || @socket.closed?
+    rescue ::Exception
+      nil
+    ensure
+      @socket = nil
     end
 
     # Send a packet to server
