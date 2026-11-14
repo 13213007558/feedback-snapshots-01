@@ -98,6 +98,21 @@ client = MQTT::Client.connect(
 )
 ~~~
 
+A packet that never finishes arriving can no longer hold the client forever. Two independent limits bound reading:
+
+* `read_idle_timeout` (default 30 seconds): how long to wait for the next byte of a packet. Bytes that keep arriving reset it, so packets split across short reads are still accepted.
+* `packet_timeout` (default 60 seconds): the total time allowed to assemble one complete packet. This cannot be reset by data trickling in slowly.
+
+When either limit is reached the connection is closed and any threads waiting on an acknowledgement fail, rather than blocking indefinitely.
+
+~~~ ruby
+client = MQTT::Client.connect(
+  :host => 'myserver.example.com',
+  :read_idle_timeout => 10,
+  :packet_timeout => 30
+)
+~~~
+
 The connection can either be made without the use of a block:
 
 ~~~ ruby

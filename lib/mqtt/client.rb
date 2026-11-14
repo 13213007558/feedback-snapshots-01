@@ -41,6 +41,14 @@ module MQTT
     # Number of seconds to connect to the server (default is 90 seconds)
     attr_accessor :connect_timeout
 
+    # Maximum number of seconds to wait for the next byte of an incoming
+    # packet before giving up on the connection (default is 30 seconds)
+    attr_accessor :read_idle_timeout
+
+    # Maximum number of seconds allowed to assemble one complete incoming
+    # packet before giving up on the connection (default is 60 seconds)
+    attr_accessor :packet_timeout
+
     # Username to authenticate to the server with
     attr_accessor :username
 
@@ -75,6 +83,8 @@ module MQTT
       :client_id => nil,
       :ack_timeout => 5,
       :connect_timeout => 30,
+      :read_idle_timeout => 30,
+      :packet_timeout => 60,
       :username => nil,
       :password => nil,
       :will_topic => nil,
@@ -261,6 +271,10 @@ module MQTT
           @socket = tcp_socket
         end
 
+        # A fresh reader (and its byte buffer) for every new connection, so
+        # that residual bytes from a previous connection are never reused
+        @packet_reader = new_packet_reader(@socket)
+
         # Construct a connect packet
         packet = MQTT::Packet::Connect.new(
           :version => @version,
@@ -307,11 +321,16 @@ module MQTT
 
       return unless connected?
 
-      # Close the socket if it is open
+      # Send a disconnect packet, if requested
       if send_msg
         packet = MQTT::Packet::Disconnect.new
         send_packet(packet)
       end
+
+      # Throw away any partially read packet and the reader itself
+      @packet_reader&.reset
+      @packet_reader = nil
+
       @socket.close unless @socket.nil?
       handle_close
       @socket = nil
@@ -473,19 +492,36 @@ module MQTT
       result = IO.select([@socket], [], [], SELECT_TIMEOUT)
       handle_timeouts
       unless result.nil?
-        # Yes - read in the packet
-        packet = MQTT::Packet.read(@socket)
-        handle_packet packet
+        # Yes - read in the packet (tolerating short reads and half packets)
+        packet = packet_reader.read
+        handle_packet packet unless packet.nil?
       end
       keep_alive!
     # Pass exceptions up to parent thread
     rescue ::Exception => exp
+      # Drop any bytes of the unfinished packet: they must not survive into
+      # a new connection
+      @packet_reader&.reset
       unless @socket.nil?
         @socket.close
         @socket = nil
         handle_close
       end
       Thread.current[:parent].raise(exp)
+    end
+
+    # Lazily build the buffered packet reader used by the background thread
+    def packet_reader
+      @packet_reader ||= new_packet_reader(@socket)
+    end
+
+    def new_packet_reader(socket)
+      MQTT::PacketReader.new(
+        socket,
+        :read_idle_timeout => @read_idle_timeout,
+        :packet_timeout => @packet_timeout,
+        :select_timeout => SELECT_TIMEOUT
+      ) { current_time }
     end
 
     def wait_for_puback(id)

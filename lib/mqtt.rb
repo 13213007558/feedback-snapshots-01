@@ -29,9 +29,10 @@ module MQTT
   class NotConnectedException < MQTT::Exception
   end
 
-  autoload :Client,   'mqtt/client'
-  autoload :Packet,   'mqtt/packet'
-  autoload :Proxy,    'mqtt/proxy'
+  autoload :Client,       'mqtt/client'
+  autoload :Packet,       'mqtt/packet'
+  autoload :PacketReader, 'mqtt/packet_reader'
+  autoload :Proxy,        'mqtt/proxy'
 
   # MQTT-SN
   module SN

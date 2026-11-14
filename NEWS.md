@@ -1,6 +1,16 @@
 Ruby MQTT NEWS
 ==============
 
+Ruby MQTT (unreleased)
+----------------------
+
+* Stop a half-written control packet from blocking the client forever: incoming
+  packets are now read through a buffered reader with separate `read_idle_timeout`
+  (reading-progress) and `packet_timeout` (whole-packet) limits. Short reads and
+  back-to-back packets are still supported, and residual bytes are never carried
+  over to a new connection.
+
+
 Ruby MQTT Version 0.7.0 (2025-10-29)
 ------------------------------------
 

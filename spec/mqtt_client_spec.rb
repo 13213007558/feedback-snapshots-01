@@ -34,6 +34,14 @@ describe MQTT::Client do
     end
   end
 
+  # A test double standing in for the buffered packet reader, installed on
+  # the client so that receive_packet reads from it instead of the socket.
+  let(:packet_reader) do
+    reader = double('Packet Reader', :reset => nil)
+    client.instance_variable_set('@packet_reader', reader)
+    reader
+  end
+
   describe "initializing a client" do
     it "with no arguments, it should use the defaults" do
       client = MQTT::Client.new
@@ -1001,32 +1009,32 @@ describe MQTT::Client do
 
     it "should close the socket if there is an MQTT exception" do
       expect(socket).to receive(:close).once
-      allow(MQTT::Packet).to receive(:read).and_raise(MQTT::Exception)
+      allow(packet_reader).to receive(:read).and_raise(MQTT::Exception)
       client.send(:receive_packet)
     end
 
     it "should close the socket if there is a system call error" do
       expect(socket).to receive(:close).once
-      allow(MQTT::Packet).to receive(:read).and_raise(Errno::ECONNRESET)
+      allow(packet_reader).to receive(:read).and_raise(Errno::ECONNRESET)
       client.send(:receive_packet)
     end
 
     it "should pass exceptions up to parent thread" do
       e = MQTT::Exception.new
       expect(@parent_thread).to receive(:raise).with(e).once
-      allow(MQTT::Packet).to receive(:read).and_raise(e)
+      allow(packet_reader).to receive(:read).and_raise(e)
       client.send(:receive_packet)
     end
 
     it "should pass a system call error up to parent thread" do
       e = Errno::ECONNRESET.new
       expect(@parent_thread).to receive(:raise).with(e).once
-      allow(MQTT::Packet).to receive(:read).and_raise(e)
+      allow(packet_reader).to receive(:read).and_raise(e)
       client.send(:receive_packet)
     end
 
     it "should update last_ping_response when receiving a Pingresp" do
-      allow(MQTT::Packet).to receive(:read).and_return MQTT::Packet::Pingresp.new
+      allow(packet_reader).to receive(:read).and_return MQTT::Packet::Pingresp.new
       client.instance_variable_set '@last_ping_response', Time.at(0)
       client.send :receive_packet
       expect(client.last_ping_response).to be_within(1).of now
@@ -1069,6 +1077,78 @@ describe MQTT::Client do
     end
   end
 
+  describe "when a control packet stays permanently incomplete" do
+    let(:clock) { [1000.0] }
+
+    before(:each) do
+      client.keep_alive = 0
+      client.read_idle_timeout = 2.0
+      client.packet_timeout = 100.0
+      # A controllable clock: no real waiting happens
+      allow(client).to receive(:current_time) { clock[0] }
+      # Each blocking poll advances fake time, but still uses a real (tiny)
+      # select so background threads get scheduled and data is noticed.
+      allow(IO).to receive(:select).and_wrap_original do |original, reads, writes, errors, _timeout|
+        clock[0] += 1.0
+        original.call(reads, writes, errors, 0.01)
+      end
+    end
+
+    def start_read_thread(parent = Thread.current)
+      Thread.new do
+        Thread.current[:parent] = parent
+        # Swallow the failure the read thread reports to its parent so it
+        # does not bubble into the test thread between assertions.
+        def parent.raise(*); end
+        client.send(:receive_packet) while client.connected?
+      end
+    end
+
+    it "fails a waiting publish and lets the read thread exit" do
+      rd, wr = UNIXSocket.pair
+      client.instance_variable_set('@socket', rd)
+      reader = client.send(:packet_reader)
+
+      # Send just one byte of a packet header, then never the rest. The read
+      # thread is now stuck assembling a packet it can never finish.
+      wr.write("\x30")
+      thread = start_read_thread
+      wait_for(5) { reader.instance_variable_get(:@buffer).bytesize == 1 }
+
+      publisher = Thread.new { client.publish('topic', 'payload', false, 1) }
+      expect(publisher.value).to eq(-1)
+
+      expect(thread.join(5)).not_to be_nil
+      expect(thread).not_to be_alive
+      expect(client).not_to be_connected
+      expect(reader.instance_variable_get(:@buffer)).to be_empty
+    ensure
+      rd&.close
+      wr&.close
+    end
+
+    it "does not carry residual half-packet bytes into a new connection" do
+      rd, wr = UNIXSocket.pair
+      client.instance_variable_set('@socket', rd)
+      old_reader = client.send(:packet_reader)
+
+      wr.write("\x30")
+      thread = start_read_thread
+      expect(thread.join(5)).not_to be_nil
+      # The failed connection's reader dropped its half packet on teardown
+      expect(old_reader.instance_variable_get(:@buffer)).to be_empty
+
+      # A new connection gets a brand new reader with an empty buffer
+      new_socket = StringIO.new
+      new_reader = client.send(:new_packet_reader, new_socket)
+      expect(new_reader).not_to be(old_reader)
+      expect(new_reader.instance_variable_get(:@buffer)).to be_empty
+    ensure
+      rd&.close
+      wr&.close
+    end
+  end
+
   describe "generating a client identifier" do
     context "with default parameters" do
       let(:client_id) { MQTT::Client.generate_client_id }
@@ -1104,6 +1184,13 @@ describe MQTT::Client do
   end
 
   private
+
+  # Block (for real time, up to timeout seconds) until the block is truthy.
+  def wait_for(timeout = 5)
+    deadline = Time.now + timeout
+    Thread.pass until yield || Time.now > deadline
+    expect(yield).to be_truthy
+  end
 
   def inject_packet(opts={})
     packet = MQTT::Packet::Publish.new(opts)
