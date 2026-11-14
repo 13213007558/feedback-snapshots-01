@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/exception'
 
 ###
 # = Overview
@@ -720,20 +721,55 @@ module Psych
   end
 
   # :stopdoc:
+  #
+  # A domain type is identified by its full tag.  The compatible short
+  # form (for example `!credential`) is not stored as a separate registry
+  # entry: doing so makes the last registration win and lets a short tag
+  # silently select an unrelated domain.  The short name recorded in the
+  # entry is only used to resolve a short tag when it identifies exactly
+  # one registration.
   def self.add_domain_type domain, type_tag, &block
     key = ['tag', domain, type_tag].join ':'
-    domain_types[key] = [key, block]
-    domain_types["tag:#{type_tag}"] = [key, block]
+    domain_types[key] = [key, block, type_tag.to_s, true]
   end
 
   def self.add_builtin_type type_tag, &block
     domain = 'yaml.org,2002'
     key = ['tag', domain, type_tag].join ':'
-    domain_types[key] = [key, block]
+    domain_types[key] = [key, block, type_tag.to_s, false]
+  end
+
+  # Normalize a YAML tag to the key used by the domain type registry.
+  # Returns the key and whether the input was a short/local tag rather
+  # than a canonical tag or a verbatim one.
+  def self.domain_type_identity tag
+    key = tag.to_s.sub(/^[!\/]*/, '').sub(/(,\d+)\//, '\1:')
+
+    if key.start_with?('tag:')
+      [key, !key.delete_prefix('tag:').include?(':')]
+    elsif key.start_with?('x-private:')
+      [key, false]
+    else
+      ["tag:#{key}", true]
+    end
   end
 
   def self.remove_type type_tag
-    domain_types.delete type_tag
+    key, short = domain_type_identity(type_tag)
+
+    return domain_types.delete(key) if domain_types.key? key
+    return unless short
+
+    short_name = key.delete_prefix('tag:')
+    candidates = domain_types.select { |_, entry|
+      entry && entry.length > 2 && entry[2] == short_name
+    }
+
+    if candidates.length > 1
+      raise AmbiguousTag.new(type_tag, candidates.keys)
+    elsif candidates.length == 1
+      domain_types.delete candidates.keys.first
+    end
   end
 
   def self.add_tag tag, klass

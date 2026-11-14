@@ -402,6 +402,154 @@ class TestPsych < Psych::TestCase
     ], types
   end
 
+  def test_domain_type_short_tag_collision
+    calls = []
+    vendor_a = lambda { |type, val|
+      calls << [:a, type, val]
+      "a:#{val}"
+    }
+    vendor_b = lambda { |type, val|
+      calls << [:b, type, val]
+      "b:#{val}"
+    }
+
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &vendor_a
+    Psych.add_domain_type 'vendor-b.example/2002', 'credential', &vendor_b
+
+    assert_raise(Psych::AmbiguousTag) do
+      Psych.load('--- !credential secret')
+    end
+    assert_equal [], calls
+
+    assert_equal 'a:secret', Psych.load('--- !<tag:vendor-a.example/2002:credential> secret')
+    assert_equal [[:a, 'tag:vendor-a.example/2002:credential', 'secret']], calls
+
+    calls.clear
+    assert_equal 'b:secret', Psych.load('--- !<tag:vendor-b.example/2002:credential> secret')
+    assert_equal [[:b, 'tag:vendor-b.example/2002:credential', 'secret']], calls
+  end
+
+  def test_domain_type_registration_order_does_not_pick_handler
+    calls = []
+    handlers = {
+      a: lambda { |type, val| calls << [:a, type, val]; val },
+      b: lambda { |type, val| calls << [:b, type, val]; val },
+    }
+
+    [%i[a b], %i[b a]].each do |order|
+      Psych.domain_types.clear
+      order.each { |name| Psych.add_domain_type "vendor-#{name}.example/2002", 'credential', &handlers[name] }
+
+      calls.clear
+      assert_raise(Psych::AmbiguousTag) { Psych.load('--- !credential secret') }
+      assert_equal [], calls
+
+      assert_equal 'secret', Psych.load("%TAG !v! tag:vendor-a.example/2002:\n--- !v!credential secret")
+      assert_equal [[:a, 'tag:vendor-a.example/2002:credential', 'secret']], calls
+
+      calls.clear
+      assert_equal 'secret', Psych.load("%TAG !v! tag:vendor-b.example/2002:\n--- !v!credential secret")
+      assert_equal [[:b, 'tag:vendor-b.example/2002:credential', 'secret']], calls
+    end
+  end
+
+  def test_domain_type_short_tag_unique
+    calls = []
+    handler = lambda { |type, val| calls << [type, val]; val }
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &handler
+
+    assert_equal 'secret', Psych.load('--- !credential secret')
+    assert_equal [['tag:vendor-a.example/2002:credential', 'secret']], calls
+  end
+
+  def test_domain_type_reentrant_parse
+    calls = []
+    other = lambda { |type, val| calls << [:other, type, val]; val }
+    outer = lambda { |type, val|
+      calls << [:outer, type, val]
+      Psych.load('--- !<tag:vendor-b.example/2002:credential> inner')
+      val
+    }
+
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &outer
+    Psych.add_domain_type 'vendor-b.example/2002', 'credential', &other
+
+    assert_equal 'secret', Psych.load('--- !<tag:vendor-a.example/2002:credential> secret')
+    assert_equal [
+      [:outer, 'tag:vendor-a.example/2002:credential', 'secret'],
+      [:other, 'tag:vendor-b.example/2002:credential', 'inner'],
+    ], calls
+
+    calls.clear
+    assert_raise(Psych::AmbiguousTag) do
+      Psych.load('--- !credential secret')
+    end
+    assert_equal [], calls
+  end
+
+  def test_domain_type_ambiguous_parent_does_not_run_nested_handler
+    calls = []
+    nested = lambda { |type, val| calls << [:nested, type, val]; val }
+    first = lambda { |type, val| calls << [:first, type, val]; val }
+    second = lambda { |type, val| calls << [:second, type, val]; val }
+
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &first
+    Psych.add_domain_type 'vendor-b.example/2002', 'credential', &second
+    Psych.add_domain_type 'vendor-c.example/2002', 'nested', &nested
+
+    yaml = <<~YAML
+      --- !credential
+      key: !<tag:vendor-c.example/2002:nested> value
+    YAML
+
+    assert_raise(Psych::AmbiguousTag) { Psych.load(yaml) }
+    assert_equal [], calls
+  end
+
+  def test_domain_type_removal
+    calls = []
+    first = lambda { |type, val| calls << [:first, type, val]; val }
+    second = lambda { |type, val| calls << [:second, type, val]; val }
+
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &first
+    Psych.add_domain_type 'vendor-b.example/2002', 'credential', &second
+
+    Psych.remove_type 'tag:vendor-a.example/2002:credential'
+
+    assert_equal 'secret', Psych.load('--- !credential secret')
+    assert_equal [[:second, 'tag:vendor-b.example/2002:credential', 'secret']], calls
+
+    calls.clear
+    assert_equal 'secret', Psych.load('--- !<tag:vendor-a.example/2002:credential> secret')
+    assert_equal [], calls
+
+    assert_equal 'secret', Psych.load('--- !<tag:vendor-b.example/2002:credential> secret')
+    assert_equal [[:second, 'tag:vendor-b.example/2002:credential', 'secret']], calls
+  end
+
+  def test_domain_type_removal_by_unique_short_name
+    calls = []
+    handler = lambda { |type, val| calls << [type, val]; val }
+
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential', &handler
+    Psych.remove_type 'credential'
+
+    Psych.load('--- !credential secret')
+    assert_equal [], calls
+  end
+
+  def test_domain_type_removal_ambiguous_short_name
+    Psych.add_domain_type 'vendor-a.example/2002', 'credential' do |type, val|
+      val
+    end
+    Psych.add_domain_type 'vendor-b.example/2002', 'credential' do |type, val|
+      val
+    end
+
+    assert_raise(Psych::AmbiguousTag) { Psych.remove_type 'credential' }
+    assert_equal 2, Psych.domain_types.length
+  end
+
   def test_symbolize_names
     yaml = <<-eoyml
 foo:

@@ -36,17 +36,11 @@ module Psych
       end
 
       def accept target
+        value, block = resolve_domain_type(target)
+
         result = super
 
-        unless @domain_types.empty? || !target.tag
-          key = target.tag.sub(/^[!\/]*/, '').sub(/(,\d+)\//, '\1:')
-          key = "tag:#{key}" unless key.match?(/^(?:tag:|x-private)/)
-
-          if @domain_types.key? key
-            value, block = @domain_types[key]
-            result = block.call value, result
-          end
-        end
+        result = block.call value, result if block
 
         result = deduplicate(result).freeze if @freeze
         result
@@ -359,6 +353,34 @@ module Psych
       end
 
       private
+
+      # Resolve the domain type registered for +target+'s tag before the
+      # node's children are visited.  An ambiguous short tag must not
+      # allow any handler (including a nested one) to run before the
+      # ambiguity is reported.
+      def resolve_domain_type target
+        return unless target.respond_to?(:tag) && target.tag
+        return if @domain_types.empty?
+
+        key, short = Psych.domain_type_identity(target.tag)
+
+        if @domain_types.key? key
+          return @domain_types[key].first(2)
+        end
+
+        return unless short
+
+        short_name = key.delete_prefix('tag:')
+        candidates = @domain_types.select { |_, entry|
+          entry && entry.length > 3 && entry[3] && entry[2] == short_name
+        }
+
+        if candidates.length > 1
+          raise AmbiguousTag.new(target.tag, candidates.keys)
+        elsif candidates.length == 1
+          return candidates.values.first.first(2)
+        end
+      end
 
       def register node, object
         @st[node.anchor] = object if node.anchor

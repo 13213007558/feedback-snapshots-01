@@ -25,4 +25,18 @@ module Psych
       super "Tried to #{action} unspecified class: #{klass_name}"
     end
   end
+
+  # Raised when a short tag could refer to more than one registered
+  # domain type.  Selecting a registration in that case would make the
+  # constructed object depend on registration order.
+  class AmbiguousTag < Exception
+    attr_reader :tag, :candidates
+
+    def initialize tag, candidates
+      @tag = tag
+      @candidates = candidates
+      super "Ambiguous YAML tag #{tag.inspect}: it matches #{candidates.join ', '}. " \
+            "Use the full tag or a %TAG directive to choose one domain."
+    end
+  end
 end
