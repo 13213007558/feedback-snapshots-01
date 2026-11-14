@@ -48,6 +48,8 @@ module Mail # :doc:
   require 'mail/field'
   require 'mail/field_list'
 
+  register_autoload :ScanPlan, 'mail/scan_plan'
+
   register_autoload :Envelope, 'mail/envelope'
 
   # Autoload header field elements and transfer encodings.

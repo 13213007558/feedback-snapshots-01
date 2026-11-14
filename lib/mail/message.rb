@@ -1935,6 +1935,20 @@ module Mail
       parts.map { |p| [p, p.all_parts] }.flatten
     end
 
+    # Builds a Mail::ScanPlan enumerating every MIME node that can carry
+    # content: every leaf part (including all branches of a
+    # multipart/alternative), nested message/rfc822 messages, multipart
+    # preamble and epilogue text, and any part whose transfer encoding cannot
+    # be decoded. Each item carries the decoding steps needed to inspect it
+    # and a completion status, so a content scanner can verify the whole
+    # message instead of only #text_part, #html_part and #attachments.
+    #
+    # Undecodable nodes are still listed; they block ScanPlan#all_clear?
+    # until the caller explicitly rejects them.
+    def scan_plan
+      Mail::ScanPlan.new(self)
+    end
+
     def find_first_mime_type(mt)
       all_parts.detect { |p| p.mime_type == mt && !p.attachment? }
     end

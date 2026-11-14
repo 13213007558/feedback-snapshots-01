@@ -410,6 +410,45 @@ mail.attachments.each do | attachment |
   end
 end
 ```
+
+### Scanning all MIME content
+
+A content scanner that only checks `text_part`, `html_part` and `attachments`
+misses real content: every branch of a `multipart/alternative`, the parts
+inside a nested `message/rfc822`, and the preamble/epilogue text of multipart
+bodies.  `#scan_plan` walks the entire MIME tree and returns one
+`Mail::ScanItem` per node that can carry content, each with the decoding
+steps required and a completion status.
+
+```ruby
+plan = mail.scan_plan
+
+plan.each do |item|
+  item.path             #=> "1.2", "2.1", "preamble", "epilogue", ...
+  item.kind             #=> "leaf", "message/rfc822", "preamble", "epilogue"
+  item.decoding_steps   #=> ["transfer-decode:base64", "charset-transcode:ISO-8859-1>UTF-8"]
+  item.decodable?       #=> false when no registered transfer encoding exists
+
+  if item.decodable?
+    item.decoded.include?(known_threat_signature) ? item.mark_threat! : item.mark_clean!
+  end
+end
+```
+
+A node that cannot be decoded cannot be marked clean or as a threat (doing so
+raises `Mail::ScanPlan::UndecodableContentError`).  It blocks an all-clear
+result until the caller explicitly rejects it, for example by quarantining it:
+
+```ruby
+plan.undecodable_items.each { |item| item.reject!('unsupported encoding, quarantined') }
+
+plan.fully_scanned?  #=> true once nothing is pending
+plan.all_clear?      #=> true only if every item is clean or explicitly rejected
+```
+
+`ScanPlan` only produces the inventory and tracks dispositions; it never
+contacts an antivirus service itself.
+
 ### Writing and Sending a Multipart/Alternative (HTML and Text) Email
 
 Mail makes some basic assumptions and makes doing the common thing as
