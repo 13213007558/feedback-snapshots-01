@@ -105,6 +105,36 @@ Prevented by:
 * [`Rack::Protection::RemoteToken`][remote-token]
 * [`Rack::Protection::HttpOrigin`][http-origin]
 
+### Per-form authenticity tokens
+
+`AuthenticityToken.token(session, path:, method:)` issues a token bound to a
+single action identifier of the form `"<path>#<method>"`. A per-form token is
+only accepted when the request is verified against the same identifier; it can
+never be replayed against a different path or method. A token issued without a
+path/method remains the legacy *global* token, which is intentionally
+path- and method-agnostic, and the two are never interchangeable.
+
+The path and method are canonicalized identically at issue and verify time
+(`canonical_form_identifier`): the HTTP method is compared case-insensitively
+and a single trailing slash is ignored, so `"/foo"` and `"/foo/"` describe the
+same action. Everything else is significant. To keep issue and verify in sync:
+
+* **Mount prefix:** sign with the mount-aware path the app actually sees.
+  `Rack::Request#path` is `SCRIPT_NAME + PATH_INFO`, so an app mounted under
+  `/app` must sign `"/app/foo"`, not just `"/foo"`.
+* **Percent-encoding:** sign the raw, encoded spelling. `Request#path` keeps
+  percent-encoding (e.g. `"/foo%20bar"`, `"/foo%2Fbar"`); a decoded path at
+  issue time is a different identifier and is rejected. An encoded slash
+  (`%2F`) never acts as a path separator.
+* **Method override:** place `Rack::MethodOverride` *before*
+  `AuthenticityToken` in the stack. Then protection sees the overridden method
+  (e.g. a browser `POST` carrying `_method=put` is evaluated as `PUT`), and the
+  form should be signed with `method: :put`. If the override middleware runs
+  after protection, protection sees the original `POST` instead.
+
+Mismatches in any of these dimensions fail closed with a `403` rather than
+collapsing two distinct actions into one.
+
 ## Cross Site Scripting
 
 Prevented by:

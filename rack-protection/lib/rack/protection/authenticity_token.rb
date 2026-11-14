@@ -132,7 +132,7 @@ module Rack
         set_token(session)
 
         token = if path && method
-                  per_form_token(session, path, method)
+                  per_form_token(session, *canonical_form_identifier(path, method))
                 else
                   global_token(session)
                 end
@@ -215,8 +215,22 @@ module Rack
       end
 
       def compare_with_per_form_token(token, session, request)
-        secure_compare(token,
-                       per_form_token(session, request.path.chomp('/'), request.request_method))
+        path, method = canonical_form_identifier(request.path, request.request_method)
+        secure_compare(token, per_form_token(session, path, method))
+      end
+
+      # Single source of truth for turning the path/method a form was issued
+      # for into the identifier the per-form HMAC is bound to. It is applied
+      # identically when a token is issued (#mask_authenticity_token) and when
+      # one is verified (#compare_with_per_form_token), so the conventional
+      # representations of one action can never disagree only because of a
+      # trailing slash or method casing.
+      #
+      # Only a single trailing slash is removed, mirroring the long-standing
+      # verification behavior; a path that differs in any other way (mount
+      # prefix, percent-encoding, an extra segment) stays a different action.
+      def canonical_form_identifier(path, method)
+        [path.to_s.chomp('/'), method.to_s.downcase]
       end
 
       def real_token(session)
