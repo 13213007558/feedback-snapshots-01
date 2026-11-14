@@ -5,9 +5,15 @@ require_relative 'baseparser'
 module REXML
   module Parsers
     class UltraLightParser
-      def initialize stream
+      def initialize stream, disallow_dtd: false
         @stream = stream
-        @parser = REXML::Parsers::BaseParser.new( stream )
+        @disallow_dtd = disallow_dtd
+        @parser = REXML::Parsers::BaseParser.new( stream, disallow_dtd: disallow_dtd )
+      end
+
+      # Returns whether this parser rejects DOCTYPE declarations.
+      def disallow_dtd?
+        @disallow_dtd
       end
 
       def add_listener( listener )

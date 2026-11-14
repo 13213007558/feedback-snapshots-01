@@ -7,7 +7,9 @@ module REXML
     class TreeParser
       def initialize( source, build_context = Document.new )
         @build_context = build_context
-        @parser = Parsers::BaseParser.new( source )
+        @parser = Parsers::BaseParser.new(
+          source,
+          disallow_dtd: build_context.disallow_dtd?)
       end
 
       def add_listener( listener )

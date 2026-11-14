@@ -4,10 +4,16 @@ require_relative "baseparser"
 module REXML
   module Parsers
     class StreamParser
-      def initialize source, listener
+      def initialize source, listener, disallow_dtd: false
         @listener = listener
-        @parser = BaseParser.new( source )
+        @disallow_dtd = disallow_dtd
+        @parser = BaseParser.new( source, disallow_dtd: disallow_dtd )
         @entities = {}
+      end
+
+      # Returns whether this parser rejects DOCTYPE declarations.
+      def disallow_dtd?
+        @disallow_dtd
       end
 
       def add_listener( listener )

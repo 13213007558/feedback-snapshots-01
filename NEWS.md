@@ -1,5 +1,22 @@
 # News
 
+## 3.4.5
+
+### Improvement
+
+  * Added an explicit DOCTYPE declaration admission policy. Pass
+    `disallow_dtd: true` to reject DTDs from untrusted input while retaining
+    full internal DTD/entity support for trusted input:
+    * `REXML::Document.new(source, disallow_dtd: true)`
+    * `REXML::Document.parse_stream(source, listener, disallow_dtd: true)`
+    * `REXML::Parsers::PullParser.new(source, disallow_dtd: true)`
+    * `REXML::Parsers::SAX2Parser.new(source, disallow_dtd: true)`
+    * The policy is stored per parser/document, so parsing external and
+      internal sources together never changes the policy of either input.
+    * Rejection happens before the declaration can apply default attributes,
+      substitute entities, or trigger any DTD-related callback. DOCTYPE-like
+      text inside comments and CDATA sections is not affected.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

@@ -35,11 +35,17 @@ module REXML
       def_delegators( :@parser, :empty? )
       def_delegators( :@parser, :source )
 
-      def initialize stream
+      def initialize stream, disallow_dtd: false
         @entities = {}
         @listeners = nil
-        @parser = BaseParser.new( stream )
+        @disallow_dtd = disallow_dtd
+        @parser = BaseParser.new( stream, disallow_dtd: disallow_dtd )
         @my_stack = []
+      end
+
+      # Returns whether this parser rejects DOCTYPE declarations.
+      def disallow_dtd?
+        @disallow_dtd
       end
 
       def add_listener( listener )

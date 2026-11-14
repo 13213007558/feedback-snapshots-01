@@ -93,6 +93,7 @@ module REXML
       @entity_expansion_count = 0
       @entity_expansion_limit = Security.entity_expansion_limit
       @entity_expansion_text_limit = Security.entity_expansion_text_limit
+      @disallow_dtd = context[:disallow_dtd] == true
       super()
       @context = context
       # `source = ""` is an invalid usage because no root element XML is an invalid XML.
@@ -113,6 +114,14 @@ module REXML
     #
     def node_type
       :document
+    end
+
+    # Returns whether DOCTYPE declarations are rejected while parsing this
+    # document. Controlled by the +:disallow_dtd+ context entry passed to
+    # Document.new. The default (+false+) preserves the historical behavior
+    # of processing DTDs, including internal entity declarations.
+    def disallow_dtd?
+      @disallow_dtd
     end
 
     # :call-seq:
@@ -400,8 +409,18 @@ module REXML
     end
 
 
-    def Document::parse_stream( source, listener )
-      Parsers::StreamParser.new( source, listener ).parse
+    # :call-seq:
+    #   parse_stream(source, listener, disallow_dtd: false) -> nil
+    #
+    # Parses +source+ as a stream, sending parse events to +listener+.
+    #
+    # When +disallow_dtd+ is +true+, a DOCTYPE declaration in +source+ raises
+    # a REXML::ParseException before any DTD-related callback (such as
+    # +doctype+, +entitydecl+, or +attlistdecl+) is invoked. The default of
+    # +false+ keeps the historical DTD-processing behavior.
+    def Document::parse_stream( source, listener, disallow_dtd: false )
+      Parsers::StreamParser.new( source, listener,
+                                 disallow_dtd: disallow_dtd ).parse
     end
 
     # Set the entity expansion limit. By default the limit is set to 10000.

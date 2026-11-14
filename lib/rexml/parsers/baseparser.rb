@@ -166,15 +166,31 @@ module REXML
       end
       private_constant :Private
 
-      def initialize( source )
+      # Create a new parser.
+      #
+      # +disallow_dtd+:: When +true+, any DOCTYPE declaration in the input is
+      #                  rejected with a REXML::ParseException before it can
+      #                  declare default attributes, define entities, or run
+      #                  any DTD-related callback. Defaults to +false+, which
+      #                  keeps the historical behavior of processing DTDs.
+      #                  The flag is stored per parser instance, so parsers
+      #                  created with different policies never affect each
+      #                  other.
+      def initialize( source, disallow_dtd: false )
         self.stream = source
         @listeners = []
         @prefixes = Set.new
         @entity_expansion_count = 0
         @entity_expansion_limit = Security.entity_expansion_limit
         @entity_expansion_text_limit = Security.entity_expansion_text_limit
+        @disallow_dtd = disallow_dtd
         @source.ensure_buffer
         @version = nil
+      end
+
+      # Returns whether this parser rejects DOCTYPE declarations.
+      def disallow_dtd?
+        @disallow_dtd
       end
 
       def add_listener( listener )
@@ -291,6 +307,17 @@ module REXML
             if @source.match?("--", true)
               return [ :comment, process_comment ]
             elsif @source.match?("DOCTYPE", true)
+              if @disallow_dtd
+                # Reject before the declaration can influence default
+                # attributes, entity replacement, or any DTD-related
+                # listener callback. The "<!DOCTYPE" prefix has been
+                # consumed, so rewind to the start of the declaration to
+                # keep the reported position pointing at it.
+                @source.position = start_position
+                raise REXML::ParseException.new(
+                  "DOCTYPE declaration is not allowed in this input",
+                  @source)
+              end
               base_error_message = "Malformed DOCTYPE"
               unless @source.skip_spaces
                 if @source.match?(">")

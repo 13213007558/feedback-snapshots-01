@@ -8,14 +8,20 @@ module REXML
   module Parsers
     # SAX2Parser
     class SAX2Parser
-      def initialize source
-        @parser = BaseParser.new(source)
+      def initialize source, disallow_dtd: false
+        @disallow_dtd = disallow_dtd
+        @parser = BaseParser.new(source, disallow_dtd: disallow_dtd)
         @listeners = []
         @procs = []
         @namespace_stack = [{}]
         @has_listeners = false
         @tag_stack = []
         @entities = {}
+      end
+
+      # Returns whether this parser rejects DOCTYPE declarations.
+      def disallow_dtd?
+        @disallow_dtd
       end
 
       def source
