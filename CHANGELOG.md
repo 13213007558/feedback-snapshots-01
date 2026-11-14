@@ -6,10 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* Grammar-driven `OAuth::HeaderParser` for `Authorization` / `WWW-Authenticate`
+  headers, with syntax-driven tests covering quotes, commas, equals, escaping,
+  repeated fields and malformed percent-encoding
 
 ### Changed
+* `OAuth::Helper.parse_header` now delegates to `OAuth::HeaderParser`, a
+  character-scanning parser driven by the RFC 5849 / RFC 7235 auth-param
+  grammar instead of a `split` on `,`, `=` and `&`
 
 ### Fixed
+* Repeated header parameter names are now rejected with `OAuth::Problem`
+  instead of silently keeping the last value, which let an appended duplicate
+  field override the credential being verified
+* Malformed percent-encoding (a `%` not followed by two hex digits),
+  unterminated quoted strings and dangling/doubled commas are now rejected
+  rather than accepted or decoded inconsistently across entry points
+* Punctuation inside quoted values (`,`, `=`, `&`) is parsed as data, and
+  legitimate percent-encoded separator fields round-trip verbatim
+* Non-standard `&`-separated auth headers are no longer accepted; RFC 5849
+  separates auth-params with commas only
 
 ### Removed
 

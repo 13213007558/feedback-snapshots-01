@@ -4,6 +4,8 @@ require "time"
 require "openssl"
 require "base64"
 
+require "oauth/header_parser"
+
 module OAuth
   module Helper
     module_function
@@ -92,22 +94,12 @@ module OAuth
     #   hash['oauth_timestamp']
     #     #=>"1234567890"
     #
+    # Parsing is grammar-driven (see OAuth::HeaderParser): punctuation inside
+    # quoted values is treated as data, malformed percent-encoding and repeated
+    # parameter names are rejected, so the credential that is parsed is the
+    # same one that gets verified regardless of the entry point.
     def parse_header(header)
-      # decompose
-      params = header[6, header.length].split(/[,=&]/)
-
-      # odd number of arguments - must be a malformed header.
-      raise OAuth::Problem, "Invalid authorization header" if params.size.odd?
-
-      params.map! do |v|
-        # strip and unescape
-        val = unescape(v.strip)
-        # strip quotes
-        val.sub(/^"(.*)"$/, '\1')
-      end
-
-      # convert into a Hash
-      Hash[*params.flatten]
+      OAuth::HeaderParser.parse(header)
     end
 
     def stringify_keys(hash)

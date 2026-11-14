@@ -43,12 +43,19 @@ class TestOAuthHelper < Minitest::Test
              'oauth_timestamp="1240004133", oauth_nonce="nonce", ' \
              'oauth_version="1.0" '
 
-    assert_raises OAuth::Problem do
-      OAuth::Helper.parse_header(header)
-    end
+    # An "=" inside a quoted value is data, not a structural delimiter: the
+    # credential must round-trip verbatim rather than be rejected (or parsed
+    # into a different key/value set) by a split-based parser.
+    params = OAuth::Helper.parse_header(header)
+
+    assert_equal "signature_here_with_=", params["oauth_signature"]
+    assert_equal "nonce", params["oauth_nonce"]
+    assert_equal "1.0", params["oauth_version"]
   end
 
-  def test_parse_valid_header_with_and_signs
+  def test_parse_header_rejects_ampersand_separators
+    # RFC 5849 separates auth-params with commas; "&" is query-string syntax
+    # and must not be silently accepted as a header separator.
     header = "OAuth " \
              'realm="http://example.com/method"&' \
              'oauth_consumer_key="vince_clortho"&' \
@@ -58,16 +65,9 @@ class TestOAuthHelper < Minitest::Test
              'oauth_timestamp="1240004133"&oauth_nonce="nonce"&' \
              'oauth_version="1.0"'
 
-    params = OAuth::Helper.parse_header(header)
-
-    assert_equal "http://example.com/method", params["realm"]
-    assert_equal "vince_clortho", params["oauth_consumer_key"]
-    assert_equal "token_value", params["oauth_token"]
-    assert_equal "HMAC-SHA1", params["oauth_signature_method"]
-    assert_equal "signature_here", params["oauth_signature"]
-    assert_equal "1240004133", params["oauth_timestamp"]
-    assert_equal "nonce", params["oauth_nonce"]
-    assert_equal "1.0", params["oauth_version"]
+    assert_raises OAuth::Problem do
+      OAuth::Helper.parse_header(header)
+    end
   end
 
   def test_normalize
