@@ -237,6 +237,24 @@ Rack::Attack.blocklist('allow2ban login scrapers') do |req|
 end
 ```
 
+#### Risk scoring with a bounded budget
+
+Rules that consult an external risk scorer run under a bounded execution
+budget so a stalled scorer cannot pile up the whole entry path. Scorer
+calls execute on a shared bounded worker pool, all risk queries in one
+request share a single time budget and memoized results, and each rule
+declares an `on_timeout` policy (`:deny`, `:local` or `:ignore`):
+
+```ruby
+Rack::Attack.risk_blocklist('login risk',
+  scorer: ->(query) { MyRiskClient.score(query) },
+  query: ->(req) { req.ip if req.path == '/login' },
+  on_timeout: :deny)
+```
+
+See [docs/risk_scoring.md](docs/risk_scoring.md) for tuning,
+observability, and the safety limits of synchronous scorer callbacks.
+
 ### Throttling
 
 Throttle state is stored in a [configurable cache](#cache-store-configuration) (which defaults to `Rails.cache` if present).

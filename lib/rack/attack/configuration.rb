@@ -80,6 +80,10 @@ module Rack
         @tracks[name] = Track.new(name, options, &block)
       end
 
+      def risk_blocklist(name, options = {}, &block)
+        @blocklists[name] = RiskCheck.new(name, options, &block)
+      end
+
       def safelisted?(request)
         @anonymous_safelists.any? { |safelist| safelist.matched_by?(request) } ||
           @safelists.any? { |_name, safelist| safelist.matched_by?(request) }

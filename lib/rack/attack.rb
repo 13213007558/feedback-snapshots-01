@@ -11,6 +11,9 @@ require 'rack/attack/store_proxy/mem_cache_store_proxy'
 require 'rack/attack/store_proxy/redis_proxy'
 require 'rack/attack/store_proxy/redis_store_proxy'
 require 'rack/attack/store_proxy/redis_cache_store_proxy'
+require 'rack/attack/risk/pool'
+require 'rack/attack/risk/scorer'
+require 'rack/attack/risk/budget'
 
 require 'rack/attack/railtie' if defined?(::Rails)
 
@@ -31,9 +34,11 @@ module Rack
     autoload :Track,                'rack/attack/track'
     autoload :Fail2Ban,             'rack/attack/fail2ban'
     autoload :Allow2Ban,            'rack/attack/allow2ban'
+    autoload :RiskCheck,            'rack/attack/risk_check'
 
     class << self
-      attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
+      attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer,
+                    :risk_budget, :risk_pool_size, :risk_queue_capacity
       attr_reader :configuration
 
       def instrument(request)
@@ -59,6 +64,29 @@ module Rack
         cache.reset!
       end
 
+      # Shared bounded pool for risk scorer calls. Lazily created from
+      # risk_pool_size / risk_queue_capacity; change those before first use
+      # or call reset_risk_pool! afterwards.
+      def risk_pool
+        @risk_pool ||= Risk::Pool.new(size: risk_pool_size, queue_capacity: risk_queue_capacity)
+      end
+
+      def reset_risk_pool!
+        @risk_pool&.shutdown
+        @risk_pool = nil
+      end
+
+      # Exposes the risk policy actually adopted for a blocked request as a
+      # response header, so downstream logs and clients see how the decision
+      # was reached (e.g. scored_deny vs deny_on_unknown).
+      def annotate_risk_policy(response, env)
+        risk = env["rack.attack.risk"]
+        return response unless risk
+
+        status, headers, body = response
+        [status, headers.merge("x-rack-attack-risk-policy" => risk[:policy].to_s), body]
+      end
+
       extend Forwardable
       def_delegators(
         :@configuration,
@@ -68,6 +96,7 @@ module Rack
         :safelist_ip,
         :throttle,
         :track,
+        :risk_blocklist,
         :throttled_responder,
         :throttled_responder=,
         :blocklisted_responder,
@@ -92,6 +121,9 @@ module Rack
     @throttle_discriminator_normalizer = lambda do |discriminator|
       discriminator.to_s.strip.downcase
     end
+    @risk_budget = 0.25
+    @risk_pool_size = 2
+    @risk_queue_capacity = 64
     @configuration = Configuration.new
 
     attr_reader :configuration
@@ -112,11 +144,13 @@ module Rack
         @app.call(env)
       elsif configuration.blocklisted?(request)
         # Deprecated: Keeping blocklisted_response for backwards compatibility
-        if configuration.blocklisted_response
-          configuration.blocklisted_response.call(env)
-        else
-          configuration.blocklisted_responder.call(request)
-        end
+        response =
+          if configuration.blocklisted_response
+            configuration.blocklisted_response.call(env)
+          else
+            configuration.blocklisted_responder.call(request)
+          end
+        self.class.annotate_risk_policy(response, env)
       elsif configuration.throttled?(request)
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response

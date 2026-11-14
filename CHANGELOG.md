@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Bounded risk scoring: `Rack::Attack.risk_blocklist` runs external risk
+  scorer calls on a shared bounded worker pool under a per-request time
+  budget, with per-rule `on_timeout` policies (`:deny`, `:local`,
+  `:ignore`), per-request query memoization, policy recording in the
+  request env / notifications, and an `x-rack-attack-risk-policy` response
+  header. See docs/risk_scoring.md.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed
