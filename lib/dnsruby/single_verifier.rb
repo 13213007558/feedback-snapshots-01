@@ -47,6 +47,11 @@ module Dnsruby
       #  The set of keys which are trusted.
       @trusted_keys = KeyCache.new
 
+      # RFC 5011-managed anchors. These participate in validation but are kept
+      # distinct from @trust_anchors so automatic and manual configuration can
+      # be inspected and cleared independently.
+      @managed_trust_anchors = KeyCache.new
+
       #  The set of keys which have been indicated by a DS RRSet which has been
       #  signed by a trusted key. Although we have not yet located these keys, we
       #  have the details (tag and digest) which can identify the keys when we
@@ -176,6 +181,34 @@ module Dnsruby
       end
     end
 
+    #  Accepted RFC 5011 anchors. These are not returned by #trust_anchors:
+    #  manually configured anchors and automatically managed anchors have
+    #  separate lifecycles.
+    def add_managed_trust_anchor(key)
+      @trust_mutex.synchronize do
+        @managed_trust_anchors.add_key_with_expiration(key, KeyCache::NEVER_EXPIRES)
+      end
+    end
+
+    def remove_managed_trust_anchor(key)
+      @trust_mutex.synchronize do
+        removed = @managed_trust_anchors.delete(key)
+        clear_learned_keys if removed
+        removed
+      end
+    end
+
+    def managed_trust_anchors
+      @trust_mutex.synchronize { @managed_trust_anchors.keys }
+    end
+
+    def clear_managed_trust_anchors
+      @trust_mutex.synchronize do
+        @managed_trust_anchors = KeyCache.new
+        clear_learned_keys
+      end
+    end
+
     # Caller holds @trust_mutex. As with explicit removal, cached descendants
     # cannot outlive a configured DNSKEY anchor. Other configured anchors remain
     # available and can establish fresh trust without retaining stale descendants.
@@ -191,6 +224,16 @@ module Dnsruby
 
     #  Check that the RRSet and RRSIG record are compatible
     def check_rr_data(rrset, sigrec)#:nodoc: all
+      check_rr_compatibility(rrset, sigrec)
+
+      #  Now check that we are in the validity period for the RRSIG
+      now = Time.now.to_i
+      if ((sigrec.expiration < now) || (sigrec.inception > now))
+        raise VerifyError.new("Signature record not in validity period")
+      end
+    end
+
+    def check_rr_compatibility(rrset, sigrec)
       # Each RR MUST have the same owner name as the RRSIG RR;
       if (rrset.name.canonical != sigrec.name.canonical)
         raise VerifyError.new("RRSET should have same owner name as RRSIG for verification (rrsert=#{rrset.name}, sigrec=#{sigrec.name}")
@@ -206,17 +249,16 @@ module Dnsruby
       if (rrset.type != sigrec.type_covered)
         raise VerifyError.new("RRSET should have same type as RRSIG for verification")
       end
+    end
+    private :check_rr_compatibility
 
-      #       #Each RR in the RRset MUST have the TTL listed in the
-      #       #RRSIG Original TTL Field;
-      #       if (rrset.ttl  != sigrec.original_ttl)
-      #         raise VerifyError.new("RRSET should have same ttl as RRSIG original_ttl for verification (should be #{sigrec.original_ttl} but was #{rrset.ttl}")
-      #       end
-
-      #  Now check that we are in the validity period for the RRSIG
-      now = Time.now.to_i
-      if ((sigrec.expiration < now) || (sigrec.inception > now))
-        raise VerifyError.new("Signature record not in validity period")
+    # Check that a supplied key and signature are structurally compatible
+    # before attempting the cryptographic verification.
+    def check_signature_key(rrset, key, sigrec)
+      check_rr_compatibility(rrset, sigrec)
+      if key.key_tag != sigrec.key_tag || key.algorithm != sigrec.algorithm ||
+         key.name.canonical != sigrec.signers_name.canonical || key.klass != sigrec.klass
+        raise VerifyError.new("Signature does not match the supplied key")
       end
     end
 
@@ -786,7 +828,27 @@ module Dnsruby
     def get_keys_to_check # :nodoc:
       @trust_mutex.synchronize do
         expire_trust_anchors
-        @trust_anchors.keys + @trusted_keys.keys
+        @trust_anchors.keys + @managed_trust_anchors.keys + @trusted_keys.keys
+      end
+    end
+
+    # Verify one supplied signature with one supplied key. RFC 5011 uses this
+    # for revocation self-signatures, which must be checked even though revoked
+    # keys are excluded from normal signing-key matching. +at+ supplies the
+    # observation time when a caller manages its own clock; otherwise wall time
+    # is used as normal.
+    def verify_rrset_signature(rrset, key, signature, at: nil)
+      with_validation do
+        check_signature_key(rrset, key, signature)
+        if at
+          now = at.respond_to?(:to_i) ? at.to_i : Integer(at)
+          if signature.expiration < now || signature.inception > now
+            raise VerifyError.new('Signature record not in validity period')
+          end
+        else
+          check_rr_data(rrset, signature)
+        end
+        verify_rrset_with_key(rrset, key, signature)
       end
     end
 
@@ -1115,7 +1177,7 @@ module Dnsruby
       root = Name.create(".")
       anchors = @trust_mutex.synchronize do
         expire_trust_anchors
-        @trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
+        @trust_anchors.keys + @managed_trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
       end
       while (true) # n != root)
         #  Try the trusted keys first, then the DS set
@@ -1129,10 +1191,9 @@ module Dnsruby
       return false
     end
 
-    #  @TODO@ Handle REVOKED keys! (RFC 5011)
-    #  Remember that revoked keys will have a different key_tag than pre-revoked.
-    #  So, if we see a revoked key, we should go through our key store for
-    #  that authority and remove any keys with the pre-revoked key_tag.
+    #  RFC 5011-managed anchors are accepted through
+    #  add_managed_trust_anchor/#remove_managed_trust_anchor. Revocation state,
+    #  hold-downs, and persistence live in Dnsruby::Rfc5011.
 
     def follow_chain(anchor, name) # :nodoc:
       with_validation { follow_chain_internal(anchor, name) }

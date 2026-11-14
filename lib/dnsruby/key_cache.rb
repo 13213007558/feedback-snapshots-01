@@ -16,6 +16,10 @@
 
 module Dnsruby
   class KeyCache #:nodoc: all
+    # A long-lived cache entry for trust anchors that do not have a signature
+    # expiry of their own (for example RFC 5011-managed accepted keys).
+    NEVER_EXPIRES = (2**63 - 1)
+
     #  Cache includes expiration time for keys
     #  Cache removes expired records
     def initialize(keys = nil)

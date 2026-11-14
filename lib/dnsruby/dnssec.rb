@@ -134,6 +134,24 @@ module Dnsruby
       return @@anchor_verifier.trust_anchors
     end
 
+    #  RFC 5011-managed anchors are separate from manual anchors. They are
+    #  accepted by validation but are not returned by Dnssec.trust_anchors.
+    def self.managed_trust_anchors
+      @@anchor_verifier.managed_trust_anchors
+    end
+
+    def self.add_managed_trust_anchor(key)
+      @@anchor_verifier.add_managed_trust_anchor(key)
+    end
+
+    def self.remove_managed_trust_anchor(key)
+      @@anchor_verifier.remove_managed_trust_anchor(key)
+    end
+
+    def self.clear_managed_trust_anchors
+      @@anchor_verifier.clear_managed_trust_anchors
+    end
+
     #  Clear learned keys and all DS/DLV anchors, including the built-in root DS
     #  anchors. Configured DNSKEY anchors are retained.
     def self.clear_trusted_keys
@@ -151,8 +169,25 @@ module Dnsruby
 
       #  @TODO@ Could add a new one of these for each anchor.
       @@anchor_verifier = SingleVerifier.new(SingleVerifier::VerifierType::ANCHOR)
+      # Reset restores only built-in trust. A manager can reload its store
+      # explicitly; an old manager must not republish anchors into this verifier.
+      @root_anchor_manager = nil
       @@do_validation_with_recursor = true # Many nameservers don't handle DNSSEC correctly yet
       @@default_resolver = Resolver.new
+    end
+
+    #  Optional RFC 5011 manager attached to the built-in root verifier. It
+    #  starts from the configured root DS anchors and can promote newly accepted
+    #  KSKs without touching manually configured anchors.
+    def self.root_anchor_manager(store_path: nil, clock: Time,
+                                 add_hold_down: nil, remove_hold_down: nil)
+      @root_anchor_manager ||= Rfc5011.new(
+        store_path: store_path, verifier: @@root_verifier, clock: clock,
+        add_hold_down: add_hold_down, remove_hold_down: remove_hold_down)
+    end
+
+    def self.root_anchor_manager=(manager)
+      @root_anchor_manager = manager
     end
 
     def self.set_hints(hints)
@@ -164,7 +199,8 @@ module Dnsruby
       no_keys = true
       [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each {|v|
         if (v.trusted_keys.length() > 0 ||
-              v.trust_anchors.length() > 0)
+              v.trust_anchors.length() > 0 ||
+              v.managed_trust_anchors.length() > 0)
           no_keys = false
         end
       }
@@ -235,7 +271,8 @@ module Dnsruby
       #  SHOULD ALWAYS VERIFY DNSSEC-SIGNED RESPONSES?
       #  Yes - if a trust anchor is configured. Otherwise, act on CD bit (in query)
       TheLog.debug("Checking whether to validate, query.cd = #{query.header.cd}")
-      if (((@@validation_policy > ValidationPolicy::ALWAYS_ROOT_ONLY) && (self.trust_anchors().length > 0)) ||
+      if (((@@validation_policy > ValidationPolicy::ALWAYS_ROOT_ONLY) &&
+            (self.trust_anchors().length > 0 || self.managed_trust_anchors().length > 0)) ||
             #  Check query here, and validate if CD is true
           ((query.header.cd == true))) # && (query.do_validation)))
         TheLog.debug("Starting validation")
