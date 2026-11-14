@@ -22,6 +22,7 @@ module Rack
           cache.reset_count("#{key_prefix}:count:#{discriminator}", findtime)
           # Clear ban flag just in case it's there
           cache.delete("#{key_prefix}:ban:#{discriminator}")
+          Rack::Attack.reset_ban(key_prefix, discriminator)
         end
 
         def banned?(discriminator)
@@ -47,6 +48,7 @@ module Rack
 
         def ban!(discriminator, bantime)
           cache.write("#{key_prefix}:ban:#{discriminator}", 1, bantime)
+          Rack::Attack.note_ban(key_prefix, discriminator, bantime)
         end
 
         def cache

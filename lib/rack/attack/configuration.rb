@@ -8,7 +8,11 @@ module Rack
       DEFAULT_BLOCKLISTED_RESPONDER = lambda { |_req| [403, { 'content-type' => 'text/plain' }, ["Forbidden\n"]] }
 
       DEFAULT_THROTTLED_RESPONDER = lambda do |req|
-        if Rack::Attack.configuration.throttled_response_retry_after_header
+        # The flag belongs to the rule set version serving this request;
+        # fall back to the global configuration for unpinned requests.
+        configuration = req.env["rack.attack.rule_set"]&.configuration || Rack::Attack.configuration
+
+        if configuration.throttled_response_retry_after_header
           match_data = req.env['rack.attack.match_data']
           now = match_data[:epoch_time]
           retry_after = match_data[:period] - (now % match_data[:period])

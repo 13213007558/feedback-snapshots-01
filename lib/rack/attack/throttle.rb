@@ -28,7 +28,7 @@ module Rack
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
-        count           = cache.count("#{name}:#{discriminator}", current_period)
+        count           = cache.count(cache_key(request, discriminator), current_period)
 
         data = {
           discriminator: discriminator,
@@ -49,6 +49,17 @@ module Rack
       end
 
       private
+
+      # Counters are namespaced by the rule set version stamped on the
+      # request, so two versions never share a counter and an in-flight
+      # request keeps counting against the version it entered with.
+      # Requests served by the legacy (global) configuration carry no
+      # namespace and keep the historical key format.
+      def cache_key(request, discriminator)
+        namespace = request.env["rack.attack.rule_set_namespace"]
+        key = "#{name}:#{discriminator}"
+        namespace ? "#{namespace}:#{key}" : key
+      end
 
       def discriminator_for(request)
         discriminator = block.call(request)
