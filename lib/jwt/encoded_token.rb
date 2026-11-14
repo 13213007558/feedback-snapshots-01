@@ -153,6 +153,7 @@ module JWT
     # @param key_finder [#call] an object responding to `call` to find the key for verification.
     #   Not called if the token's algorithm is not among the given algorithms, in which case the
     #   signature is not valid. The token's alg header is not compared when a key is given directly.
+    #   Also not called if the token has no signature segment, unless the alg header is 'none'.
     # @return [Boolean] true if the signature is valid, false otherwise.
     # @raise [JWT::MalformedTokenError] if the token is structurally invalid.
     def valid_signature?(algorithm: nil, key: nil, key_finder: nil)
@@ -161,6 +162,7 @@ module JWT
       @signature_verified = false
       validate_segment_count!
       return false if key_finder && !algorithm_allowed?(algorithm)
+      return false if key_finder && encoded_signature.nil? && header['alg'] != 'none'
 
       keys      = Array(key || key_finder.call(self))
       verifiers = JWA.create_verifiers(algorithms: algorithm, keys: keys, preferred_algorithm: header['alg'])

@@ -285,6 +285,20 @@ RSpec.describe JWT::EncodedToken do
         expect(token.verify_signature!(algorithm: 'HS256', key_finder: ->(_token) { 'secret' })).to eq(nil)
       end
 
+      it 'does not call the key finder when the token has no signature segment' do
+        key_finder = ->(_token) { raise 'key finder should not be called' }
+        unsigned_token = described_class.new(token.jwt.split('.')[0..1].join('.'))
+
+        expect(unsigned_token.valid_signature?(algorithm: 'HS256', key_finder: key_finder)).to eq(false)
+      end
+
+      it 'calls the key finder for an unsigned token when the alg is none' do
+        key_finder = ->(_token) { 'secret' }
+        unsigned_token = described_class.new(JWT::EncodedToken.new(JWT.encode({ 'pay' => 'load' }, nil, 'none')).jwt.sub(/\.$/, ''))
+
+        expect(unsigned_token.valid_signature?(algorithm: 'none', key_finder: key_finder)).to eq(true)
+      end
+
       it 'can utilize an array provided by keyfinder' do
         expect(token.verify_signature!(algorithm: 'HS256', key_finder: ->(_token) { %w[wrong secret] })).to eq(nil)
       end

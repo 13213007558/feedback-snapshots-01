@@ -304,6 +304,41 @@ encoded_token.verify!(signature: { algorithm: 'RS256', key_finder: ->(_token){ k
 encoded_token.payload # => { 'pay' => 'load' }
 ```
 
+#### Keyfinder callback contract
+
+The keyfinder callback runs **before** the signature is verified. Everything it receives is parsed but unverified, attacker-controlled data — never trust it, only use it to locate a candidate key.
+
+What is guaranteed before the callback fires, for both interfaces:
+
+- the token has the expected number of segments and a parseable JSON object header
+- the `alg` header matches the given algorithm allowlist (the legacy `JWT.decode` interface raises `JWT::IncorrectAlgorithm` instead)
+- the token has a signature segment, unless the `alg` header is `none` (object interface)
+
+What is **not** guaranteed:
+
+- the signature is valid — it has not been checked yet
+- the payload is parseable or its claims valid — both happen after the callback
+- header values have expected types — `kid` can be any JSON type (String, Number, Array, Object, Boolean, null)
+
+If the callback raises, the error propagates and no payload is exposed. If it returns `nil` or an incompatible key, verification fails and `JWT::EncodedToken#payload` keeps raising `JWT::TokenError`.
+
+#### Guarding an expensive key lookup
+
+When the keyfinder performs a database query or a network call, `JWT::StrictKeyFinder` rejects cheap-to-check garbage before the lookup runs. The loader is called at most once per token and always with a `String` kid (or `nil` when `allow_nil_kid` is set):
+
+```ruby
+key_finder = JWT::StrictKeyFinder.new(kid_format: /\A[\w-]+\z/) do |kid|
+  KeyStore.find_by(kid: kid)&.verification_key # kid is always a String here
+end
+
+# Object interface
+encoded_token = JWT::EncodedToken.new(jwt)
+encoded_token.verify!(signature: { algorithm: 'HS256', key_finder: key_finder })
+
+# Legacy interface
+JWT.decode(jwt, nil, true, algorithm: 'HS256', &key_finder)
+```
+
 ### Detached payload
 
 The `::JWT::Token#detach_payload!` method can be use to detach the payload from the JWT.

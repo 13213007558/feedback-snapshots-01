@@ -6,6 +6,7 @@ require 'jwt'
 
 require_relative 'spec_support/test_keys'
 require_relative 'spec_support/token'
+require_relative 'spec_support/counting_key_store'
 
 puts "OpenSSL::VERSION: #{OpenSSL::VERSION}"
 puts "OpenSSL::OPENSSL_VERSION: #{OpenSSL::OPENSSL_VERSION}"

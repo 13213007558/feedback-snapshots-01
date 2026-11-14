@@ -6,10 +6,12 @@
 
 **Features:**
 
+- Add `JWT::StrictKeyFinder`, a key finder that validates the token structure and the `kid` header before delegating to an expensive key lookup, usable with both `JWT.decode` and `JWT::EncodedToken` (Claude Code)
 - Your contribution here
 
 **Fixes and enhancements:**
 
+- Do not call the `key_finder` of `JWT::EncodedToken` when the token has no signature segment, so unsigned tokens no longer trigger expensive key lookups (Claude Code)
 - Test that `JWT::Claims::Required` raises `JWT::MissingRequiredClaim` for a non-Hash payload [#768](https://github.com/jwt/ruby-jwt/pull/768) ([@renanmpimentel](https://github.com/renanmpimentel))
 - Ignore unsupported `kty` values when a `JWT::JWK::Set` is built from an array [#744](https://github.com/jwt/ruby-jwt/pull/744) ([@RalphBragg](https://github.com/RalphBragg))
 - Redact private JWK material from inspection [#754](https://github.com/jwt/ruby-jwt/pull/754) - [@OskarEichler](https://github.com/OskarEichler)
