@@ -1,3 +1,7 @@
+## Unreleased
+
+- CSP: Add phased directive-injection validation. `:observe` (default) preserves the existing space-replacement output and exposes structured, redacted violation locations; `:strict` rejects the whole invalid change before a new policy is applied. Configurable via `SecureHeaders::Configuration.csp_validation_mode` and a per-request `validation_mode:` option. See `docs/csp_validation_migration.md`.
+
 ## 6.5.0
 
 - CSP: Remove source expression deduplication. (@lgarron) https://github.com/github/secure_headers/pull/499

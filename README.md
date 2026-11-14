@@ -135,6 +135,26 @@ config.reporting_endpoints = {
 ### Deprecated Configuration Values
 * `block_all_mixed_content` - this value is deprecated in favor of `upgrade_insecure_requests`. See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/block-all-mixed-content for more information.
 
+### Directive-injection validation
+
+Values containing CR, LF or `;` could let a source expression break out of its
+directive and inject sibling directives. secure_headers handles these in two
+phases, controlled by `SecureHeaders::Configuration.csp_validation_mode`:
+
+* `:observe` (default) - keeps the legacy behavior of replacing the bytes with
+  spaces and warning, while exposing structured, redacted violation locations
+  through `SecureHeaders.content_security_policy_violations(request)`.
+* `:strict` - rejects the whole invalid change with
+  `SecureHeaders::CspValidation::CspValidationError` before any new policy is
+  applied, so a half-written policy can never survive.
+
+Enforced and report-only policies are reported independently, results are
+deterministic across multiple offending directives, and legal-but-loose
+policies (`*`, `'unsafe-inline'`, etc.) are never flagged as syntax errors.
+See [`docs/csp_validation_migration.md`](docs/csp_validation_migration.md) for
+the full observe → remediate → strict → rollback runbook, or run
+`bundle exec ruby examples/csp_validation_migration.rb`.
+
 ## Default values
 
 All headers except for PublicKeyPins and ClearSiteData have a default value. The default set of headers is:

@@ -46,6 +46,7 @@ module SecureHeaders
 
   OPT_OUT = NoOpHeaderConfig.instance
   SECURE_HEADERS_CONFIG = "secure_headers_request_config".freeze
+  SECURE_HEADERS_CSP_VIOLATIONS = "secure_headers_csp_validation_violations".freeze
   NONCE_KEY = "secure_headers_content_security_policy_nonce".freeze
   HTTPS = "https".freeze
   CSP = ContentSecurityPolicy
@@ -58,8 +59,13 @@ module SecureHeaders
     #
     # additions - a hash containing directives. e.g.
     #    script_src: %w(another-host.com)
-    def override_content_security_policy_directives(request, additions, target = nil)
+    def override_content_security_policy_directives(request, additions, target = nil, options = {})
       config, target = config_and_target(request, target)
+
+      candidates = []
+      candidates << [additions, CspValidation::ENFORCED_POLICY] if [:both, :enforced].include?(target)
+      candidates << [additions, CspValidation::REPORT_ONLY_POLICY] if [:both, :report_only].include?(target)
+      preflight_csp_changes!(request, candidates, :request_override, options[:validation_mode])
 
       if [:both, :enforced].include?(target)
         if config.csp.opt_out?
@@ -86,8 +92,17 @@ module SecureHeaders
     #
     # additions - a hash containing directives. e.g.
     #    script_src: %w(another-host.com)
-    def append_content_security_policy_directives(request, additions, target = nil)
+    def append_content_security_policy_directives(request, additions, target = nil, options = {})
       config, target = config_and_target(request, target)
+
+      candidates = []
+      if [:both, :enforced].include?(target) && !config.csp.opt_out?
+        candidates << [combined_csp_hash(config.csp, additions), CspValidation::ENFORCED_POLICY]
+      end
+      if [:both, :report_only].include?(target) && !config.csp_report_only.opt_out?
+        candidates << [combined_csp_hash(config.csp_report_only, additions), CspValidation::REPORT_ONLY_POLICY]
+      end
+      preflight_csp_changes!(request, candidates, :request_append, options[:validation_mode])
 
       if [:both, :enforced].include?(target) && !config.csp.opt_out?
         config.csp.append(additions)
@@ -100,9 +115,9 @@ module SecureHeaders
       override_secure_headers_request_config(request, config)
     end
 
-    def use_content_security_policy_named_append(request, name)
+    def use_content_security_policy_named_append(request, name, options = {})
       additions = SecureHeaders::Configuration.named_appends(name).call(request)
-      append_content_security_policy_directives(request, additions)
+      append_content_security_policy_directives(request, additions, nil, options)
     end
 
     # Public: override X-Frame-Options settings for this request.
@@ -144,6 +159,7 @@ module SecureHeaders
       prevent_dup = true
       config = config_for(request, prevent_dup)
       config.validate_config!
+      record_csp_violations!(request, config)
       headers = config.generate_headers
 
       if request.scheme != HTTPS
@@ -158,11 +174,19 @@ module SecureHeaders
     end
 
     # Public: specify which named override will be used for this request.
-    # Raises an argument error if no named override exists.
+    # Raises an argument error if no named override exists. In strict CSP
+    # validation mode, raises CspValidationError before the override is applied
+    # when it would inject directives, leaving the default policy untouched.
     #
     # name - the name of the previously configured override.
-    def use_secure_headers_override(request, name)
+    def use_secure_headers_override(request, name, options = {})
       config = config_for(request)
+      if CspValidation.resolve_mode(options[:validation_mode]) == CspValidation::STRICT_MODE
+        candidate = config.dup
+        candidate.override(name)
+        violations = candidate.csp_violations(source: :named_override)
+        raise CspValidation.strict_violation_error(violations) unless violations.empty?
+      end
       config.override(name)
       override_secure_headers_request_config(request, config)
     end
@@ -183,6 +207,14 @@ module SecureHeaders
     # Returns the nonce
     def content_security_policy_style_nonce(request)
       content_security_policy_nonce(request, ContentSecurityPolicy::STYLE_SRC)
+    end
+
+    # Public: returns the structured, redacted CSP directive-injection
+    # violations observed for this request across the enforced and report-only
+    # policies. The order is deterministic so identical policies always produce
+    # identical results.
+    def content_security_policy_violations(request)
+      request.env[SECURE_HEADERS_CSP_VIOLATIONS] || []
     end
 
     # Public: Retrieves the config for a given header type:
@@ -218,6 +250,70 @@ module SecureHeaders
       target ||= guess_target(config)
       raise_on_unknown_target(target)
       [config, target]
+    end
+
+    # Private: validates every policy a pending mutation touches before any of
+    # them is changed. In :strict mode all violations are collected up front
+    # (so a :both change reports both enforced and report-only locations) and
+    # a single CspValidationError is raised, leaving the existing policies
+    # completely intact. In :observe mode the redacted violations are stashed
+    # on the request and the legacy scrub-and-warn renderer keeps producing the
+    # same output as before.
+    def preflight_csp_changes!(request, candidates, source, explicit_mode)
+      mode = CspValidation.resolve_mode(explicit_mode)
+      violations = candidates.flat_map do |candidate_hash, policy_kind|
+        CspValidation.violations_for(candidate_hash, policy_kind: policy_kind, source: source)
+      end
+      return if violations.empty?
+
+      if mode == CspValidation::STRICT_MODE
+        raise CspValidation.strict_violation_error(violations)
+      end
+
+      stash_csp_violations!(request, violations)
+    end
+
+    # Private: mirrors PolicyManagement.combine_policies without mutating either
+    # input, so an append can be validated against its resulting policy before
+    # any value is written.
+    def combined_csp_hash(current_config, additions)
+      ContentSecurityPolicy.combine_policies(current_config.to_h, additions)
+    end
+
+    # Private: records observed violations at header-generation time, covering
+    # policies that were invalid before the request started (default config or
+    # a named override). Strict mode never reaches here; it raises on build.
+    def record_csp_violations!(request, config)
+      return if CspValidation.resolve_mode(nil) == CspValidation::STRICT_MODE
+      violations = config.csp_violations(source: :header_generation)
+      stash_csp_violations!(request, violations) unless violations.empty?
+    end
+
+    def stash_csp_violations!(request, violations)
+      existing = request.env[SECURE_HEADERS_CSP_VIOLATIONS] || []
+      # A physical location is identified by policy, directive, token and
+      # offsets - not by :source - so the same offending value seen both when a
+      # request mutates the policy and again when the header is rendered is
+      # reported exactly once. The first observed source is retained.
+      location_key = ->(violation) do
+        [
+          violation[:policy],
+          violation[:directive],
+          violation[:token_index],
+          violation[:char_offsets],
+        ]
+      end
+      known_locations = existing.map { |violation| location_key.call(violation) }
+      combined = existing + violations.reject { |violation| known_locations.include?(location_key.call(violation)) }
+      request.env[SECURE_HEADERS_CSP_VIOLATIONS] = combined.uniq.sort_by do |violation|
+        [
+          CspValidation::POLICY_ORDER.fetch(violation[:policy], 99),
+          violation[:source].to_s,
+          violation[:directive].to_s,
+          violation[:token_index].nil? ? -1 : violation[:token_index],
+          violation[:char_offsets].first || 0,
+        ]
+      end
     end
 
     def guess_target(config)

@@ -77,6 +77,19 @@ module SecureHeaders
   end
 
   class ContentSecurityPolicyConfigError < StandardError; end
+
+  # Strict-mode CSP injection failures are also configuration failures, so
+  # callers already rescuing ContentSecurityPolicyConfigError keep working.
+  # The class itself is defined in csp_validation.rb (which loads first) and is
+  # re-parented here once the config error class exists.
+  CspValidation::CspValidationError = Class.new(ContentSecurityPolicyConfigError) do
+    attr_reader :violations
+
+    def initialize(violations)
+      @violations = violations
+      super("Invalid CSP content rejected (#{violations.length} violation(s)). See #violations for structured locations.")
+    end
+  end
   class ContentSecurityPolicyConfig
     HEADER_NAME = "content-security-policy".freeze
 

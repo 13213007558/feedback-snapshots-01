@@ -1,12 +1,13 @@
 # frozen_string_literal: true
 require_relative "policy_management"
+require_relative "csp_validation"
 require_relative "content_security_policy_config"
 
 module SecureHeaders
   class ContentSecurityPolicy
     include PolicyManagement
 
-    def initialize(config = nil)
+    def initialize(config = nil, options = {})
       @config =
         if config.is_a?(Hash)
           if config[:report_only]
@@ -23,6 +24,7 @@ module SecureHeaders
       @preserve_schemes = @config[:preserve_schemes]
       @script_nonce = @config[:script_nonce]
       @style_nonce = @config[:style_nonce]
+      @validation_mode = CspValidation.resolve_mode(options[:validation_mode])
     end
 
     ##
@@ -37,13 +39,40 @@ module SecureHeaders
     def value
       @value ||=
         if @config
+          enforce_strict_validation!
           build_value
         else
           DEFAULT_VALUE
         end
     end
 
+    # Public: structured directive-injection violations for this policy,
+    # redacted so nonces and absolute tenant URLs never appear.
+    def violations
+      CspValidation.violations_for(@config, policy_kind: policy_kind, source: :header_generation)
+    end
+
+    def validation_mode
+      @validation_mode
+    end
+
     private
+
+    # Strict phase: reject the whole policy before any header text is built, so
+    # an invalid policy can never be partially rendered.
+    def enforce_strict_validation!
+      return unless @validation_mode == CspValidation::STRICT_MODE
+      error = CspValidation.strict_violation_error(violations)
+      raise error if error
+    end
+
+    def policy_kind
+      if @config.respond_to?(:report_only?) && @config.report_only?
+        CspValidation::REPORT_ONLY_POLICY
+      else
+        CspValidation::ENFORCED_POLICY
+      end
+    end
 
     # Private: converts the config object into a string representing a policy.
     # Places default-src at the first directive and report-uri as the last. All
@@ -115,12 +144,13 @@ module SecureHeaders
     # smuggle directives either.
     DIRECTIVE_INJECTION_REGEX = /[\n\r;]/.freeze
 
-    # Private: scrubs caller-controlled bytes that would let a value
-    # break out of its CSP directive (CR, LF, semicolon). Shared across
-    # every directive builder so sandbox / plugin-types / report-to /
-    # source-list all reject the same byte set with the same warn UX.
-    # Emits a single Kernel.warn per directive even when multiple
-    # offending bytes are present.
+    # Private: observe-phase behavior for caller-controlled bytes that would
+    # let a value break out of its CSP directive (CR, LF, semicolon). Shared
+    # across every directive builder so sandbox / plugin-types / report-to /
+    # source-list all neutralize the same byte set with the same warn UX.
+    # Emits a single Kernel.warn per directive even when multiple offending
+    # bytes are present. In :strict mode this method is never reached because
+    # #enforce_strict_validation! rejects the policy up front.
     def scrub_directive_value(directive, value)
       str = value.to_s
       if str =~ DIRECTIVE_INJECTION_REGEX

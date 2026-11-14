@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require "yaml"
+require_relative "headers/csp_validation"
 
 module SecureHeaders
   class Configuration
@@ -9,6 +10,17 @@ module SecureHeaders
     class NotYetConfiguredError < StandardError; end
     class IllegalPolicyModificationError < StandardError; end
     class << self
+      # Public: process-wide CSP directive-injection validation mode.
+      # Defaults to :observe so existing configurations keep their scrubbed
+      # output while violations are collected. Set to :strict to reject invalid
+      # policies outright.
+      def csp_validation_mode
+        defined?(@csp_validation_mode) ? @csp_validation_mode : CspValidation::OBSERVE_MODE
+      end
+
+      def csp_validation_mode=(mode)
+        @csp_validation_mode = CspValidation.validate_mode!(mode)
+      end
       # Public: Disable secure_headers entirely. When disabled, no headers will be set.
       #
       # Note: This must be called before Configuration.default. Calling it after
@@ -277,13 +289,29 @@ module SecureHeaders
     # Public: validates all configurations values.
     #
     # Raises various configuration errors if any invalid config is detected.
+    # In :strict CSP validation mode, also raises CspValidationError when any
+    # CSP policy contains directive-injection bytes. In :observe mode the
+    # structured, redacted violations are returned instead and no header text
+    # changes.
     #
-    # Returns nothing
+    # Returns the observed CSP violations (an empty Array when none exist or
+    # strict mode is active).
     def validate_config!
       VALIDATABLE_ATTRIBUTES.each do |attr|
         klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
         klass.validate_config!(instance_variable_get("@#{attr}"))
       end
+      validate_csp_injection!
+    end
+
+    # Public: collect directive-injection violations for both the enforced and
+    # report-only policies without changing any header output. Useful for
+    # one-off audits outside of request handling.
+    def csp_violations(source: :default_registration)
+      [
+        csp_violations_for(@csp, CspValidation::ENFORCED_POLICY, source),
+        csp_violations_for(@csp_report_only, CspValidation::REPORT_ONLY_POLICY, source),
+      ].flatten
     end
 
     def secure_cookies=(secure_cookies)
@@ -322,6 +350,22 @@ module SecureHeaders
       else
         raise ArgumentError, "Must provide either an existing CSP config or a CSP config hash"
       end
+    end
+
+    private
+
+    def validate_csp_injection!
+      violations = csp_violations
+      return violations if violations.empty?
+      if Configuration.csp_validation_mode == CspValidation::STRICT_MODE
+        raise CspValidation.strict_violation_error(violations)
+      end
+      violations
+    end
+
+    def csp_violations_for(policy, policy_kind, source)
+      return [] if policy.nil? || policy.opt_out?
+      CspValidation.violations_for(policy, policy_kind: policy_kind, source: source)
     end
   end
 end
