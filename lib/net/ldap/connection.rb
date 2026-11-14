@@ -572,10 +572,7 @@ class Net::LDAP::Connection #:nodoc:
       ops.to_ber_sequence,
     ].to_ber_appsequence(Net::LDAP::PDU::ModifyRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = encode_controls(args[:controls])
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -649,10 +646,7 @@ class Net::LDAP::Connection #:nodoc:
     message_id = next_msgid
     request    = [add_dn.to_ber, add_attrs.to_ber_sequence].to_ber_appsequence(Net::LDAP::PDU::AddRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = encode_controls(args[:controls])
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -677,7 +671,8 @@ class Net::LDAP::Connection #:nodoc:
     request    = [old_dn.to_ber, new_rdn.to_ber, delete_attrs.to_ber]
     request   << new_superior.to_ber_contextspecific(0) unless new_superior == nil
 
-    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), nil, message_id)
+    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest),
+          encode_controls(args[:controls]), message_id)
     pdu = queued_read(message_id)
 
     if !pdu || pdu.app_tag != Net::LDAP::PDU::ModifyRDNResponse
@@ -692,7 +687,14 @@ class Net::LDAP::Connection #:nodoc:
   #++
   def delete(args)
     dn = args[:dn] or raise "Unable to delete empty DN"
-    controls   = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
+    if args.key?(:controls)
+      # Pre-encoded BER control sequences, wrapped in the LDAP controls
+      # context-specific field. This is the form used by transactions.
+      controls = encode_controls(args[:controls])
+    else
+      # Legacy interface: plain control tuples encoded via #to_ber_control.
+      controls = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil
+    end
     message_id = next_msgid
     request    = dn.to_s.to_ber_application_string(Net::LDAP::PDU::DeleteRequest)
 
@@ -709,6 +711,61 @@ class Net::LDAP::Connection #:nodoc:
   def ldapwhoami
     ext_seq = [Net::LDAP::WhoamiOid.to_ber_contextspecific(0)]
     request = ext_seq.to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    message_id = next_msgid
+
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if !pdu || pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
+    end
+
+    pdu
+  end
+
+  # RFC 5805 section 2.1. Issues a Start Transaction extended request. The
+  # request has an OID (1.3.6.1.1.21.1) and no requestValue. On success the
+  # extended response value carries the opaque transaction identifier.
+  #
+  # Returns the ExtendedResponse PDU.
+  def start_transaction
+    request = [
+      Net::LDAP::StartTransactionOid.to_ber_contextspecific(0),
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    message_id = next_msgid
+
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if !pdu || pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
+    end
+
+    pdu
+  end
+
+  # RFC 5805 section 2.3. Issues an End Transaction extended request
+  # (1.3.6.1.1.21.3) whose requestValue is a BER-encoded txnEndReq:
+  #
+  #   txnEndReq ::= SEQUENCE {
+  #        commit     BOOLEAN DEFAULT TRUE,
+  #        identifier OCTET STRING }
+  #
+  # +commit+ true requests a commit, false requests an abort.
+  #
+  # Returns the ExtendedResponse PDU.
+  def end_transaction(identifier, commit)
+    end_value = [
+      commit.to_ber,
+      identifier.to_ber,
+    ].to_ber_sequence
+
+    request = [
+      Net::LDAP::EndTransactionOid.to_ber_contextspecific(0),
+      end_value.to_ber_contextspecific(1),
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
 
     message_id = next_msgid
 
@@ -743,6 +800,16 @@ class Net::LDAP::Connection #:nodoc:
   end
 
   private
+
+  # Wraps an array of pre-encoded BER control sequences in the
+  # context-specific [0] controls field of an LDAP message (RFC 4511
+  # section 4.1.11). Returns nil when no controls are present so the
+  # controls field is omitted from the message entirely.
+  def encode_controls(controls)
+    return nil if controls.nil? || (controls.respond_to?(:empty?) && controls.empty?)
+
+    controls.to_ber_contextspecific(0)
+  end
 
   # Wrap around Socket.tcp to normalize with other Socket initializers
   class DefaultSocket

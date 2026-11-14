@@ -25,6 +25,7 @@ require_relative 'ldap/password'
 require_relative 'ldap/entry'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
+require_relative 'ldap/transaction'
 require_relative 'ldap/version'
 require_relative 'ldap/error'
 require_relative 'ldap/auth_adapter'
@@ -342,6 +343,17 @@ class Net::LDAP
   StartTlsOid = '1.3.6.1.4.1.1466.20037'
   PasswdModifyOid = '1.3.6.1.4.1.4203.1.11.1'
   WhoamiOid = '1.3.6.1.4.1.4203.1.11.3'
+
+  # RFC 5805 (Lightweight Directory Access Protocol (LDAP) Transactions)
+  # https://tools.ietf.org/html/rfc5805#section-7.2
+  # Start Transaction Extended Request
+  StartTransactionOid = '1.3.6.1.1.21.1'
+  # Transaction Specification Control
+  TransactionSpecificationOid = '1.3.6.1.1.21.2'
+  # End Transaction Extended Request
+  EndTransactionOid = '1.3.6.1.1.21.3'
+  # Aborted Transaction Notice (unsolicited notification)
+  AbortedTransactionOid = '1.3.6.1.1.21.4'
 
   # https://tools.ietf.org/html/rfc4511#section-4.1.9
   # https://tools.ietf.org/html/rfc4511#appendix-A
@@ -860,6 +872,12 @@ class Net::LDAP
   # the documentation for #auth, the password parameter can be a Ruby Proc
   # instead of a String.
   def bind(auth = @auth)
+    if current_transaction
+      raise Net::LDAP::OperationNotAllowedInTransactionError,
+            "a Bind aborts outstanding transactions (RFC 5805 section 3.5) " \
+            "and is not permitted inside an active transaction"
+    end
+
     instrument "bind.net_ldap" do |payload|
       if @open_connection
         payload[:connection] = @open_connection
@@ -964,8 +982,10 @@ class Net::LDAP
   #  end
   def add(args)
     instrument "add.net_ldap", args do |payload|
-      @result = use_connection(args) do |conn|
-        conn.add(args)
+      @result = run_update_operation(:add, args) do
+        use_connection(args) do |conn|
+          conn.add(args)
+        end
       end
       @result.success?
     end
@@ -1054,8 +1074,10 @@ class Net::LDAP
   # does _not_ imply transactional atomicity, which LDAP does not provide.
   def modify(args)
     instrument "modify.net_ldap", args do |payload|
-      @result = use_connection(args) do |conn|
-        conn.modify(args)
+      @result = run_update_operation(:modify, args) do
+        use_connection(args) do |conn|
+          conn.modify(args)
+        end
       end
       @result.success?
     end
@@ -1154,8 +1176,10 @@ class Net::LDAP
   # _Documentation_ _stub_
   def rename(args)
     instrument "rename.net_ldap", args do |payload|
-      @result = use_connection(args) do |conn|
-        conn.rename(args)
+      @result = run_update_operation(:rename, args) do
+        use_connection(args) do |conn|
+          conn.rename(args)
+        end
       end
       @result.success?
     end
@@ -1173,8 +1197,10 @@ class Net::LDAP
   #  ldap.delete :dn => dn
   def delete(args)
     instrument "delete.net_ldap", args do |payload|
-      @result = use_connection(args) do |conn|
-        conn.delete(args)
+      @result = run_update_operation(:delete, args) do
+        use_connection(args) do |conn|
+          conn.delete(args)
+        end
       end
       @result.success?
     end
@@ -1314,7 +1340,90 @@ class Net::LDAP
     @open_connection = connection
   end
 
+  # Internal: The connection currently bound to this object, if any. Used by
+  # the transaction coordinator to pin all operations to one association.
+  def connection
+    @open_connection
+  end
+
+  # Internal: The active Net::LDAP::Transaction, or nil when none is running.
+  attr_accessor :current_transaction
+
+  # Groups a sequence of directory update operations into a single RFC 5805
+  # LDAP transaction. The block receives this Net::LDAP object and any Add,
+  # Modify, Delete, or Rename (ModifyDN) operations performed inside it are
+  # attached to the transaction via the Transaction Specification control and
+  # applied atomically when the block completes.
+  #
+  # The transaction runs entirely on one connection. If an open connection is
+  # already in use (e.g. inside Net::LDAP#open) it is reused; otherwise a
+  # dedicated connection is established, bound, and closed afterwards.
+  #
+  # Returns a Net::LDAP::Transaction::Result describing a three-way outcome:
+  # * +committed?+  - the server confirmed all updates were applied.
+  # * +rolled_back? - the server confirmed no updates were applied.
+  # * +unknown?+    - the real outcome could not be confirmed.
+  #
+  # Protocol-level failures never raise; they are encoded on the Result so
+  # callers can distinguish start failure, a failed update, a block
+  # exception, an unsuccessful commit, and a missing commit response.
+  #
+  #  result = ldap.transaction do |txn|
+  #    txn.modify(:dn => dn1, :operations => ops1)
+  #    txn.modify(:dn => dn2, :operations => ops2)
+  #  end
+  #
+  #  case
+  #  when result.committed?   then puts "committed"
+  #  when result.rolled_back? then puts "rolled back: #{result.reason}"
+  #  when result.unknown?     then puts "outcome unknown: #{result.reason}"
+  #  end
+  def transaction
+    raise Net::LDAP::NestedTransactionError, "transactions cannot be nested" if
+      current_transaction
+
+    if @open_connection
+      run_transaction(@open_connection) { yield self }
+    else
+      begin
+        conn = new_connection
+        bind_result = conn.bind(@auth)
+        unless bind_result.result_code == Net::LDAP::ResultCodeSuccess
+          return Net::LDAP::Transaction::Result.new(
+            status: :not_started, reason: :start_failed,
+            code: bind_result.result_code,
+            message: bind_result.error_message, response: bind_result)
+        end
+
+        @open_connection = conn
+        run_transaction(conn) { yield self }
+      ensure
+        @open_connection.close if @open_connection
+        @open_connection = nil
+      end
+    end
+  end
+
   private
+
+  # Builds and runs the coordinator on an already-established connection.
+  def run_transaction(connection, &block)
+    instrument "transaction.net_ldap" do |payload|
+      coordinator = Net::LDAP::Transaction.new(self, connection)
+      payload[:result] = coordinator.run(&block)
+    end
+  end
+
+  # Internal: Routes an update operation through the active transaction when
+  # one is present, otherwise performs it normally.
+  def run_update_operation(name, args)
+    transaction = current_transaction
+    return yield unless transaction
+
+    transaction.run_operation(name, args) do
+      yield
+    end
+  end
 
   # Yields an open connection if there is one, otherwise establishes a new
   # connection, binds, and yields it. If binding fails, it will return the
