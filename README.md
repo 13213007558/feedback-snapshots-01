@@ -42,6 +42,68 @@ gem install net-ldap
 
 Simply require either `net-ldap` or `net/ldap`.
 
+## Content Synchronization (RFC 4533)
+
+`Net::LDAP#sync_refresh` runs one RFC 4533 `refreshOnly` content sync poll and
+returns an atomic replacement for a locally held permission mirror. Entries are
+correlated by their stable `entryUUID` (not their DN), and the change ledger is
+keyed by UUID.
+
+```ruby
+# Persisted between polls: a UUID => Net::LDAP::Entry map and the last cookie.
+state = load_checkpoint        # { entries: {...}, cookie: "..." } or nil
+previous = state ? state[:entries] : {}
+cookie   = state ? state[:cookie] : nil
+
+result =
+  ldap.sync_refresh(base: "ou=perms,dc=example,dc=org",
+                    cookie: cookie,
+                    previous_entries: previous)
+
+replace_permissions(result.entries)        # swap the whole map atomically
+save_checkpoint(entries: result.entries, cookie: result.cookie)
+
+result.changelog # => { add: [...], modify: [...], present: [...], delete: [...] }
+```
+
+Two refresh shapes are handled and distinguished automatically:
+
+- **Present phase** (`refreshDeletes=FALSE`): every surviving entry is named
+  with `present` or carried as `add`/`modify`; entries never named are removed
+  from the replacement.
+- **Delete phase** (`refreshDeletes=TRUE`): only removed entries are named with
+  `delete` (or a `syncIdSet`); every other previous entry is retained. A present
+  phase followed by a delete phase is delimited by a `refreshPresent`
+  Intermediate Response with `refreshDone=FALSE`.
+
+### Checkpoint persistence
+
+Persist the cookie **only together with** the fully materialized
+`result.entries`, and only after `sync_refresh` returns. The returned cookie is
+the one from the terminal Sync Done Control and is the sole valid checkpoint.
+Cookies that arrive earlier (on Sync State Controls or Sync Info Messages) are
+exposed for diagnostics via the consumer but must not be checkpointed: the
+content they describe is not yet complete, so restarting from them can skip
+unprocessed deletes.
+
+### Why a failed refresh cannot continue from a half mirror
+
+All messages are applied to private staging state; the caller's previous mirror
+is never mutated. A replacement is published solely after a successful
+SearchResultDone with a Sync Done Control. On a truncated stream, any
+non-success result code (including `e-syncRefreshRequired`, raised as
+`Net::LDAP::Sync::RefreshRequiredError`), or a contradictory protocol sequence,
+a `Net::LDAP::Sync::Error` is raised and no result is available.
+
+The half-applied staging data is unusable because present/delete semantics are
+only defined relative to a *complete* refresh: in present mode an entry merely
+not received yet would be indistinguishable from one that was deleted, and in
+delete mode an unprocessed `delete` would leave a permission that should have
+been revoked. Keep the previous mirror and checkpoint untouched, discard the
+failed consumer, and retry the whole refresh (without a cookie for a full
+reload, or with the cookie carried by `RefreshRequiredError` for an incremental
+one).
+
 ## Extensions
 
 This library focuses on the core LDAP RFCs referenced in the description.

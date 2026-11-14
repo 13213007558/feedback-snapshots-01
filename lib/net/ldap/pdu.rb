@@ -75,6 +75,7 @@ class Net::LDAP::PDU
   attr_reader :search_parameters
   attr_reader :bind_parameters
   attr_reader :extended_response
+  attr_reader :intermediate_response
 
   ##
   # Returns RFC-2251 Controls if any.
@@ -122,6 +123,8 @@ class Net::LDAP::PDU
       parse_unbind_request(ber_object[1])
     when ExtendedResponse
       parse_extended_response(ber_object[1])
+    when IntermediateResponse
+      parse_intermediate_response(ber_object[1])
     else
       raise Error.new("unknown pdu-type: #{@app_tag}")
     end
@@ -203,6 +206,32 @@ class Net::LDAP::PDU
     @extended_response = sequence.length == 3 ? nil : sequence.last
   end
   private :parse_extended_response
+
+  ##
+  # Parse an Intermediate Response Message (RFC 4511 section 4.13). It is
+  # used by the LDAP Content Synchronization Operation (RFC 4533) to carry
+  # Sync Info Messages.
+  #
+  #   IntermediateResponse ::= [APPLICATION 25] SEQUENCE {
+  #       responseName     [0] LDAPOID OPTIONAL,
+  #       responseValue    [1] OCTET STRING OPTIONAL
+  #   }
+  #
+  # Both fields are context-specific and may be omitted, so they are read
+  # by their BER identifier rather than by fixed position.
+  def parse_intermediate_response(sequence)
+    response = {}
+    sequence.each do |element|
+      next unless element.respond_to?(:ber_identifier)
+
+      case element.ber_identifier
+      when 0x80 then response[:name] = element
+      when 0x81 then response[:value] = element
+      end
+    end
+    @intermediate_response = response
+  end
+  private :parse_intermediate_response
 
   ##
   # A Bind Response may have an additional field, ID [7], serverSaslCreds,

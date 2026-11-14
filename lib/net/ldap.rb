@@ -30,6 +30,7 @@ require_relative 'ldap/error'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
+require_relative 'ldap/sync'
 
 Net::LDAP::AuthAdapter.register([:simple, :anon, :anonymous], Net::LDAP::AuthAdapter::Simple)
 Net::LDAP::AuthAdapter.register(:sasl, Net::LDAP::AuthAdapter::Sasl)
@@ -294,6 +295,7 @@ class Net::LDAP
     16 => :array, # AbandonRequest
     19 => :array, # SearchResultReferral
     24 => :array, # Unsolicited Notification
+    25 => :array, # IntermediateResponse (RFC 4511 4.13, RFC 4533 Sync Info)
   }
   application = {
     :primitive => primitive,
@@ -384,6 +386,9 @@ class Net::LDAP
   ResultCodeAffectsMultipleDSAs          = 71
   ResultCodeOther                        = 80
 
+  # RFC 4533 section 2.6: the server requires a full or partial refresh.
+  ResultCodeSyncRefreshRequired          = 4096
+
   # https://tools.ietf.org/html/rfc4511#appendix-A.1
   ResultCodesNonError = [
     ResultCodeSuccess,
@@ -447,6 +452,12 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+
+    # RFC 4533 LDAP Content Synchronization controls and Sync Info OID.
+    SYNC_REQUEST = Net::LDAP::Sync::OID::REQUEST
+    SYNC_STATE   = Net::LDAP::Sync::OID::STATE
+    SYNC_DONE    = Net::LDAP::Sync::OID::DONE
+    SYNC_INFO    = Net::LDAP::Sync::OID::INFO
   end
 
   def self.result2string(code) #:nodoc:
@@ -799,6 +810,76 @@ class Net::LDAP
       else
         @result.success?
       end
+    end
+  end
+
+  # Perform one RFC 4533 +refreshOnly+ content synchronization poll and
+  # return an atomic replacement for the locally held mirror.
+  #
+  # Arguments:
+  # +base+::       Search base object (required, as for #search).
+  # +cookie+::     Opaque syncCookie returned by the previous successful
+  #                refresh. Omit/nil for an initial content poll.
+  # +filter+::     Search filter, defaults to +(objectClass=*)+.
+  # +attributes+:: Attributes to request.
+  # +scope+::      Search scope, defaults to whole subtree.
+  # +reload_hint+:: Sets reloadHint in the Sync Request Control.
+  # +previous_entries+:: UUID => Net::LDAP::Entry map from the last
+  #                completed refresh. It is never modified.
+  #
+  # Returns a Net::LDAP::Sync::RefreshConsumer::Result whose +entries+ is the
+  # complete replacement map keyed by entryUUID. The result (and its
+  # +cookie+) is only returned after the SearchResultDone with a Sync Done
+  # Control has been validated; on any truncation, error result code,
+  # e-syncRefreshRequired or protocol contradiction a Net::LDAP::Sync::Error
+  # is raised instead and the caller must keep its previous mirror.
+  def sync_refresh(base:, cookie: nil, filter: nil, attributes: nil, scope: nil,
+                   reload_hint: false, previous_entries: {})
+    consumer = Net::LDAP::Sync::RefreshConsumer.new(previous_entries)
+    request_control = Net::LDAP::Sync::Codec.encode_request_control(
+      mode: Net::LDAP::Sync::MODE_REFRESH_ONLY,
+      cookie: cookie,
+      reload_hint: reload_hint,
+    )
+
+    args = {
+      base: base,
+      filter: filter,
+      attributes: attributes,
+      scope: scope,
+      controls: [request_control],
+      # The consumer needs full PDUs (with Sync State/Sync Info controls),
+      # not just decoded Net::LDAP::Entry objects.
+      yield_pdus: true,
+      # Paged results are incompatible with the sync message ordering
+      # guarantees (Intermediate Responses and a single Sync Done), so the
+      # sync poll must not be split into pages.
+      ignore_server_caps: true,
+      paged_searches_supported: false,
+    }
+
+    instrument "sync_refresh.net_ldap", args do |payload|
+      begin
+        @result = use_connection(args) do |conn|
+          conn.search(args) do |message|
+            consumer.process(message)
+          end
+        end
+      rescue Net::LDAP::ResponseMissingOrInvalidError => e
+        # The stream ended before a SearchResultDone arrived. Nothing was
+        # published, so surface this as an incomplete refresh rather than a
+        # generic transport error.
+        raise Net::LDAP::Sync::IncompleteRefreshError,
+              "sync refresh stream was truncated: #{e.message}"
+      end
+
+      unless consumer.finished?
+        raise Net::LDAP::Sync::IncompleteRefreshError,
+              "sync refresh stream ended without a completed Sync Done"
+      end
+
+      payload[:cookie] = consumer.result.cookie
+      consumer.result
     end
   end
 

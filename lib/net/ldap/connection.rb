@@ -453,7 +453,12 @@ class Net::LDAP::Connection #:nodoc:
           case pdu.app_tag
           when Net::LDAP::PDU::SearchReturnedData
             n_results += 1
-            yield pdu.search_entry if block_given?
+            if block_given?
+              # By default callers receive the Net::LDAP::Entry. A protocol
+              # consumer such as RFC 4533 sync needs the full PDU because the
+              # Sync State Control is attached to it, so it may request PDUs.
+              yield args[:yield_pdus] ? pdu : pdu.search_entry
+            end
           when Net::LDAP::PDU::SearchResultReferral
             if refs
               if block_given?
@@ -472,7 +477,17 @@ class Net::LDAP::Connection #:nodoc:
                 yield se
               end
             end
+            # Hand the terminal PDU to the block as well. Ordinary searches
+            # ignore it, but a sync consumer (RFC 4533) must observe the
+            # SearchResultDone to validate the Sync Done Control and publish
+            # its replacement snapshot atomically.
+            yield pdu if block_given?
             break
+          when Net::LDAP::PDU::IntermediateResponse
+            # RFC 4533 Sync Info Messages arrive here. Hand the full PDU to
+            # the caller (e.g. Net::LDAP::Sync::RefreshConsumer) rather than
+            # treating it as an entry.
+            yield pdu if block_given?
           else
             raise Net::LDAP::ResponseTypeInvalidError, "invalid response-type in search: #{pdu.app_tag}"
           end
