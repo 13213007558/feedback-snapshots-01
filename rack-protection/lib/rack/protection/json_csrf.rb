@@ -18,21 +18,21 @@ module Rack
     # if the request is safe. Please refer to the documentation for more info.
     #
     # The `:allow_if` option can be set to a proc to use custom allow/deny logic.
+    #
+    # Because this check depends on the response's <tt>content-type</tt>, the
+    # protection decision is made after the application has returned. Reactions
+    # therefore follow the response-dependent contract described in
+    # Rack::Protection::Base: +:report+ keeps the original response and records
+    # the finding, while a denial reaction must return a Rack response triple
+    # and the original body is closed exactly once without being iterated.
     class JsonCsrf < Base
       default_options allow_if: nil
 
-      alias react deny
-
       def call(env)
-        request               = Request.new(env)
-        status, headers, body = app.call(env)
+        request = Request.new(env)
 
-        if has_vector?(request, headers)
-          warn env, "attack prevented by #{self.class}"
-
-          react_and_close(env, body) or [status, headers, body]
-        else
-          [status, headers, body]
+        check_response(env) do |_status, headers, _body|
+          has_vector?(request, headers)
         end
       end
 
@@ -42,18 +42,6 @@ module Rack
         return false unless headers['content-type'].to_s.split(';', 2).first =~ %r{^\s*application/json\s*$}
 
         origin(request.env).nil? and referrer(request.env) != request.host
-      end
-
-      def react_and_close(env, body)
-        reaction = react(env)
-
-        close_body(body) if reaction
-
-        reaction
-      end
-
-      def close_body(body)
-        body.close if body.respond_to?(:close)
       end
     end
   end

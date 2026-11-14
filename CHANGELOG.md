@@ -1,5 +1,10 @@
 ## Unreleased
 
+* Fix: Unify the lifecycle of response-dependent rejections in rack-protection. `JsonCsrf`
+  now closes a replaced body exactly once, never iterates it in deny mode, preserves it in
+  report mode, and defines an explicit contract for custom reactions that do not return a
+  Rack response.
+
 ## 4.2.1 / 2025-10-10
 
 * Fix: Revert "`PATH_INFO` can never be empty" ([#2124](https://github.com/sinatra/sinatra/pull/2124))

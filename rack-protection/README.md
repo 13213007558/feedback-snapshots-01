@@ -163,6 +163,43 @@ use Rack::Protection, instrumenter: ActiveSupport::Notifications
 
 The instrumenter is passed a namespace (String) and environment (Hash). The namespace is 'rack.protection' and the attack type can be obtained from the environment key 'rack.protection.attack'.
 
+# Rejections decided from the response
+
+Most protections decide before calling the application. `Rack::Protection::JsonCsrf`,
+however, can only decide after it has seen the application's `content-type` header.
+Such protections use `Rack::Protection::Base#check_response` (or
+`#reject_response`) so that every response-dependent rejection follows the same
+lifecycle:
+
+* The rejection decision and the configured reaction each run once.
+* `reaction: :report` keeps the original response, sets `protection.failed` in
+  `env`, and leaves the body for the server to consume and close.
+* Any other reaction must return a Rack response triple. The original body is
+  then closed exactly once and is never iterated.
+* A reaction returning `nil` (including side-effect reactions such as
+  `:drop_session`) falls back to the standard denial response, preserving the
+  fail-closed behavior of `JsonCsrf`.
+* A reaction returning a non-`nil`, non-Rack value raises
+  `Rack::Protection::Base::ResponseReactionError`.
+* Exceptions while deciding, reacting, instrumenting, or closing are contained:
+  an existing rejection never becomes a pass-through. A close failure is logged
+  and the replacement response is still returned.
+
+This works for both enumerable bodies (`#each`) and streaming/callable bodies
+(`#call`), and for bodies that raise from `#close`.
+
+## Responsibility split
+
+The protection layer owns the decision and the ownership transfer: it invokes
+the reaction once, records a report finding, closes a body it replaces exactly
+once, and never iterates it. It must return a valid Rack triple (or preserve the
+original under `:report`).
+
+The Rack server owns the response it receives: it iterates an enumerable body or
+invokes a callable body, closes that body after sending, and suppresses or
+propagates exceptions from the network and from body iteration. A body kept by
+`:report` therefore remains the server's responsibility to consume and close.
+
 [authenticity-token]: http://www.sinatrarb.com/protection/authenticity_token
 [content-security-policy]: http://www.sinatrarb.com/protection/content_security_policy
 [cookie-tossing]: http://www.sinatrarb.com/protection/cookie_tossing
