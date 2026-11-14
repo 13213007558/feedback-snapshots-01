@@ -325,6 +325,85 @@ encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
 encoded_token.payload # => {"pay"=>"load"}
 ```
 
+## Purpose-based verification
+
+When the same issuer signs more than one kind of token with the same key (for
+example a login-callback token and an API token), a valid signature alone is not
+enough: an API token must never be accepted as a login credential. The
+`JWT::Policy::IdentityVerifier` lets the server describe one verification
+`JWT::Policy::VerificationPolicy` per purpose and then verify a token for the
+purpose the application chooses.
+
+A policy pins every discriminator together:
+
+- trusted `iss`uer(s)
+- accepted `alg`orithm(s)
+- accepted `typ` header value(s)
+- accepted `aud`ience(s)
+- required payload claims
+- the verification key, or a server-side JWK set/loader
+
+All of these come from the server configuration. The token being verified can
+never select a policy, widen the issuer/algorithm set, or point the verifier at
+an external key source (`jku`/`x5u` headers are rejected). Verification is
+all-or-nothing: a `JWT::Policy::VerifiedIdentity` is returned only when every
+check passes.
+
+```ruby
+verifier = JWT::Policy::IdentityVerifier.new do |register|
+  register.policy(
+    purpose: :login,
+    issuers: 'https://issuer.example',
+    algorithms: 'RS256',
+    typ: 'login+jwt',
+    audience: 'web-app',
+    required_claims: %w[sub nonce],
+    jwks: ->(options) { JWT::JWK::Set.new(fetch_jwks) }
+  )
+
+  register.policy(
+    purpose: :api,
+    issuers: 'https://issuer.example',
+    algorithms: 'RS256',
+    typ: 'api+jwt',
+    audience: 'api-gateway',
+    required_claims: %w[sub],
+    jwks: ->(options) { JWT::JWK::Set.new(fetch_jwks) }
+  )
+end
+
+# The application, not the token, states which purpose it is authenticating.
+identity = verifier.verify(login_token, purpose: :login)
+identity.subject   # => 'user-1'
+identity.purpose   # => :login
+
+# An API token presented to the login endpoint is rejected even though its
+# signature is valid for the shared key.
+verifier.verify(api_token, purpose: :login) # raises JWT::InvalidTypError
+
+# Predicate form is available when raising is not desired.
+verifier.valid?(api_token, purpose: :api)   # => true
+```
+
+### Overlapping policies are a configuration error
+
+Each token must be able to match at most one purpose. If two registered policies
+accept the same combination of issuer, algorithm, `typ` and audience, registering
+the second one raises `JWT::PolicyError` instead of silently keeping the first.
+Make at least one dimension distinct (a dedicated `typ` or `audience` is the
+recommended fix).
+
+### Untrusted issuers never trigger key fetching
+
+Policy claims (including the issuer gate) are evaluated before any key lookup. A
+token whose `iss` is not trusted fails with `JWT::InvalidIssuerError` and the
+configured JWK loader is never invoked, so an untrusted token cannot drive an
+external request.
+
+The lower-level `JWT.decode` interface keeps its existing behavior and is left
+unchanged; the policy verifier is the purpose-aware entry point layered on top of
+the same primitives.
+
 ## Claims
 
 JSON Web Token defines some reserved claim names and defines how they should be

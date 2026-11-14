@@ -73,6 +73,19 @@ module JWT
   # The MissingRequiredClaim class is raised when a required claim is missing from the JWT.
   class MissingRequiredClaim < ClaimValidationError; end
 
+  # The InvalidTypError class is raised when the JWT type ('typ') header does
+  # not match the type expected by the verification policy.
+  class InvalidTypError < TokenError; end
+
+  # The PolicyError class is raised when a server-side verification policy is
+  # misconfigured, for example when two registered purposes accept overlapping
+  # sets of tokens.
+  class PolicyError < DecodeError; end
+
+  # The UnknownPurposeError class is raised when a token is verified against a
+  # purpose that the server has not registered a verification policy for.
+  class UnknownPurposeError < PolicyError; end
+
   # The JWKError class is raised when there is an error with the JSON Web Key (JWK).
   class JWKError < DecodeError; end
 
