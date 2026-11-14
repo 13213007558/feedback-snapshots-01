@@ -7,6 +7,9 @@ rule %r|rfc5322_.+\.rl\z| => 'lib/mail/parsers/rfc5234_abnf_core_rules.rl'
 # RFC 5322 parser depends on its submodules
 file 'lib/mail/parsers/rfc5322.rl' => FileList['lib/mail/parsers/rfc5322_*.rl']
 
+# RFC 8601 parser depends on its grammar
+rule 'lib/mail/parsers/authentication_results_parser.rl' => 'lib/mail/parsers/rfc8601_authentication_results.rl'
+
 rule %r|_parser\.rl\z| => 'lib/mail/parsers/rfc5322.rl'
 
 # Ruby parsers depend on Ragel parser definitions

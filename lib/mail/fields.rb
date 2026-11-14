@@ -10,6 +10,7 @@ module Mail
   register_autoload :StructuredField, 'mail/fields/structured_field'
   register_autoload :OptionalField, 'mail/fields/optional_field'
 
+  register_autoload :AuthenticationResultsField, 'mail/fields/authentication_results_field'
   register_autoload :BccField, 'mail/fields/bcc_field'
   register_autoload :CcField, 'mail/fields/cc_field'
   register_autoload :CommentsField, 'mail/fields/comments_field'

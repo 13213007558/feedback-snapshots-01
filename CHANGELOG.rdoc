@@ -1,5 +1,11 @@
 == Version 2.9.0 (unreleased)
 
+Features:
+* Add structured parsing of Authentication-Results headers (RFC 8601) via
+  Mail::AuthenticationResultsField / Mail::AuthenticationResultsElement, and
+  Mail::AuthenticationResults.trusted for selecting only the header instances
+  a trusted receiving node added within a caller-supplied header boundary
+
 Breaking changes:
 * Mail::Field::FIELDS_MAP now contains class names, not Class instances (c960657)
 

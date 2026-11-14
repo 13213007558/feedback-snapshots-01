@@ -31,7 +31,7 @@ module Mail
                             mime-version received references reply-to
                             resent-bcc resent-cc resent-date resent-from
                             resent-message-id resent-sender resent-to
-                            return-path sender to ]
+                            return-path sender to authentication-results ]
 
     KNOWN_FIELDS = STRUCTURED_FIELDS + ['comments', 'subject']
 
@@ -65,6 +65,7 @@ module Mail
       "content-type" => "ContentTypeField",
       "content-id" => "ContentIdField",
       "content-location" => "ContentLocationField",
+      "authentication-results" => "AuthenticationResultsField",
     }
 
     FIELD_NAME_MAP = {
@@ -97,6 +98,7 @@ module Mail
       "content-type" => "Content-Type",
       "content-id" => "Content-ID",
       "content-location" => "Content-Location",
+      "authentication-results" => "Authentication-Results",
     }
 
     # Generic Field Exception
@@ -268,7 +270,7 @@ module Mail
     end
 
     FIELD_ORDER_LOOKUP = Hash[%w[
-      return-path received
+      authentication-results return-path received
       resent-date resent-from resent-sender resent-to
       resent-cc resent-bcc resent-message-id
       date from sender reply-to to cc bcc

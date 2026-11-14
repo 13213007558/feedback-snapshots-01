@@ -52,6 +52,7 @@ module Mail # :doc:
 
   # Autoload header field elements and transfer encodings.
   require 'mail/elements'
+  require 'mail/authentication_results'
   require 'mail/encodings'
   require 'mail/encodings/base64'
   require 'mail/encodings/quoted_printable'

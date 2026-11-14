@@ -759,6 +759,26 @@ module Mail
       header[:received] = val
     end
 
+    # Returns the Authentication-Results header field(s) of the message,
+    # in header order when there is more than one.
+    #
+    # Note that anyone on the delivery path can prepend a forged
+    # Authentication-Results header, so a parsed field is not proof of
+    # authentication. Use Mail::AuthenticationResults.trusted to select
+    # the header instances your own receiving infrastructure added
+    # before making a security decision.
+    def authentication_results( val = nil )
+      if val
+        header[:authentication_results] = val
+      else
+        header[:authentication_results]
+      end
+    end
+
+    def authentication_results=( val )
+      header[:authentication_results] = val
+    end
+
     def references( val = nil )
       default :references, val
     end

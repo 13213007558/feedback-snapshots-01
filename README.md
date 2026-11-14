@@ -373,6 +373,33 @@ mail.decoded         #=> 'This is the body of the email...
 
 Many more methods available.
 
+### Reading Authentication-Results (RFC 8601)
+
+Mail parses `Authentication-Results` headers into a structured form:
+
+```ruby
+field = mail.authentication_results        #=> field(s), in header order
+field.authserv_id                          #=> 'mx.example.com'
+field.result_for('dkim').result            #=> 'pass'
+field.result_for('dkim').property('header', 'd')  #=> 'example.com'
+```
+
+Anyone on the delivery path — including the sender — can prepend a forged
+`Authentication-Results` header, so a parsed `dkim=pass` is not proof of
+anything by itself. Only the results your own receiving infrastructure added
+may feed a security decision. Declare your trusted receiving node(s) and how
+many headers they add (the header boundary), and let Mail select:
+
+```ruby
+dkim = Mail::AuthenticationResults.trusted_result_for(mail, 'dkim',
+         authserv_ids: 'mx.example.com', within: 1)
+dkim && dkim.pass?   # only true if your own receiver recorded a pass
+```
+
+Headers beyond the boundary, headers from other authserv-ids, and headers
+that fail to parse are all excluded; `nil` means "no trustworthy
+information", never "pass".
+
 ### Reading a Multipart Email
 
 ```ruby

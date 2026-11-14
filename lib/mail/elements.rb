@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 module Mail
+  register_autoload :AuthenticationResultsElement, 'mail/elements/authentication_results_element'
   register_autoload :Address, 'mail/elements/address'
   register_autoload :AddressList, 'mail/elements/address_list'
   register_autoload :ContentDispositionElement, 'mail/elements/content_disposition_element'

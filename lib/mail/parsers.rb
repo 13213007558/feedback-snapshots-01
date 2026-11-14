@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'mail/parsers/address_lists_parser'
+require 'mail/parsers/authentication_results_parser'
 require 'mail/parsers/content_disposition_parser'
 require 'mail/parsers/content_location_parser'
 require 'mail/parsers/content_transfer_encoding_parser'
