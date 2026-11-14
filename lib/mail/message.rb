@@ -678,6 +678,32 @@ module Mail
       header[:from] = val
     end
 
+    # Strictly extracts the sender identity from the From field for
+    # authorization decisions (e.g. sender whitelists).
+    #
+    # Unlike #from, which is lenient and always returns something
+    # displayable (falling back to the raw unparsed text), this method
+    # only reports an identity when the From field was parsed by the
+    # structured address parser and contains exactly one mailbox.
+    # Otherwise it reports an explicit non-authorizable status
+    # (:missing, :unparseable, :ambiguous or :empty) while keeping the
+    # original displayable field value in the result.
+    #
+    # Example:
+    #
+    #  result = mail.from_identity
+    #  if result.usable_for_authorization?
+    #    whitelist.include?(result.address)
+    #  else
+    #    reject(result.status) # never authorize on result.display
+    #  end
+    #
+    # Returns a Mail::IdentityResult. See Mail::IdentityResult for the
+    # contract and contrast samples against the lenient #from accessor.
+    def from_identity
+      IdentityResult.extract(header[:from])
+    end
+
     def in_reply_to( val = nil )
       default :in_reply_to, val
     end
