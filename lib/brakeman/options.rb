@@ -197,6 +197,21 @@ module Brakeman::Options
           options[:url_safe_methods].merge methods.map {|e| e.to_sym }
         end
 
+        opts.on "--authentication-callbacks method1,method2,etc", Array, "Callback names treated as authentication checks (enables CheckUnprotectedActions)" do |methods|
+          options[:authentication_callbacks] ||= Set.new
+          options[:authentication_callbacks].merge methods.map {|e| e.to_sym }
+        end
+
+        opts.on "--protected-controllers name1,name2,etc", Array, "Controller names/prefixes that must be protected by authentication callbacks" do |names|
+          options[:protected_controllers] ||= Set.new
+          options[:protected_controllers].merge names
+        end
+
+        opts.on "--public-actions Controller#action,etc", Array, "Routable actions explicitly exempt from authentication checks" do |actions|
+          options[:public_actions] ||= Set.new
+          options[:public_actions].merge actions
+        end
+
         opts.on "--skip-files file1,path2,etc", Array, "Skip processing of these files/directories. Directories are application relative and must end in \"#{File::SEPARATOR}\"" do |files|
           options[:skip_files] ||= Set.new
           options[:skip_files].merge files

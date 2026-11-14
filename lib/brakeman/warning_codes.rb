@@ -131,6 +131,8 @@ module Brakeman::WarningCodes
     :missing_rsa_padding_mode => 127,
     :small_rsa_key_size => 128,
     :ransack_search => 129,
+    :unprotected_action => 130,
+    :unproven_authentication => 131,
 
     :custom_check => 9090,
   }

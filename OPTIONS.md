@@ -223,6 +223,16 @@ Brakeman warns about use of user input in URLs generated with `link_to`. Since R
 
     brakeman --url-safe-methods ensure_safe_protocol_or_something
 
+To find routable controller actions that are not covered by an authentication callback, configure the callback names and the protected controller scope (this enables the optional `CheckUnprotectedActions` check):
+
+    brakeman --authentication-callbacks authenticate_user!,require_admin --protected-controllers "Admin::"
+
+Controllers are in the protected scope when their name matches or starts with a configured entry. Routable actions that are intentionally public can be exempted:
+
+    brakeman --public-actions "Admin::DashboardController#overview"
+
+These options can also be set in `config/brakeman.yml` as `authentication_callbacks`, `protected_controllers`, and `public_actions`.
+
 ## Confidence Levels
 
 Brakeman assigns a confidence level to each warning. This provides a rough estimate of how certain the tool is that a given warning is actually a problem. Naturally, these ratings should not be taken as absolute truth.

@@ -7,6 +7,7 @@ module Brakeman
     def initialize_controller
       @options[:before_filters] = []
       @options[:skip_filters] = []
+      @options[:callback_declarations] = []
       @layout = nil
       @skip_filter_cache = nil
       @before_filter_cache = nil
@@ -18,10 +19,12 @@ module Brakeman
 
     def add_before_filter exp
       @options[:before_filters] << exp
+      @options[:callback_declarations] << [:append, exp]
     end
 
     def prepend_before_filter exp
       @options[:before_filters].unshift exp
+      @options[:callback_declarations] << [:prepend, exp]
     end
 
     def before_filters
@@ -30,10 +33,18 @@ module Brakeman
 
     def skip_filter exp
       @options[:skip_filters] << exp
+      @options[:callback_declarations] << [:skip, exp]
     end
 
     def skip_filters
       @options[:skip_filters]
+    end
+
+    #Ordered list of [[kind, exp], ...] where kind is
+    #:append, :prepend, or :skip, preserving declaration order
+    #across regular and skip callbacks.
+    def callback_declarations
+      @options[:callback_declarations]
     end
 
     def before_filter_list processor, method

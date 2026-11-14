@@ -331,6 +331,11 @@ class Brakeman::Scanner
   def process_controllers
     controllers = file_cache.controllers.sort_by { |path, _| path }
 
+    #Process concerns first so they are available
+    #when controllers include them
+    concerns, rest = controllers.partition { |path, _| path.relative.include? "concerns" }
+    controllers = concerns + rest
+
     track_progress controllers do |path, controller|
       process_step_file path do
         process_controller controller
