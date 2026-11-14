@@ -1,0 +1,16 @@
+[
+  {
+    "repo": "rexml",
+    "file": ".feedback/specs/c14n11.html",
+    "url": "https://www.w3.org/TR/xml-c14n11/",
+    "sha256": "d91a016ac03391255c64bd5f90035b292f1ee97c3ad4076ea8b33ef11fd9673f",
+    "bytes": 90696
+  },
+  {
+    "repo": "rexml",
+    "file": ".feedback/specs/xinclude.html",
+    "url": "https://www.w3.org/TR/xinclude/",
+    "sha256": "65ef87de3be6be8ec0fe7056a34f441d91863b5c9a2d1869462bc4e57adf5d2f",
+    "bytes": 92080
+  }
+]
