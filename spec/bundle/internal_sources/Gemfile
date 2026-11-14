@@ -1,0 +1,7 @@
+source 'http://shared.example.com'
+source 'http://192.168.1.5'
+source 'http://localhost:9292'
+source 'http://[::1]'
+
+gem 'rack'
+gem 'jquery-rails', git: 'http://shared.example.com/jquery-rails.git'

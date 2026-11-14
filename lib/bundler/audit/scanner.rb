@@ -134,6 +134,11 @@ module Bundler
       # @option options [Array<String>] :ignore
       #   The advisories to ignore.
       #
+      # @option options [Boolean] :offline
+      #   Do not perform any DNS resolution when checking gem sources.
+      #   Hostnames that cannot be confirmed internal without DNS will be
+      #   flagged as insecure.
+      #
       # @yield [result]
       #   The given block will be passed the results of the scan.
       #
@@ -158,6 +163,11 @@ module Bundler
       # @param [Hash] options
       #   Additional options.
       #
+      # @option options [Boolean] :offline
+      #   Do not perform any DNS resolution. Only sources with literal
+      #   internal IP addresses or `localhost` are considered internal;
+      #   everything else is treated as unconfirmed and flagged.
+      #
       # @yield [result]
       #   The given block will be passed the results of the scan.
       #
@@ -174,18 +184,25 @@ module Bundler
       def scan_sources(options={})
         return enum_for(__method__,options) unless block_given?
 
+        offline = options.fetch(:offline,false)
+
+        # Per-scan cache of host resolutions, so that the same host is
+        # judged consistently throughout a single scan, even if DNS answers
+        # change between lookups.
+        resolved_hosts = {}
+
         @lockfile.sources.map do |source|
           case source
           when Source::Git
             case source.uri
             when /^git:/, /^http:/
-              unless internal_source?(source.uri)
+              unless internal_source?(source.uri,offline: offline,cache: resolved_hosts)
                 yield Results::InsecureSource.new(source.uri)
               end
             end
           when Source::Rubygems
             source.remotes.each do |uri|
-              if (uri.scheme == 'http' && !internal_source?(uri))
+              if (uri.scheme == 'http' && !internal_source?(uri,offline: offline,cache: resolved_hosts))
                 yield Results::InsecureSource.new(uri.to_s)
               end
             end
@@ -242,26 +259,63 @@ module Bundler
       # @param [URI, String] uri
       #   The URI.
       #
+      # @param [Boolean] offline
+      #   Do not perform any DNS resolution.
+      #
+      # @param [Hash{String => Boolean}] cache
+      #   Per-scan cache of resolved hosts.
+      #
       # @return [Boolean]
       #
-      def internal_source?(uri)
+      def internal_source?(uri, offline: false, cache: {})
         uri = URI.parse(uri.to_s)
 
-        internal_host?(uri.host) if uri.host
+        internal_host?(uri.hostname,offline: offline,cache: cache) if uri.hostname
+      rescue URI::Error
+        false
       end
 
       #
       # Determines whether a host is internal.
       #
+      # A host is only considered internal when it is *confirmed* to be
+      # internal: a literal internal IP address, `localhost`, or a hostname
+      # that resolves to only internal IP addresses. Hosts that cannot be
+      # resolved (NXDOMAIN, timeouts, or other resolution errors) are
+      # treated as unconfirmed, not as internal.
+      #
       # @param [String] host
       #   The hostname.
       #
+      # @param [Boolean] offline
+      #   Do not perform any DNS resolution; only trust literal internal
+      #   IP addresses and `localhost`.
+      #
+      # @param [Hash{String => Boolean}] cache
+      #   Per-scan cache of resolved hosts.
+      #
       # @return [Boolean]
       #
-      def internal_host?(host)
-        Resolv.getaddresses(host).all? { |ip| internal_ip?(ip) }
-      rescue URI::Error
-        false
+      def internal_host?(host, offline: false, cache: {})
+        return cache[host] if cache.key?(host)
+
+        cache[host] = if host.match?(Resolv::AddressRegex)
+                        # Literal IP addresses never require resolution.
+                        internal_ip?(host)
+                      elsif offline
+                        # Conservative offline mode: only literal internal
+                        # IP addresses (handled above) and localhost are
+                        # considered internal; hostnames cannot be
+                        # confirmed without DNS.
+                        host == 'localhost'
+                      else
+                        addresses = Resolv.getaddresses(host)
+
+                        addresses.any? &&
+                          addresses.all? { |ip| internal_ip?(ip) }
+                      end
+      rescue Resolv::ResolvError, Resolv::ResolvTimeout, SocketError, SystemCallError
+        cache[host] = false
       end
 
       # List of internal IP address ranges.
@@ -288,7 +342,11 @@ module Bundler
       # @return [Boolean]
       #
       def internal_ip?(ip)
-        INTERNAL_SUBNETS.any? { |subnet| subnet.include?(ip) }
+        ipaddr = IPAddr.new(ip).native
+
+        INTERNAL_SUBNETS.any? { |subnet| subnet.include?(ipaddr) }
+      rescue IPAddr::Error
+        false
       end
     end
   end

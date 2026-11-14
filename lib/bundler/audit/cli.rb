@@ -45,6 +45,8 @@ module Bundler
       method_option :gemfile_lock, type: :string, aliases: '-G',
                                    default: 'Gemfile.lock'
       method_option :output, type: :string, aliases: '-o'
+      method_option :offline, type: :boolean,
+                              desc: 'Do not resolve hostnames; flag HTTP sources that are not literal internal IPs'
 
       def check(dir=Dir.pwd)
         unless File.directory?(dir)
@@ -73,7 +75,7 @@ module Bundler
                      exit 1
                    end
 
-        report = scanner.report(ignore: options.ignore)
+        report = scanner.report(ignore: options.ignore, offline: options[:offline])
 
         output = if options[:output]
                    File.new(options[:output],'w')

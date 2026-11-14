@@ -231,6 +231,163 @@ describe Scanner do
     end
   end
 
+  describe "#scan_sources" do
+    let(:bundle) { 'internal_sources' }
+
+    let(:git_source)       { 'http://shared.example.com/jquery-rails.git' }
+    let(:gem_source)       { 'http://shared.example.com/' }
+    let(:literal_ip)       { 'http://192.168.1.5/' }
+    let(:localhost_source) { 'http://localhost:9292/' }
+    let(:literal_ipv6)     { 'http://[::1]/' }
+
+    # Controlled resolver: never touches real DNS. Literal IP addresses
+    # resolve to themselves (like Resolv does locally), hostnames are
+    # answered from +answers+.
+    let(:answers) { {'localhost' => ['127.0.0.1']} }
+
+    before do
+      allow(Resolv).to receive(:getaddresses) do |host|
+        if host.match?(Resolv::AddressRegex)
+          [host]
+        else
+          answers.fetch(host, [])
+        end
+      end
+    end
+
+    let(:scanned_sources) { subject.scan_sources.map(&:source) }
+
+    context "when a hostname resolves to only internal IP addresses" do
+      let(:answers) { super().merge('shared.example.com' => ['10.0.0.5']) }
+
+      it "must not flag the source" do
+        expect(scanned_sources).to be_empty
+      end
+    end
+
+    context "when a hostname resolves to only public IP addresses" do
+      let(:answers) { super().merge('shared.example.com' => ['8.8.8.8']) }
+
+      it "must flag the source" do
+        expect(scanned_sources).to contain_exactly(git_source, gem_source)
+      end
+    end
+
+    context "when a hostname resolves to both private and public IP addresses" do
+      let(:answers) { super().merge('shared.example.com' => ['10.0.0.5', '8.8.8.8']) }
+
+      it "must flag the source" do
+        expect(scanned_sources).to contain_exactly(git_source, gem_source)
+      end
+    end
+
+    context "when a hostname resolves to an IPv4-mapped IPv6 address" do
+      context "of an internal IPv4 address" do
+        let(:answers) { super().merge('shared.example.com' => ['::ffff:10.0.0.5']) }
+
+        it "must not flag the source" do
+          expect(scanned_sources).to be_empty
+        end
+      end
+
+      context "of a public IPv4 address" do
+        let(:answers) { super().merge('shared.example.com' => ['::ffff:8.8.8.8']) }
+
+        it "must flag the source" do
+          expect(scanned_sources).to contain_exactly(git_source, gem_source)
+        end
+      end
+    end
+
+    context "when DNS returns no addresses for a hostname" do
+      let(:answers) { super().merge('shared.example.com' => []) }
+
+      it "must treat the host as unconfirmed and flag the source" do
+        expect(scanned_sources).to contain_exactly(git_source, gem_source)
+      end
+    end
+
+    context "when DNS resolution fails" do
+      before do
+        allow(Resolv).to receive(:getaddresses).and_raise(Resolv::ResolvError.new('DNS resolv timeout'))
+      end
+
+      it "must treat the host as unconfirmed and flag the source" do
+        expect(scanned_sources).to contain_exactly(git_source, gem_source, localhost_source)
+      end
+
+      it "must still trust literal internal IP addresses" do
+        expect(scanned_sources).not_to include(literal_ip, literal_ipv6)
+      end
+    end
+
+    context "when DNS answers change between lookups of the same host" do
+      before do
+        @lookups = 0
+        allow(Resolv).to receive(:getaddresses) do |host|
+          if host == 'shared.example.com'
+            @lookups += 1
+            @lookups == 1 ? ['10.0.0.5'] : ['8.8.8.8']
+          elsif host.match?(Resolv::AddressRegex)
+            [host]
+          else
+            ['127.0.0.1']
+          end
+        end
+      end
+
+      it "must resolve the host only once per scan" do
+        scanned_sources
+        expect(@lookups).to eq(1)
+      end
+
+      it "must judge every occurrence of the host consistently" do
+        expect(scanned_sources).to be_empty
+      end
+
+      context "when the first answer is public" do
+        before do
+          @lookups = 0
+          allow(Resolv).to receive(:getaddresses) do |host|
+            if host == 'shared.example.com'
+              @lookups += 1
+              @lookups == 1 ? ['8.8.8.8'] : ['10.0.0.5']
+            elsif host.match?(Resolv::AddressRegex)
+              [host]
+            else
+              ['127.0.0.1']
+            end
+          end
+        end
+
+        it "must flag every occurrence of the host" do
+          expect(scanned_sources).to contain_exactly(git_source, gem_source)
+        end
+      end
+    end
+
+    context "when the :offline option is given" do
+      let(:scanned_sources) { subject.scan_sources(offline: true).map(&:source) }
+
+      it "must not perform any DNS resolution" do
+        scanned_sources
+        expect(Resolv).not_to have_received(:getaddresses)
+      end
+
+      it "must flag hostname sources that cannot be confirmed internal" do
+        expect(scanned_sources).to include(git_source, gem_source)
+      end
+
+      it "must still trust literal internal IP addresses" do
+        expect(scanned_sources).not_to include(literal_ip, literal_ipv6)
+      end
+
+      it "must still trust localhost" do
+        expect(scanned_sources).not_to include(localhost_source)
+      end
+    end
+  end
+
   describe "#report" do
     let(:expected_results) { subject.scan.to_a }
 

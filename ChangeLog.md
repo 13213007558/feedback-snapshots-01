@@ -1,3 +1,22 @@
+### Unreleased
+
+* Fixed HTTP gem sources being treated as trusted internal sources when DNS
+  resolution returned no addresses (NXDOMAIN or timeout) or failed. Hosts
+  that cannot be confirmed internal are now flagged as insecure sources.
+* Hosts are now resolved only once per scan, so the same host is judged
+  consistently even if DNS answers change between lookups.
+* IPv4-mapped IPv6 addresses (ex: `::ffff:10.0.0.1`) are now unmapped
+  before being checked against the internal IP subnets.
+* Added the `:offline` option to {Bundler::Audit::Scanner#scan},
+  {Bundler::Audit::Scanner#scan_sources}, and
+  {Bundler::Audit::Scanner#report}, which disables DNS resolution and only
+  trusts literal internal IP addresses and `localhost`.
+
+#### CLI
+
+* Added the `--offline` option to `bundler-audit check` for fully offline
+  conservative scans.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.
