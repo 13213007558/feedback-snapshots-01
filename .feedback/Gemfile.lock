@@ -1,0 +1,37 @@
+PATH
+  remote: ..
+  specs:
+    psych (5.5.0)
+      date
+      stringio
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    date (3.6.0)
+    power_assert (3.1.0)
+    stringio (3.2.0)
+    test-unit (3.7.8)
+      power_assert
+    test-unit-ruby-core (1.0.16)
+      test-unit (>= 3.7.2)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  psych!
+  test-unit
+  test-unit-ruby-core
+
+CHECKSUMS
+  date (3.6.0) sha256=18ac945c4e24ebd93534f8eab8c2fd8c5604b3e977105b3798d62a1e8d27b580
+  power_assert (3.1.0) sha256=fefe98ed5d3140628138f3f9f9194d6ece01f1320e69700d3c928adca7518251
+  psych (5.5.0)
+  stringio (3.2.0) sha256=c37cb2e58b4ffbd33fe5cd948c05934af997b36e0b6ca6fdf43afa234cf222e1
+  test-unit (3.7.8) sha256=689d1ca53f4d46f678b4e5d68d8e4294f87fc5e8b9238cc4de7c5727e8d65943
+  test-unit-ruby-core (1.0.16) sha256=2f8bd142ef69a1a29637bc56804163ef9a0a398fd349bf9d4a3c67c4dfa82557
+
+BUNDLED WITH
+  4.0.20

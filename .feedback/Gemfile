@@ -1,0 +1,4 @@
+source 'https://rubygems.org'
+gem 'psych', path: '..'
+gem 'test-unit'
+gem 'test-unit-ruby-core'
