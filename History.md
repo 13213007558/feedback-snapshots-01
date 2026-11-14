@@ -1,5 +1,9 @@
 # Liquid Change Log
 
+## Unreleased
+
+* Add optional `Liquid::Drop` exposure declarations (`liquid_expose`), plus a separate `liquid_expose_missing` contract for dynamic fields. Declarations are inherited but bound to the approved method implementation, so overrides, aliases, module changes, and visibility changes invalidate them until redeclared. Drops without a declaration keep the existing behavior.
+
 ## 5.14.0
 
 * Avoid materializing integer ranges in `for` and `tablerow` loops, and account for each visited range item [Ian Ker-Seymer]
