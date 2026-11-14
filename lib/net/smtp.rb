@@ -246,6 +246,7 @@ module Net
       @port = (port || SMTP.default_port)
       @esmtp = true
       @capabilities = nil
+      @helo_fallback = false
       @socket = nil
       @started = false
       @open_timeout = 30
@@ -277,10 +278,12 @@ module Net
 
     #
     # Set whether to use ESMTP or not.  This should be done before
-    # calling #start.  Note that if #start is called in ESMTP mode,
-    # and the connection fails due to a ProtocolError, the SMTP
-    # object will automatically switch to plain SMTP mode and
-    # retry (but not vice versa).
+    # calling #start.  If #start is called in ESMTP mode and the server
+    # rejects EHLO with a permanent "command not recognized"/"command not
+    # implemented" reply (status 500 or 502), that single connection falls
+    # back to the legacy HELO handshake without changing this setting;
+    # other EHLO failures raise immediately.  The next connection of this
+    # instance always starts with EHLO again when this value is truthy.
     #
     attr_accessor :esmtp
 
@@ -301,6 +304,16 @@ module Net
 
     # The server capabilities by EHLO response
     attr_reader :capabilities
+
+    # +true+ when the EHLO handshake was rejected with a permanent
+    # "command not recognized"/"command not implemented" reply (500 or 502)
+    # and this session was therefore downgraded to the legacy HELO handshake.
+    # A HELO session advertises no SMTP extensions, so callers must not assume
+    # that any extension (AUTH, STARTTLS, SMTPUTF8, ...) is available.
+    # You cannot get a valid value before opening an SMTP session.
+    def helo_fallback?
+      @helo_fallback
+    end
 
     # true if server advertises AUTH PLAIN.
     # You cannot get valid value before opening SMTP session.
@@ -665,6 +678,10 @@ module Net
         check_auth_args authtype, user, secret
       end
       @error_occurred = false
+      # Start each connection with an empty capability set; values are only
+      # populated by the EHLO/HELO exchange below (and again after STARTTLS).
+      @capabilities = nil
+      @helo_fallback = false
       s = Timeout.timeout(@open_timeout, Net::OpenTimeout) do
         tcp_socket(@address, @port)
       end
@@ -714,15 +731,37 @@ module Net
     end
 
     def do_helo(helo_domain)
-      res = @esmtp ? ehlo(helo_domain) : helo(helo_domain)
-      @capabilities = res.capabilities
-    rescue SMTPError
-      if @esmtp
-        @esmtp = false
+      # Never reuse capabilities learned on an earlier connection or before
+      # STARTTLS: the new EHLO/HELO exchange is the only source of truth for
+      # this (possibly TLS-protected) session.
+      @capabilities = nil
+      @helo_fallback = false
+      return helo(helo_domain) unless @esmtp
+      begin
+        res = ehlo(helo_domain)
+        @capabilities = res.capabilities
+      rescue SMTPError => e
+        # RFC 5321 3.2/4.1.4: HELO is a compatibility fallback for servers
+        # that do not implement the extended handshake at all.  Only an
+        # explicit "command not recognized"/"command not implemented"
+        # permanent reply (500 or 502) qualifies.  Transient failures (4xx),
+        # policy rejections (501, 550, ...), authentication failures and
+        # malformed replies must never silently strip security extensions.
+        raise unless fallback_to_helo?(e)
+        @helo_fallback = true
         @error_occurred = false
-        retry
+        logging "EHLO rejected with #{e.response.status}; falling back to HELO"
+        res = helo(helo_domain)
+        @capabilities = res.capabilities
       end
-      raise
+    end
+
+    # Whether an EHLO failure means the server genuinely lacks support for
+    # the extended SMTP handshake, which is the only situation in which a
+    # downgrade to HELO is permitted by RFC 5321.
+    def fallback_to_helo?(error)
+      response = error.response
+      response && %w[500 502].include?(response.status)
     end
 
     def do_finish
@@ -730,6 +769,10 @@ module Net
     ensure
       @started = false
       @error_occurred = false
+      # Capabilities belong to the connection being torn down; never leak
+      # them into a subsequent connection of this same instance.
+      @capabilities = nil
+      @helo_fallback = false
       @socket.close if @socket
       @socket = nil
     end
@@ -791,6 +834,7 @@ module Net
     def send_message(msgstr, from_addr, *to_addrs)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
+      ensure_smtputf8_available(from_addr, to_addrs)
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
       rcptto_list(to_addrs) {data msgstr}
@@ -846,6 +890,7 @@ module Net
     def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
+      ensure_smtputf8_available(from_addr, to_addrs)
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
       rcptto_list(to_addrs) {data(&block)}
@@ -868,6 +913,17 @@ module Net
     # arguments differently.
     def authenticate(user, secret, authtype = DEFAULT_AUTH_TYPE)
       check_auth_args authtype, user, secret
+      # AUTH is an ESMTP service extension (RFC 4954).  If the session fell
+      # back to plain HELO, the server advertised no extensions at all;
+      # sending AUTH would be a command the server cannot understand while
+      # the caller still believes the connection is authenticated.  Fail
+      # explicitly instead of pretending the requested security mechanism
+      # was negotiated.
+      if @helo_fallback
+        raise SMTPUnsupportedCommand,
+              "AUTH #{authtype} is unavailable: this session was downgraded " \
+              "to HELO and therefore has no SMTP authentication extension"
+      end
       authenticator = Authenticator.auth_class(authtype).new(self)
       authenticator.auth(user, secret)
     end
@@ -907,12 +963,27 @@ module Net
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
     def mailfrom(from_addr)
+      ensure_smtputf8_available(from_addr, [])
       addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
                Address.new(from_addr, "SMTPUTF8")
              else
                Address.new(from_addr)
              end
       getok((["MAIL FROM:<#{addr.address}>"] + addr.parameters).join(' '))
+    end
+
+    # Refuse to silently drop SMTPUTF8 semantics: a non-ASCII address needs
+    # the SMTPUTF8 extension (RFC 6531), which cannot be present on a session
+    # that was downgraded to HELO.  Without a downgrade the caller can still
+    # talk to a server that merely omitted the extension, preserving the
+    # historical best-effort behavior.
+    def ensure_smtputf8_available(from_addr, to_addrs)
+      return unless @helo_fallback
+      if requires_smtputf8(from_addr) || any_require_smtputf8(to_addrs)
+        raise SMTPUnsupportedCommand,
+              "SMTPUTF8 is required for non-ASCII mail addresses but is " \
+              "unavailable: this session was downgraded to HELO"
+      end
     end
 
     def rcptto_list(to_addrs)

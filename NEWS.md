@@ -1,5 +1,25 @@
 # NEWS
 
+## Unreleased
+
+### Security fixes
+
+* Restrict the EHLO-to-HELO compatibility fallback to permanent "command not
+  recognized"/"command not implemented" replies (SMTP status 500 or 502), per
+  RFC 5321.  Transient failures (4xx), policy rejections (501, 550, ...),
+  authentication failures and malformed replies no longer silently downgrade
+  the session and strip its security extensions.
+* The ESMTP preference (`#esmtp`) is no longer mutated by a fallback: a
+  downgrade applies only to the current connection, and the next connection
+  retries EHLO.  Server capabilities are reset per connection, including after
+  STARTTLS and after the session finishes, so they can never leak across
+  connections.
+* After a HELO fallback, explicitly requested extensions fail loudly instead
+  of being silently ignored: `#authenticate` raises `SMTPUnsupportedCommand`
+  (AUTH is an ESMTP extension), and sending mail with non-ASCII addresses
+  raises when SMTPUTF8 cannot be available.
+* Add `#helo_fallback?` so callers can detect that a session was downgraded.
+
 ## Version 0.5.0 (2024-03-27)
 
 ### Improvements
