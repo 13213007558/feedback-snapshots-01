@@ -10,6 +10,22 @@ separate_testing do
   require_relative '../lib/rack/mock_request'
 end
 
+# Stand-in for the proxy's own path interpretation: decodes the
+# x-accel-redirect URI exactly once and maps the external prefix back to
+# the internal file location, the way nginx `alias` would resolve it.
+class AccelProxyStandin
+  def initialize(routes)
+    @routes = routes
+  end
+
+  def resolve(uri)
+    path = Rack::Utils.unescape_path(uri)
+    route = @routes.select { |external, _| path.start_with?(external) }.
+      max_by { |external, _| external.length }
+    route && route[1] + path[route[0].length..]
+  end
+end
+
 describe Rack::Sendfile do
   def sendfile_body(filename = "rack_sendfile")
     FileUtils.touch File.join(Dir.tmpdir,  filename)
@@ -357,6 +373,159 @@ describe Rack::Sendfile do
       response.body.must_equal 'Hello World'
       response.headers.wont_include 'x-accel-redirect'
       response.errors.must_include 'x-accel-mapping'
+    end
+  end
+
+  describe "strict mapping mode" do
+    # In-memory response body: the content lives in memory, only #to_path
+    # points at the file the proxy should serve.
+    def memory_body(path)
+      body = ['in-memory response']
+      body.define_singleton_method(:to_path) { path }
+      body
+    end
+
+    def with_approved_tree
+      root = Dir.mktmpdir
+      yield root
+    ensure
+      FileUtils.remove_entry_secure root
+    end
+
+    def strict_request(path, mappings, headers = {})
+      FileUtils.mkdir_p File.dirname(path)
+      FileUtils.touch path
+      captured_env = nil
+      app = lambda do |env|
+        captured_env = env
+        [200, { 'content-type' => 'text/plain' }, memory_body(path)]
+      end
+      middleware = Rack::Lint.new(Rack::Sendfile.new(app, 'X-Accel-Redirect', mappings, strict: true))
+      response = Rack::MockRequest.new(middleware).get('/', headers)
+      [response, captured_env]
+    end
+
+    it "matches mappings only on complete path segment boundaries" do
+      with_approved_tree do |root|
+        mappings = [["#{root}/approved/private", "/internal/private"]]
+
+        response, env = strict_request("#{root}/approved/private/report.txt", mappings)
+        response.headers['x-accel-redirect'].must_equal '/internal/private/report.txt'
+        env['sendfile.mapping'].must_equal ["#{root}/approved/private", "/internal/private"]
+
+        # "/private-a" is not a subdirectory of "/private" and must not match.
+        response, env = strict_request("#{root}/approved/private-a/secret.txt", mappings)
+        response.headers['x-accel-redirect'].must_be_nil
+        env['sendfile.mapping'].must_be_nil
+        response.body.must_equal 'in-memory response'
+      end
+    end
+
+    it "prefers the longest overlapping prefix and reports the mapping used" do
+      with_approved_tree do |root|
+        mappings = [
+          ["#{root}/approved/private", "/internal/general"],
+          ["#{root}/approved/private/sub", "/internal/specific"]
+        ]
+
+        response, env = strict_request("#{root}/approved/private/sub/file.txt", mappings)
+        response.headers['x-accel-redirect'].must_equal '/internal/specific/file.txt'
+        env['sendfile.mapping'].must_equal ["#{root}/approved/private/sub", "/internal/specific"]
+
+        response, env = strict_request("#{root}/approved/private/other.txt", mappings)
+        response.headers['x-accel-redirect'].must_equal '/internal/general/other.txt'
+        env['sendfile.mapping'].must_equal ["#{root}/approved/private", "/internal/general"]
+      end
+    end
+
+    it "matches case-insensitively while preserving the case of the remaining path" do
+      with_approved_tree do |root|
+        mappings = [["#{root}/APPROVED/Private/", "/internal/"]]
+        response, env = strict_request("#{root}/approved/pRIVATE/Report.TXT", mappings)
+        response.headers['x-accel-redirect'].must_equal '/internal/Report.TXT'
+        env['sendfile.mapping'].must_equal ["#{root}/APPROVED/Private/", "/internal/"]
+      end
+    end
+
+    it "escapes percent, question mark and special filenames exactly once" do
+      with_approved_tree do |root|
+        mappings = [["#{root}/approved/private/", "/internal/"]]
+        proxy = AccelProxyStandin.new([["/internal/", "#{root}/approved/private/"]])
+
+        path = "#{root}/approved/private/100%legit?.txt"
+        response, _ = strict_request(path, mappings)
+        uri = response.headers['x-accel-redirect']
+        uri.must_equal '/internal/100%25legit%3F.txt'
+        uri.wont_include '?'
+        proxy.resolve(uri).must_equal path
+
+        # A filename that literally contains "%2e%2e%2f" decodes to itself,
+        # not to "../", so the proxy stays inside the approved location.
+        path = "#{root}/approved/private/%2e%2e%2fsecret.txt"
+        response, _ = strict_request(path, mappings)
+        uri = response.headers['x-accel-redirect']
+        uri.must_equal '/internal/%252e%252e%252fsecret.txt'
+        proxy.resolve(uri).must_equal path
+      end
+    end
+
+    it "produces URIs the proxy resolves back to the approved file" do
+      with_approved_tree do |root|
+        mappings = [["#{root}/approved/private/", "/internal/"]]
+        proxy = AccelProxyStandin.new([["/internal/", "#{root}/approved/private/"]])
+        path = "#{root}/approved/private/annual report 2026.txt"
+
+        response, _ = strict_request(path, mappings)
+        uri = response.headers['x-accel-redirect']
+        uri.must_match(/\A\/internal\//)
+        proxy.resolve(uri).must_equal path
+      end
+    end
+
+    it "does not re-map the result through a second mapping" do
+      with_approved_tree do |root|
+        mappings = [
+          ["#{root}/approved/a/", "/approved/b/"],
+          ["/approved/b/", "/elsewhere/"]
+        ]
+        response, env = strict_request("#{root}/approved/a/file.txt", mappings)
+        response.headers['x-accel-redirect'].must_equal '/approved/b/file.txt'
+        env['sendfile.mapping'].must_equal ["#{root}/approved/a/", "/approved/b/"]
+      end
+    end
+
+    it "inserts backslash sequences in the replacement literally" do
+      with_approved_tree do |root|
+        mappings = [["#{root}/approved/", '/internal\1/']]
+        response, _ = strict_request("#{root}/approved/file.txt", mappings)
+        response.headers['x-accel-redirect'].must_equal '/internal%5C1/file.txt'
+      end
+    end
+
+    it "ignores the x-accel-mapping header even when no mappings are configured" do
+      with_approved_tree do |root|
+        path = "#{root}/approved/private/report.txt"
+        headers = { 'HTTP_X_ACCEL_MAPPING' => "#{root}/approved/=/attacker/" }
+        response, env = strict_request(path, [], headers)
+        response.headers['x-accel-redirect'].must_be_nil
+        env['sendfile.mapping'].must_be_nil
+        response.errors.must_include 'no approved x-accel-mapping'
+        response.body.must_equal 'in-memory response'
+      end
+    end
+
+    it "never exposes the local absolute path when no mapping matches" do
+      with_approved_tree do |root|
+        path = "#{root}/approved/private/secret.txt"
+        mappings = [["#{root}/approved/public/", "/files/"]]
+        response, env = strict_request(path, mappings)
+        response.headers['x-accel-redirect'].must_be_nil
+        response.headers.each_value do |value|
+          value.wont_include path
+        end
+        env['sendfile.mapping'].must_be_nil
+        response.body.must_equal 'in-memory response'
+      end
     end
   end
 end

@@ -111,6 +111,31 @@ module Rack
   # the `x-accel-mapping` header from the proxy. This allows nginx to control
   # the path mapping without requiring application-level configuration.
   #
+  # === Strict mapping mode
+  #
+  # Passing `strict: true` enables a stricter interpretation of the
+  # application-level mappings:
+  #
+  #   use Rack::Sendfile, "x-accel-redirect", [["/var/www/", "/files/"]], strict: true
+  #
+  # In strict mode:
+  #
+  # * Internal prefixes are matched literally (no regular expression syntax)
+  #   and must end on a complete path segment boundary, so "/private" matches
+  #   "/private/file" but never "/private-a/file".
+  # * When several mappings overlap, the longest matching internal prefix wins.
+  # * The matched mapping is recorded in `env['sendfile.mapping']` as an
+  #   `[internal, external]` tuple so the application can tell exactly which
+  #   configuration entry produced the resulting URI.
+  # * The external replacement is inserted literally (backslash sequences are
+  #   not interpreted) and the resulting URI is never fed back through the
+  #   mapping table, so a response cannot be redirected to a second internal
+  #   location via double interpretation.
+  # * The `x-accel-mapping` request header is ignored entirely; only mappings
+  #   explicitly approved by the application are used.
+  # * If no mapping matches, no `x-accel-redirect` header is emitted and the
+  #   local absolute path is never exposed in the response.
+  #
   # === Security
   #
   # For security reasons, the `x-sendfile-type` header from HTTP requests is
@@ -119,11 +144,16 @@ module Rack
   # where attackers could bypass proxy restrictions.
 
   class Sendfile
-    def initialize(app, variation = nil, mappings = [])
+    def initialize(app, variation = nil, mappings = [], strict: false)
       @app = app
       @variation = variation
+      @strict = strict
       @mappings = mappings.map do |internal, external|
-        [/\A#{internal}/i, external]
+        if strict
+          [strict_mapping_regexp(internal), external, internal]
+        else
+          [/\A#{internal}/i, external, internal]
+        end
       end
     end
 
@@ -143,7 +173,9 @@ module Rack
               obody.close if obody.respond_to?(:close)
             end
           else
-            env[RACK_ERRORS].puts "x-accel-mapping header missing"
+            env[RACK_ERRORS].puts(@strict ?
+              "no approved x-accel-mapping matched" :
+              "x-accel-mapping header missing")
           end
         when /x-sendfile|x-lighttpd-send-file/i
           path = ::File.expand_path(body.to_path)
@@ -180,8 +212,10 @@ module Rack
     end
 
     def map_accel_path(env, path)
+      return strict_map_accel_path(env, path) if @strict
+
       if mapping = @mappings.find { |internal, _| internal =~ path }
-        return path.sub(*mapping)
+        return path.sub(mapping[0], mapping[1])
       elsif mapping = x_accel_mapping(env)
         # Safe to use header: explicit config + no app mappings:
         mapping.split(',').map(&:strip).each do |m|
@@ -192,6 +226,35 @@ module Rack
 
         return path
       end
+    end
+
+    # Strict mode only consults the application-approved mappings. The
+    # longest matching internal prefix wins, the chosen mapping is exposed
+    # via env['sendfile.mapping'], and the external replacement is applied
+    # exactly once as a literal string so the result cannot be reinterpreted
+    # into a different internal location.
+    def strict_map_accel_path(env, path)
+      best = nil
+      @mappings.each do |regexp, external, internal|
+        if (match = regexp.match(path)) && (best.nil? || match[0].length > best[0])
+          best = [match[0].length, regexp, external, internal]
+        end
+      end
+
+      return nil unless best
+
+      _, regexp, external, internal = best
+      env['sendfile.mapping'] = [internal, external]
+      path.sub(regexp) { external }
+    end
+
+    # Build a regexp that matches the internal prefix literally and only
+    # on a complete path segment boundary: "/private" matches "/private"
+    # and "/private/file" but not "/private-a/file".
+    def strict_mapping_regexp(internal)
+      source = Regexp.escape(internal)
+      source += '(?=/|\z)' unless internal.end_with?('/')
+      /\A#{source}/i
     end
   end
 end
