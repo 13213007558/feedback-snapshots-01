@@ -347,7 +347,14 @@ module Psych
       end
 
       def visit_Psych_Nodes_Document o
+        # Anchors are scoped to a single document. A visitor may be reused for
+        # a stream or for several documents, so give each document its own
+        # anchor table instead of letting anchors leak across documents.
+        previous_anchors = @st
+        @st = {}
         accept o.root
+      ensure
+        @st = previous_anchors
       end
 
       def visit_Psych_Nodes_Stream o
