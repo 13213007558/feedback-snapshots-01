@@ -238,5 +238,6 @@ module Dnsruby
 end
 
 require 'dnsruby/dnssec'
+require 'dnsruby/sshfp_verifier'
 require 'dnsruby/zone_reader'
 require 'dnsruby/resolv'

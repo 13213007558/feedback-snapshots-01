@@ -26,11 +26,14 @@ module Dnsruby
       class Algorithms < CodeMapper
         RSA = 1
         DSS = 2
+        ECDSA = 3
+        ED25519 = 6
         update()
       end
 
       class FpTypes < CodeMapper
         SHA1 = 1
+        SHA256 = 2
         update()
       end
 
