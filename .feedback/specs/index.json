@@ -1,0 +1,9 @@
+[
+  {
+    "repo": "mqtt",
+    "file": ".feedback/specs/mqtt311.html",
+    "url": "https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html",
+    "sha256": "fc1f493558339850740a57ea19c4b2bdf39db6589edf9a69a984afbec098aa9b",
+    "bytes": 935387
+  }
+]
