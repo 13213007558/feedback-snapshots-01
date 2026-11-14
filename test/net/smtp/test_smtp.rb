@@ -186,6 +186,85 @@ module Net
       end
     end
 
+    def test_send_message_with_pipelining
+      server = FakeServer.start(pipelining: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal true, smtp.capable_pipelining?
+      smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"])
+      smtp.finish
+      assert_equal "MAIL FROM:<sender@example.com>\r\n", server.commands[1]
+      assert_equal "RCPT TO:<rcpt1@example.com>\r\n", server.commands[2]
+      assert_equal "RCPT TO:<rcpt2@example.com>\r\n", server.commands[3]
+      assert_equal "DATA\r\n", server.commands[4]
+      assert_equal "message\r\n", server.body
+    end
+
+    def test_pipelining_mail_rejected
+      server = FakeServer.start(pipelining: true,
+                                mail_response: "550 5.7.1 Sender rejected\r\n")
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"])
+      end
+      assert_include err.message, "MAIL FROM:<sender@example.com>"
+      assert_include err.message, "550"
+      # the following 250 replies must not be mistaken for success,
+      # and the message body must not be sent
+      assert_not_include server.commands, "DATA\r\n"
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_pipelining_rcpt_partial_failure
+      server = FakeServer.start(pipelining: true, rcpt_responses: [
+        "250 2.1.5 Ok\r\n",
+        "550 5.1.1 User unknown\r\n",
+        "250 2.1.5 Ok\r\n",
+      ])
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com",
+                          ["ok1@example.com", "bad@example.com", "ok2@example.com"])
+      end
+      # the failure must be attributed to the rejected recipient,
+      # not to the 250 replies around it
+      assert_include err.message, "RCPT TO:<bad@example.com>"
+      assert_include err.message, "550"
+      # pipelined: every RCPT TO was sent before the replies were read
+      assert_equal ["RCPT TO:<ok1@example.com>\r\n",
+                    "RCPT TO:<bad@example.com>\r\n",
+                    "RCPT TO:<ok2@example.com>\r\n"],
+                   server.commands.grep(/\ARCPT TO:/)
+      assert_not_include server.commands, "DATA\r\n"
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_pipelining_reply_disconnect
+      server = FakeServer.start(pipelining: true, close_after_replies: 1)
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(EOFError) do
+        smtp.send_message("message", "sender@example.com", ["rcpt1@example.com", "rcpt2@example.com"])
+      end
+      assert_not_include server.commands, "DATA\r\n"
+      assert_equal "", server.body
+      smtp.finish
+    end
+
+    def test_no_pipelining_without_capability
+      server = FakeServer.start(rcpt_responses: ["550 5.1.1 User unknown\r\n"])
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_equal false, smtp.capable_pipelining?
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_message("message", "sender@example.com", ["bad@example.com", "never@example.com"])
+      end
+      assert_include err.message, "550"
+      # serial path: the second RCPT TO is never sent
+      assert_equal ["RCPT TO:<bad@example.com>\r\n"], server.commands.grep(/\ARCPT TO:/)
+      assert_not_include server.commands, "DATA\r\n"
+      smtp.finish
+    end
+
     def test_unsuccessful_send_message_server_busy
       server = FakeServer.new
       def server.greeting
@@ -660,6 +739,10 @@ module Net
       @body = +''
       @capa = capabilities
       @tls = @capa.delete(:tls)
+      @mail_response = @capa.delete(:mail_response)
+      @rcpt_responses = @capa.delete(:rcpt_responses)
+      @close_after_replies = @capa.delete(:close_after_replies)
+      @replies = 0
       @servers = Socket.tcp_server_sockets('localhost', 0)
       @port = @servers[0].local_address.ip_port
       @server_thread = Thread.start do
@@ -764,11 +847,21 @@ module Net
     end
 
     def mail(_)
-      @sock.puts "250 2.1.0 Ok\r\n"
+      reply(@mail_response || "250 2.1.0 Ok\r\n")
     end
 
     def rcpt(_)
-      @sock.puts "250 2.1.0 Ok\r\n"
+      index = @commands.grep(/\ARCPT TO:/).size - 1
+      reply((@rcpt_responses || [])[index] || "250 2.1.0 Ok\r\n")
+    end
+
+    def reply(str)
+      if @close_after_replies && @replies >= @close_after_replies
+        @sock.close
+        return
+      end
+      @replies += 1
+      @sock.puts str
     end
 
     def data
@@ -814,8 +907,9 @@ module Net
         else
           @sock.puts "502 5.5.2 Error: command not recognized\r\n"
         end
+        break if @sock.closed?
       end
-    rescue Errno::ECONNRESET, Errno::ECONNABORTED
+    rescue Errno::ECONNRESET, Errno::ECONNABORTED, IOError
       nil
     end
   end

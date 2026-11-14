@@ -83,7 +83,10 @@ module Net
   # [RFC6409[https://www.rfc-editor.org/rfc/rfc6409.html]],
   # and [SMTPUTF8[https://www.rfc-editor.org/rfc/rfc6531.txt]], which is
   # necessary to send messages to/from addresses containing characters
-  # outside the ASCII range.
+  # outside the ASCII range.  When the server advertises
+  # {PIPELINING}[https://www.rfc-editor.org/rfc/rfc2920.txt], the
+  # envelope commands (MAIL FROM and RCPT TO) are sent in one batch
+  # instead of waiting for each reply.
   #
   # == What is This Library NOT?
   #
@@ -291,6 +294,12 @@ module Net
     # You cannot get valid value before opening SMTP session.
     def capable_starttls?
       capable?('STARTTLS')
+    end
+
+    # true if server advertises PIPELINING.
+    # You cannot get valid value before opening SMTP session.
+    def capable_pipelining?
+      capable?('PIPELINING')
     end
 
     # true if the EHLO response contains +key+.
@@ -792,8 +801,7 @@ module Net
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data msgstr}
+      mail_transaction(from_addr, to_addrs) {data msgstr}
     end
 
     alias send_mail send_message
@@ -847,8 +855,7 @@ module Net
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
-      mailfrom from_addr
-      rcptto_list(to_addrs) {data(&block)}
+      mail_transaction(from_addr, to_addrs) {data(&block)}
     end
 
     alias ready open_message_stream   # obsolete
@@ -990,6 +997,60 @@ module Net
     end
 
     private
+
+    # Sends the MAIL FROM and RCPT TO envelope commands, then yields to
+    # send the message data.  When the server advertises PIPELINING
+    # (RFC 2920), the envelope commands are sent in one batch and their
+    # replies are collected afterwards; otherwise the traditional serial
+    # command/response sequence is used.
+    def mail_transaction(from_addr, to_addrs)
+      if capable_pipelining?
+        pipelined_envelope(from_addr, to_addrs)
+        yield
+      else
+        mailfrom from_addr
+        rcptto_list(to_addrs) {yield}
+      end
+    end
+
+    # Sends MAIL FROM and all RCPT TO commands without waiting for each
+    # reply, then collects the replies in command order: the first reply
+    # belongs to MAIL FROM and each subsequent reply to the RCPT TO
+    # command at the same position.  All replies are drained before any
+    # error is raised so the session stays in sync, and this method only
+    # returns normally when MAIL FROM and every RCPT TO was accepted;
+    # the message body must not be sent otherwise.
+    def pipelined_envelope(from_addr, to_addrs)
+      raise ArgumentError, 'mail destination not given' if to_addrs.empty?
+      from_addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
+                    Address.new(from_addr, "SMTPUTF8")
+                  else
+                    Address.new(from_addr)
+                  end
+      rcpt_addrs = to_addrs.flatten.map {|addr| Address.new(addr) }
+      commands = [(["MAIL FROM:<#{from_addr.address}>"] + from_addr.parameters).join(' ')]
+      rcpt_addrs.each do |addr|
+        commands.push (["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' ')
+      end
+      commands.each {|line| validate_line line }
+      responses = critical {
+        commands.each {|line| @socket.writeline line }
+        @socket.io.flush
+        commands.size.times.map {recv_response()}
+      }
+      mail_response, *rcpt_responses = responses
+      unless mail_response.success?
+        raise mail_response.exception_class.new(mail_response,
+          message: "MAIL FROM:<#{from_addr.address}>: #{mail_response.message}")
+      end
+      rcpt_addrs.zip(rcpt_responses) do |addr, res|
+        unless res.success?
+          raise res.exception_class.new(res,
+            message: "RCPT TO:<#{addr.address}>: #{res.message}")
+        end
+      end
+      nil
+    end
 
     def validate_line(line)
       # A bare CR or LF is not allowed in RFC5321.
