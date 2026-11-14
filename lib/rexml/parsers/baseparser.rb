@@ -200,6 +200,8 @@ module REXML
         @entities = []
         @namespaces = {"xml" => Private::XML_PREFIXED_NAMESPACE}
         @namespaces_restore_stack = []
+        @version = nil
+        @entity_expansion_count = 0
       end
 
       def position

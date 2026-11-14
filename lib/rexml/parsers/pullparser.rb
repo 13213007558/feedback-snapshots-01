@@ -30,9 +30,7 @@ module REXML
       include XMLTokens
       extend Forwardable
 
-      def_delegators( :@parser, :has_next? )
       def_delegators( :@parser, :entity )
-      def_delegators( :@parser, :empty? )
       def_delegators( :@parser, :source )
 
       def initialize stream
@@ -40,6 +38,9 @@ module REXML
         @listeners = nil
         @parser = BaseParser.new( stream )
         @my_stack = []
+        @element_depth = 0
+        @document_finished = false
+        @failure = nil
       end
 
       def add_listener( listener )
@@ -65,29 +66,58 @@ module REXML
         end
       end
 
+      def empty?
+        !has_next?
+      end
+
+      def has_next?
+        return true unless @my_stack.empty?
+        return false if @failure
+        @parser.has_next?
+      end
+
       def peek depth=0
-        if @my_stack.length <= depth
-          (depth - @my_stack.length + 1).times {
-            e = PullEvent.new(@parser.pull)
-            @my_stack.push(e)
-          }
+        raise %Q[Illegal argument "#{depth}"] if depth < -1
+        if @failure
+          # Reviewed events that were decoded before the failure are still
+          # safe to observe.  Anything beyond them would need to read the
+          # source again, which is forbidden until a new parser is used.
+          if depth == -1
+            return @my_stack.last unless @my_stack.empty?
+          elsif depth < @my_stack.length
+            return @my_stack[depth]
+          end
+          raise_failure
         end
-        @my_stack[depth]
+        begin
+          if depth == -1
+            until document_boundary?
+              @my_stack.push(decode_event(@parser.pull))
+            end
+            return @my_stack.last || end_document_event
+          end
+          while @my_stack.length <= depth and !document_boundary?
+            @my_stack.push(decode_event(@parser.pull))
+          end
+          return @my_stack[depth] if depth < @my_stack.length
+        rescue StandardError => error
+          abort_with(error)
+        end
+        # Nothing but the :end_document sentinel is left.  It is not a real
+        # event of the document, so do not buffer it: deep peeks all observe
+        # the same sentinel and a following pull sees the same event stream
+        # as a parser that never looked ahead.
+        end_document_event
       end
 
       def pull
-        return @my_stack.shift if @my_stack.length > 0
-
-        event = @parser.pull
-        case event[0]
-        when :entitydecl
-          @entities[ event[1] ] =
-            event[2] unless event[2] =~ /PUBLIC|SYSTEM/
-        when :text
-          unnormalized = @parser.unnormalize( event[1], @entities )
-          event << unnormalized
+        return @my_stack.shift unless @my_stack.empty?
+        raise_failure if @failure
+        begin
+          decode_event(@parser.pull)
+        rescue StandardError => error
+          abort_with(error)
         end
-        PullEvent.new( event )
       end
 
       def unshift token
@@ -95,7 +125,88 @@ module REXML
       end
 
       def reset
+        # Start a new document.  The old document's buffered events, entity
+        # table and expansion budget must not leak into the new one.
+        #
+        # A latched failure is intentionally kept: reset can't resynchronize a
+        # stream whose document failed an entity check, so the unreviewed tail
+        # of that document must stay unreachable.  Use a new parser to parse a
+        # new document after such a failure.
+        @my_stack.clear
+        @entities.clear
+        @element_depth = 0
+        @document_finished = false
         @parser.reset
+      end
+
+      private
+
+      def end_document_event
+        PullEvent.new([:end_document])
+      end
+
+      # True when the root element has been closed and continuing would start
+      # a new document instead of continuing the current one.  Pre-reading
+      # must never consume the next document: #reset is the only supported
+      # way to move to it.
+      #
+      # Trailing comments and non-XML processing instructions still belong to
+      # the current document.  An XML declaration starts a new document.
+      def document_boundary?
+        return false unless @document_finished
+        source = @parser.source
+        source.ensure_buffer
+        rest = source.buffer
+        # Scan bytes so a malformed tail can't raise an encoding error here.
+        first_non_space = rest.b.index(/[^ \t\r\n\f\v]/n)
+        return true if first_non_space.nil?
+        # A trailing comment or a non-declaration processing instruction
+        # (for example, xml-stylesheet) still belongs to this document.
+        prefix = rest.byteslice(first_non_space, 6)
+        if prefix.start_with?("<!--")
+          false
+        elsif prefix.start_with?("<?")
+          !!(prefix =~ /\A<\?xml(?:\s|\?>)/n)
+        else
+          true
+        end
+      end
+
+      # Decode an event exactly once, when it is read from the underlying
+      # parser.  Both #pull and #peek use this path, so buffered events are
+      # already decoded and entity expansion is charged exactly once no matter
+      # how deeply or how often the caller looks ahead.
+      def decode_event event
+        case event[0]
+        when :entitydecl
+          @entities[ event[1] ] =
+            event[2] unless event[2] =~ /PUBLIC|SYSTEM/
+        when :start_element
+          @element_depth += 1
+        when :end_element
+          @element_depth -= 1
+          @document_finished = true if @element_depth == 0
+        when :text
+          unnormalized = @parser.unnormalize( event[1], @entities )
+          event << unnormalized
+        end
+        PullEvent.new( event )
+      end
+
+      # Once decoding fails (for example, an entity expansion limit is hit or
+      # a recursive entity is found), stop reading the source.  Events that
+      # were decoded before the failure are already reviewed and charged, so
+      # they stay deliverable; the failure is then repeated forever and no
+      # later event, including any text from the failed expansion, can be
+      # pulled.  This makes the delivered event sequence and the expansion
+      # count independent of how far the consumer pre-read.
+      def abort_with(error)
+        @failure = error
+        raise error
+      end
+
+      def raise_failure
+        raise @failure
       end
     end
 

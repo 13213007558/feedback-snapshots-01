@@ -1,5 +1,15 @@
 # News
 
+## Unreleased
+
+### Fixes
+
+  * Fixed a pull parser bug that `peek` returned events that skipped entity
+    expansion, so content checks that inspected `peek` could be bypassed
+    depending on read order.  Look-ahead now decodes events exactly once,
+    charges entity expansion once, and a failed entity check permanently
+    blocks the rest of the document.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement
