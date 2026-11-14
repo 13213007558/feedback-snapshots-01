@@ -40,6 +40,15 @@ compatibility notes below for the changes from 1.74.0.
   coexist, and validation tries each matching key even if another is malformed
   or unusable.
   [#225](https://github.com/alexdalitz/dnsruby/issues/225).
+* **DNSSEC algorithm policy.** A validation call can pass an
+  `AlgorithmPolicy` (or attach it to the query `Message`) to require that one
+  complete trust path uses only permitted algorithms. The policy constrains
+  DS digest types, DNSKEYs and RRSIGs together and is applied to cached keys
+  when they are used. Unsupported, policy-disabled and cryptographically
+  failed signatures are reported as distinct `VerifyError` subclasses, and a
+  policy-disabled weak signature is never accepted after a permitted signature
+  fails. Calls without a policy keep the previous behaviour. See the
+  [README](README.md#dnssec-algorithm-policy).
 * **DNSSEC work limits.** Validation reuses canonical RR data when checking
   matching signatures. Dnsruby also limits how much work it will do for one
   answer, including any queries needed to follow the chain of trust. The

@@ -87,6 +87,11 @@ module Dnsruby
     #  will hold a description of the problem. It defaults to ''
     attr_accessor :security_error
 
+    #  Optional DNSSEC algorithm policy for a validation of this message.
+    #  A query may carry the policy for its response; a call that does not set
+    #  one keeps the library's historical algorithm behaviour.
+    attr_accessor :algorithm_policy
+
     #  If the Message was returned from the cache, the cached flag will be set
     #  true. It will be false otherwise.
     attr_accessor :cached
@@ -118,6 +123,7 @@ module Dnsruby
       @do_caching = true
       @security_level = SecurityLevel.UNCHECKED
       @security_error = nil
+      @algorithm_policy = nil
       @cached = false
       type = Types::A
       klass = Classes::IN

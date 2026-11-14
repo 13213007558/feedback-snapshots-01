@@ -13,6 +13,30 @@ Dnsruby includes the IANA root DS trust anchors for KSK-2017 (key tag 20326) and
 
 It is possible to turn off dnssec validation on a per-message basis. Simply set Message#do_validation to false.
 
+Algorithm policy
+----------------
+
+A validation call can require a particular set of DNSSEC algorithms. The policy
+is passed to the call itself (or attached to the query Message), not configured
+globally, so different callers can use different policies in the same process:
+
+    policy = Dnsruby::Dnssec::AlgorithmPolicy.allow(8, 13)
+    Dnsruby::Dnssec.verify(msg, policy)
+    Dnsruby::Dnssec.verify_rrset(rrset, keys, policy)
+
+A validation passes only if there is one complete chain from a permitted trust
+anchor through permitted DS digests and DNSKEY algorithms to RRSIGs that verify.
+`AlgorithmPolicy.deny` excludes algorithms instead. The policy is enforced when
+cached keys are used, so keys learned before the policy was supplied cannot
+bypass it, and disabling the algorithm of the only available anchor fails the
+validation rather than reporting the zone as insecure.
+
+Failures distinguish three cases: `AlgorithmUnsupportedError` means Dnsruby has
+no implementation; `AlgorithmDisabledError` means this call's policy refuses the
+algorithm; a plain `VerifyError` means the signature was attempted and failed.
+A disabled weak signature is never accepted merely because a permitted
+signature failed. Calls that pass no policy keep the historical behaviour.
+
 Resolver#do_validation defaults to false; set it to true to enable local DNSSEC validation. The dnssec flag controls requesting DNSSEC records and is distinct from local validation. Recursor#query attempts validation unless its no_validation argument is true. Missing root anchors affect queries that need to establish trust from the root; an application using local trust anchors or previously authenticated cached keys may behave differently.
 
 Dnsruby maintains a cache of responses, and a cache of trusted keys. Once the initial keys have been downloaded, and a set of trusted keys built up, very little overhead is required to enjoy the benefits of DNSSEC. There is, however, some initial cost (to build up the caches).

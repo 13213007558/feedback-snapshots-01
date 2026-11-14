@@ -113,6 +113,42 @@ For asynchronous validation, up to four workers can run at once, with another
 Cancellation is checked between operations and while waiting on the network.
 An OpenSSL operation already in progress is allowed to finish first.
 
+DNSSEC algorithm policy
+------------------------
+
+A DNSSEC answer can carry DS, DNSKEY and RRSIG records for more than one
+algorithm at once. Pass an `AlgorithmPolicy` to a verification call to require
+that at least one complete trust path uses only the algorithms you permit:
+
+```ruby
+policy = Dnsruby::Dnssec::AlgorithmPolicy.allow(8, 13) # RSASHA256, ECDSAP256SHA256
+Dnsruby::Dnssec.verify(message, policy)
+verifier.verify_rrset(rrset, keys, policy)
+Dnsruby::Dnssec.verify_rrset(rrset, keys, policy)
+resolver.query('example.com', 'A') # policy can also be set on the query Message
+```
+
+`allow` builds an allow-list, `deny` a deny-list, and both can be combined. Pass
+`:all` to permit every algorithm Dnsruby implements. `ds_digest_types:` limits
+DS digest types (1, 2 and 4 are implemented). The policy applies to DS digests,
+DNSKEY algorithms and RRSIG algorithms together; a path is accepted only when
+all three are permitted and the signature verifies. Records are filtered when
+keys are used as well as when they are learned, so a key cached before the
+policy was supplied cannot grant trust under it.
+
+Policy failures are distinct subclasses of `VerifyError`:
+
+- `AlgorithmUnsupportedError` (and `DsDigestUnsupportedError`): the algorithm
+  or digest type has no implementation in Dnsruby.
+- `AlgorithmDisabledError` (and `DsDigestDisabledError`): the algorithm is
+  implemented but excluded by this call's policy.
+- `VerifyError` itself: the signature was tried and failed to verify.
+
+A policy-disabled weak signature is never used to satisfy an answer after a
+permitted signature fails. Reordering DS, DNSKEY and RRSIG records does not
+change the result. Calls that do not pass a policy keep the previous behaviour,
+including accepting any implemented algorithm.
+
 Dependencies
 ------------
 

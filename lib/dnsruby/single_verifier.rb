@@ -243,7 +243,7 @@ module Dnsruby
     #  Add the specified keys to the trusted key cache.
     #  k can be a KeyCache, or an RRSet of DNSKEYs.
     def add_trusted_key(k)
-      publish_trust { @trusted_keys.add(k) }
+      publish_trust { @trusted_keys.add(filter_keys_for_policy(k)) }
     end
 
     def add_root_ds(ds)
@@ -273,6 +273,131 @@ module Dnsruby
         @trusted_keys.keys + @configured_ds_store + @discovered_ds_store.flat_map(&:rrs)
       end
     end
+
+    # Algorithm policy helpers. A policy is scoped to one top-level validation
+    # call and is therefore thread-local, so parallel validations with
+    # different policies cannot affect each other.
+    def algorithm_policy
+      AlgorithmPolicy.current
+    end
+    private :algorithm_policy
+
+    def policy_rejection_for_algorithm(algorithm, context)
+      policy = algorithm_policy
+      return nil unless policy
+      rejection = policy.rejection_for_algorithm(algorithm, context: context)
+      AlgorithmPolicy.reject(rejection) if rejection
+      rejection
+    end
+    private :policy_rejection_for_algorithm
+
+    def policy_rejection_for_digest(digest_type, context)
+      policy = algorithm_policy
+      return nil unless policy
+      rejection = policy.rejection_for_digest(digest_type, context: context)
+      AlgorithmPolicy.reject(rejection) if rejection
+      rejection
+    end
+    private :policy_rejection_for_digest
+
+    def policy_rejection_for_key(key, context = 'DNSKEY')
+      policy_rejection_for_algorithm(key.algorithm, context)
+    end
+    private :policy_rejection_for_key
+
+    def policy_rejection_for_ds(ds)
+      policy_rejection_for_digest(ds.digest_type, 'DS') ||
+        policy_rejection_for_algorithm(ds.algorithm, 'DS')
+    end
+    private :policy_rejection_for_ds
+
+    def permitted_key_records(key_rrset)
+      key_rrset.rrs.select do |key|
+        rejection = policy_rejection_for_key(key)
+        if rejection
+          AlgorithmPolicy.reject(rejection)
+          false
+        else
+          true
+        end
+      end
+    end
+    private :permitted_key_records
+
+    # Split candidate keys into those this call may use and the policy
+    # failures that excluded the rest. Only used locally: when a permitted
+    # candidate exists, a rejected alternative must not decide the error.
+    def classify_key_candidates(keys, context = 'DNSKEY')
+      rejected = []
+      permitted = []
+      list = case keys
+             when nil then []
+             when KeyCache then keys.keys
+             when RRSet then keys.rrs
+             when Array then keys
+             else [keys]
+             end
+      list.each do |key|
+        rejection = if key.is_a?(RR::DS) || key.is_a?(RR::DLV)
+          policy_rejection_for_ds(key)
+        else
+          algorithm_policy&.rejection_for_algorithm(key.algorithm, context: context)
+        end
+        if rejection
+          AlgorithmPolicy.reject(rejection)
+          rejected << [key, rejection]
+        else
+          permitted << key
+        end
+      end
+      [permitted, rejected]
+    end
+    private :classify_key_candidates
+
+    # True when a policy-excluded key would otherwise have matched one of
+    # these signatures. In that case the cause is the policy, not a missing
+    # key, and "Signing key not found" would misreport the failure.
+    def rejected_key_matches_signature?(rejected, sigrecs)
+      rejected.any? do |key, _rejection|
+        next false if key.is_a?(RR::DS) || key.is_a?(RR::DLV)
+        sigrecs.any? do |sig|
+          key.key_tag == sig.key_tag && key.algorithm == sig.algorithm &&
+            key.name.canonical == sig.signers_name.canonical && key.klass == sig.klass
+        end
+      end
+    end
+    private :rejected_key_matches_signature?
+
+    def best_policy_error(errors)
+      errors.min_by { |error| [AlgorithmPolicy.error_rank(error), AlgorithmPolicy.error_message(error)] }
+    end
+    private :best_policy_error
+
+    # Publish only keys this call may use. A key authenticated earlier, or by
+    # a sibling signature under another policy, cannot become trusted here.
+    def filter_keys_for_policy(k)
+      return k unless algorithm_policy
+      case k
+      when KeyCache
+        filtered = KeyCache.new
+        k.keys_and_expirations.each do |expiration, key|
+          rejection = policy_rejection_for_key(key)
+          if rejection
+            AlgorithmPolicy.reject(rejection)
+            next
+          end
+          filtered.add_key_with_expiration(key, expiration)
+        end
+        filtered
+      when RRSet
+        return k unless k.type == Types::DNSKEY
+        permitted = permitted_key_records(k)
+        RRSet.new(permitted + k.sigs)
+      else
+        k
+      end
+    end
+    private :filter_keys_for_policy
 
     # Public verification and discovery methods enter here explicitly. Nested
     # calls retain both the operation's limits and this verifier's trust generation.
@@ -320,6 +445,7 @@ module Dnsruby
       found = false
       ds_rrset.sigs.each { |sig|
         if ((sig.type_covered == Types.DS) || ((sig.type_covered == Types.DLV)&& (@verifier_type==VerifierType::DLV)))
+          next if policy_rejection_for_algorithm(sig.algorithm, 'RRSIG')
           if (sig.inception <= Time.now.to_i)
             #  Check sig.expiration, sig.algorithm
             if (sig.expiration > expiration)
@@ -329,9 +455,12 @@ module Dnsruby
         end
       }
       if (expiration > 0)
+        key_rejection = policy_rejection_for_key(key)
         ds_rrset.rrs.each { |ds|
           if ((ds.type === Types.DS) || ((ds.type == Types.DLV) && (@verifier_type == VerifierType::DLV)))
             ValidationBudget.current&.check!(1)
+            next if policy_rejection_for_ds(ds)
+            next if key_rejection
             if ds.check_key(key)
               publish_trust { @trusted_keys.add_key_with_expiration(key, expiration) }
               found = true
@@ -355,8 +484,9 @@ module Dnsruby
     #  keys may be nil, or a KeyCache or an RRSet of Dnsruby::RR::DNSKEY
     # 
     #  Returns true if the message verifies OK, and false otherwise.
-    def verify(msg, keys = nil)
-      with_validation { verify_internal(msg, keys) }
+    def verify(msg, keys = nil, policy_arg = nil, **options)
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { verify_internal(msg, keys) } }
     end
 
     private def verify_internal(msg, keys)
@@ -685,12 +815,29 @@ module Dnsruby
       #       return false
     end
 
-    def verify_ds_rrset(ds_rrset, keys = nil, msg = nil) # :nodoc:
-      with_validation { verify_ds_rrset_internal(ds_rrset, keys, msg) }
+    def verify_ds_rrset(ds_rrset, keys = nil, msg = nil, policy_arg = nil, **options)
+      # Older callers pass the message in the third position. A policy-like
+      # value there is a policy, not a Message.
+      if policy_arg.nil? && msg && !msg.is_a?(Message) &&
+          AlgorithmPolicy.policy_argument?(msg) && !AlgorithmPolicy.keys_argument?(msg)
+        policy_arg = msg
+        msg = nil
+      end
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { verify_ds_rrset_internal(ds_rrset, keys, msg) } }
     end
 
     private def verify_ds_rrset_internal(ds_rrset, keys, msg)
       #       print "verify_ds_rrset #{ds_rrset}\n"
+      if (ds_rrset)
+        if algorithm_policy
+          permitted = ds_rrset.rrs.reject { |ds| policy_rejection_for_ds(ds) }
+          rejected = ds_rrset.rrs.map { |ds| policy_rejection_for_ds(ds) }.compact
+          if permitted.empty? && !rejected.empty?
+            raise best_policy_error(rejected)
+          end
+        end
+      end
       if (ds_rrset && ds_rrset.num_sigs > 0)
         if (verify_rrset(ds_rrset, keys))
           #  Need to handle DS RRSets (with RRSIGs) not just DS records.
@@ -731,8 +878,9 @@ module Dnsruby
       return false # no DS rrset to verify
     end
 
-    def verify_key_rrset(key_rrset, keys = nil) # :nodoc:
-      with_validation { verify_key_rrset_internal(key_rrset, keys) }
+    def verify_key_rrset(key_rrset, keys = nil, policy_arg = nil, **options)
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { verify_key_rrset_internal(key_rrset, keys) } }
     end
 
     private def verify_key_rrset_internal(key_rrset, keys)
@@ -752,20 +900,29 @@ module Dnsruby
       return verified
     end
 
-    def check_ds_stores(key_rrset, signatures = nil) # :nodoc:
-      with_validation { check_ds_stores_internal(key_rrset, signatures) }
+    def check_ds_stores(key_rrset, signatures = nil, policy_arg = nil, **options)
+      policy, signatures = AlgorithmPolicy.resolve(signatures, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { check_ds_stores_internal(key_rrset, signatures) } }
     end
 
     private def check_ds_stores_internal(key_rrset, signatures)
       signatures ||= valid_signatures(key_rrset)
+      if algorithm_policy
+        signatures = signatures.select { |sig|
+          !policy_rejection_for_algorithm(sig.algorithm, 'RRSIG')
+        }
+      end
       return if signatures.empty?
       key_expiration = signatures.first.expiration
       configured, discovered = @trust_mutex.synchronize do
         [@configured_ds_store.dup, @discovered_ds_store.dup]
       end
       key_rrset.rrs.each do |key|
+        key_rejection = policy_rejection_for_key(key)
         configured.each do |ds|
           ValidationBudget.current&.check!(1)
+          next if policy_rejection_for_ds(ds)
+          next if key_rejection
           if ds.check_key(key)
             publish_trust { @trusted_keys.add_key_with_expiration(key, key_expiration) }
           end
@@ -773,7 +930,10 @@ module Dnsruby
         discovered.each do |rrset|
           if rrset.sigs[0].expiration < Time.now.to_i
             publish_trust { @discovered_ds_store.delete(rrset) }
-          elsif rrset.rrs.any? { |ds| ValidationBudget.current&.check!(1); ds.check_key(key) }
+          elsif !key_rejection && rrset.rrs.any? { |ds|
+              ValidationBudget.current&.check!(1)
+              !policy_rejection_for_ds(ds) && ds.check_key(key)
+            }
             publish_trust do
               @trusted_keys.add_key_with_expiration(key, rrset.sigs[0].expiration)
               @discovered_ds_store.delete(rrset)
@@ -829,8 +989,9 @@ module Dnsruby
     #  or RRSet. If no signature is included, false is returned.
     # 
     #  Returns true if the RRSet verified, false otherwise.
-    def verify_rrset(rrset, keys = nil)
-      with_validation { verify_rrset_internal(rrset, keys) }
+    def verify_rrset(rrset, keys = nil, policy_arg = nil, **options)
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { verify_rrset_internal(rrset, keys) } }
     end
 
     private def verify_rrset_internal(rrset, keys)
@@ -849,6 +1010,21 @@ module Dnsruby
         raise VerifyError.new("No signatures in the RRSet : #{rrset.name}, #{rrset.type}")
       end
       sigrecs = valid_signatures(rrset)
+      # A policy-disabled signature is not input to any later step: not DS
+      # publication, not key matching and not a fallback after a permitted
+      # signature fails.
+      if algorithm_policy
+        rejected_signatures = []
+        sigrecs = sigrecs.select do |sig|
+          rejection = algorithm_policy.rejection_for_algorithm(sig.algorithm, context: 'RRSIG')
+          rejected_signatures << rejection if rejection
+          rejection.nil?
+        end
+        if sigrecs.empty?
+          best = best_policy_error(rejected_signatures)
+          raise(best || VerifyError.new("No usable signatures in the RRSet : #{rrset.name}, #{rrset.type}"))
+        end
+      end
       raise ArgumentError.new("Expecting DNSKEY, DLV, DS, RRSet, Array or nil for keys : got #{keys.class} instead") if
       (keys && (![Array, RR::IN::DNSKEY, RR::IN::DLV, RR::IN::DS].include?keys.class) && (keys.class != RRSet))
 
@@ -856,10 +1032,27 @@ module Dnsruby
       keys = RRSet.new([keys]) if [RR::IN::DS, RR::IN::DLV].include?(keys.class)
 
       if (rrset.type == Types.DNSKEY)
-        if (keys && !(Array === keys) && ((keys.type == Types.DS) || ((keys.type == Types.DLV) && (@verifier_type == VerifierType::DLV))))
+        if (keys && !(Array === keys) && keys.respond_to?(:type) &&
+            ((keys.type == Types.DS) || ((keys.type == Types.DLV) && (@verifier_type == VerifierType::DLV))))
+          # A DS RRSet is the only trust input here. If the policy excludes
+          # every DS and DNSKEY candidate, report that rather than the
+          # uninformative "Signing key not found".
+          if algorithm_policy
+            permitted_ds = keys.rrs.reject { |ds| policy_rejection_for_ds(ds) }
+            permitted_keys = rrset.rrs.reject { |key| policy_rejection_for_key(key) }
+            if permitted_ds.empty? || permitted_keys.empty?
+              rejected = []
+              keys.rrs.each { |ds| r = policy_rejection_for_ds(ds); rejected << r if r }
+              rrset.rrs.each { |key| r = policy_rejection_for_key(key); rejected << r if r }
+              raise best_policy_error(rejected) unless rejected.empty?
+            end
+          end
           rrset.rrs.each do |key|
+            key_rejection = policy_rejection_for_key(key)
+            next if key_rejection
             keys.rrs.each do |ds|
               ValidationBudget.current&.check!(1)
+              next if policy_rejection_for_ds(ds)
               if ds.check_key(key)
                 publish_trust { @trusted_keys.add_key_with_expiration(key, sigrecs.first.expiration) }
               end
@@ -869,8 +1062,21 @@ module Dnsruby
           check_ds_stores(rrset, sigrecs)
         end
       end
-      if ((keys.nil?) || ((keys.class != Array) && ((keys.type == Types.DS) || ((keys.type == Types.DLV) && (@verifier_type == VerifierType::DLV)))))
+      if (keys.nil? || ((keys.class != Array) && keys.respond_to?(:type) &&
+            ((keys.type == Types.DS) || ((keys.type == Types.DLV) && (@verifier_type == VerifierType::DLV)))))
         keys = get_keys_to_check
+      end
+
+      # Rejected alternatives are not allowed to decide a failure when a
+      # permitted candidate exists. If none does, report the policy reason
+      # rather than an uninformative "Signing key not found".
+      rejected_keys = []
+      if algorithm_policy
+        permitted_keys, rejected_keys = classify_key_candidates(keys)
+        if permitted_keys.empty? && !rejected_keys.empty?
+          raise best_policy_error(rejected_keys.map(&:last))
+        end
+        keys = permitted_keys
       end
 
       error = VerifyError.new("Signing key not found")
@@ -886,6 +1092,12 @@ module Dnsruby
           # A malformed colliding candidate must not mask a valid signing key.
           error = VerifyError.new("Signature failed to cryptographically verify: #{e.message}")
         end
+      end
+      if rejected_key_matches_signature?(rejected_keys, sigrecs)
+        # Combine with the verification error so a permitted signature that
+        # was tried and failed is reported as the cryptographic failure, not
+        # as the excluded alternative.
+        raise AlgorithmPolicy.preferred_error(error, best_policy_error(rejected_keys.map(&:last)))
       end
       raise error
     end
@@ -948,7 +1160,14 @@ module Dnsruby
 
         verified = keyrec.public_key.dsa_verify_asn1(digest_obj.digest(sig_data), asn1)
       else
-        raise VerifyError.new("Algorithm #{sigrec.algorithm.code} unsupported by Dnsruby")
+        # A typed subclass of VerifyError keeps existing rescue clauses
+        # working while letting callers tell "not implemented" apart from a
+        # policy exclusion or a bad signature.
+        message = algorithm_policy ?
+          "RRSIG algorithm #{sigrec.algorithm.code} is not supported by Dnsruby" :
+          "Algorithm #{sigrec.algorithm.code} unsupported by Dnsruby"
+        raise Dnssec::AlgorithmUnsupportedError.new(message,
+          algorithm: sigrec.algorithm.code, policy: algorithm_policy)
       end
 
       if (!verified)
@@ -1113,10 +1332,7 @@ module Dnsruby
       name = "." if name == ""
       n = Name.create(name)
       root = Name.create(".")
-      anchors = @trust_mutex.synchronize do
-        expire_trust_anchors
-        @trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
-      end
+      anchors = anchor_candidates
       while (true) # n != root)
         #  Try the trusted keys first, then the DS set
         anchors.each {|key|
@@ -1128,6 +1344,58 @@ module Dnsruby
       end
       return false
     end
+
+    # Errors for anchors that are the closest possible trust source for name
+    # but are excluded by this call's policy. Empty if a permitted anchor
+    # exists at that level, or if there is no anchored level at all.
+    def policy_rejected_anchor_errors(name)
+      return [] unless algorithm_policy
+      n = Name.create(name)
+      n = Name.create(".") if name == ""
+      anchors = @trust_mutex.synchronize do
+        expire_trust_anchors
+        @trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
+      end
+      permitted, rejected = anchors.partition { |anchor| anchor_policy_errors(anchor).empty? }
+      # A permitted anchor anywhere on the path means the policy has a usable
+      # starting point; a rejection below it is handled by the normal chain
+      # walk and must not turn an unrelated insecure result into BOGUS.
+      return [] unless permitted.empty?
+      while true
+        matches = rejected.select { |anchor|
+          Array(anchor.respond_to?(:rrs) ? anchor.rrs : anchor).any? { |rr| rr.name.canonical == n.canonical }
+        }
+        return matches.flat_map { |anchor| anchor_policy_errors(anchor) } unless matches.empty?
+        break if n.to_s == "."
+        n = n.strip_label
+      end
+      []
+    end
+    private :policy_rejected_anchor_errors
+
+
+    def anchor_policy_errors(anchor)
+      records = anchor.is_a?(RRSet) ? anchor.rrs : (anchor.respond_to?(:rrs) ? anchor.rrs : [anchor])
+      records.map do |record|
+        rejection = record.is_a?(RR::DS) || record.is_a?(RR::DLV) ?
+          (policy_rejection_for_ds(record) || policy_rejection_for_key(record)) :
+          policy_rejection_for_key(record)
+        rejection
+      end.compact
+    end
+    private :anchor_policy_errors
+
+    # Anchors permitted by this call's policy. Rejected anchors are reported
+    # by policy_rejected_anchor_errors when no permitted one exists.
+    def anchor_candidates
+      anchors = @trust_mutex.synchronize do
+        expire_trust_anchors
+        @trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
+      end
+      return anchors unless algorithm_policy
+      anchors.select { |anchor| anchor_policy_errors(anchor).empty? }
+    end
+    private :anchor_candidates
 
     #  @TODO@ Handle REVOKED keys! (RFC 5011)
     #  Remember that revoked keys will have a different key_tag than pre-revoked.
@@ -1252,6 +1520,7 @@ module Dnsruby
                 TheLog.info("FAILED TO VERIFY DS RRSET FOR #{child}")
                 # return false, nil
                 # raise ResolvError.new("FAILED TO VERIFY DS RRSET FOR #{child}")
+                raise e if e.is_a?(Dnssec::AlgorithmError)
                 raise VerifyError.new("FAILED TO VERIFY DS RRSET FOR #{child}")
               end
             end
@@ -1318,8 +1587,9 @@ module Dnsruby
           rescue VerifyError => e
             begin
               verify(key_rrset)
-            rescue VerifyError =>e
+            rescue VerifyError => e
               verified = false
+              raise e if e.is_a?(Dnssec::AlgorithmError)
               raise VerifyError.new("Couldn't verify DNSKEY and DS records")
             end
           end
@@ -1341,6 +1611,7 @@ module Dnsruby
         #         print "Verification error : #{e}\n"
         TheLog.info("Verification error : #{e}\n")
         # return false, nil # new_res
+        raise e if e.is_a?(Dnssec::AlgorithmError)
         raise VerifyError.new("Verification error : #{e}\n")
       end
     end
@@ -1469,13 +1740,19 @@ module Dnsruby
 
         end
       end
+      # A signed zone whose only usable anchor is excluded by policy must not
+      # be downgraded to insecure: that would turn a policy refusal into an
+      # unsigned answer.
+      rejected_anchors = policy_rejected_anchor_errors(qname)
+      raise best_policy_error(rejected_anchors) unless rejected_anchors.empty?
       #       print "Returning Message insecure OK\n"
       msg.security_level = Message::SecurityLevel.INSECURE
       return true
     end
 
-    def validate(msg, query)
-      with_validation { validate_internal(msg, query) }
+    def validate(msg, query, policy_arg = nil, **options)
+      policy, _ = AlgorithmPolicy.resolve(nil, options, policy_arg)
+      with_validation { AlgorithmPolicy.with(policy) { validate_internal(msg, query) } }
     end
 
     private def validate_internal(msg, query)
@@ -1558,6 +1835,12 @@ module Dnsruby
         end
         # @TODO@ We need to de ermine whether there was simply no DS record, or whether there was a failure
         if (!actual_anchor)
+          rejected = policy_rejected_anchor_errors(qname)
+          unless rejected.empty?
+            error = best_policy_error(rejected)
+            msg.security_level = Message::SecurityLevel.BOGUS
+            return error
+          end
           TheLog.debug("Unable to follow chain from anchor : #{closest_anchor.name}")
           msg.security_level = Message::SecurityLevel.INSECURE
         else
@@ -1578,6 +1861,13 @@ module Dnsruby
           end
         end
       else
+        rejected = policy_rejected_anchor_errors(qname)
+        unless rejected.empty?
+          error = best_policy_error(rejected)
+          TheLog.debug("Algorithm policy rejected every anchor for #{qname}")
+          msg.security_level = Message::SecurityLevel.BOGUS
+          return error
+        end
         #         print "Unable to find an anchor for #{qname}\n"
         msg.security_level = Message::SecurityLevel.INSECURE
       end

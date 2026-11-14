@@ -16,6 +16,7 @@
 require 'digest/sha2'
 require 'dnsruby/key_cache'
 require 'dnsruby/validation_budget'
+require 'dnsruby/algorithm_policy'
 require 'dnsruby/single_verifier'
 module Dnsruby
 
@@ -199,14 +200,24 @@ module Dnsruby
     #  Could be : secure, insecure, bogus or indeterminate
     #  If an error is encountered during verification, then the thrown exception
     #  will define the error.
-    def self.validate(msg)
+    def self.validate(msg, policy_arg = nil, **options)
+      policy = policy_arg || AlgorithmPolicy.extract(options)
       query = Message.new()
       query.header.cd=true
-      validate_with_query(query, msg)
+      validate_with_query(query, msg, policy: policy)
     end
 
-    def self.validate_with_query(query, msg)
-      ValidationBudget.with { validate_with_query_internal(query, msg) }
+    def self.validate_with_query(query, msg, keys = nil, policy_arg = nil, **options)
+      policy, _keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      policy ||= AlgorithmPolicy.for_message(query)
+      policy ||= AlgorithmPolicy.for_message(msg)
+      ValidationBudget.with do
+        if policy
+          AlgorithmPolicy.with(policy) { validate_with_query_internal(query, msg) }
+        else
+          validate_with_query_internal(query, msg)
+        end
+      end
     end
 
     private_class_method def self.validate_with_query_internal(query, msg)
@@ -242,7 +253,7 @@ module Dnsruby
 
         #  Validate!
         #  Need to think about trapping/storing exceptions and security_levels here
-        last_error = ""
+        last_error = nil
         last_level = Message::SecurityLevel.BOGUS
         last_error_level = Message::SecurityLevel.BOGUS
         if (@@validation_policy == ValidationPolicy::ALWAYS_LOCAL_ANCHORS_ONLY)
@@ -270,13 +281,17 @@ module Dnsruby
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
             Proc.new{|m, q| validate_with_dlv(m, q)}, msg, query)
         end
-        #  Set the message security level!
+        #  Set the message security level! A successful validation has no
+        #  error, even if an earlier anchor or path was rejected.
         msg.security_level = last_level
-        msg.security_error = last_error
-        if (last_error && last_error.index("ification error"))
+        msg.security_error = last_level.code >= Message::SecurityLevel::SECURE ? nil : last_error
+        if (last_error && AlgorithmPolicy.error_message(last_error).include?("ification error"))
           msg.security_level = Message::SecurityLevel.BOGUS
         end
-        raise VerifyError.new(last_error) if (last_level < 0)
+        if (last_level < 0)
+          raise last_error if last_error.is_a?(Exception)
+          raise VerifyError.new("Bogus record")
+        end
         return (msg.security_level.code > Message::SecurityLevel::UNCHECKED)
       end
       msg.security_level = Message::SecurityLevel.UNCHECKED
@@ -293,14 +308,26 @@ module Dnsruby
       begin
         proc.call(msg, query)
         last_level = Message::SecurityLevel.new([msg.security_level.code, last_level.code].max)
+        last_error = AlgorithmPolicy.preferred_error(last_error, AlgorithmPolicy.best_error)
       rescue VerifyError => e
-        if (last_error_level < last_level)
-          last_error = e.to_s
+        if last_error.nil? || (last_error_level < last_level)
+          last_error = e
           last_error_level = last_level
+        elsif last_error_level == last_level && policy_sensitive?(last_error, e)
+          last_error = AlgorithmPolicy.preferred_error(last_error, e)
         end
+        last_error = AlgorithmPolicy.preferred_error(last_error, AlgorithmPolicy.best_error)
       end
       return last_level, last_error, last_error_level
     end
+
+    # A policy call ranks failures by kind; the historical behaviour keeps the
+    # first failure at the highest security level.
+    def self.policy_sensitive?(current, candidate)
+      AlgorithmPolicy.current || current.is_a?(AlgorithmPolicy::AlgorithmError) ||
+        candidate.is_a?(AlgorithmPolicy::AlgorithmError)
+    end
+    private_class_method :policy_sensitive?
 
     def self.validate_with_anchors(msg, query)
       @@anchor_verifier.validate(msg, query)
@@ -314,20 +341,40 @@ module Dnsruby
       @@dlv_verifier.validate(msg, query)
     end
 
-    def self.verify(msg, keys=nil)
-      ValidationBudget.with { verify_internal(msg, keys) }
+    def self.verify(msg, keys=nil, policy_arg=nil, **options)
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      ValidationBudget.with do
+        AlgorithmPolicy.with(policy) { verify_internal(msg, keys) }
+      end
     end
 
     private_class_method def self.verify_internal(msg, keys)
-      begin
-        return true if @@anchor_verifier.verify(msg, keys)
-      rescue VerifyError
+      unless AlgorithmPolicy.current
+        # Historical behaviour: try the next trust source on a VerifyError and
+        # let the DLV verifier's result (including its error) reach the caller.
         begin
-          return true if @@root_verifier.verify(msg, keys)
+          return true if @@anchor_verifier.verify(msg, keys)
         rescue VerifyError
-          return true if @@dlv_verifier.verify(msg, keys) # Will carry error to client
+          begin
+            return true if @@root_verifier.verify(msg, keys)
+          rescue VerifyError
+            return true if @@dlv_verifier.verify(msg, keys) # Will carry error to client
+          end
+        end
+        return false
+      end
+
+      error = nil
+      [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each do |verifier|
+        begin
+          return true if verifier.verify(msg, keys)
+        rescue VerifyError => e
+          error = AlgorithmPolicy.preferred_error(error, e)
         end
       end
+      error = AlgorithmPolicy.preferred_error(error, AlgorithmPolicy.best_error)
+      raise error if error
+      false
     end
 
     def self.anchor_verifier
@@ -343,10 +390,26 @@ module Dnsruby
 
 
 
-    def self.verify_rrset(rrset, keys = nil)
-      @@anchor_verifier.verify_rrset(rrset, keys) ||
-        @@root_verifier.verify_rrset(rrset, keys) ||
-        @@dlv_verifier.verify_rrset(rrset, keys)
+    def self.verify_rrset(rrset, keys = nil, policy_arg = nil, **options)
+      policy, keys = AlgorithmPolicy.resolve(keys, options, policy_arg)
+      AlgorithmPolicy.with(policy) do
+        unless policy
+          return @@anchor_verifier.verify_rrset(rrset, keys) ||
+            @@root_verifier.verify_rrset(rrset, keys) ||
+            @@dlv_verifier.verify_rrset(rrset, keys)
+        end
+        error = nil
+        [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each do |verifier|
+          begin
+            return true if verifier.verify_rrset(rrset, keys)
+          rescue VerifyError => e
+            error = AlgorithmPolicy.preferred_error(error, e)
+          end
+        end
+        error = AlgorithmPolicy.preferred_error(error, AlgorithmPolicy.best_error)
+        raise error if error
+        false
+      end
     end
   end
 end
