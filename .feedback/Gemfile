@@ -1,0 +1,8 @@
+source 'https://rubygems.org'
+gem 'omniauth', path: '..', require: false
+gem 'rspec', '~> 3.13', require: false
+gem 'rack-test', '~> 2.0', require: false
+gem 'rack-session', '~> 2.1', require: false
+gem 'simplecov', '>= 1', require: false
+gem 'simplecov-lcov', require: false
+gem 'cgi', require: false
