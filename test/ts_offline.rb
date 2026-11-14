@@ -79,6 +79,7 @@ TESTS = %w(
     tcp_pipelining
     tkey
     tsig_api
+    tsig_keyring
     tsig_rfc8945
     update
     zone_reader

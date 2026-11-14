@@ -43,10 +43,13 @@ module Dnsruby
     # You can select hmac-md5 for legacy servers, which logs a warning.
     # * res.tsig=(tsig_rr)
     # * res.tsig=(key_name, key)
+    # * res.tsig=(key_ring) # a Dnsruby::TSIGKeyRing accepts every key it
+    #   holds (e.g. old and new keys during a rotation); each transfer pins
+    #   one signing identity and keeps its own MAC chain state
     # * res.tsig=nil # Don't sign the transfer
     def tsig=(*args)
       @tsig = Resolver.get_tsig(args)
-      @tsig_configured_time = @tsig&.time_signed
+      @tsig_configured_time = @tsig.time_signed if @tsig.is_a?(RR::TSIG)
       @last_tsig_time = nil
     end
 
@@ -352,16 +355,25 @@ module Dnsruby
     def send_message(socket, msg) #:nodoc: all
       msg.tsig.warn_if_legacy_algorithm if msg.tsig
       if (@tsig)
-        # Keep the last query's TSIG available to callers. Generate a fresh
-        # timestamp for each transfer or retry unless the caller set one.
-        if @last_tsig_time.nil? || @tsig.time_signed != @last_tsig_time
-          @tsig_configured_time = @tsig.time_signed
+        if @tsig.is_a?(TSIGKeyRing)
+          # Each transfer gets its own exchange: the signing identity is
+          # pinned and the MAC chain state is private to this transfer.
+          @exchange = @tsig.signing_exchange
+          @exchange.apply(msg)
+          @verify_exchange = nil
+          @last_query = msg
+        else
+          # Keep the last query's TSIG available to callers. Generate a fresh
+          # timestamp for each transfer or retry unless the caller set one.
+          if @last_tsig_time.nil? || @tsig.time_signed != @last_tsig_time
+            @tsig_configured_time = @tsig.time_signed
+          end
+          signing_key = @tsig.dup
+          signing_key.time_signed = @tsig_configured_time
+          signing_key.apply(msg)
+          @tsig = msg.tsig
+          @last_tsig_time = @tsig.time_signed
         end
-        signing_key = @tsig.dup
-        signing_key.time_signed = @tsig_configured_time
-        signing_key.apply(msg)
-        @tsig = msg.tsig
-        @last_tsig_time = @tsig.time_signed
       end
       query_packet = msg.encode
       lenmsg = [query_packet.length].pack('n')
@@ -386,12 +398,37 @@ module Dnsruby
       buf = tcp_read(socket, answersize)
       msg = Message.decode(buf)
       if (@tsig)
-        if !@tsig.verify_envelope(msg, buf)
+        verifier = @tsig
+        if @tsig.is_a?(TSIGKeyRing)
+          begin
+            verifier = ring_verifier(msg)
+          rescue TSIGKeyRing::UnknownKeyError => e
+            msg.tsigstate = :Failed
+            msg.tsigerror = RCode.BADKEY
+            @last_tsigstate = :Failed
+            Dnsruby.log.error { "TSIG verification failed on zone transfer: #{e.message}" }
+            raise ResolvError.new("Bad signature on zone transfer")
+          end
+        end
+        if !verifier.verify_envelope(msg, buf)
+          @last_tsigstate = :Failed
           Dnsruby.log.error("Bad signature on zone transfer - closing connection")
           raise ResolvError.new("Bad signature on zone transfer")
         end
       end
       return msg
     end
+
+    # Selects the pinned exchange for this transfer from the first signed
+    # envelope. Later envelopes reuse it, so a mixed chain aborts instead of
+    # falling back to another key in the ring.
+    def ring_verifier(msg) #:nodoc: all
+      @verify_exchange ||= begin
+        exchange = msg.tsig ? @tsig.exchange_for(msg) : @exchange
+        exchange.query = @last_query
+        exchange
+      end
+    end
+    private :ring_verifier
   end
 end

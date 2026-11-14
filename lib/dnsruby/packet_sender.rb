@@ -149,6 +149,8 @@ module Dnsruby
     # Note that pre-signed packets will not be signed by PacketSender.
     # * res.tsig=(tsig_rr)
     # * res.tsig=(key_name, key)
+    # * res.tsig=(key_ring) # a Dnsruby::TSIGKeyRing; each query pins one
+    #   signing identity and responses may use any key the ring holds
     # * res.tsig=nil # Stop the resolver from signing
     def tsig=(*args)
       @tsig = Resolver.get_tsig(args)
@@ -1023,7 +1025,20 @@ module Dnsruby
     def check_tsig(query, response, response_bytes)
       if (query.tsig)
         if (response_signature = response.tsig)
-          if !query.tsig.verify(query, response, response_bytes)
+          verifier = query.tsig
+          if @tsig.is_a?(TSIGKeyRing)
+            begin
+              # Pin the exchange to the identity carried by the response. A
+              # MAC failure never falls back to another key in the ring.
+              verifier = @tsig.exchange_for(response)
+            rescue TSIGKeyRing::UnknownKeyError
+              response.tsigstate = :Failed
+              response.tsigerror = RCode.BADKEY
+              Dnsruby.log.error { "TSIG authentication failed!" }
+              return TsigError.new
+            end
+          end
+          if !verifier.verify(query, response, response_bytes)
             if response.verified? && response.header.get_header_rcode == RCode.NOTAUTH
               description = {18 => 'BADTIME', 22 => 'BADTRUNC'}[response.tsigerror]
               if description
@@ -1088,7 +1103,13 @@ module Dnsruby
       # Use the resolver's key if the Message has none.
       encoded = packet.encode
       if @tsig && !packet.signed? && !packet.tsig
-        packet.set_tsig(@tsig)
+        if @tsig.is_a?(TSIGKeyRing)
+          # Each query gets a fresh exchange: the signing identity is pinned
+          # and no MAC chain state is shared with any other exchange.
+          @tsig.signing_exchange.apply(packet)
+        else
+          packet.set_tsig(@tsig)
+        end
         encoded = packet.encode
       end
       encoded

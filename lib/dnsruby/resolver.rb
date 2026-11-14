@@ -766,6 +766,9 @@ module Dnsruby
     #  hmac-md5 explicitly for a legacy server. MD5 use logs a warning.
     #  * res.tsig = key_name, key # defaults to hmac-sha256
     #  * res.tsig = key_name, key, algorithm # must match the server's key
+    #  * res.tsig = key_ring # a Dnsruby::TSIGKeyRing accepts every key it
+    #    holds (e.g. old and new keys during a rotation); each query pins one
+    #    signing identity and never falls back to another key mid-exchange
     #  * res.tsig=nil # Stop the resolver from signing
     def tsig=(t)
       Resolver.get_tsig([t]) unless t.nil?
@@ -796,6 +799,9 @@ module Dnsruby
         if args[0]
           if args[0].instance_of?(RR::TSIG)
             tsig = args[0]
+          elsif args[0].instance_of?(TSIGKeyRing)
+            Dnsruby.log.info{"TSIG signing now using key ring (#{args[0].identities.join(', ')})"}
+            return args[0]
           elsif args[0].instance_of?(Array)
             tsig = RR.new_from_hash(create_tsig_options(*args[0]))
           end
@@ -806,7 +812,7 @@ module Dnsruby
       else
         tsig = RR.new_from_hash(create_tsig_options(*args))
       end
-      raise ArgumentError, 'Expected a TSIG record or a key name, secret and optional algorithm' unless tsig
+      raise ArgumentError, 'Expected a TSIG record, a TSIGKeyRing, or a key name, secret and optional algorithm' unless tsig
       tsig.warn_if_legacy_algorithm
       Dnsruby.log.info{"TSIG signing now using #{tsig.name} (#{tsig.algorithm})"}
       tsig

@@ -24,6 +24,7 @@ require 'dnsruby/cache'
 require 'dnsruby/DNS'
 require 'dnsruby/hosts'
 require 'dnsruby/update'
+require 'dnsruby/tsig_key_ring'
 require 'dnsruby/zone_transfer'
 
 # = Dnsruby library
