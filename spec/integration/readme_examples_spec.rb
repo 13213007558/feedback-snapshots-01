@@ -451,4 +451,40 @@ RSpec.describe 'README.md code test' do
       expect { encoded_token.verify!(signature: { algorithm: %w[HS256 HS512], key: jwk }) }.not_to raise_error
     end
   end
+
+  context 'JWT::Token lifecycle' do
+    it 'keeps the audited header and signed content in sync when the header is completed later' do
+      token = JWT::Token.new(payload: { sub: 'my-subject' }, header: { kid: 'hmac' })
+      audited_header = token.encoded_header
+
+      token.header['typ'] = 'JWT'
+      token.sign!(algorithm: 'HS256', key: 'secret')
+
+      encoded_token = JWT::EncodedToken.new(token.jwt)
+      encoded_token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+
+      expect(audited_header).not_to eq(token.encoded_header)
+      expect(encoded_token.header).to eq('kid' => 'hmac', 'typ' => 'JWT', 'alg' => 'HS256')
+      expect(encoded_token.header).to eq(token.header)
+      expect(encoded_token.payload).to eq('sub' => 'my-subject')
+    end
+
+    it 'detaches the payload without changing the signature' do
+      token = JWT::Token.new(payload: { pay: 'load' })
+      token.sign!(algorithm: 'HS256', key: 'secret')
+      signature = token.signature
+      signing_input = token.signing_input
+
+      token.detach_payload!
+
+      expect(token.jwt).to eq('eyJhbGciOiJIUzI1NiJ9..UEhDY1Qlj29ammxuVRA_-gBah4qTy5FngIWg0yEAlC0')
+      expect(token.signature).to eq(signature)
+      expect(token.signing_input).to eq(signing_input)
+
+      encoded_token = JWT::EncodedToken.new(token.jwt)
+      encoded_token.encoded_payload = token.encoded_payload
+      encoded_token.verify_signature!(algorithm: 'HS256', key: 'secret')
+      expect(encoded_token.unverified_payload).to eq('pay' => 'load')
+    end
+  end
 end

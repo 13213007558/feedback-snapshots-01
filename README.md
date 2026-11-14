@@ -226,6 +226,27 @@ token.jwt
 # => "eyJraWQiOiJobWFjIiwiYWxnIjoiSFMyNTYifQ.eyJleHAiOjE3NTAwMDU0NzksImp0aSI6IjEyMzQiLCJzdWIiOiJteS1zdWJqZWN0In0.NRLcK6fYr3IdNfmncJePMWLQ34M4n14EgqSYrQIjL9w"
 ```
 
+#### Token lifecycle
+
+`JWT::Token` has two states, and the two only overlap at the moment `sign!` succeeds.
+
+Before signing a token is editable. `header` and `payload` are the live hashes, and `encoded_header`, `encoded_payload` and `signing_input` are generated from their current content on every call. Reading the header for an audit and then adding fields is therefore safe: the later signature covers the completed header, and the segments reported by the token describe what was signed. A nested change such as `token.payload['nested']['role'] = 'admin'` is picked up the same way. An encoded value read earlier is a snapshot of that moment, never the input to a later signature.
+
+After `sign!` succeeds the token is an immutable snapshot. `header` and `payload` are deep-frozen copies of exactly the JSON that was signed, and `signature`, `encoded_signature`, `encoded_header`, `encoded_payload`, `signing_input` and `jwt` are fixed. Editing the token then raises `FrozenError`, and calling `sign!` again raises `JWT::EncodeError`. `signed?` tells the two states apart.
+
+Signing is atomic. If `sign!` fails, for example because the key does not match the algorithm, the token remains editable, its header is untouched, and it can be signed again with corrected parameters. The generated `alg` header from the failed attempt does not leak into the retry.
+
+```ruby
+token = JWT::Token.new(payload: { pay: 'load' })
+token.sign!(algorithm: 'ES256', key: 'secret') # raises JWT::EncodeError
+token.signed? # => false
+token.header # => {}
+token.sign!(algorithm: 'HS256', key: 'secret')
+token.jwt # => "eyJhbGciOiJIUzI1NiJ9.eyJwYXkiOiJsb2FkIn0.UEhDY1Qlj29ammxuVRA_-gBah4qTy5FngIWg0yEAlC0"
+```
+
+`detach_payload!` only changes how a signed token is rendered. The signing input, the encoded payload and the signature are unchanged, and the empty payload segment appears in `jwt`. It may be called before or after signing, any number of times.
+
 ### Verifying and decoding a token
 
 The `JWT::EncodedToken` can be used as a token object that allows verification of signatures and claims.
@@ -306,7 +327,7 @@ encoded_token.payload # => { 'pay' => 'load' }
 
 ### Detached payload
 
-The `::JWT::Token#detach_payload!` method can be use to detach the payload from the JWT.
+The `::JWT::Token#detach_payload!` method can be use to detach the payload from the JWT. It changes only how the signed token is rendered: `signing_input`, `encoded_payload` and the signature stay as they were, so the detached serialization still verifies when the original payload segment is supplied again.
 
 ```ruby
 token = JWT::Token.new(payload: { pay: 'load' })

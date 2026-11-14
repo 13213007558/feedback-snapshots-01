@@ -1,5 +1,19 @@
 # Upgrading ruby-jwt to >= 3.3.0
 
+## `JWT::Token` lifecycle
+
+`JWT::Token` now has an explicit editable state and an explicit signed state.
+
+While a token is editable, `encoded_header`, `encoded_payload` and `signing_input` are derived from the current `header` and `payload` on every call instead of being memoized. Code that read `encoded_header` and then changed the header used to sign the stale encoding; it now signs the current content. A value read earlier is a snapshot and is not reused for signing.
+
+Once `sign!` succeeds, the token is an immutable snapshot. `header` and `payload` are deep-frozen copies of what was signed, edits raise `FrozenError`, and the signature-related accessors no longer change. Previously the header and payload stayed mutable after signing, which could leave `header` and `payload` describing something other than the signature.
+
+A failed `sign!` is now atomic. Previously a failure after the header had been updated, for example an `ES256` attempt with an HMAC key, left the generated `alg` header behind and made an otherwise correct retry fail with `JWT::IncorrectAlgorithm`. A failed attempt now leaves the token editable and unchanged.
+
+`signature` and `encoded_signature` return `nil` on an unsigned token instead of deriving an empty signature.
+
+`detach_payload!` still only changes the compact serialization, and may be called before or after signing.
+
 ## Error hierarchy revamp
 
 The [error classes were reorganised](https://github.com/jwt/ruby-jwt/pull/722) under a new `JWT::Error` base class, so failures can be rescued by category instead of one class at a time:
