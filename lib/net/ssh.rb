@@ -71,7 +71,7 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       prompt_without_tty agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms no_delay
-      control_master control_path preopen_channels
+      control_master control_path preopen_channels forward_policy
     ]
 
     class << self
@@ -188,6 +188,19 @@ module Net
     # * :forward_agent => set to true if you want the SSH agent connection to
     #   be forwarded. Ignored for a session through a ControlMaster (see
     #   :control_master).
+    # * :forward_policy => a callable that authorizes port forwarding
+    #   destinations (see Net::SSH::Service::Forward#policy=). It is called with
+    #   a Net::SSH::Service::Forward::Request for local forwarding, remote
+    #   forwarding and channels the server opens, and must return a
+    #   Net::SSH::Service::Forward::Permit (or an equivalent [host, port, ips]
+    #   Array/ Hash) or nil to refuse. Refused local and remote forwards raise
+    #   Net::SSH::Service::Forward::NotPermitted; refused server-opened channels
+    #   are answered with CHANNEL_OPEN_FAILURE and never connect. Defaults to
+    #   +nil+, which permits every destination as before. When the client
+    #   resolves a destination (remote forwarding and server-opened channels),
+    #   it is resolved once at approval and the connection is pinned to the
+    #   resulting addresses; for local forwarding only the server resolves the
+    #   name, so the policy can't restrict the final IP.
     # * :known_hosts => a custom object holding known hosts records.
     #   It must implement #search_for and `add` in a similiar manner as KnownHosts.
     # * :global_known_hosts_file => the location of the global known hosts
@@ -365,6 +378,7 @@ module Net
 
       connection = Multiplex.connect(host_arg, host, user, options, explicit: explicit_options) if options[:control_master]
       connection ||= connect_directly(host, user, options)
+      apply_forward_policy(connection, options[:forward_policy], user)
 
       if block_given?
         begin
@@ -376,6 +390,22 @@ module Net
         connection
       end
     end
+
+    def self.apply_forward_policy(connection, policy, user)
+      return if policy.nil?
+
+      forward = connection.forward
+      forward.policy = policy
+
+      # A direct connection authenticated +user+ over a transport whose key
+      # exchange produced the session id. A ControlMaster owns both, so it is
+      # left to the application to supply them if its policy needs them.
+      transport = connection.transport
+      unless defined?(Multiplex::ProxyTransport) && transport.is_a?(Multiplex::ProxyTransport)
+        forward.policy_identity = [transport.algorithms.session_id, user]
+      end
+    end
+    private_class_method :apply_forward_policy
 
     def self.connect_directly(host, user, options)
       transport = Transport::Session.new(host, options)

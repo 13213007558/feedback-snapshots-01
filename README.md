@@ -154,6 +154,30 @@ end
 
 See Net::SSH for more documentation, and links to further information.
 
+## Forwarding destinations
+
+A destination policy restricts which hosts and ports forwarding may reach. It is called
+separately for local forwarding, remote forwarding and channels the server opens:
+
+```ruby
+Net::SSH.start("bastion", "deploy",
+               forward_policy: lambda do |request|
+                 # request.direction is :local, :remote or :server
+                 approved = request.port == 5432 && request.host == "db.internal"
+                 approved ? [request.host, request.port] : nil
+               end) do |ssh|
+  ssh.forward.local(1234, "db.internal", 5432)
+end
+```
+
+`request` carries the session id and authenticated user when they can be observed,
+the destination host and port, and `request.target_resolution` (`:server` or `:client`).
+The policy can't redirect the destination; return nil to refuse. For `:remote` and
+`:server` the client resolves the name once and connects the approved addresses, so a
+changed DNS record can't redirect it. For `:local` the server resolves and connects
+the name, so the policy restricts the name and port only, not the final IP. Cancelling a
+forward revokes its permit, so a channel the server opens afterwards is refused.
+
 ## REQUIREMENTS:
 
 Net::SSH requires Ruby 2.7 or newer and the Ruby `openssl` gem version `3.2.0` or newer.
