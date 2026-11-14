@@ -131,6 +131,52 @@ Prevented by:
 
 * [`Rack::Protection::SessionHijacking`][session-hijacking] (not included by `use Rack::Protection`)
 
+By default the middleware tracks the user agent and empties the session when
+it changes. For mobile clients, whose network traits legitimately change, a
+graded mode is available that splits signals into two tiers:
+
+```ruby
+use Rack::Protection::SessionHijacking,
+    identity_signals: [
+      # Callables built from server-trusted data, e.g. a device token the
+      # app issued at login. A mismatch drops the session. Plain header
+      # names are refused here: client-forgeable headers must never be
+      # used as identity credentials.
+      ->(env) { Rack::Request.new(env).cookies['device_token'] }
+    ],
+    # Weak signals (headers or callables): a mismatch only moves the
+    # session into the restricted state, the session is kept. The legacy
+    # :track entries (default: the user agent) count as weak signals.
+    weak_signals: %w[HTTP_X_NETWORK_HINT]
+```
+
+While restricted, the application must require re-authentication for
+sensitive operations and then explicitly lift the restriction:
+
+```ruby
+def strongly_authenticated?(env)
+  # restricted? == true  -> definitely require fresh credentials.
+  # restricted? == false -> merely "no anomaly detected", never proof of
+  # authentication on its own.
+  env['rack.session'][:user_id] && !Rack::Protection::SessionHijacking.restricted?(env)
+end
+
+post '/reauthenticate' do
+  halt 403 unless credentials_valid?(params) # verify fresh credentials FIRST
+  Rack::Protection::SessionHijacking.confirm_reauthentication(env)
+end
+```
+
+`confirm_reauthentication` is the only way the weak-signal baseline is
+updated after the session was established, so attack requests cannot teach
+the middleware new traits. On logout, account switch or session restore,
+rebuild the baseline with `Rack::Protection::SessionHijacking.reset_tracking(env)`
+or `Rack::Protection::SessionHijacking.rebaseline(env)`. Set
+`weak_reaction: :drop_session` (or omit the graded options) to keep the old
+"clear the whole session" behaviour. See
+`examples/session_hijacking.ru` for a runnable demo of a normal mobile
+scenario versus a copied-session scenario.
+
 ## Cookie Tossing
 
 Prevented by:
