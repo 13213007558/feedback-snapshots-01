@@ -16,7 +16,7 @@ module Liquid
   #
   class Template
     attr_accessor :root, :name
-    attr_reader :resource_limits, :warnings
+    attr_reader :resource_limits, :warnings, :environment
 
     attr_reader :profiler
 
@@ -124,6 +124,19 @@ module Liquid
       @errors ||= []
     end
 
+    # Opt-in strict check: confirms that every filter this template (and its
+    # statically known partials) relies on is actually invokable, before any
+    # output is produced. Returns a FilterVerification snapshot of the
+    # confirmed filter set. Rendering afterwards raises FilterVerificationError
+    # if the available filters no longer match that snapshot, so filters added
+    # at render time never silently change what was confirmed.
+    #
+    # Pass additional filter modules via <tt>filters:</tt> when the template is
+    # rendered with per-render filters; they become part of the confirmed set.
+    def verify_filters!(filters: [])
+      @filter_verification = FilterVerifier.verify!(self, filters: filters)
+    end
+
     # Render takes a hash with local variables.
     #
     # if you use the same filters over and over again consider registering them globally
@@ -180,6 +193,8 @@ module Liquid
         context.add_filters(args.pop)
       end
 
+      check_filter_verification!(context) if @filter_verification
+
       # Retrying a render resets resource usage
       context.resource_limits.reset
 
@@ -217,6 +232,18 @@ module Liquid
     end
 
     private
+
+    def check_filter_verification!(context)
+      current_filter_names = context.strainer.class.filter_method_names
+      return if @filter_verification.matches?(current_filter_names)
+
+      error = FilterVerificationError.new(
+        "available filters changed since this template was verified, " \
+        "re-run verify_filters! before rendering",
+      )
+      error.template_name = name
+      raise error
+    end
 
     def configure_options(options)
       if (profiling = options[:profile])

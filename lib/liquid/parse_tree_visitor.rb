@@ -33,6 +33,10 @@ module Liquid
       end
     end
 
+    def each_child(&block)
+      children.each(&block)
+    end
+
     protected
 
     def children
