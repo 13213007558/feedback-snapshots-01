@@ -1,0 +1,35 @@
+From: sender@example.com
+To: preview@example.com
+Subject: CID scope layout B - two related groups sharing one Content-ID
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-b"
+
+--mix-b
+Content-Type: multipart/related; boundary="rel-b1"
+
+--rel-b1
+Content-Type: text/html; charset="utf-8"
+
+<html><body>layout one <img src="cid:logo@example.com"></body></html>
+--rel-b1
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Disposition: inline; filename="logo-one.png"
+
+IMAGE-B1
+--rel-b1--
+--mix-b
+Content-Type: multipart/related; boundary="rel-b2"
+
+--rel-b2
+Content-Type: text/html; charset="utf-8"
+
+<html><body>layout two <img src="cid:logo%40example.com"></body></html>
+--rel-b2
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Disposition: inline; filename="logo-two.png"
+
+IMAGE-B2
+--rel-b2--
+--mix-b--

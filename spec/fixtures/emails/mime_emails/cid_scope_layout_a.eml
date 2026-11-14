@@ -1,0 +1,35 @@
+From: sender@example.com
+To: preview@example.com
+Subject: CID scope layout A - decoy attachment outside the related group
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-a"
+
+--mix-a
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Disposition: attachment; filename="decoy.png"
+
+DECOY-IMAGE-A
+--mix-a
+Content-Type: multipart/related; boundary="rel-a"
+
+--rel-a
+Content-Type: multipart/alternative; boundary="alt-a"
+
+--alt-a
+Content-Type: text/plain; charset="utf-8"
+
+See the HTML version of this message.
+--alt-a
+Content-Type: text/html; charset="utf-8"
+
+<html><body><img src="cid:logo@example.com"></body></html>
+--alt-a--
+--rel-a
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Disposition: inline; filename="logo.png"
+
+REAL-IMAGE-A
+--rel-a--
+--mix-a--

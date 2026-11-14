@@ -1939,6 +1939,47 @@ module Mail
       all_parts.detect { |p| p.mime_type == mt && !p.attachment? }
     end
 
+    # Resolves a "cid:" URL (RFC 2392), as found in HTML body parts, to the
+    # MIME part it references. The lookup is scoped to the MIME structure of
+    # the selected body part instead of searching the whole message, so the
+    # part returned is always the one the displayed body is actually related
+    # to.
+    #
+    #  mail.find_part_by_cid('cid:logo@example', from: mail.html_part)
+    #
+    # Resolution rules:
+    #
+    # * +from+ is the body part being rendered; it defaults to
+    #   +html_part || text_part+. It must belong to this message.
+    # * Only parts inside the innermost multipart/related enclosing the
+    #   selected body part are candidates. Parts anywhere else — top-level
+    #   attachments, unselected multipart/alternative branches, or other
+    #   multipart/related groups — are never returned, even if their
+    #   Content-ID matches.
+    # * A nested multipart/related inside that scope is a component of it,
+    #   so its parts are candidates for bodies outside it. A body inside a
+    #   nested multipart/related can only reference parts of that nested
+    #   group, not its outer siblings.
+    # * The cid URL is percent-decoded before matching, so an encoded CID
+    #   such as "cid:logo%40example" matches Content-ID "<logo@example>".
+    # * Returns nil when there is no candidate, when the selected body part
+    #   is not enclosed in a multipart/related, or when more than one
+    #   candidate shares the Content-ID. Ambiguity is never resolved by
+    #   guessing (e.g. by picking the first match).
+    def find_part_by_cid(cid_url, from: nil)
+      body_part = from || html_part || text_part
+      return nil unless body_part
+
+      scope = innermost_related_enclosing(body_part)
+      return nil unless scope
+
+      wanted = Utilities.uri_unescape(Utilities.unbracket(cid_url.to_s.sub(/\Acid:/i, '')))
+      matches = scope.all_parts.select do |part|
+        part.header.has_content_id? && Utilities.unbracket(part.content_id.to_s) == wanted
+      end
+      matches.one? ? matches.first : nil
+    end
+
     # Skips the deletion of this message. All other messages
     # flagged for delete still will be deleted at session close (i.e. when
     # #find exits). Only has an effect if you're using #find_and_delete
@@ -2154,6 +2195,28 @@ module Mail
 
     def decode_body_as_text
       Encodings.transcode_charset decode_body, charset, 'UTF-8'
+    end
+
+    # Returns the innermost multipart/related part that encloses +target+,
+    # or nil if +target+ is not inside any multipart/related. Raises
+    # ArgumentError if +target+ is not a part of this message.
+    def innermost_related_enclosing(target)
+      found = false
+      related = nil
+      walk = lambda do |node, current_related|
+        current_related = node if node.multipart? && node.sub_type.to_s.downcase == 'related'
+        node.parts.each do |child|
+          if child.equal?(target)
+            found = true
+            related = current_related
+          else
+            walk.call(child, current_related)
+          end
+        end
+      end
+      walk.call(self, nil)
+      raise ArgumentError, 'the :from part does not belong to this message' unless found
+      related
     end
   end
 end
