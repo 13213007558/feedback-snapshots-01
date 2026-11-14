@@ -1,0 +1,13 @@
+{"at": "2026-11-14T10:00:00Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:05Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:10Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "account": "user-7@example.com", "params": {"result": "success"}, "effects": [{"allow2ban_reset": {"discriminator": "logins:10.1.1.1", "findtime": 60}}]}
+{"at": "2026-11-14T10:00:15Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:15Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:20Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:25Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:06:40Z", "method": "POST", "path": "/login", "ip": "10.1.1.1", "params": {"result": "fail"}}
+{"at": "2026-11-14T10:00:30Z", "method": "GET", "path": "/search", "ip": "2.2.2.2"}
+{"at": "2026-11-14T10:00:40Z", "method": "GET", "path": "/search", "ip": "2.2.2.2"}
+{"at": "2026-11-14T10:00:50Z", "method": "GET", "path": "/search", "ip": "2.2.2.2"}
+{"at": "2026-11-14T10:01:00Z", "method": "GET", "path": "/admin", "ip": "8.8.8.8"}
+{"at": "2026-11-14T10:01:10Z", "method": "GET", "path": "/api/feed", "ip": "9.9.9.9"}

@@ -11,7 +11,9 @@ Gem::Specification.new do |s|
   s.description = "A rack middleware for throttling and blocking abusive requests"
   s.email = "aaron@ktheory.com"
 
-  s.files = Dir.glob("{bin,lib}/**/*") + %w(Rakefile README.md LICENSE)
+  s.files = Dir.glob("{bin,lib,exe}/**/*") + %w(Rakefile README.md LICENSE)
+  s.bindir = "exe"
+  s.executables = ["rack-attack-replay"]
   s.homepage = 'https://github.com/rack/rack-attack'
   s.rdoc_options = ["--charset=UTF-8"]
   s.require_paths = ["lib"]

@@ -413,6 +413,32 @@ for more on how to do this.
 
 `Rack::Attack.reset!` can be used in your test suite to clear any Rack::Attack state between different test cases. If you're testing blocklist and safelist configurations, consider using `Rack::Attack.clear_configuration` to unset the values for those lists between test cases.
 
+## Replaying rule changes offline
+
+Before deploying a rule change, you can replay sanitized request events against the old and the new
+rulesets and see exactly which decisions change:
+
+```console
+$ rack-attack-replay --old rules_old.rb --new rules_new.rb --events events.jsonl
+```
+
+Ruleset files configure a `Rack::Attack::Configuration` exactly like your production initializer,
+wrapped in `Rack::Attack::Replay.ruleset`. Events are newline-delimited JSON with an explicit
+timestamp (`at`), `method`, `path`, and optional `ip`, `user_agent`, `headers`, `params`, `account`
+and `effects` (e.g. an `allow2ban_reset` after a successful login). The JSON report lists the
+decision each ruleset produced per event (`allow`, `block`, `throttle`, or `undecidable` when a rule
+read a field the event did not provide — replay never defaults to allow) and classifies every
+difference as `tightened`, `loosened`, `changed`, or `undecidable`.
+
+Replay runs against a private in-memory cache driven by a virtual clock: the production cache is
+never touched, responders are never invoked, and no notifications are emitted. Events are replayed
+ordered by timestamp (ties keep input order), so expiry, unban-after-success and causal ordering
+behave as they would in production, and identical input always produces an identical report. The
+report traces every decision back to the event position and the matched rule, but account
+identifiers appear only as SHA-256 digests.
+
+See [examples/replay](examples/replay/README.md) for a runnable sample.
+
 ## How it works
 
 The Rack::Attack middleware compares each request against *safelists*, *blocklists*, *throttles*, and *tracks* that you define. There are none by default.

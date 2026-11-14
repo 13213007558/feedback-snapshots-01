@@ -1,0 +1,45 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Offline replay of sanitized request events against two Rack::Attack
+# rulesets. Prints a JSON report of per-event decisions and their diffs.
+#
+#   bin/rack-attack-replay --old rules_old.rb --new rules_new.rb --events events.jsonl
+#
+# Ruleset files are plain Ruby whose last expression is
+# `Rack::Attack::Replay.ruleset do |config| ... end`.
+# Events are newline-delimited JSON; see Rack::Attack::Replay::Event.
+
+require 'optparse'
+require 'json'
+
+options = {}
+OptionParser.new do |parser|
+  parser.banner = "Usage: rack-attack-replay --old RULES.rb --new RULES.rb --events EVENTS.jsonl"
+  parser.on("--old PATH", "ruleset file with the current (old) rules") { |path| options[:old] = path }
+  parser.on("--new PATH", "ruleset file with the candidate (new) rules") { |path| options[:new] = path }
+  parser.on("--events PATH", "newline-delimited JSON request events") { |path| options[:events] = path }
+end.parse!
+
+missing = %i[old new events].reject { |key| options[key] }
+abort("missing option(s): #{missing.map { |key| "--#{key}" }.join(', ')}") unless missing.empty?
+
+require 'rack/attack'
+
+def load_ruleset(path)
+  ruleset = eval(File.read(path), TOPLEVEL_BINDING, path) # rubocop:disable Security/Eval
+  unless ruleset.respond_to?(:call)
+    abort("#{path} must evaluate to a ruleset block (Rack::Attack::Replay.ruleset do |config| ... end)")
+  end
+  ruleset
+end
+
+events = File.readlines(options[:events]).reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
+
+report = Rack::Attack::Replay.run(
+  old: load_ruleset(options[:old]),
+  new: load_ruleset(options[:new]),
+  events: events
+)
+
+puts JSON.pretty_generate(report)
