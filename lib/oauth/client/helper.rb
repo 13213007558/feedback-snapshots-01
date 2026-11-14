@@ -20,11 +20,19 @@ module OAuth
       attr_reader :options
 
       def nonce
-        options[:nonce] ||= generate_key
+        if options[:nonce].nil? || options[:force_fresh_nonce]
+          options[:nonce] = generate_key
+        end
+        options[:nonce]
       end
 
       def timestamp
-        options[:timestamp] ||= generate_timestamp
+        return options[:timestamp].to_s unless options[:timestamp].nil?
+
+        value = generate_timestamp.to_i + options[:timestamp_offset].to_i
+        excluded = options[:timestamp_not_equal]
+        value += 1 if excluded && value == excluded.to_i
+        options[:timestamp] = value.to_s
       end
 
       def oauth_parameters

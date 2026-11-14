@@ -4,6 +4,7 @@ require "net/http"
 require "net/https"
 require "oauth/oauth"
 require "oauth/client/net_http"
+require "oauth/client/clock_correction"
 require "oauth/errors"
 require "cgi"
 
@@ -76,6 +77,7 @@ module OAuth
 
     attr_accessor :options, :key, :secret
     attr_writer   :site, :http
+    attr_reader   :last_clock_correction_outcome
 
     # Create a new consumer instance by passing it a configuration hash:
     #
@@ -190,12 +192,13 @@ module OAuth
     #   @consumer.request(:get,  '/people', @token, { :scheme => :query_string })
     #   @consumer.request(:post, '/people', @token, {}, @person.to_xml, { 'Content-Type' => 'application/xml' })
     #
-    def request(http_method, path, token = nil, request_options = {}, *arguments)
-      unless %r{^/}.match?(path)
-        @http = create_http(path)
-        _uri = URI.parse(path)
-        path = "#{_uri.path}#{_uri.query ? "?#{_uri.query}" : ""}"
+    def request(http_method, path, token = nil, request_options = {}, *arguments, &block)
+      if clock_correction_config(request_options)
+        return request_with_clock_correction(http_method, path, token, request_options, *arguments,
+                                             &block)
       end
+
+      path = normalize_request_path!(path)
 
       # override the request with your own, this is useful for file uploads which Net::HTTP does not do
       req = create_signed_request(http_method, path, token, request_options, *arguments)
@@ -205,23 +208,63 @@ module OAuth
       # check for an error reported by the Problem Reporting extension
       # (https://wiki.oauth.net/ProblemReporting)
       # note: a 200 may actually be an error; check for an oauth_problem key to be sure
-      if !(headers = rsp.to_hash["www-authenticate"]).nil? &&
-         (h = headers.grep(/^OAuth /)).any? &&
-         h.first.include?("oauth_problem")
-
-        # puts "Header: #{h.first}"
-
-        # TODO: doesn't handle broken responses from api.login.yahoo.com
-        # remove debug code when done
-        params = OAuth::Helper.parse_header(h.first)
-
-        # puts "Params: #{params.inspect}"
-        # puts "Body: #{rsp.body}"
-
-        raise OAuth::Problem.new(params.delete("oauth_problem"), rsp, params)
-      end
+      problem = problem_for_response(rsp)
+      raise problem if problem
 
       rsp
+    end
+
+    # Perform a request with the opt-in, bounded timestamp correction flow.
+    #
+    # The business request (method, path, body and idempotency header) is kept
+    # unchanged. Only +oauth_timestamp+ and +oauth_nonce+ are regenerated for a
+    # retry, and only after a trusted same-service +timestamp_refused+ response.
+    #
+    # The result is exposed through #last_clock_correction_outcome so the
+    # caller can decide whether a manual retry is appropriate when the request
+    # outcome is unknown.
+    def request_with_clock_correction(http_method, path, token = nil, request_options = {}, *arguments, &block)
+      path = normalize_request_path!(path)
+
+      config = clock_correction_config(request_options)
+      correction = OAuth::Client::ClockCorrection.new(config, offsets: clock_correction_offsets)
+      target_origin = request_origin
+      replayable = replayable_request_body?(http_method, arguments.first)
+
+      build_request = lambda do |attempt_options|
+        rewind_request_body(arguments.first)
+        signing_options = request_options.reject do |key, _value|
+          %i[clock_correction].include?(key.to_sym)
+        end
+        req = create_signed_request(http_method, path, token, signing_options.merge(attempt_options), *arguments)
+        if block && (yield(req) == :done)
+          OAuth::Client::ClockCorrection::HALT
+        else
+          req
+        end
+      end
+
+      transport = lambda do |req|
+        http.request(req)
+      end
+
+      @last_clock_correction_outcome = correction.execute(
+        target_origin: target_origin,
+        http_method: http_method,
+        build_request: build_request,
+        transport: transport,
+        problem_for: ->(rsp) { problem_for_response(rsp) },
+        replayable_body: replayable
+      )
+
+      outcome = @last_clock_correction_outcome
+      return nil if outcome.result == :halted
+
+      if outcome.succeeded?
+        outcome.response
+      else
+        raise_correction_failure(outcome)
+      end
     end
 
     # Creates and signs an http request.
@@ -348,7 +391,82 @@ module OAuth
       @options[:proxy]
     end
 
+    def clock_correction_offsets
+      @clock_correction_offsets ||= {}
+    end
+
     protected
+
+    def normalize_request_path!(path)
+      return path if %r{^/}.match?(path)
+
+      @http = create_http(path)
+      _uri = URI.parse(path)
+      "#{_uri.path}#{_uri.query ? "?#{_uri.query}" : ""}"
+    end
+
+    def request_origin
+      scheme = http.respond_to?(:use_ssl?) && http.use_ssl? ? "https" : "http"
+      default_port = scheme == "https" ? 443 : 80
+      port = http.respond_to?(:port) ? http.port : nil
+      port_suffix = port && port != default_port ? ":#{port}" : ""
+      "#{scheme}://#{http.address.to_s.downcase}#{port_suffix}"
+    end
+
+    def clock_correction_config(request_options)
+      requested = request_options.is_a?(Hash) ? request_options[:clock_correction] : nil
+      return nil if requested == false
+
+      consumer_config = @options[:clock_correction]
+      return nil if consumer_config == false
+
+      base = case consumer_config
+             when nil then {}
+             when true then {enabled: true}
+             else consumer_config.to_h
+             end
+      extra = case requested
+              when nil then {}
+              when true then {enabled: true}
+              else requested.to_h
+              end
+      config = base.merge(extra)
+      return nil if config.empty? || config[:enabled] == false
+
+      config
+    end
+
+    def replayable_request_body?(http_method, data)
+      return true unless OAuth::Client::ClockCorrection::WRITE_METHODS.include?(http_method.to_sym)
+      return true if data.nil? || data.is_a?(Hash) || data.is_a?(String)
+      return data.respond_to?(:rewind) if data.respond_to?(:read)
+
+      true
+    end
+
+    def rewind_request_body(data)
+      data.rewind if data.respond_to?(:rewind)
+    end
+
+    def problem_for_response(response)
+      return nil unless response.respond_to?(:to_hash)
+
+      headers = response.to_hash["www-authenticate"]
+      return nil if headers.nil?
+
+      header = headers.grep(/^OAuth /).first
+      return nil if header.nil? || !header.include?("oauth_problem")
+
+      params = OAuth::Helper.parse_header(header)
+      OAuth::Problem.new(params.delete("oauth_problem"), response, params)
+    end
+
+    def raise_correction_failure(outcome)
+      raise outcome.error if outcome.error
+      raise outcome.problem if outcome.problem
+
+      raise OAuth::ClockCorrectionError.new("Clock correction failed: #{outcome.result}", outcome)
+    end
 
     # Instantiates the http object
     def create_http(_url = nil)

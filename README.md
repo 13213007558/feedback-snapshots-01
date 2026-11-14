@@ -302,6 +302,54 @@ hydra.run
 @response = req.response
 ```
 
+### Optional clock correction
+
+OAuth servers may reject a request with `oauth_problem="timestamp_refused"` when
+the client clock is wrong. Clock correction is opt-in, because treating arbitrary error
+responses as time evidence is unsafe.
+
+Provide an explicit trusted time source for the service. The callable receives the
+`Net::HTTPResponse` and a context hash; its return value is treated as the service's
+current Unix time.
+
+```ruby
+oauth_consumer = OAuth::Consumer.new(
+  "key",
+  "secret",
+  site: "https://agree2",
+  clock_correction: {
+    trusted_time_source: ->(response, context) { Integer(response["X-Server-Time"]) },
+    max_offset_seconds: 300,
+    max_retries: 1
+  }
+)
+
+access_token.get("/photos.xml") # first request; may correct and re-sign once
+oauth_consumer.last_clock_correction_outcome.to_h
+# => {result: :corrected, request_count: 2, offset_seconds: 42, manual_retry: false, attempts: [...]}
+
+# Writes use the same consumer-level opt-in and one stable business idempotency key.
+response = access_token.post("/photos.xml", body, { "Idempotency-Key" => "stable-key" })
+```
+
+The correction applies only to the responding service origin, never to the process clock.
+An offset larger than `max_offset_seconds` is rejected (the hard ceiling is one day),
+and retries are capped by `max_retries` (hard maximum 3). A retry keeps the request path, body and `Idempotency-Key`
+unchanged, while generating a new `oauth_timestamp` and `oauth_nonce`.
+
+The library does not replay automatically when:
+
+* no trusted time evidence is available,
+* the `timestamp_refused` response came from another origin, or
+* the transport outcome is unknown (for example a read timeout).
+
+In those cases `last_clock_correction_outcome.manual_retry?` is true, and
+`outcome.attempts` records each request's `oauth_timestamp`, `oauth_nonce`,
+`oauth_signature`, body digest and idempotency key so a person or scheduler can decide
+whether to retry. Non-idempotent write methods are never replayed after an unknown outcome.
+The original transport exception is re-raised for an unknown outcome, so inspect
+`last_clock_correction_outcome` before deciding what to do next.
+
 ## More Information
 
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]

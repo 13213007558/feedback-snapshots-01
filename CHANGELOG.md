@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* Opt-in, bounded OAuth clock correction for `oauth_problem="timestamp_refused"`
+  * per-service offsets only; never changes the process clock
+  * caller-supplied trusted time evidence, same-origin only
+  * capped retry count and offset, with fresh nonce/timestamp while preserving body and idempotency key
+  * `OAuth::Consumer#last_clock_correction_outcome` audit state for manual retry decisions
 
 ### Changed
 
