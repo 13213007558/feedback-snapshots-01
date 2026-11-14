@@ -835,6 +835,134 @@ describe MQTT::Client do
       client.clear_queue
       expect(client.queue_length).to eq(0)
     end
+
+    it "should reset the accounted queue bytes" do
+      inject_packet(:topic => 'topic0', :payload => 'payload0', :qos => 0)
+      expect(client.read_queue_bytes).to eq(8)
+      client.clear_queue
+      expect(client.read_queue_bytes).to eq(0)
+    end
+  end
+
+  describe "read queue limits" do
+    def publish_packet(payload, qos = 0)
+      MQTT::Packet::Publish.new(:topic => 'a/b', :payload => payload, :qos => qos)
+    end
+
+    context "with a byte limit" do
+      let(:client) { MQTT::Client.new(:host => 'localhost', :read_queue_byte_limit => 100) }
+
+      it "bounds the queued payload bytes when the producer outpaces the consumer" do
+        # Fast producer, no consumer: the queue never holds more than the limit
+        10.times { client.send(:handle_packet, publish_packet('x' * 30)) }
+        expect(client.queue_length).to eq(3)
+        expect(client.read_queue_bytes).to eq(90)
+        expect(client.dropped_packets).to eq(7)
+
+        # A slow consumer frees space that the producer can fill again
+        client.get_packet
+        expect(client.read_queue_bytes).to eq(60)
+        client.send(:handle_packet, publish_packet('y' * 30))
+        expect(client.queue_length).to eq(3)
+        expect(client.read_queue_bytes).to eq(90)
+        expect(client.dropped_packets).to eq(7)
+      end
+
+      it "drops a single message bigger than the limit" do
+        client.send(:handle_packet, publish_packet('x' * 101))
+        expect(client.queue_empty?).to be_truthy
+        expect(client.read_queue_bytes).to eq(0)
+        expect(client.dropped_packets).to eq(1)
+      end
+
+      it "keeps the connection open and keeps processing control packets when full" do
+        client.instance_variable_set('@socket', socket)
+        client.send(:handle_packet, publish_packet('x' * 100))
+        expect(client.read_queue_bytes).to eq(100)
+
+        # A Puback for a waiting publisher is still delivered
+        puback_waiter = client.send(:wait_for_puback, 42)
+        client.send(:handle_packet, MQTT::Packet::Puback.new(:id => 42))
+        expect(puback_waiter.size).to eq(1)
+
+        # A Pingresp still updates the last ping response time
+        client.instance_variable_set('@last_ping_response', 0.0)
+        client.send(:handle_packet, MQTT::Packet::Pingresp.new)
+        expect(client.last_ping_response).to be_within(1).of(now)
+
+        expect(client).to be_connected
+      end
+
+      it "does not acknowledge dropped QoS 1 messages" do
+        client.instance_variable_set('@socket', socket)
+        client.send(:handle_packet, publish_packet('x' * 100))
+        expect(client).not_to receive(:send_packet)
+        client.send(:handle_packet, publish_packet('z' * 10, 1))
+        expect(client.dropped_packets).to eq(1)
+        expect(socket.string).to eq('')
+      end
+    end
+
+    context "with a message count limit" do
+      let(:client) { MQTT::Client.new(:host => 'localhost', :read_queue_limit => 2, :read_queue_byte_limit => nil) }
+
+      it "drops messages beyond the limit" do
+        3.times { client.send(:handle_packet, publish_packet('x')) }
+        expect(client.queue_length).to eq(2)
+        expect(client.dropped_packets).to eq(1)
+      end
+    end
+
+    context "with the limits disabled" do
+      let(:client) { MQTT::Client.new(:host => 'localhost', :read_queue_limit => nil, :read_queue_byte_limit => nil) }
+
+      it "queues everything but still tracks the accounted bytes" do
+        5.times { client.send(:handle_packet, publish_packet('x' * 30)) }
+        expect(client.queue_length).to eq(5)
+        expect(client.read_queue_bytes).to eq(150)
+        expect(client.dropped_packets).to eq(0)
+      end
+    end
+
+    it "releases the accounted bytes and does not acknowledge when the callback raises" do
+      client.instance_variable_set('@socket', socket)
+      inject_packet(:topic => 'a/b', :payload => 'x' * 40, :qos => 1)
+      expect(client.read_queue_bytes).to eq(40)
+      expect(client).not_to receive(:send_packet)
+      expect {
+        client.get_packet { |packet| raise 'callback boom' }
+      }.to raise_error('callback boom')
+      expect(client.queue_empty?).to be_truthy
+      expect(client.read_queue_bytes).to eq(0)
+    end
+  end
+
+  describe "resource reclamation when the connection closes" do
+    before(:each) do
+      client.instance_variable_set('@socket', socket)
+    end
+
+    it "wakes up publishers waiting for an acknowledgement and returns -1" do
+      publisher = Thread.new { client.publish('a/b', 'payload', false, 1) }
+      # Wait until the publisher is blocked waiting for the puback
+      Timeout.timeout(5) do
+        sleep(0.001) while client.instance_variable_get('@pubacks').empty?
+      end
+      client.disconnect(false)
+      expect(publisher.join(5)).not_to be_nil
+      expect(publisher.value).to eq(-1)
+      expect(client.instance_variable_get('@pubacks')).to be_empty
+    end
+
+    it "discards queued messages and resets the byte accounting" do
+      inject_packet(:topic => 'a/b', :payload => 'x' * 50)
+      inject_packet(:topic => 'a/b', :payload => 'y' * 50)
+      expect(client.read_queue_bytes).to eq(100)
+      client.disconnect(false)
+      expect(client.queue_empty?).to be_truthy
+      expect(client.queue_length).to eq(0)
+      expect(client.read_queue_bytes).to eq(0)
+    end
   end
 
   describe "when calling the 'get' method" do
@@ -1107,7 +1235,7 @@ describe MQTT::Client do
 
   def inject_packet(opts={})
     packet = MQTT::Packet::Publish.new(opts)
-    client.instance_variable_get('@read_queue').push(packet)
+    client.send(:enqueue_packet, packet)
   end
 
   def inject_puback(packet_id)

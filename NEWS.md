@@ -1,6 +1,19 @@
 Ruby MQTT NEWS
 ==============
 
+Ruby MQTT Unreleased
+--------------------
+
+* Added configurable read queue limits (`read_queue_byte_limit`, default
+  1 MiB, and `read_queue_limit`) so a slow consumer or malicious server
+  cannot exhaust memory; excess incoming messages are dropped (counted in
+  `dropped_packets`) without blocking control packets or acknowledging
+  dropped QoS messages
+* Closing the connection now discards queued incoming messages, resets the
+  queue byte accounting and wakes up publishers waiting for an
+  acknowledgement (they return -1)
+
+
 Ruby MQTT Version 0.7.0 (2025-10-29)
 ------------------------------------
 

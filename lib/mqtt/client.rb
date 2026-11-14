@@ -41,6 +41,31 @@ module MQTT
     # Number of seconds to connect to the server (default is 90 seconds)
     attr_accessor :connect_timeout
 
+    # Maximum number of incoming publish packets that may wait in the read
+    # queue for the application to consume (default is nil, i.e. unlimited).
+    #
+    # When the limit is reached, newly arriving publish packets are dropped
+    # and counted in dropped_packets; the connection stays open.
+    attr_accessor :read_queue_limit
+
+    # Maximum total bytes of payload that may wait in the read queue for the
+    # application to consume (default is DEFAULT_READ_QUEUE_BYTE_LIMIT,
+    # set to nil for no limit).
+    #
+    # This bounds the memory a fast or malicious server can make the client
+    # buffer while the application consumes messages slowly. When the limit
+    # is reached, newly arriving publish packets are dropped and counted in
+    # dropped_packets; the connection stays open.
+    attr_accessor :read_queue_byte_limit
+
+    # Total bytes of payload currently waiting in the read queue
+    attr_reader :read_queue_bytes
+
+    # Number of incoming publish packets dropped because a read queue limit
+    # was reached. Dropped packets are never acknowledged to the server, so
+    # QoS 1 and 2 messages may be redelivered by the server later.
+    attr_reader :dropped_packets
+
     # Username to authenticate to the server with
     attr_accessor :username
 
@@ -65,6 +90,9 @@ module MQTT
     # Timeout between select polls (in seconds)
     SELECT_TIMEOUT = 0.5
 
+    # Default limit on the total bytes of payload waiting in the read queue
+    DEFAULT_READ_QUEUE_BYTE_LIMIT = 1024 * 1024
+
     # Default attribute values
     ATTR_DEFAULTS = {
       :host => nil,
@@ -75,6 +103,8 @@ module MQTT
       :client_id => nil,
       :ack_timeout => 5,
       :connect_timeout => 30,
+      :read_queue_limit => nil,
+      :read_queue_byte_limit => DEFAULT_READ_QUEUE_BYTE_LIMIT,
       :username => nil,
       :password => nil,
       :will_topic => nil,
@@ -176,6 +206,9 @@ module MQTT
       @last_ping_response = current_time
       @socket = nil
       @read_queue = Queue.new
+      @read_queue_bytes = 0
+      @dropped_packets = 0
+      @read_queue_semaphore = Mutex.new
       @pubacks = {}
       @read_thread = nil
       @write_semaphore = Mutex.new
@@ -300,6 +333,9 @@ module MQTT
 
     # Disconnect from the MQTT server.
     # If you don't want to say goodbye to the server, set send_msg to false.
+    #
+    # Any incoming messages still waiting in the read queue are discarded and
+    # publishers blocked in publish are woken up and return -1.
     def disconnect(send_msg = true)
       # Stop reading packets from the socket first
       @read_thread.kill if @read_thread && @read_thread.alive?
@@ -323,6 +359,10 @@ module MQTT
     end
 
     # Publish a message on a particular topic to the MQTT server.
+    #
+    # For QoS 1 and 2, waits up to ack_timeout for the acknowledgement and
+    # returns -1 if the connection closed or the acknowledgement didn't
+    # arrive in time.
     def publish(topic, payload = '', retain = false, qos = 0)
       raise ArgumentError, 'Topic name cannot be nil' if topic.nil?
       raise ArgumentError, 'Topic name cannot be empty' if topic.empty?
@@ -426,13 +466,13 @@ module MQTT
       if block_given?
         # Loop forever!
         loop do
-          packet = @read_queue.pop
+          packet = dequeue_packet
           yield(packet)
           puback_packet(packet) if packet.qos > 0
         end
       else
         # Wait for one packet to be available
-        packet = @read_queue.pop
+        packet = dequeue_packet
         puback_packet(packet) if packet.qos > 0
         return packet
       end
@@ -450,7 +490,10 @@ module MQTT
 
     # Clear the incoming message queue.
     def clear_queue
-      @read_queue.clear
+      @read_queue_semaphore.synchronize do
+        @read_queue.clear
+        @read_queue_bytes = 0
+      end
     end
 
     # Send a unsubscribe message for one or more topics on the MQTT server
@@ -496,8 +539,8 @@ module MQTT
 
     def handle_packet(packet)
       if packet.class == MQTT::Packet::Publish
-        # Add to queue
-        @read_queue.push(packet)
+        # Add to queue, unless a read queue limit has been reached
+        enqueue_packet(packet)
       elsif packet.class == MQTT::Packet::Pingresp
         @last_ping_response = current_time
       elsif packet.class == MQTT::Packet::Puback
@@ -509,6 +552,39 @@ module MQTT
       # FIXME: implement responses for QoS  2
     end
 
+    # Add a publish packet to the read queue, unless a queue limit has been
+    # reached. Packets that don't fit are dropped rather than blocking the
+    # read thread, so that control packets (such as Puback and Pingresp)
+    # keep being processed. Dropped packets are never acknowledged, so the
+    # server may redeliver QoS 1 and 2 messages later.
+    def enqueue_packet(packet)
+      bytes = packet.payload.to_s.bytesize
+      @read_queue_semaphore.synchronize do
+        if read_queue_full?(bytes)
+          @dropped_packets += 1
+          return false
+        end
+        @read_queue_bytes += bytes
+        @read_queue.push(packet)
+        return true
+      end
+    end
+
+    # Remove a publish packet from the read queue, waiting if it is empty
+    def dequeue_packet
+      packet = @read_queue.pop
+      @read_queue_semaphore.synchronize do
+        @read_queue_bytes -= packet.payload.to_s.bytesize
+      end
+      packet
+    end
+
+    def read_queue_full?(bytes)
+      return true if !@read_queue_limit.nil? && @read_queue.length >= @read_queue_limit
+      return true if !@read_queue_byte_limit.nil? && @read_queue_bytes + bytes > @read_queue_byte_limit
+      false
+    end
+
     def handle_timeouts
       @pubacks_semaphore.synchronize do
         @pubacks.each_value { |q| q << :read_timeout }
@@ -518,7 +594,10 @@ module MQTT
     def handle_close
       @pubacks_semaphore.synchronize do
         @pubacks.each_value { |q| q << :close }
+        @pubacks.clear
       end
+      # Reclaim the memory held by undelivered incoming messages
+      clear_queue
     end
 
     if Process.const_defined? :CLOCK_MONOTONIC

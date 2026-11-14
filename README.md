@@ -162,6 +162,34 @@ end
 For more information see the [MQTT::Client#get] method.
 
 
+### Limiting the incoming message queue ###
+
+Received messages wait in a read queue until the application consumes them
+with `get` or `get_packet`. If the application consumes messages slower than
+the server sends them, the queue would grow without bound, so the client
+limits how much may wait in the queue:
+
+* `read_queue_byte_limit`: the maximum total bytes of queued message
+  payloads (default is 1 MiB, set to `nil` for no limit)
+* `read_queue_limit`: the maximum number of queued messages (default is
+  `nil`, i.e. no limit)
+
+~~~ ruby
+client = MQTT::Client.new('mqtt://myserver.example.com', :read_queue_byte_limit => 256 * 1024)
+~~~
+
+When a limit is reached, newly arriving messages are dropped and counted in
+`client.dropped_packets`; the connection stays open and control packets
+(such as publish acknowledgements and ping responses) are still processed.
+Dropped messages are never acknowledged to the server, so QoS 1 and 2
+messages may be redelivered later. The current memory usage of the queue is
+available as `client.read_queue_bytes`.
+
+When the connection closes, any messages still waiting in the queue are
+discarded, and publishers blocked in `publish` while waiting for an
+acknowledgement are woken up and return `-1`.
+
+
 ### Parsing and serialising of packets ###
 
 The parsing and serialising of MQTT and MQTT-SN packets is a separate lower-level API.
