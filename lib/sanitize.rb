@@ -9,6 +9,7 @@ require_relative "sanitize/config/restricted"
 require_relative "sanitize/config/basic"
 require_relative "sanitize/config/relaxed"
 require_relative "sanitize/css"
+require_relative "sanitize/node_snapshot"
 require_relative "sanitize/transformers/clean_cdata"
 require_relative "sanitize/transformers/clean_comment"
 require_relative "sanitize/transformers/clean_css"
@@ -123,7 +124,7 @@ class Sanitize
     return "" unless html
 
     doc = Nokogiri::HTML5.parse(preprocess(html), **@config[:parser_options])
-    node!(doc)
+    sanitize_node!(doc)
     to_html(doc)
   end
 
@@ -135,7 +136,7 @@ class Sanitize
     return "" unless html
 
     frag = Nokogiri::HTML5.fragment(preprocess(html), **@config[:parser_options])
-    node!(frag)
+    sanitize_node!(frag)
     to_html(frag)
   end
 
@@ -144,6 +145,51 @@ class Sanitize
 
   # Sanitizes the given `Nokogiri::XML::Node` and all its children, modifying it
   # in place.
+  #
+  # Sanitization is atomic: if any transformer raises an exception, the tree is
+  # restored to the state it was in when this method was called, and then the
+  # exception is re-raised. This prevents callers from observing a partially
+  # sanitized tree.
+  #
+  # The following guarantees apply when an exception is raised:
+  #
+  # -   Every node that existed when the call began is back in the tree at its
+  #     original position, with its original name, namespace, attributes, and
+  #     text content.
+  #
+  # -   Element, comment, CDATA, and processing-instruction nodes keep their
+  #     exact Ruby object identity. Text nodes that a transformer didn't merge
+  #     into a neighbor also keep their identity.
+  #
+  # -   Nokogiri destroys the underlying node when a transformer inserts one
+  #     text node next to another (it merges them). When that happens, both
+  #     text nodes are rebuilt from their captured content so that their
+  #     content and boundaries are restored and old wrappers can't silently
+  #     modify a neighboring node. Wrappers obtained before the call therefore
+  #     can't be trusted to address a text node that was involved in a merge,
+  #     even though the tree itself is fully restored.
+  #
+  # -   Nodes created by a transformer during the failed call are removed from
+  #     the tree. They aren't corrupted, but they're no longer attached.
+  #
+  # -   A node that a transformer moved within the tree is moved back, so a
+  #     caller that holds a reference to it sees it in its original location.
+  #
+  # -   If the sanitized node was detached when the call began, it's left
+  #     detached. Otherwise, if a transformer detached it or moved it to
+  #     another document, it's returned to its original parent.
+  #
+  # -   When the sanitized node is attached to a document, the whole document
+  #     is snapshotted, because transformers can reach it through
+  #     `node.document`. Changes a transformer makes elsewhere in the document
+  #     are rolled back too.
+  #
+  # -   A doctype removed by a transformer is recreated. Nokogiri doesn't
+  #     support reattaching the original doctype node, so its contents are
+  #     restored but its object identity may differ.
+  #
+  # A failed call leaves no state behind, so retrying the same sanitization
+  # starts from the restored tree and a fresh allowlist.
   #
   # If _node_ is a `Nokogiri::XML::Document`, the `<html>` element must be
   # allowlisted or an error will be raised.
@@ -156,10 +202,20 @@ class Sanitize
       end
     end
 
-    node_allowlist = Set.new
+    snapshot = NodeSnapshot.new(node)
 
-    traverse(node) do |n|
-      transform_node!(n, node_allowlist)
+    begin
+      sanitize_node!(node)
+    rescue Exception => error
+      begin
+        snapshot.restore
+      rescue StandardError => restore_error
+        raise Error,
+          "Sanitization failed (#{error.class}: #{error.message}) and the tree " \
+          "could not be restored: #{restore_error.message}"
+      end
+
+      raise
     end
 
     node
@@ -169,6 +225,19 @@ class Sanitize
   alias_method :clean_node!, :node!
 
   private
+
+  # Sanitizes _node_ in place without any failure handling. This is used by
+  # the string-based methods, which discard their parsed tree if an exception
+  # is raised, so there's no partially sanitized tree for callers to see.
+  def sanitize_node!(node)
+    node_allowlist = Set.new
+
+    traverse(node) do |n|
+      transform_node!(n, node_allowlist)
+    end
+
+    node
+  end
 
   # Preprocesses HTML before parsing to remove undesirable Unicode chars.
   def preprocess(html)

@@ -498,6 +498,45 @@ Sanitize.fragment(html, transformers: transformer)
 
 Transformers have a tremendous amount of power, including the power to completely bypass Sanitize's built-in filtering. Be careful! Your safety is in your own hands.
 
+### Atomic in-place sanitization
+
+`Sanitize.node!` sanitizes a `Nokogiri::XML::Node` in place, and it's atomic: if a transformer raises an exception, the tree is restored to the state it was in when `node!` was called and the exception is re-raised. This prevents callers from seeing a partially sanitized tree in which some nodes have been cleaned up and others haven't.
+
+```ruby
+sanitized = false
+
+begin
+  Sanitize.node!(email_dom, elements: %w[b i a], transformers: custom_transformer)
+  sanitized = true
+rescue StandardError
+  # email_dom is now identical to what it was before the call.
+end
+
+send_email(email_dom) if sanitized
+```
+
+On success, the sanitized tree is committed in place and nothing is restored.
+
+When a failure occurs, the following guarantees apply:
+
+* Every node that existed before the call is back at its original position in the tree with its original name, namespace, attributes, and text content. A transformer that moved a node within the tree has its move undone, so a caller holding a reference to that node sees it where it started.
+
+* Element, comment, CDATA, and processing-instruction nodes keep their exact Ruby object identity, as do text nodes that weren't merged into a neighbor.
+
+* Nokogiri merges adjacent text nodes when one is inserted next to another, destroying the individual nodes. If that happens, Sanitize rebuilds each affected text node from its captured content, so the tree and text are restored exactly, but a Ruby wrapper obtained before the call can no longer be used to address the node it originally referred to. Don't retain text node wrappers across a failed `node!` call.
+
+* Nodes created by a transformer during the failed call are removed from the tree.
+
+* If the node passed to `node!` was detached when the call began, it remains detached. Otherwise, if a transformer detached it or moved it to another document, it's returned to its original parent.
+
+* When the node is attached to a document, the whole document is rolled back, since transformers can reach it through `node.document`.
+
+* A doctype that a transformer removed is recreated. Nokogiri can't reattach the original doctype node, so its contents are restored but its identity may differ.
+
+A failed call leaves no allowlist or other state behind, so retrying the same sanitization starts from the restored tree with a fresh allowlist.
+
+`Sanitize.fragment` and `Sanitize.document` parse a new tree on every call and return a string, so a failed call never exposes a partially sanitized tree to callers.
+
 ### Example: Transformer to allow image URLs by domain
 
 The following example demonstrates how to remove image elements unless they use a relative URL or are hosted on a specific domain. It assumes that the `<img>` element and its `src` attribute are already allowlisted.

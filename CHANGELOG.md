@@ -2,6 +2,12 @@
 
 All notable changes to Sanitize are documented in this file. The format (since version 7.0.0) is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `Sanitize#node!` is now atomic. If a transformer (or any other part of sanitization) raises an exception, the tree is restored to its state before the call and the exception is re-raised, instead of leaving callers with a partially sanitized tree. Existing nodes are restored to their original parents, positions, names, namespaces, attributes, and text content, and nodes created during the failed call are removed. A failed call leaves no state behind, so a retry starts from the restored tree with a fresh allowlist. See the README for the full set of guarantees. `Sanitize.fragment` and `Sanitize.document` parse a new tree on each call and are unaffected.
+
 ## 7.0.2 (2026-11-02)
 
 ### Security
