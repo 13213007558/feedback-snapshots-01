@@ -130,6 +130,51 @@ For Rails, see [Rails (without Devise)](#rails-without-devise). For
 more options, see the
 [rack-protection documentation](https://www.rubydoc.info/gems/rack-protection/Rack/Protection/AuthenticityToken).
 
+## Phase Hooks
+OmniAuth runs these hooks around its phases, in this order:
+
+| Request | Callback | OPTIONS |
+| --- | --- | --- |
+| `setup` | `setup` | `before_options_phase` |
+| `request_validation_phase` | restore `omniauth.origin` and `omniauth.params` | |
+| store `omniauth.params` in the session | `before_callback_phase` | |
+| `before_request_phase` | `callback_phase` (writes `omniauth.auth`) | |
+| the request phase | | |
+| `after_request_phase` | | |
+
+Set them with `OmniAuth.config` or in an `OmniAuth::Builder` block,
+for example `OmniAuth.config.before_callback_phase = ->(env) { ... }`.
+Each hook receives the Rack env, and its return value is ignored, except
+for `request_validation_phase` (below). Hooks are for side effects, such
+as configuring a strategy per-tenant in `setup` or auditing in
+`after_request_phase`.
+
+A hook that raises is handled like an error in the phase it runs in:
+the exception goes to `OmniAuth.config.on_failure` (unless it came from
+the downstream app, which is re-raised). A hook can also call
+`env['omniauth.strategy'].fail!(...)`, which ends the phase immediately
+even if the hook then returns normally. From that point on, no later
+hook, phase, or downstream app receives the request.
+
+`request_validation_phase` runs before the request phase's params are
+stored in the session. Like the other hooks it may raise
+`OmniAuth::AuthenticityError` (reported as `:authenticity_error`), but
+it may also return a Rack response to reject the request, for example
+`[403, {}, ['Forbidden']]`. A returned response is the final response:
+the request phase does not run, `omniauth.params` is not stored, and
+`omniauth.error.type` is set to `:authenticity_error`. This is the one
+hook whose return value is a response, so a validator that already
+builds one doesn't have to raise.
+
+A failure is terminal. `fail!` removes any `omniauth.auth` a hook may
+have written, records `omniauth.error`, `omniauth.error.type`, and
+`omniauth.error.strategy`, and calls `on_failure`. If `on_failure`
+returns nothing, OmniAuth answers with a 500 rather than letting the
+request fall through to the app as if it had succeeded. If `on_failure`
+calls `fail!` again, it gets the first failure's response instead of
+re-entering failure handling, so a recursive handler cannot loop. An
+exception raised by `on_failure` itself is re-raised, not handled again.
+
 ## Rails (without Devise)
 To get started, add the gem
 

@@ -1478,6 +1478,17 @@ describe OmniAuth::Strategy do
           OmniAuth.config.request_validation_phase = nil
         end
 
+        it 'stops at a Rack response returned by the request validation phase' do
+          OmniAuth.config.request_validation_phase = lambda { |_env| [403, {}, ['denied']] }
+          env = make_env('/auth/test', 'QUERY_STRING' => 'evil=1')
+
+          expect(ExampleStrategy.new(app).call(env)).to eq([403, {}, ['denied']])
+          expect(env['rack.session']).not_to have_key('omniauth.params')
+          expect(env['omniauth.error.type']).to eq(:authenticity_error)
+        ensure
+          OmniAuth.config.request_validation_phase = nil
+        end
+
         it 'renders a form from a Rack endpoint, passing it the env' do
           @options = {:form => lambda { |env| [200, {}, [env['PATH_INFO']]] }}
           expect(strategy.call(make_env)).to eq([200, {}, ['/auth/test']])

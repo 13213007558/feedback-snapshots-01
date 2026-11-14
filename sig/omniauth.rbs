@@ -491,7 +491,10 @@ module OmniAuth
 
       # Defined in Strategy.
       def handle_phase_error: (StandardError error) -> rack_response
-      def run_hook: (Symbol name) -> void
+      def run_hook: (Symbol name) -> untyped
+      def failure_dispatched?: () -> bool
+      def failure_response: () -> rack_response
+      def rack_response?: (untyped value) -> bool
     end
 
     attr_reader app: Rack::_Application
@@ -523,6 +526,9 @@ module OmniAuth
     def options_call: () -> rack_response
 
     def request_call: () -> rack_response
+
+    # Runs request_validation_phase; non-nil when it rejected the request.
+    def validation_rejection: () -> rack_response?
 
     def request_response: () -> rack_response
 
@@ -565,6 +571,9 @@ module OmniAuth
     @app: Rack::_Application
     @options: Options
     @request: Rack::Request?
+    @failure_dispatched: bool?
+    @failure_response: rack_response?
+    @failure_handler_raised: bool?
 
     private
 
@@ -590,9 +599,25 @@ module OmniAuth
 
     def ascii_compatible_uri: [T < Object] (T uri) -> (T | String)
 
+    def run_request_hooks: () -> rack_response
+
+    def record_failure: (String | Symbol message_key, Exception? exception) -> void
+
+    def log_failure: (String | Symbol message_key, Exception? exception) -> void
+
+    def call_failure_handler: () -> rack_response
+
     def handle_phase_error: (StandardError error) -> rack_response
 
-    def run_hook: (Symbol name) -> void
+    def run_hook: (Symbol name) -> untyped
+
+    def failure_dispatched?: () -> bool
+
+    def failure_response: () -> rack_response
+
+    def rack_response?: (untyped value) -> bool
+
+    def reject_request: (untyped response) -> rack_response
 
     def initialize_copy: (*untyped) -> void
 

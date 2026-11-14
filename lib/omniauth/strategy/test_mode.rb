@@ -20,23 +20,27 @@ module OmniAuth
 
       def mock_request_call
         setup_phase
+        return failure_response if failure_dispatched?
 
-        run_hook(:request_validation_phase)
+        rejection = validation_rejection
+        return rejection if rejection
 
         session['omniauth.params'] = omniauth_params
 
         run_hook(:before_request_phase)
+        return failure_response if failure_dispatched?
 
         store_origin if options.origin_param
 
         result = redirect(callback_url)
 
         run_hook(:after_request_phase)
-        result
+        failure_dispatched? ? failure_response : result
       end
 
       def mock_callback_call
         setup_phase
+        return failure_response if failure_dispatched?
 
         origin = session.delete('omniauth.origin')
         env['omniauth.origin'] ||= origin
@@ -44,9 +48,17 @@ module OmniAuth
         env['omniauth.params'] = session.delete('omniauth.params') || {}
 
         mocked_auth = OmniAuth.mock_auth_for(name)
-        env['omniauth.auth'] = mocked_auth unless mocked_auth.instance_of?(Symbol)
+        failed = mocked_auth.instance_of?(Symbol)
+
+        # As in a real callback, the hook runs before the auth result is
+        # written, so a hook that fails (or writes then fails) cannot leave
+        # a successful auth hash for the app or the failure handler.
         run_hook(:before_callback_phase)
-        mocked_auth.instance_of?(Symbol) ? fail!(mocked_auth) : call_app!
+        return failure_response if failure_dispatched?
+        return fail!(mocked_auth) if failed
+
+        env['omniauth.auth'] = mocked_auth
+        call_app!
       end
     end
   end

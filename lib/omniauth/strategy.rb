@@ -101,6 +101,9 @@ module OmniAuth
       end
 
       @env = env
+      @failure_dispatched = false
+      @failure_response = nil
+      @failure_handler_raised = false
 
       warn_if_using_get_on_request_path
 
@@ -160,6 +163,8 @@ module OmniAuth
     # Responds to an OPTIONS request.
     def options_call
       run_hook(:before_options_phase)
+      return failure_response if failure_dispatched?
+
       verbs = OmniAuth.config.allowed_request_methods.collect(&:upcase).join(', ')
       [200, {'Allow' => verbs}, []]
     end
@@ -168,15 +173,43 @@ module OmniAuth
     def request_call
       setup_phase
       log :debug, 'Request phase initiated.'
+      return failure_response if failure_dispatched?
+
       warn_if_using_request_host
       return invalid_host! unless allowed_host?
 
-      run_hook(:request_validation_phase)
-      session['omniauth.params'] = omniauth_params
-      run_hook(:before_request_phase)
-      request_response.tap { run_hook(:after_request_phase) }
+      rejection = validation_rejection
+      return rejection if rejection
+
+      response = run_request_hooks
+      failure_dispatched? ? failure_response : response
     rescue OmniAuth::AuthenticityError => e
       fail!(:authenticity_error, e)
+    end
+
+    # Runs the hooks and the request phase after validation. Any hook may
+    # end the phase by calling fail!, so the phase stops checking after each.
+    def run_request_hooks
+      session['omniauth.params'] = omniauth_params
+      run_hook(:before_request_phase)
+      return failure_response if failure_dispatched?
+
+      response = request_response
+      return failure_response if failure_dispatched?
+
+      run_hook(:after_request_phase)
+      response
+    end
+
+    # Runs request_validation_phase and returns a terminal response when it
+    # rejects the request, whether by raising or by returning one. It runs
+    # before the session write, so a rejected request stores no params.
+    def validation_rejection
+      validation = run_hook(:request_validation_phase)
+      return failure_response if failure_dispatched?
+      return reject_request(validation) if rack_response?(validation)
+
+      nil
     end
 
     # Renders the login form (from a Rack endpoint or the app itself) if
@@ -224,6 +257,7 @@ module OmniAuth
     def callback_call
       setup_phase
       log :debug, 'Callback phase initiated.'
+      return failure_response if failure_dispatched?
       return invalid_host! unless allowed_host?
 
       sign_in = recall_sign_in
@@ -231,6 +265,8 @@ module OmniAuth
       env['omniauth.origin'] = (origin unless origin.eql?(''))
       env['omniauth.params'] = sign_in.fetch('params') || {}
       run_hook(:before_callback_phase)
+      return failure_response if failure_dispatched?
+
       callback_phase
     end
 
@@ -306,18 +342,24 @@ module OmniAuth
       {}
     end
 
+    # The response a failure ends with when on_failure returns nothing. A
+    # failure is terminal even then, so the request never falls through to
+    # the app as if it had succeeded.
+    FAILURE_FALLBACK_RESPONSE = [500, {'content-type' => 'text/plain'}, ['OmniAuth authentication failure']].freeze
+    private_constant :FAILURE_FALLBACK_RESPONSE
+
     def fail!(message_key, exception = nil)
-      env['omniauth.error'] = exception
-      env['omniauth.error.type'] = message_key.to_sym
-      env['omniauth.error.strategy'] = self
+      return failure_response if failure_dispatched?
 
-      if exception
-        log :error, "Authentication failure! #{message_key}: #{exception.class}, #{exception.message}"
-      else
-        log :error, "Authentication failure! #{message_key} encountered."
-      end
+      record_failure(message_key, exception)
 
-      OmniAuth.config.on_failure.call(env)
+      # Marked before on_failure runs, so a handler that calls fail! again
+      # gets this failure's response instead of handling the failure again.
+      @failure_dispatched = true
+      @failure_response = FAILURE_FALLBACK_RESPONSE
+      handled = call_failure_handler
+      @failure_response = handled if handled
+      @failure_response
     end
 
     class Options < OmniAuth::KeyStore; end
@@ -409,10 +451,39 @@ module OmniAuth
       uri.encode(Encoding::UTF_8, :invalid => :replace, :undef => :replace)
     end
 
+    # Records a failure without letting the app or a failure handler see an
+    # authentication result a hook wrote before rejecting the request.
+    def record_failure(message_key, exception)
+      env.delete('omniauth.auth')
+      env['omniauth.error'] = exception
+      env['omniauth.error.type'] = message_key.to_sym
+      env['omniauth.error.strategy'] = self
+      log_failure(message_key, exception)
+    end
+
+    def log_failure(message_key, exception)
+      if exception
+        log :error, "Authentication failure! #{message_key}: #{exception.class}, #{exception.message}"
+      else
+        log :error, "Authentication failure! #{message_key} encountered."
+      end
+    end
+
+    # Calls on_failure, noting a raise so the phase dispatcher re-raises it
+    # instead of feeding the handler's own exception back into on_failure.
+    def call_failure_handler
+      OmniAuth.config.on_failure.call(env)
+    rescue StandardError
+      @failure_handler_raised = true
+      raise
+    end
+
     # Re-raises errors from the downstream app; reports anything else
     # raised during a phase as an authentication failure.
     def handle_phase_error(error)
       raise error if env.delete('omniauth.error.app')
+      raise error if @failure_handler_raised
+      return failure_response if failure_dispatched?
 
       fail!(error.message, error)
     end
@@ -424,6 +495,40 @@ module OmniAuth
       return unless hook # not hook&.call: a hook can be set to false
 
       hook.call(env)
+    end
+
+    # True once fail! has handed the request to on_failure. A phase checks
+    # this after each hook, so a hook that calls fail! stops the phase even
+    # though the hook returned normally.
+    def failure_dispatched?
+      @failure_dispatched
+    end
+
+    # The terminal response for a dispatched failure. Never nil, so a phase
+    # that comes back through #call! can't fall through to the app.
+    def failure_response
+      @failure_response || FAILURE_FALLBACK_RESPONSE
+    end
+
+    # A response returned by request_validation_phase is a denial, not a
+    # value to discard: the request phase must not run after it. Only this
+    # hook's return value is treated as a response; the others are
+    # side-effect hooks whose return values are ignored.
+    def rack_response?(value)
+      return true if value.is_a?(Rack::Response)
+
+      value.is_a?(Array) && value.size == 3 &&
+        value[0].is_a?(Integer) && value[1].is_a?(Hash) && value[2].respond_to?(:each)
+    end
+
+    # Makes a denial returned by the validation phase terminal, and removes
+    # any authentication result a hook wrote before rejecting the request.
+    def reject_request(response)
+      env.delete('omniauth.auth')
+      env['omniauth.error.type'] = :authenticity_error
+      env['omniauth.error.strategy'] = self
+      @failure_dispatched = true
+      @failure_response = response.is_a?(Rack::Response) ? response.finish : response
     end
 
     def initialize_copy(*args)
