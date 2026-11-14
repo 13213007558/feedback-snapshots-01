@@ -473,6 +473,90 @@ class ContextTest < Minitest::Test
     assert_equal(345392, @context['magic'])
   end
 
+  def test_proc_results_are_not_written_back_into_definitions
+    definitions = { 'dynamic' => proc { 'Hello' } }
+
+    assert_equal('Hello', Context.new([definitions])['dynamic'])
+    assert_kind_of(Proc, definitions['dynamic'])
+  end
+
+  def test_frozen_definitions_with_proc
+    definitions = { 'dynamic' => proc { 'Hello' } }.freeze
+    context   = Context.new([definitions])
+
+    assert_equal('Hello', context['dynamic'])
+    assert_equal('Hello', context['dynamic'])
+    assert_kind_of(Proc, definitions['dynamic'])
+  end
+
+  def test_proc_is_reevaluated_for_each_context
+    calls       = 0
+    definitions = { 'callcount' => proc { calls += 1 } }
+
+    assert_equal(1, Context.new([definitions])['callcount'])
+    assert_equal(2, Context.new([definitions])['callcount'])
+    assert_equal(2, calls)
+    assert_kind_of(Proc, definitions['callcount'])
+  end
+
+  def test_isolated_subcontext_shares_proc_results_with_parent
+    calls  = 0
+    static = { 'callcount' => proc { calls += 1 } }
+
+    context    = Context.new({}, {}, {}, false, nil, static)
+    subcontext = context.new_isolated_subcontext
+
+    assert_equal(1, subcontext['callcount'])
+    assert_equal(1, context['callcount'])
+    assert_equal(1, calls)
+  end
+
+  def test_reassignment_invalidates_cached_proc_result
+    @context['dynamic'] = proc { 'old' }
+    assert_equal('old', @context['dynamic'])
+
+    @context['dynamic'] = 'new'
+    assert_equal('new', @context['dynamic'])
+  end
+
+  def test_shared_proc_definitions_interleaved_between_two_renders
+    evaluations = []
+    mutex       = Mutex.new
+    entered     = Queue.new
+    release     = Queue.new
+
+    definitions = {
+      'current_user' => lambda do |context|
+        user = context.registers[:user]
+        mutex.synchronize { evaluations << user }
+        entered << user
+        release.pop
+        user
+      end,
+    }
+    template = Template.parse('{{ current_user }} / {{ current_user }}')
+
+    render_as = lambda do |user|
+      context = Context.build(environments: definitions, registers: { user: user })
+      template.render!(context)
+    end
+
+    alice = Thread.new { render_as.call('alice') }
+    bob   = Thread.new { render_as.call('bob') }
+
+    # Both renders are inside their own Proc evaluation at the same time:
+    # results are cached per Context, never written back into the shared
+    # definitions, and renders are not serialized behind a lock.
+    entered.pop
+    entered.pop
+    release << true
+    release << true
+
+    assert_equal(['alice / alice', 'bob / bob'], [alice.value, bob.value].sort)
+    assert_equal(%w[alice bob], evaluations.sort)
+    assert_kind_of(Proc, definitions['current_user'])
+  end
+
   def test_to_liquid_and_context_at_first_level
     @context['category'] = Category.new("foobar")
     assert_kind_of(CategoryDrop, @context['category'])

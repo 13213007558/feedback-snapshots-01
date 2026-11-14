@@ -12,7 +12,26 @@ module Liquid
   #      context['bob'] = 'bobsen'
   #   end
   #
-  #   context['bob']  #=> nil  class Context
+  #   context['bob']  #=> nil
+  #
+  # == Lazy variables (Proc values) and ownership
+  #
+  # A Proc stored in an environment or scope is a lazy variable: it is
+  # evaluated on first access and the result is cached on the evaluating
+  # Context, so repeated reads within one render (including isolated
+  # subcontexts created by the `render` tag) reuse it. The container that
+  # holds the Proc is treated as read-only definitions and is never
+  # mutated, which means:
+  #
+  # * the same definitions Hash can be shared across requests/renders;
+  #   each render gets its own Context and therefore its own results
+  # * definitions may be frozen
+  # * a new Context (e.g. retrying after an exception) re-evaluates Procs;
+  #   reusing the same Context reuses its cached results
+  #
+  # Share definitions, not results. If you share definitions across
+  # threads, the Procs themselves must be thread-safe: each render may
+  # evaluate them concurrently, and Liquid never serializes renders.
   class Context
     attr_reader :scopes, :errors, :registers, :environments, :resource_limits, :static_registers, :static_environments
     attr_accessor :exception_renderer, :template_name, :partial, :global_filter, :strict_variables, :strict_filters, :environment
@@ -39,6 +58,13 @@ module Liquid
       @filters             = []
       @global_filter       = nil
       @disabled_tags       = {}
+
+      # Results of Proc values used as lazy variables, keyed by the identity
+      # of the container they were found in, then by the variable key.
+      # Results belong to this Context and are never written back into the
+      # container, so variable definitions shared across renders (or frozen
+      # by the caller) are never mutated by evaluation.
+      @evaluated_procs = {}.compare_by_identity
 
       # Instead of constructing new StringScanner objects for each Expression parse,
       # we recycle the same one.
@@ -117,6 +143,9 @@ module Liquid
 
     # Merge a hash of variables in the current local scope
     def merge(new_scopes)
+      if (cache = @evaluated_procs[@scopes[0]])
+        new_scopes.each_key { |key| cache.delete(key) }
+      end
       @scopes[0].merge!(new_scopes)
     end
 
@@ -159,16 +188,21 @@ module Liquid
         subcontext.errors   = errors
         subcontext.warnings = warnings
         subcontext.disabled_tags = @disabled_tags
+        # Isolated subcontexts belong to the same render, so they share this
+        # context's lazy variable results instead of re-evaluating them.
+        subcontext.evaluated_procs = @evaluated_procs
       end
     end
 
     def clear_instance_assigns
+      @evaluated_procs.delete(@scopes[0])
       @scopes[0] = {}
     end
 
     # Only allow String, Numeric, Hash, Array, Proc, Boolean or <tt>Liquid::Drop</tt>
     def []=(key, value)
       @scopes[0][key] = value
+      @evaluated_procs[@scopes[0]]&.delete(key)
     end
 
     # Look up variable, either resolve directly after considering the name. We can directly handle
@@ -237,11 +271,17 @@ module Liquid
       end
 
       value = obj[key]
+      return value unless value.is_a?(Proc)
 
-      if value.is_a?(Proc) && obj.respond_to?(:[]=)
-        obj[key] = value.arity == 0 ? value.call : value.call(self)
+      # A Proc value is a lazy variable owned by the caller's container.
+      # Evaluate it at most once per Context and cache the result here;
+      # the container itself is treated as read-only so it can be shared
+      # across renders (and may be frozen).
+      cache = (@evaluated_procs[obj] ||= {})
+      if cache.key?(key)
+        cache[key]
       else
-        value
+        cache[key] = value.arity == 0 ? value.call : value.call(self)
       end
     end
 
@@ -262,7 +302,7 @@ module Liquid
 
     protected
 
-    attr_writer :base_scope_depth, :warnings, :errors, :strainer, :filters, :disabled_tags
+    attr_writer :base_scope_depth, :warnings, :errors, :strainer, :filters, :disabled_tags, :evaluated_procs
 
     private
 

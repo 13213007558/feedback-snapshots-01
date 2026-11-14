@@ -79,19 +79,21 @@ class TemplateTest < Minitest::Test
     assert_equal('from persistent assigns', t.parse("{{ foo }}").render!)
   end
 
-  def test_lambda_is_called_once_from_persistent_assigns_over_multiple_parses_and_renders
+  def test_lambda_is_called_once_per_render_from_persistent_assigns
     t = Template.new
     t.assigns['number'] = -> {
       @global ||= 0
       @global  += 1
     }
     assert_equal('1', t.parse("{{number}}").render!)
-    assert_equal('1', t.parse("{{number}}").render!)
-    assert_equal('1', t.render!)
+    assert_equal('2', t.parse("{{number}}").render!)
+    assert_equal('3', t.render!)
+    # renders must not replace the definition with a previous result
+    assert_instance_of(Proc, t.assigns['number'])
     @global = nil
   end
 
-  def test_lambda_is_called_once_from_custom_assigns_over_multiple_parses_and_renders
+  def test_lambda_is_called_once_per_render_from_custom_assigns
     t = Template.new
     assigns = {
       'number' => -> {
@@ -100,8 +102,10 @@ class TemplateTest < Minitest::Test
       },
     }
     assert_equal('1', t.parse("{{number}}").render!(assigns))
-    assert_equal('1', t.parse("{{number}}").render!(assigns))
-    assert_equal('1', t.render!(assigns))
+    assert_equal('2', t.parse("{{number}}").render!(assigns))
+    assert_equal('3', t.render!(assigns))
+    # shared assigns stay reusable definitions, not first-render results
+    assert_instance_of(Proc, assigns['number'])
     @global = nil
   end
 

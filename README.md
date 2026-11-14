@@ -93,6 +93,45 @@ LIQUID
 
 By using Environments, you ensure that custom tags and filters are only available in the contexts where they are needed, making your Liquid templates more robust and easier to manage. For smaller projects, a global environment is available via `Liquid::Environment.default`.
 
+### Lazy variables and sharing definitions across renders
+
+A `Proc` used as a variable value is a lazy variable: it is evaluated on first
+access, and a `Proc` with one parameter receives the current `Liquid::Context`.
+
+Evaluation results belong to the rendering `Context`, never to the hash that
+holds the `Proc`. Liquid caches the result on the context for the rest of that
+render (isolated subcontexts created by `{% render %}` share the same cache)
+and treats your hash as read-only definitions. This means:
+
+* **Share definitions, not results.** The same assigns/environment hash —
+  including nested hashes and arrays — can be reused across requests and
+  renders. Each render builds its own `Context`, so each request evaluates
+  the `Proc` again and can never observe another request's cached value.
+* **Definitions may be frozen.** Results are never written back into the
+  hash, so `Hash#freeze` is a supported way to guard shared definitions.
+* **Retries re-evaluate.** A new `Context` (for example when retrying after
+  an exception) re-evaluates lazy variables; reusing the same `Context`
+  object reuses its cached results.
+* **No global locking.** Liquid never serializes renders or copies the
+  variable graph. If you share definitions across threads, each render may
+  evaluate the same `Proc` concurrently — the `Proc` itself must be
+  thread-safe.
+
+```ruby
+definitions = {
+  'cart_count' => ->(context) { Cart.for(context.registers[:user_id]).item_count },
+}.freeze
+
+# Safe to reuse across requests and threads; each render sees its own count.
+Liquid::Template.parse("items in cart: {{ cart_count }}").render(
+  definitions, registers: { user_id: 42 },
+)
+```
+
+If you mutate a hash directly while a render is reading it, invalidate by
+assigning through the context (`context['key'] = value`) instead — cached
+results are dropped when a variable is reassigned through the context.
+
 ### Error Modes
 
 Setting the error mode of Liquid lets you specify how strictly you want your templates to be interpreted.

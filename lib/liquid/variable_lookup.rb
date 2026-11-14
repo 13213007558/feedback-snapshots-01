@@ -60,7 +60,8 @@ module Liquid
             ((object.respond_to?(:key?) && object.key?(key)) ||
              (object.respond_to?(:fetch) && key.is_a?(Integer)))
 
-          # if its a proc we will replace the entry with the proc
+          # a proc value is a lazy variable: it is evaluated once per
+          # Context and cached there, never written back into the object
           res    = context.lookup_and_evaluate(object, key)
           object = res.to_liquid
 
