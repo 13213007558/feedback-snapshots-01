@@ -1,0 +1,5 @@
+{%- assign heading = product.title -%}
+<article class="card" data-shop="{{ shop.name }}">
+  <h2>{{ heading }}</h2>
+  {% if badge %}<span class="badge">{{ badge }}</span>{% endif %}
+</article>

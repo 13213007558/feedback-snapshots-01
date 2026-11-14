@@ -1,0 +1,5 @@
+<ul class="line-items">
+{%- for item in entries %}
+  <li>{{ forloop.index }}. {{ item.title }} × {{ item.quantity }}</li>
+{%- endfor %}
+</ul>

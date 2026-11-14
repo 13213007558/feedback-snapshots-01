@@ -1,0 +1,10 @@
+{%- assign heading = 'Catalog' -%}
+<section>
+  <h1>{{ heading }}</h1>
+
+  {% include 'product_card' with featured_product as product, badge: badge %}
+
+  {% include 'line_items' %}
+
+  {% include 'secret_probe' %}
+</section>

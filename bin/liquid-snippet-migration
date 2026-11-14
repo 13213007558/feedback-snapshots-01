@@ -1,0 +1,84 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'json'
+require 'optparse'
+require 'bundler/setup'
+require 'liquid'
+require 'liquid/snippet_migration'
+
+options = {
+  templates: [],
+  snippets: [],
+  caller_binding: [],
+  global: [],
+  private: [],
+  format: 'json',
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = 'Usage: bin/liquid-snippet-migration --template FILE --snippets DIR [options]'
+  opts.on('--template FILE', 'Template containing include calls (repeatable)') { |v| options[:templates] << v }
+  opts.on('--snippets DIR', 'Snippet root directory (repeatable)') { |v| options[:snippets] << v }
+  opts.on('--caller-binding NAME', 'Name the caller can pass explicitly (repeatable)') do |v|
+    options[:caller_binding] << v
+  end
+  opts.on('--global NAME', 'Global/static data still visible inside render (repeatable)') do |v|
+    options[:global] << v
+  end
+  opts.on('--private NAME', 'Private parent-local name never suggested as an argument') do |v|
+    options[:private] << v
+  end
+  opts.on('--format FORMAT', %w(json text), 'Output format: json or text') { |v| options[:format] = v }
+  opts.on('-h', '--help') do
+    puts opts
+    exit
+  end
+end
+
+begin
+  parser.parse!(ARGV)
+rescue OptionParser::ParseError => e
+  warn e.message
+  warn parser
+  exit 2
+end
+
+if options[:templates].empty? || options[:snippets].empty?
+  warn parser
+  exit 2
+end
+
+templates = options[:templates].each_with_object({}) do |path, out|
+  out[path] = File.read(path)
+end
+
+report = Liquid::SnippetMigration.analyze(
+  templates: templates,
+  snippets: options[:snippets],
+  caller_bindings: options[:caller_binding],
+  globals: options[:global],
+  private_names: options[:private],
+)
+
+case options[:format]
+when 'json'
+  puts JSON.pretty_generate(report.to_h)
+else
+  data = report.to_h
+  visible_globals = data['isolation']['global_data_still_visible'].map { |global| global['name'] }
+  puts "Isolation: render hides parent locals; globals still visible: #{visible_globals.join(', ')}"
+  data['calls'].each do |call|
+    puts "\n#{call['caller_template']}:#{call['line']} include #{call['snippet']} => #{call['status']}"
+    call['caller_can_provide'].each do |value|
+      puts "  pass #{value['name']}: #{value['expression']} (#{value['resolution']})"
+    end
+    puts "  suggested: #{call['suggested_render']}" if call['suggested_render']
+  end
+  unless data['manual_review'].empty?
+    puts "\nManual review:"
+    data['manual_review'].each do |finding|
+      puts "  #{finding['template']}:#{finding['line']} #{finding['detail']}"
+    end
+  end
+end
