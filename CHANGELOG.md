@@ -9,7 +9,7 @@ All notable changes to this project will be documented in this file. For info on
 - Define `rack.response_finished` callback arguments more strictly. ([#2365](https://github.com/rack/rack/pull/2365), [@skipkayhil](https://github.com/skipkayhil))
 
 ### Added
-
+- Add opt-in `Rack::Assembly` static verification to `Rack::Builder`, checking per `map` branch that request-phase facts required by middleware or an endpoint are provided earlier on the same branch.
 - Add `Rack::Files#assign_headers` to allow overriding how the configured file headers are set. ([#2377](https://github.com/rack/rack/pull/2377), [@codergeek121](https://github.com/codergeek121))
 - Add support for `rack.response_finished` to `Rack::TempfileReaper`. ([#2363](https://github.com/rack/rack/pull/2363), [@skipkayhil](https://github.com/skipkayhil))
 - Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))

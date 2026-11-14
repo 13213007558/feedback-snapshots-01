@@ -18,6 +18,7 @@ module Rack
   autoload :BadRequest, "rack/bad_request"
   autoload :BodyProxy, "rack/body_proxy"
   autoload :Builder, "rack/builder"
+  autoload :Assembly, "rack/assembly"
   autoload :Cascade, "rack/cascade"
   autoload :CommonLogger, "rack/common_logger"
   autoload :ConditionalGet, "rack/conditional_get"
