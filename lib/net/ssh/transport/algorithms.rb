@@ -4,6 +4,7 @@ require 'net/ssh/loggable'
 require 'net/ssh/transport/cipher_factory'
 require 'net/ssh/transport/constants'
 require 'net/ssh/transport/hmac'
+require 'net/ssh/transport/algorithm_policy'
 require 'net/ssh/transport/kex'
 require 'net/ssh/transport/kex/curve25519_sha256_loader'
 require 'net/ssh/transport/server_version'
@@ -165,6 +166,9 @@ module Net
         # The session-id for this session, as decided during the initial key exchange.
         attr_reader :session_id
 
+        # The strict negotiation policy in effect for this session, or nil.
+        attr_reader :algorithm_policy
+
         # Returns true if the given packet can be processed during a key-exchange.
         def self.allowed_packet?(packet)
           (1..4).include?(packet.type) ||
@@ -321,6 +325,43 @@ module Net
             end
             algorithms[:host_key] = host_keys
           end
+
+          apply_algorithm_policy!
+        end
+
+        # Applies the optional strict negotiation policy (see
+        # Transport::AlgorithmPolicy) to the composed preference lists. This
+        # runs after all compatibility options (such as
+        # :append_all_supported_algorithms or '+algo' additions) have been
+        # merged, so a strict policy can never be weakened by them. The
+        # resulting lists are used for both the initial key exchange and any
+        # later rekey, since this object is reused for both.
+        def apply_algorithm_policy!
+          definition = options[:algorithm_policy]
+          @algorithm_policy = definition.nil? || definition.is_a?(AlgorithmPolicy) ? definition : AlgorithmPolicy.new(definition)
+          return unless @algorithm_policy
+
+          %i[kex host_key encryption hmac].each do |category|
+            next unless @algorithm_policy.restricted?(category)
+
+            original = algorithms[category]
+            filtered = @algorithm_policy.filter(category, original)
+            if filtered.empty?
+              raise Net::SSH::Exception,
+                    "algorithm policy leaves no #{category} algorithm to offer " \
+                    "(policy allows #{@algorithm_policy.allowed(category).join(',')}; " \
+                    "configured list was #{original.join(',')})"
+            end
+
+            removed = original - filtered
+            unless removed.empty?
+              info { "algorithm policy: #{category} restricted to #{filtered.join(',')} (removed #{removed.join(',')})" }
+            end
+            algorithms[category] = filtered
+          end
+
+          algorithms[:encryption_client ] = algorithms[:encryption_server ] = algorithms[:encryption]
+          algorithms[:hmac_client       ] = algorithms[:hmac_server       ] = algorithms[:hmac]
         end
 
         # Composes the list of algorithms by taking supported algorithms and matching with supplied options.
@@ -458,6 +499,8 @@ module Net
           @language_client    = negotiate(:language_client) rescue ""
           @language_server    = negotiate(:language_server) rescue ""
 
+          enforce_algorithm_policy!
+
           debug do
             "negotiated:\n" +
               %i[kex host_key encryption_server encryption_client hmac_client hmac_server
@@ -480,6 +523,31 @@ module Net
           end
 
           return match
+        end
+
+        # Validates the negotiated algorithm set against the strict policy,
+        # if one is configured. This runs after both KEXINIT packets have been
+        # exchanged but before the key exchange completes and before any
+        # authentication data is sent, so a policy violation aborts the
+        # session without exposing credentials. Only algorithm names and rule
+        # explanations are logged or raised, never key material.
+        def enforce_algorithm_policy!
+          return unless @algorithm_policy
+
+          accepted, explanation = @algorithm_policy.evaluate(
+            kex: @kex,
+            host_key: @host_key,
+            encryption_client: @encryption_client,
+            encryption_server: @encryption_server,
+            hmac_client: @hmac_client,
+            hmac_server: @hmac_server
+          )
+
+          if accepted
+            info { "algorithm policy: #{explanation}" }
+          else
+            raise Net::SSH::Exception, "algorithm policy #{explanation}"
+          end
         end
 
         # Considers the sizes of the keys and block-sizes for the selected ciphers,

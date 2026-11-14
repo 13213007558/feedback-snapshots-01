@@ -44,6 +44,7 @@ lib/net/ssh/test/remote_packet.rb
 lib/net/ssh/test/script.rb
 lib/net/ssh/test/socket.rb
 lib/net/ssh/transport/algorithms.rb
+lib/net/ssh/transport/algorithm_policy.rb
 lib/net/ssh/transport/cipher_factory.rb
 lib/net/ssh/transport/constants.rb
 lib/net/ssh/transport/ctr.rb
@@ -123,6 +124,7 @@ test/transport/kex/test_ecdh_sha2_nistp256.rb
 test/transport/kex/test_ecdh_sha2_nistp384.rb
 test/transport/kex/test_ecdh_sha2_nistp521.rb
 test/transport/test_algorithms.rb
+test/transport/test_algorithm_policy.rb
 test/transport/test_cipher_factory.rb
 test/transport/test_hmac.rb
 test/transport/test_identity_cipher.rb

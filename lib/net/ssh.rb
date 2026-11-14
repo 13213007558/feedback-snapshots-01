@@ -71,7 +71,7 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       prompt_without_tty agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms no_delay
-      control_master control_path preopen_channels
+      control_master control_path preopen_channels algorithm_policy
     ]
 
     class << self
@@ -303,6 +303,15 @@ module Net
     #   algorithms by net-ssh, except the +none+ cipher and MAC, which must be
     #   named explicitly (e.g. encryption: '+none'). Was the default behaviour
     #   until 2.10
+    # * :algorithm_policy => an optional strict negotiation policy (a Hash, see
+    #   Net::SSH::Transport::AlgorithmPolicy) that constrains which combinations
+    #   of kex, host key, encryption and MAC algorithms may be negotiated. It
+    #   is applied after the :kex/:host_key/:encryption/:hmac lists (including
+    #   values from ssh_config) have been composed, so compatibility options
+    #   like :append_all_supported_algorithms cannot re-add algorithms the
+    #   policy forbids. The same policy governs the initial key exchange and
+    #   every rekey, and a session that cannot satisfy it fails before any
+    #   authentication data is sent.
     # * :number_of_password_prompts => Number of prompts for the password
     #   authentication method defaults to 3 set to 0 to disable prompt for
     #   password auth method
