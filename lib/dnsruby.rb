@@ -240,3 +240,4 @@ end
 require 'dnsruby/dnssec'
 require 'dnsruby/zone_reader'
 require 'dnsruby/resolv'
+require 'dnsruby/caa_checker'
