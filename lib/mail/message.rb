@@ -1558,6 +1558,76 @@ module Mail
       @delivery_status_part
     end
 
+    # Structured RFC 3464 representation of the delivery-status part, or nil
+    # when this message is not a delivery-status report.  Parsing succeeds or
+    # fails independently of whether the report can be trusted: the returned
+    # object always starts untrusted (see #delivery_status_trusted?).
+    def delivery_status
+      return nil unless delivery_status_part
+
+      @delivery_status ||=
+        delivery_status_part.delivery_status(
+          mime_part_index: parts.index(delivery_status_part)
+        )
+    end
+
+    # Per-recipient delivery results in the order they appear in the DSN.
+    # Each entry is a Mail::DeliveryStatus::Recipient exposing its status,
+    # action, diagnostic code and the exact evidence location inside the
+    # original message.
+    def delivery_status_recipients
+      delivery_status ? delivery_status.recipients : []
+    end
+
+    # Recipient blocks whose Action is "failed".  Use this instead of the
+    # message-level #bounced? when deciding which addresses to suppress, so a
+    # partial-failure report does not penalize recipients that actually
+    # succeeded.
+    def failed_delivery_recipients
+      delivery_status ? delivery_status.failed_recipients : []
+    end
+
+    # DSNs are ordinary mail and can be forged (RFC 3464 section 4.1).  This
+    # flag is therefore separate from parse success and always starts false.
+    # Only callers that have independently authenticated the source (via the
+    # receiving MTA, SPF/DKIM/DMARC or a trusted Reporting-MTA allowlist)
+    # should call #mark_delivery_status_trusted!.
+    def delivery_status_trusted?
+      !!(delivery_status && delivery_status.trusted?)
+    end
+
+    def delivery_status_untrusted?
+      !delivery_status_trusted?
+    end
+
+    def mark_delivery_status_trusted!
+      delivery_status && delivery_status.trust!
+      self
+    end
+
+    # The original message that the report bounced, nested as a
+    # message/rfc822 or text/rfc822-headers part, or nil when absent.  The
+    # nested content is never parsed as part of the DSN itself.
+    def returned_message_part
+      return nil unless delivery_status_report?
+
+      parts.detect do |part|
+        part.mime_type == 'message/rfc822' ||
+          part.mime_type == 'text/rfc822-headers'
+      end
+    end
+
+    # The nested original message parsed into a Mail::Message, or nil when the
+    # report did not return any content.  Parsing is performed lazily and kept
+    # separate from the delivery-status data so fields inside the returned
+    # message can never be mistaken for per-recipient DSN fields.
+    def returned_message
+      part = returned_message_part
+      return nil unless part
+
+      @returned_message ||= Mail.new(part.body.raw_source.to_s)
+    end
+
     def bounced?
       delivery_status_part and delivery_status_part.bounced?
     end

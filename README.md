@@ -562,6 +562,65 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+### Reading Per-Recipient Delivery Status (RFC 3464)
+
+A single bounce can cover several recipients, and a human-readable body may
+claim that delivery failed for all of them even when the machine-readable
+report only fails some of them. Use the structured per-recipient API instead
+of the message-level predicates when you act on individual addresses:
+
+```ruby
+report = Mail.read('/path/to/partial_failure_bounce.eml')
+
+report.delivery_status_recipients.each do |recipient|
+  recipient.final_recipient_address #=> "bounced-user@example.org"
+  recipient.action                  #=> "failed", "delayed" or "delivered"
+  recipient.status                  #=> "5.1.1"
+  recipient.diagnostic_code         #=> "smtp; 550 5.1.1 ..."
+  recipient.failed?                 #=> true only for the failed block
+  recipient.retryable?              #=> true for 4xx, false for 5xx
+
+  # Pointer back to the exact bytes in the original message.
+  evidence = recipient.evidence
+  evidence.mime_part_index          #=> 1 (the message/delivery-status part)
+  evidence.line_number              #=> first line of this recipient's block
+  evidence.byte_offset              #=> byte offset inside that part's body
+  evidence.raw_text                 #=> the original, unparsed block
+end
+
+report.failed_delivery_recipients.map(&:final_recipient_address)
+#=> ["bounced-user@example.org"]  -- the other recipients are untouched
+```
+
+Only a part whose media type is `message/delivery-status` is parsed; ordinary
+`text/plain` prose that merely contains the word `Status:` can never
+impersonate a delivery-status part. The nested original message is available
+separately through `report.returned_message` and is never mixed into the DSN
+fields.
+
+#### Trust Is Independent of Parsing
+
+Parsing successfully only proves the report is *syntactically* valid. DSNs are
+ordinary mail and can be forged (RFC 3464 section 4.1), so a report always
+starts untrusted regardless of how well it parses:
+
+```ruby
+report.delivery_status_trusted?   #=> false
+report.delivery_status            #=> parsed Mail::DeliveryStatus anyway
+
+# After independently authenticating the source (SPF/DKIM/DMARC, the
+# receiving MTA or a trusted Reporting-MTA allowlist):
+report.mark_delivery_status_trusted!
+
+# Suppress addresses only from a trusted report, and only the failed ones.
+if report.delivery_status_trusted?
+  addresses = report.failed_delivery_recipients.map(&:final_recipient_address)
+end
+```
+
+This keeps a forged or partial bounce from getting the other recipients
+blocked automatically.
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try

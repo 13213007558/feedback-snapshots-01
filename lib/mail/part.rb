@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 require 'mail/constants'
 require 'mail/utilities'
+require 'mail/delivery_status'
 
 module Mail
   class Part < Message
@@ -43,12 +44,43 @@ module Mail
       # Override so we don't add Date, MIME-Version, or Message-ID.
     end
 
+    # Only a part whose declared media type is exactly message/delivery-status
+    # may be treated as a DSN.  A text/plain body that merely mentions
+    # "Status:" can never satisfy this check, so human-readable bounce prose
+    # cannot impersonate a machine-readable delivery-status part.  The body
+    # must additionally contain at least one RFC 3464 field; reports that omit
+    # the usual Status field but still carry Final-Recipient/Action remain
+    # readable, while free-form prose under the media type does not qualify.
     def delivery_status_report_part?
-      (main_type =~ /message/i && sub_type =~ /delivery-status/i) && body =~ /Status:/
+      main_type.to_s =~ /\Amessage\z/i &&
+        sub_type.to_s =~ /\Adelivery-status\z/i &&
+        body.to_s =~ /^[\x21-\x39\x3b-\x7e]+[ \t]*:/
     end
 
     def delivery_status_data
       delivery_status_report_part? ? parse_delivery_status_report : {}
+    end
+
+    # Structured, per-recipient view of the message/delivery-status body as
+    # defined by RFC 3464.  Returns nil when this part is not a
+    # delivery-status part.  The returned Mail::DeliveryStatus is never
+    # trusted on its own: see Mail::DeliveryStatus#trusted? and
+    # Mail::Message#mark_delivery_status_trusted!.
+    def delivery_status(mime_part_index: nil)
+      @delivery_status ||=
+        if delivery_status_report_part?
+          Mail::DeliveryStatus.parse(
+            body.raw_source.to_s,
+            mime_part_index: mime_part_index,
+            charset: delivery_status_charset
+          )
+        end
+    end
+
+    # Each recipient block as a Mail::DeliveryStatus::Recipient, preserving
+    # the order and every field found in the report.
+    def delivery_status_recipients
+      delivery_status ? delivery_status.recipients : []
     end
 
     def bounced?
@@ -59,6 +91,12 @@ module Mail
       end
     end
 
+    # True when at least one recipient block reports a failed action.  Unlike
+    # +bounced?+ this inspects every recipient block instead of only the first
+    # one, which matters for partial-failure reports.
+    def any_recipient_failed?
+      delivery_status_recipients.any?(&:failed?)
+    end
 
     # Either returns the action if the message has just a single report, or an
     # array of all the actions, one for each report
@@ -83,19 +121,26 @@ module Mail
     end
 
     def retryable?
-      !(error_status =~ /^5/)
+      values = Array(error_status).compact
+      return false if values.empty?
+
+      values.none? { |status| status =~ /\A\s*5/ }
     end
 
     private
 
+    def delivery_status_charset
+      parameters = content_type_parameters rescue nil
+      parameters && parameters['charset']
+    end
+
     def get_return_values(key)
-      if delivery_status_data[key].is_a?(Array)
-        delivery_status_data[key].map { |a| a.value }
-      elsif !delivery_status_data[key].nil?
-        delivery_status_data[key].value
-      else
-        nil
+      values = delivery_status_recipients.flat_map do |recipient|
+        recipient.fields.select { |name, _| name == key }.map { |_, value| value }
       end
+      return nil if values.empty?
+
+      values.length == 1 ? values.first : values
     end
 
     # A part may not have a header.... so, just init a body if no header
