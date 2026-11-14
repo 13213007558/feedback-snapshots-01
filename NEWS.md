@@ -1,5 +1,19 @@
 # NEWS
 
+## Unreleased
+
+### Improvements
+
+* Add the SCRAM-SHA-256 SASL mechanism (`authtype: :scram_sha_256`) and its
+  channel-binding SCRAM-SHA-256-PLUS variants, which bind the client proof
+  to the live TLS connection:
+  `:scram_sha_256_tls_exporter` (TLS 1.3+, RFC 9266),
+  `:scram_sha_256_tls_unique` (TLS 1.2 with extended master secret, RFC 5929),
+  and `:scram_sha_256_tls_server_end_point` (RFC 5929).
+  Binding conditions are enforced strictly: unsupported combinations raise
+  instead of silently downgrading to the non-PLUS mechanism, and success is
+  reported only after the server's SCRAM proof is verified.
+
 ## Version 0.5.0 (2024-03-27)
 
 ### Improvements

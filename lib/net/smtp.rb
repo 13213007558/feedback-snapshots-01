@@ -71,6 +71,14 @@ module Net
     include SMTPError
   end
 
+  # A local SCRAM SASL exchange failed before the server could accept it
+  # (for example, a malformed challenge, an unacceptable iteration count,
+  # a nonce that was not extended, or a channel binding that could not be
+  # established for a +SCRAM-*-PLUS+ mechanism).  The message never
+  # contains the password or any derived key material.
+  class SCRAMError < ProtocolError
+  end
+
   #
   # == What is This Library?
   #
@@ -171,8 +179,9 @@ module Net
   #
   # The Net::SMTP class supports the \SMTP extension for SASL Authentication
   # [RFC4954[https://www.rfc-editor.org/rfc/rfc4954.html]] and the following
-  # SASL mechanisms: +PLAIN+, +LOGIN+ _(deprecated)_, and +CRAM-MD5+
-  # _(deprecated)_.
+  # SASL mechanisms: +PLAIN+, +LOGIN+ _(deprecated)_, +CRAM-MD5+
+  # _(deprecated)_, +SCRAM-SHA-256+, and the channel-binding
+  # +SCRAM-SHA-256-PLUS+ variants.
   #
   # To use \SMTP authentication, pass extra arguments to
   # SMTP.start or SMTP#start.
@@ -181,11 +190,43 @@ module Net
   #     Net::SMTP.start('your.smtp.server', 25,
   #                     user: 'Your Account', secret: 'Your Password', authtype: :plain)
   #
-  # Support for other SASL mechanisms-such as +EXTERNAL+, +OAUTHBEARER+,
-  # +SCRAM-SHA-256+, and +XOAUTH2+-will be added in a future release.
+  #     # SCRAM-SHA-256 (mutual authentication, no channel binding)
+  #     Net::SMTP.start('your.smtp.server', 587,
+  #                     user: 'Your Account', secret: 'Your Password',
+  #                     authtype: :scram_sha_256)
   #
   # The +LOGIN+ and +CRAM-MD5+ mechanisms are still available for backwards
   # compatibility, but are deprecated and should be avoided.
+  #
+  # === SCRAM Channel Binding (+SCRAM-SHA-256-PLUS+)
+  #
+  # The +SCRAM-SHA-256-PLUS+ mechanisms bind the authentication exchange to
+  # the actual TLS connection, so a proof computed for one connection cannot
+  # be replayed on another.  The binding material is always derived from this
+  # client's live TLS connection; it is never taken from a server supplied
+  # value.  Each mechanism has fixed channel-binding and TLS version
+  # requirements, and authentication fails rather than silently downgrading
+  # to the non-PLUS mechanism when they are not met:
+  #
+  # +tls-exporter+ (authtype +:scram_sha_256_tls_exporter+)::
+  #   TLS 1.3 or later only; uses Exported Keying Material
+  #   (RFC9266[https://www.rfc-editor.org/rfc/rfc9266.html]).
+  #
+  # +tls-unique+ (authtype +:scram_sha_256_tls_unique+)::
+  #   TLS 1.2 or earlier only, and requires the extended master secret
+  #   extension (RFC5929[https://www.rfc-editor.org/rfc/rfc5929.html],
+  #   RFC7627[https://www.rfc-editor.org/rfc/rfc7627.html]).
+  #
+  # +tls-server-end-point+
+  #   (authtype +:scram_sha_256_tls_server_end_point+)::
+  #   Hashes the server certificate as presented in the TLS handshake;
+  #   available on any TLS version
+  #   (RFC5929[https://www.rfc-editor.org/rfc/rfc5929.html]).
+  #
+  # Because these mechanisms require TLS, call them on a connection
+  # established with SMTPS (Net::SMTP.new +tls: true+) or STARTTLS.  The
+  # client reports success only after it has independently verified the
+  # server's SCRAM proof.
   #
   class SMTP < Protocol
     VERSION = "0.5.2"
@@ -706,6 +747,95 @@ module Net
       s
     ensure
       s.close unless verified
+    end
+
+    # The OpenSSL::SSL::SSLSocket of the current, established TLS connection,
+    # or nil if the session is not protected by TLS.  This always refers to
+    # the connection that actually carries the SMTP traffic, so the channel
+    # binding derived from it cannot be supplied (or tampered with) by the
+    # peer.
+    def tls_socket
+      io = @socket&.io
+      io if io.is_a?(OpenSSL::SSL::SSLSocket)
+    end
+
+    # Negotiated TLS version as a comparable symbol: :TLS1_3 (and later),
+    # :TLS1_2, or nil when the connection is not TLS protected.
+    def tls_version
+      socket = tls_socket or return nil
+      case socket.ssl_version
+      when "TLSv1.3", "TLSv1.4" then :TLS1_3
+      when "TLSv1.2" then :TLS1_2
+      else
+        # Older protocol versions (TLS 1.0/1.1 and earlier) are treated the
+        # same as 1.2 for channel binding purposes.
+        :TLS1_2
+      end
+    end
+
+    # Whether the TLS 1.2 (or earlier) handshake derived an extended master
+    # secret (RFC 7627).  tls-unique is only a safe unique channel binding
+    # when the master secret is unique.
+    def tls_extended_master_secret?
+      tls_socket&.session&.to_text&.include?("Extended master secret: yes")
+    end
+
+    public
+
+    # Channel binding data for the requested type, taken from the live TLS
+    # connection.  Raises Net::SCRAMError instead of silently substituting
+    # different material (or downgrading to a non-PLUS mechanism) when the
+    # binding is unavailable or unsafe for the negotiated connection.
+    def tls_channel_binding_data(type)
+      socket = tls_socket
+      raise SCRAMError,
+            "SCRAM channel binding requires a TLS connection" unless socket
+      case type
+      when 'tls-exporter'
+        unless tls_version == :TLS1_3
+          raise SCRAMError,
+                "tls-exporter channel binding requires TLS 1.3 or later"
+        end
+        socket.export_keying_material('EXPORTER-Channel-Binding', 32, '')
+      when 'tls-unique'
+        unless tls_version == :TLS1_2
+          raise SCRAMError,
+                "tls-unique channel binding is not defined for TLS 1.3 or later"
+        end
+        unless tls_extended_master_secret?
+          raise SCRAMError,
+                "tls-unique channel binding requires the extended master secret extension"
+        end
+        data = socket.finished_message
+        raise SCRAMError,
+              "tls-unique channel binding data is unavailable" if data.nil? || data.empty?
+        data
+      when 'tls-server-end-point'
+        cert = socket.peer_cert
+        raise SCRAMError,
+              "tls-server-end-point channel binding requires a server certificate" unless cert
+        OpenSSL::Digest.new(tls_server_end_point_hash(cert)).digest(cert.to_der)
+      else
+        raise SCRAMError,
+              "unsupported SCRAM channel binding type: #{type}"
+      end
+    end
+
+    private
+
+    # Selects the digest for tls-server-end-point per RFC 5929 section 4.1:
+    # certificate signatures based on MD5 or SHA-1 are replaced by SHA-256;
+    # otherwise the hash named by the certificate's signatureAlgorithm is
+    # used.
+    def tls_server_end_point_hash(cert)
+      algorithm = cert.signature_algorithm.downcase
+      return 'SHA256' if algorithm.start_with?('md5', 'md2', 'sha1')
+      if (match = algorithm.match(/\A(sha(?:224|256|384|512))/))
+        match[1].upcase
+      else
+        raise SCRAMError,
+              "tls-server-end-point channel binding is undefined for #{cert.signature_algorithm}"
+      end
     end
 
     def new_internet_message_io(s)
