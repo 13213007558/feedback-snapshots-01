@@ -86,6 +86,39 @@ end
 
 I strongly recommend this scheme.  This form is simpler and more robust.
 
+### Delivering Messages via LMTP
+
+Local mail delivery agents often speak LMTP, the Local Mail Transfer
+Protocol ([RFC 2033](https://www.rfc-editor.org/rfc/rfc2033.html)), instead
+of SMTP.  LMTP support is separate and explicitly enabled: require
+`net/lmtp` and use `Net::LMTP` (a `Net::SMTP` subclass).  `Net::SMTP`
+itself is unaffected.
+
+Unlike SMTP, an LMTP server sends one reply per accepted recipient after
+the end of `DATA`, so `send_message` returns a `Net::LMTP::Delivery` with
+the per-recipient results instead of raising on individual failures:
+
+```ruby
+require 'net/lmtp'
+
+Net::LMTP.start('localhost', 24) do |lmtp|
+  delivery = lmtp.send_message msgstr,
+                               'from@example.com',
+                               ['user1@example.com', 'user2@example.com']
+  delivery.each do |recipient|
+    if recipient.delivered?
+      puts "#{recipient.address}: delivered"
+    else
+      puts "#{recipient.address}: failed"
+    end
+  end
+end
+```
+
+A recipient is only reported as delivered when its own final reply is a
+2xx reply; recipients rejected at `RCPT TO` or never confirmed by the
+server are never reported as delivered.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
