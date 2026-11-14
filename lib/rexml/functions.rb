@@ -14,6 +14,7 @@ module REXML
     def initialize
       @context = nil
       @node_indexes = nil
+      @budget = nil
     end
 
     AVAILABLE_FUNCTIONS = %w[
@@ -54,6 +55,18 @@ module REXML
     # through XPathParser; sort then caches for one call only.
     def node_indexes=(value); @node_indexes = value; end
 
+    # The work budget of the evaluation using this instance, or nil.  Set by
+    # XPathParser so that functions that walk descendants or sort node sets
+    # contribute to the same budget as the query itself.
+    def budget=(value); @budget = value; end
+
+    def budget; @budget; end
+
+    def charge(units = 1)
+      budget = @budget
+      budget.consume(units) if budget
+    end
+
     # Returns the last node of the given list of nodes.
     def last( )
       @context[:size]
@@ -93,7 +106,7 @@ module REXML
         when nil
           @context[:node]
         when Array
-          XPathParser.sort(node_set, @node_indexes).first
+          XPathParser.sort(node_set, @node_indexes, @budget).first
         end
       node if node.respond_to?(:namespace)
     end
@@ -150,7 +163,7 @@ module REXML
       else
         case object
         when Array
-          string(XPathParser.sort(object, @node_indexes).first)
+          string(XPathParser.sort(object, @node_indexes, @budget).first)
         when Float
           if object.nan?
             "NaN"
@@ -178,6 +191,7 @@ module REXML
     def string_value( o )
       rv = ""
       o.children.each { |e|
+        charge if @budget
         if e.node_type == :text
           rv << e.to_s
         elsif e.node_type == :element
@@ -353,6 +367,7 @@ module REXML
       node = @context[:node]
       attr = nil
       until node.nil?
+        charge
         if node.node_type == :element
           attr = node.attributes["xml:lang"]
           unless attr.nil?
@@ -408,7 +423,10 @@ module REXML
 
     def sum( nodes )
       nodes = [nodes] unless nodes.kind_of? Array
-      nodes.inject(0) { |r,n| r + number(string(n)) }
+      nodes.inject(0) do |r, n|
+        charge
+        r + number(string(n))
+      end
     end
 
     def floor( number )
@@ -441,6 +459,7 @@ module REXML
     end
 
     def call(name, args:, fallback: nil)
+      charge
       name = name.to_s
       if AVAILABLE_FUNCTIONS.include?(name)
         __send__(name.tr('-', '_'), *args)

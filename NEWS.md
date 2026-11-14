@@ -1,5 +1,19 @@
 # News
 
+## 3.4.5 - 2025-xx-xx {#version-3-4-5}
+
+### Improvement
+
+  * Added an optional work budget and cancellation for XPath evaluation
+    * `REXML::XPath::Budget` limits the work an evaluation may do, counting
+      axis traversal, predicate evaluation, node-set comparison, sorting and
+      descendant-walking functions, not just returned nodes
+    * `REXML::XPath::Cancellation` and `Budget#cancel!` let another thread
+      stop an evaluation
+    * A stopped evaluation raises `REXML::XPath::BudgetExceeded` or
+      `REXML::XPath::Cancelled` and leaves no caches or function context
+      behind for the next evaluation of the same document
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

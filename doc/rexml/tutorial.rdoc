@@ -991,6 +991,41 @@ for which the given block returns a truthy value, or +nil+ if none:
     ele.name == 'nosuch'
   end # => nil
 
+=== Limiting XPath Work
+
+When an XPath comes from an untrusted user, a short expression may still
+scan a large document repeatedly.  Pass an optional work budget to
+REXML::XPath::match, REXML::XPath::first or REXML::XPath::each to stop
+such an evaluation:
+
+  budget = REXML::XPath::Budget.new(10_000)
+  begin
+    REXML::XPath.match(doc, "//*[count(//*) > 0]", nil, {}, budget: budget)
+  rescue REXML::XPath::BudgetExceeded
+    # The query was stopped after budget.used work units.
+  end
+
+A numeric +limit+ (or +max_work+, +work_limit+, +budget_limit+) may be given
+instead of a Budget object.  The budget is counted in work units covering
+axis traversal, predicate evaluation, node-set comparison, document-order
+sorting and the functions that walk descendants, so it follows the actual
+work rather than the number of returned nodes.  The counter is reset at the
+start of every evaluation, including on the same REXML::XPathParser.
+
+To stop an evaluation from another thread, pass a cancellation token:
+
+  token = REXML::XPath::Cancellation.new
+  thread = Thread.new do
+    REXML::XPath.match(doc, "//item", nil, {}, cancellation: token)
+  rescue REXML::XPath::Cancelled
+    # Stopped.
+  end
+  token.cancel!
+
+A Budget with no limit may be used the same way through +budget#cancel!+.
+Neither a stopped evaluation nor the next one sees stale ordering indexes,
+namespace caches or function context.
+
 == Editing
 
 === Editing a Document

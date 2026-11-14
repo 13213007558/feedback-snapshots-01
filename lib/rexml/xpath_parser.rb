@@ -7,6 +7,7 @@ require_relative 'namespace'
 require_relative 'xmltokens'
 require_relative 'attribute'
 require_relative 'parsers/xpathparser'
+require_relative 'xpath_budget'
 
 module REXML
   module DClonable
@@ -58,7 +59,7 @@ module REXML
 
     DEBUG = (ENV["REXML_XPATH_PARSER_DEBUG"] == "true")
 
-    def initialize(strict: false)
+    def initialize(strict: false, budget: nil, cancellation: nil)
       @debug = DEBUG
       @parser = REXML::Parsers::XPathParser.new
       @namespaces = nil
@@ -70,7 +71,109 @@ module REXML
       @node_indexes = nil
       @nest = 0
       @strict = strict
+      @budget = coerce_budget(budget, cancellation)
+      @functions.budget = @budget
+      @evaluation_depth = 0
     end
+
+    # The work budget used by this parser, or +nil+ if no budget is set.
+    def budget
+      @budget
+    end
+
+    # Sets the work budget.  A numeric value is used as the work-unit limit.
+    def budget=(value)
+      @budget = coerce_budget(value)
+      @functions.budget = @budget
+    end
+
+    # The cancellation token used by this parser, or +nil+ if none is set.
+    def cancellation
+      @budget&.cancellation
+    end
+
+    def cancellation=(token)
+      if @budget
+        @budget.cancellation = token
+      else
+        @budget = XPath::Budget.new(nil, cancellation: token)
+        @functions.budget = @budget
+      end
+    end
+
+    private
+
+    def coerce_budget(budget, cancellation = nil)
+      budget = XPath::Budget.new(budget) if budget.is_a?(Numeric)
+      if budget.nil?
+        budget = XPath::Budget.new(nil, cancellation: cancellation) if cancellation
+      elsif cancellation
+        budget.cancellation = cancellation
+      end
+      budget
+    end
+
+    # Consumes +units+ from the work budget, if one is active.
+    #
+    # Counting happens in the axis scanners, the predicate evaluator, the
+    # node-set comparisons, the document-order sort and the functions that
+    # walk descendants.  Callers must not expect this to be a free operation
+    # when a budget is in use: it is the checkpoint at which a query is
+    # stopped.
+    def charge(units = 1)
+      @budget.consume(units) if @budget
+    end
+
+    # Charges a large linear amount in small chunks, so that a tight budget
+    # stops the query near its limit instead of after the whole amount.
+    def charge_linear(units)
+      return unless @budget
+      while units > 0
+        step = units > 1_000 ? 1_000 : units
+        @budget.consume(step)
+        units -= step
+      end
+    end
+
+    # Marks the start of an evaluation.  Nested calls are counted so that
+    # only the outermost entry point resets the transient state.
+    def begin_evaluation
+      @evaluation_depth += 1
+      begin
+        if @evaluation_depth > 1
+          @budget&.check!
+          return
+        end
+
+        # Nothing from a previous evaluation may be visible to this one.
+        @document = nil
+        @attlist_mappings = nil
+        @element_namespaces_cache.clear
+        @node_indexes = nil
+        @functions.node_indexes = nil
+        @functions.context = nil
+        @budget&.begin_evaluation!
+      rescue Exception
+        # The caller has not entered its ensure block yet.
+        @evaluation_depth -= 1
+        raise
+      end
+    end
+
+    def end_evaluation
+      @evaluation_depth -= 1
+      return if @evaluation_depth > 0
+
+      # A result may still be used after this returns, but the evaluation's
+      # private caches and the function context must not leak into the next
+      # evaluation, including after one that was aborted.
+      @document = nil
+      @node_indexes = nil
+      @functions.node_indexes = nil
+      @functions.context = nil
+    end
+
+    public
 
     def namespaces=( namespaces={} )
       @namespaces = namespaces
@@ -93,8 +196,13 @@ module REXML
 
     def get_first path, node
       path_stack = @parser.parse( path )
-      @document = node.document
-      first( path_stack, node )
+      begin_evaluation
+      begin
+        @document = node.document
+        first( path_stack, node )
+      ensure
+        end_evaluation
+      end
     end
 
     def predicate path, node
@@ -112,6 +220,7 @@ module REXML
     #
     # FIXME: This method is incomplete!
     def first( path_stack, node )
+      charge if @budget
       return nil if path.size == 0
 
       case path[0]
@@ -149,26 +258,24 @@ module REXML
 
 
     def match(path_stack, node)
-      @document = node.document
-      # A fresh cache per evaluation, so that a document modified between two
-      # evaluations is not ordered by stale indexes.
-      @node_indexes = {}.compare_by_identity
-      @functions.node_indexes = @node_indexes
-      nodeset = [node]
-      result = expr(path_stack, nodeset)
-      case result
-      when Array # nodeset
-        XPathParser.sort(result, @node_indexes)
-      else
-        [result]
+      begin_evaluation
+      begin
+        @document = node.document
+        # A fresh cache per evaluation, so that a document modified between two
+        # evaluations is not ordered by stale indexes.
+        @node_indexes = {}.compare_by_identity
+        @functions.node_indexes = @node_indexes
+        nodeset = [node]
+        result = expr(path_stack, nodeset)
+        case result
+        when Array # nodeset
+          XPathParser.sort(result, @node_indexes, @budget)
+        else
+          [result]
+        end
+      ensure
+        end_evaluation
       end
-    ensure
-      # Let go of the indexes: they are no use to the next evaluation, and the
-      # cache holds one entry per node it had to look up.  The document itself
-      # stays reachable through @document and @element_namespaces_cache, which
-      # outlive the evaluation.
-      @node_indexes = nil
-      @functions.node_indexes = nil
     end
 
     private
@@ -222,6 +329,7 @@ module REXML
       enter(:expr, path_stack, nodeset) if @debug
       return nodeset if path_stack.length == 0 || nodeset.length == 0
       while path_stack.length > 0
+        charge if @budget
         trace(:while, path_stack, nodeset) if @debug
         if nodeset.length == 0
           path_stack.clear
@@ -233,6 +341,7 @@ module REXML
           nodeset = [nodeset.first.root_node]
         when :self
           nodeset = step(path_stack) do
+            charge(nodeset.size)
             [:iterate_nodesets, nodeset.map {|node| [node] }]
           end
         when :child
@@ -245,6 +354,7 @@ module REXML
         when :attribute
           nodeset = step(path_stack, any_type: :attribute) do
             nodesets = nodeset.map do |node|
+              charge
               next unless node.node_type == :element
               attributes = node.attributes
               next if attributes.empty?
@@ -260,6 +370,7 @@ module REXML
           nodeset = step(path_stack) do
             parents = Set.new.compare_by_identity
             nodeset.each do |node|
+              charge
               if node.node_type == :attribute
                 parent = node.element
               else
@@ -323,6 +434,9 @@ module REXML
         when :union
           left = expr( path_stack.shift, nodeset, context )
           right = expr( path_stack.shift, nodeset, context )
+          if left.kind_of?(Array) && right.kind_of?(Array)
+            charge_linear(left.size + right.size)
+          end
           return (left | right)
         when :neg
           res = expr( path_stack, nodeset, context )
@@ -378,7 +492,7 @@ module REXML
       value = [] unless value.is_a?(Array)
       path_stack.unshift(:node)
       step(path_stack) do
-        [:iterate_nodesets, [XPathParser.sort(value, @node_indexes)]]
+        [:iterate_nodesets, [XPathParser.sort(value, @node_indexes, @budget)]]
       end
     end
 
@@ -535,6 +649,7 @@ module REXML
       nodeset.group_by(&:parent).flat_map do |parent, sibling_nodes|
         anchors = Set.new.compare_by_identity.replace(sibling_nodes)
         children = parent.children
+        charge_linear(children.size)
         children = children.reverse if reverse
         followings = children.drop_while {|child| !anchors.include?(child) }.drop(1)
         events = [:push]
@@ -554,9 +669,11 @@ module REXML
       when :uniq
         ancestors = Set.new.compare_by_identity
         nodeset.each do |node|
+          charge
           ancestors << node if include_self
           parent = node.parent
           while parent
+            charge
             break if ancestors.include?(parent)
             ancestors << parent
             parent = parent.parent
@@ -566,10 +683,12 @@ module REXML
       else
         # Slow path
         nodesets = nodeset.map do |node|
+          charge
           ancestors = []
           ancestors << node if include_self
           parent = node.parent
           while parent
+            charge
             ancestors << parent
             parent = parent.parent
           end
@@ -651,6 +770,14 @@ module REXML
       begin
         enter(:step, path_stack, scanner, scanner_argument) if @debug
         tester = node_test(path_stack, any_type: any_type)
+        if @budget
+          budget = @budget
+          raw_tester = tester
+          tester = ->(node) do
+            budget.consume
+            raw_tester.call(node)
+          end
+        end
         predicates = []
         while path_stack.first == :predicate
           path_stack.shift
@@ -681,6 +808,8 @@ module REXML
           nodesets = evaluate_predicate(predicate_expr.dclone, nodesets)
         end
         nodes = Set.new.compare_by_identity
+        total = nodesets.inject(0) {|total, nodeset| total + nodeset.size}
+        charge_linear(total)
         nodesets.each do |nodeset|
           nodeset.each do |node|
             nodes << node
@@ -776,6 +905,7 @@ module REXML
         new_nodeset = []
         subcontext = { :size => nodeset.size }
         nodeset.each.with_index(1) do |node, position|
+          charge if @budget
           subcontext[:node] = node
           subcontext[:position] = position
           result = expr(expression.dclone, [node], subcontext)
@@ -835,29 +965,44 @@ module REXML
     # can happen many times per evaluation (Functions#string sorts once per
     # candidate node), and those sorts usually revisit the same parents.
     # Passing nothing just means the caching lasts for this one call.
-    def self.sort(array_of_nodes, node_indexes = nil)
+    def self.sort(array_of_nodes, node_indexes = nil, budget = nil)
       return array_of_nodes if array_of_nodes.size <= 1
       node_indexes ||= {}.compare_by_identity
-      array_of_nodes.sort_by do |node|
-        if node.node_type == :attribute
-          # An attribute has no place of its own in the child tree, so its key
-          # extends that of the element carrying it.
-          ancestor_indexes(node.element, node_indexes) <<
-            ATTRIBUTE_POSITION << attribute_position(node, node_indexes)
-        else
-          ancestor_indexes(node, node_indexes)
+      if budget
+        array_of_nodes.sort_by do |node|
+          budget.consume(1)
+          sort_key(node, node_indexes, budget)
+        end
+      else
+        array_of_nodes.sort_by do |node|
+          sort_key(node, node_indexes, nil)
         end
       end
     end
 
+    # The document-order key of one node.  Attributes sort after their
+    # element and among themselves in the order they were written.
+    def self.sort_key(node, node_indexes, budget)
+      if node.node_type == :attribute
+        # An attribute has no place of its own in the child tree, so its key
+        # extends that of the element carrying it.
+        ancestor_indexes(node.element, node_indexes, budget) <<
+          ATTRIBUTE_POSITION << attribute_position(node, node_indexes, budget)
+      else
+        ancestor_indexes(node, node_indexes, budget)
+      end
+    end
+    private_class_method :sort_key
+
     # The index the node holds under each of its ancestors, outermost first.
-    def self.ancestor_indexes(node, node_indexes)
+    def self.ancestor_indexes(node, node_indexes, budget = nil)
       indexes = []
       # Walk all the way up to the document.  Stopping at the root element
       # would leave every node outside it, and the root itself, with the same
       # empty key, and ties are then broken arbitrarily.
       while (parent = node.parent)
-        indexes << child_index_of(node, parent, node_indexes)
+        budget&.consume(1)
+        indexes << child_index_of(node, parent, node_indexes, budget)
         node = parent
       end
       indexes.reverse!
@@ -868,7 +1013,7 @@ module REXML
     # leaves the relative order of those implementation dependent, but document
     # order is a total ordering, so they do need one; this keeps them in the
     # order they were written in.
-    def self.attribute_position(attribute, node_indexes)
+    def self.attribute_position(attribute, node_indexes, budget = nil)
       position = node_indexes[attribute]
       return position if position
 
@@ -877,6 +1022,7 @@ module REXML
       # element, and looking each one up on its own is quadratic.
       i = 0
       attribute.element.attributes.each_attribute do |other|
+        budget&.consume(1)
         node_indexes[other] ||= i
         i += 1
       end
@@ -887,7 +1033,7 @@ module REXML
     # Index the whole child list at once.  A node set normally has many nodes
     # under the same few parents, and walking that list once per node is what
     # made sorting quadratic in the number of children.
-    def self.child_index_of(node, parent, node_indexes)
+    def self.child_index_of(node, parent, node_indexes, budget = nil)
       index = node_indexes[node]
       return index if index
 
@@ -896,7 +1042,10 @@ module REXML
       # not supposed to hold the same node twice, but Parent lets it happen,
       # and the rest of REXML reads such a node as being at the first of its
       # positions.
-      parent.each_with_index {|child, i| node_indexes[child] ||= i }
+      parent.each_with_index do |child, i|
+        budget&.consume(1)
+        node_indexes[child] ||= i
+      end
       node_indexes[node]
     end
     private_class_method :child_index_of
@@ -1012,6 +1161,7 @@ module REXML
       until stack.empty?
         if stack.last
           node = stack.last
+          charge
           # Push nil as a mark that we are entering this node.
           # If we see this mark again, we know to pop the node and yield :leave
           stack << nil
@@ -1036,6 +1186,7 @@ module REXML
       stack = [anchor_node]
       until stack.empty?
         node = stack.pop
+        charge
         if include_self || !node.equal?(anchor_node)
           next unless yield node
         end
@@ -1063,6 +1214,7 @@ module REXML
       ancestors = []
       parent = node.parent
       while parent
+        charge
         ancestors << parent
         parent = parent.parent
       end
@@ -1070,6 +1222,7 @@ module REXML
       precedings = []
       preceding_node = preceding_node_of(node)
       while preceding_node
+        charge
         if ancestors.include?(preceding_node)
           ancestors.delete(preceding_node)
         else
@@ -1090,6 +1243,7 @@ module REXML
         #psn = preceding_node_of( node.parent )
       end
       while psn and psn.kind_of? Element and psn.children.size > 0
+        charge
         psn = psn.children[-1]
       end
       psn
@@ -1110,6 +1264,7 @@ module REXML
     def child(nodeset)
       nodesets = []
       nodeset.each do |node|
+        charge if @budget
         node_type = node.node_type
         # trace(:child, node_type, node)
         case node_type
@@ -1148,11 +1303,15 @@ module REXML
         # first node-set and a node in the second node-set such that the
         # result of performing the comparison on the string-values of
         # the two nodes is true.
-        set1.product(set2).any? do |node1, node2|
+        set1.each do |node1|
           node_string1 = @functions.string(node1)
-          node_string2 = @functions.string(node2)
-          compare(node_string1, op, node_string2)
+          set2.each do |node2|
+            charge
+            node_string2 = @functions.string(node2)
+            return true if compare(node_string1, op, node_string2)
+          end
         end
+        false
       elsif set1.kind_of? Array or set2.kind_of? Array
         # If one is nodeset and other is number, compare number to each item
         # in nodeset s.t. number op number(string(item))
@@ -1171,20 +1330,24 @@ module REXML
         case b
         when true, false
           a.any? do |node|
+            charge
             compare(@functions.boolean(node), op, b)
           end
         when Numeric
           a.any? do |node|
+            charge
             compare(@functions.number(node), op, b)
           end
         when /\A\d+(\.\d+)?\z/
           b = @functions.number(b)
           a.any? do |node|
+            charge
             compare(@functions.number(node), op, b)
           end
         else
           b = @functions.string(b)
           a.any? do |node|
+            charge
             compare(@functions.string(node), op, b)
           end
         end
