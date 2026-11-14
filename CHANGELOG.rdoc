@@ -11,6 +11,7 @@ Features:
 
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
+* Add Mail::Security strict decoding and scanning: separate transfer-encoding and charset completeness, locate unexplainable raw bytes, and never mark tolerant, lossy output as scan-complete
 
 Code Improvements:
 

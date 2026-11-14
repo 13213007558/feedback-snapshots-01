@@ -1972,6 +1972,19 @@ module Mail
       has_content_type? ? /^text$/i.match?(main_type) : false
     end
 
+    # Strict, security-oriented decode of this leaf part. See
+    # Mail::Security::StrictDecode.
+    def strict_decode
+      Mail::Security::StrictDecode.decode_part(self)
+    end
+
+    # Scan this message for dangerous patterns without trusting tolerant
+    # decoding. See Mail::Security::Scanner.
+    def security_scan(patterns = nil)
+      scanner = patterns ? Mail::Security::Scanner.new(patterns) : Mail::Security::Scanner.new
+      scanner.scan(self)
+    end
+
   private
 
     HEADER_SEPARATOR = /#{Constants::LAX_CRLF}#{Constants::LAX_CRLF}/

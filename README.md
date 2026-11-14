@@ -394,6 +394,46 @@ is another message which can have many or no parts.
 A message will only have parts if it is a multipart/mixed or multipart/related
 content type and has a boundary defined.
 
+### Strict Decoding for Security Scanning
+
+`#decoded` is tuned for display: it repairs malformed Base64/quoted-printable
+and replaces undecodable bytes with `�` or `?`. That is convenient for rendering,
+but a scanner that relies on it can be fooled — bytes that carried dangerous
+content may be replaced or dropped before the pattern ever runs.
+
+`Mail::Security::StrictDecode` keeps a strict, byte-accurate account instead.
+It reports the transfer encoding and charset stages independently and points at
+every raw byte neither stage can explain:
+
+```ruby
+result = mail.strict_decode
+
+result.transfer_encoding_complete?   #=> true only if Base64/QP/7bit was valid
+result.charset_complete?             #=> true only if every byte matches the charset
+result.complete?                     #=> true only when no byte was lost
+result.strict_text                   #=> lossless UTF-8 String, or nil if incomplete
+result.lenient_text                  #=> display-oriented result (may contain �)
+result.issues.each do |issue|
+  issue.stage    #=> :transfer_encoding or :charset
+  issue.reason   #=> :illegal_base64_character, :truncated_multibyte_sequence, ...
+  issue.offset   #=> byte offset into the stage input
+  issue.bytes    #=> the unexplainable original octets (ASCII-8BIT)
+  issue.hex_bytes
+end
+```
+
+`Mail::Security::Scanner` (or `#security_scan`) matches patterns only against
+losslessly decoded text. A part that did not decode completely is reported as
+`:indeterminate` rather than scanned against lenient output, so damaged content
+can never produce a false "safe" verdict:
+
+```ruby
+report = mail.security_scan([/malware/i, /<script[\s>]/i])
+report.verdict       #=> :dangerous, :clean, or :indeterminate
+report.clean?        #=> true only when every part decoded fully and matched nothing
+report.issues        #=> unexplainable bytes behind any indeterminate verdict
+```
+
 ### Testing and Extracting Attachments
 ```ruby
 mail.attachments.each do | attachment |

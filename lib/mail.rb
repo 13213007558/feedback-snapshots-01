@@ -57,6 +57,15 @@ module Mail # :doc:
   require 'mail/encodings/quoted_printable'
   require 'mail/encodings/unix_to_unix'
 
+  # Security-oriented strict decoding and scanning.
+  require 'mail/security/issue'
+  require 'mail/security/transfer_decoder'
+  require 'mail/security/charset_decoder'
+  require 'mail/security/decode_result'
+  require 'mail/security/strict_decode'
+  require 'mail/security/scan_report'
+  require 'mail/security/scanner'
+
   require 'mail/matchers/has_sent_mail'
   require 'mail/matchers/attachment_matchers'
 
