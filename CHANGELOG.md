@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file. For info on
 
 ### Added
 
+- Add `Rack::MessageSignatures::Verifier`, an opt-in middleware for verifying RFC 9421 HTTP Message Signatures on requests. The initial implementation supports HMAC-SHA256 with an application-provided key and required covered components, validates the timestamp policy, binds the request method, target, and Content-Digest, and refuses to guess when the Rack environment cannot represent the signed message unambiguously.
 - Add `Rack::Files#assign_headers` to allow overriding how the configured file headers are set. ([#2377](https://github.com/rack/rack/pull/2377), [@codergeek121](https://github.com/codergeek121))
 - Add support for `rack.response_finished` to `Rack::TempfileReaper`. ([#2363](https://github.com/rack/rack/pull/2363), [@skipkayhil](https://github.com/skipkayhil))
 - Add support for streaming bodies when using `Rack::Events`. ([#2375](github.com/rack/rack/pull/2375), [@unflxw](https://github.com/unflxw))

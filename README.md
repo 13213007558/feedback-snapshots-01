@@ -155,6 +155,9 @@ middleware:
 * `Rack::Head` for returning an empty body for HEAD requests.
 * `Rack::Lint` for checking conformance to the [Rack Specification].
 * `Rack::Lock` for serializing requests using a mutex.
+* `Rack::MessageSignatures::Verifier` for verifying [RFC
+  9421](https://www.rfc-editor.org/rfc/rfc9421) HTTP Message Signatures on
+  requests. It is opt-in and supports `hmac-sha256`.
 * `Rack::MethodOverride` for modifying the request method based on a submitted
   parameter.
 * `Rack::Recursive` for including data from other paths in the application, and
