@@ -11,25 +11,25 @@ class TestProxyJump < NetSSHTest
   def test_host
     proxy = Net::SSH::Proxy::Jump.new("jumphost")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -W %h:%p jumphost", proxy.command_line_template
+    assert_equal "ssh -W '[%h]:%p' jumphost", proxy.command_line_template
   end
 
   def test_user_host
     proxy = Net::SSH::Proxy::Jump.new("sally@proxy")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -l sally -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -l sally -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_user_host_port
     proxy = Net::SSH::Proxy::Jump.new("bob@jump:2222")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -l bob -p 2222 -W %h:%p jump", proxy.command_line_template
+    assert_equal "ssh -l bob -p 2222 -W '[%h]:%p' jump", proxy.command_line_template
   end
 
   def test_multiple_jump_proxies
     proxy = Net::SSH::Proxy::Jump.new("user1@proxy1,user2@proxy2,user3@proxy3")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -l user1 -J user2@proxy2,user3@proxy3 -W %h:%p proxy1", proxy.command_line_template
+    assert_equal "ssh -l user1 -J user2@proxy2,user3@proxy3 -W '[%h]:%p' proxy1", proxy.command_line_template
   end
 
   def test_shell_metacharacters_are_rejected
@@ -41,49 +41,49 @@ class TestProxyJump < NetSSHTest
   def test_config_path_is_escaped
     proxy = Net::SSH::Proxy::Jump.new("proxy")
     proxy.build_proxy_command_equivalent(config: "/home/user/my config")
-    assert_equal "ssh -F /home/user/my\\ config -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -F /home/user/my\\ config -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_config_path_percent_is_escaped
     proxy = Net::SSH::Proxy::Jump.new("proxy")
     proxy.build_proxy_command_equivalent(config: "/home/user/%h config")
-    assert_equal "ssh -F /home/user/\\%%h\\ config -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -F /home/user/\\%%h\\ config -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_config_override
     proxy = Net::SSH::Proxy::Jump.new("proxy")
     proxy.build_proxy_command_equivalent(config: "/home/user/.ssh/config2")
-    assert_equal "ssh -F /home/user/.ssh/config2 -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -F /home/user/.ssh/config2 -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_config_false
     proxy = Net::SSH::Proxy::Jump.new("proxy")
     proxy.build_proxy_command_equivalent(config: false)
-    assert_equal "ssh -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_config_true
     proxy = Net::SSH::Proxy::Jump.new("proxy")
     proxy.build_proxy_command_equivalent(config: true)
-    assert_equal "ssh -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_options
     proxy = Net::SSH::Proxy::Jump.new("proxy", options: { "StrictHostKeyChecking" => "no", "UserKnownHostsFile" => "/dev/null", ConnectTimeout: 5 })
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_options_repeated_with_an_array
     proxy = Net::SSH::Proxy::Jump.new("proxy", options: { "IdentityFile" => ["/home/user/jump", "/home/user/jump old"], "StrictHostKeyChecking" => "no" })
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -o IdentityFile=/home/user/jump -o IdentityFile=/home/user/jump\\ old -o StrictHostKeyChecking=no -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -o IdentityFile=/home/user/jump -o IdentityFile=/home/user/jump\\ old -o StrictHostKeyChecking=no -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_options_empty_array_passes_nothing
     proxy = Net::SSH::Proxy::Jump.new("proxy", options: { "IdentityFile" => [], "StrictHostKeyChecking" => "no" })
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -o StrictHostKeyChecking=no -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -o StrictHostKeyChecking=no -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_options_nil_value_raises
@@ -99,19 +99,38 @@ class TestProxyJump < NetSSHTest
   def test_options_are_escaped
     proxy = Net::SSH::Proxy::Jump.new("proxy", options: { "IdentityFile" => "/home/user/my key", "ProxyCommand" => "nc %h %p; id" })
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -o IdentityFile=/home/user/my\\ key -o ProxyCommand=nc\\ \\%%h\\ \\%%p\\;\\ id -W %h:%p proxy", proxy.command_line_template
+    assert_equal "ssh -o IdentityFile=/home/user/my\\ key -o ProxyCommand=nc\\ \\%%h\\ \\%%p\\;\\ id -W '[%h]:%p' proxy", proxy.command_line_template
   end
 
   def test_multiple_jump_proxies_with_ports
     proxy = Net::SSH::Proxy::Jump.new("a@h1:2222,b@h2:2200,h3")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -l a -p 2222 -J b@h2:2200,h3 -W %h:%p h1", proxy.command_line_template
+    assert_equal "ssh -l a -p 2222 -J b@h2:2200,h3 -W '[%h]:%p' h1", proxy.command_line_template
   end
 
   def test_ipv6_jump_proxies
     proxy = Net::SSH::Proxy::Jump.new("a@[::1]:2222,b@[fe80::1]:2200,[::2]")
     proxy.build_proxy_command_equivalent
-    assert_equal "ssh -l a -p 2222 -J b@\\[fe80::1\\]:2200,\\[::2\\] -W %h:%p \\[::1\\]", proxy.command_line_template
+    assert_equal "ssh -l a -p 2222 -J b@\\[fe80::1\\]:2200,\\[::2\\] -W '[%h]:%p' ::1", proxy.command_line_template
+  end
+
+  def test_config_paths_are_passed_once_each_in_reverse
+    proxy = Net::SSH::Proxy::Jump.new("u@jump")
+    proxy.build_proxy_command_equivalent(config: ["/home/user/one config", "/home/user/two config"])
+    assert_equal "ssh -l u -F /home/user/two\\ config -F /home/user/one\\ config -W '[%h]:%p' jump", proxy.command_line_template
+  end
+
+  def test_option_values_keep_a_literal_percent
+    proxy = Net::SSH::Proxy::Jump.new("u@jump", options: { "IdentityFile" => "/home/user/id%h" })
+    proxy.build_proxy_command_equivalent
+    assert_equal "ssh -l u -o IdentityFile=/home/user/id\\%%h -W '[%h]:%p' jump", proxy.command_line_template
+  end
+
+  def test_jump_host_characters_that_change_argv_are_rejected
+    ["u@jump#x", "u@jump?x", "u@jump/x", "u@jump*x", "u@jump=v", "u@jump!x", "u~v@jump", "u@-jump",
+     "[::1]x", "u@[a]", "u@[1.2.3.4]", "u@[::1]:0", "u@jump:65536"].each do |jump|
+      assert_raises(ArgumentError, jump.inspect) { Net::SSH::Proxy::Jump.new(jump).build_proxy_command_equivalent }
+    end
   end
 
   def test_extra_jump_with_shell_payload_in_path_is_rejected_and_never_runs

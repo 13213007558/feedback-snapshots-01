@@ -17,9 +17,16 @@ module Net
       #   end
       class Command
         # The command line is run by the shell, so like OpenSSH 9.6 (CVE-2023-51385) we refuse
-        # host and user names containing shell metacharacters rather than substituting them.
-        INVALID_HOST_NAME = /\A-|[[:space:][:cntrl:]'`"$\\;&<>|(){},]/.freeze
-        INVALID_USER_NAME = /\A-|[[:cntrl:]'`";&<>|(){}]|[[:space:]]-|\\\z/.freeze
+        # host and user names that the shell could split, expand (globbing, tilde, parameter or
+        # command substitution) or turn into a separate option. Values substituted into %h, %r
+        # and %p are not shell-escaped (the template around them is the caller's), so they may
+        # only contain characters that can appear in a host name or user name. Brackets are
+        # allowed only in a ProxyJump hop (see Jump), never in %h.
+        VALID_HOST_NAME = /\A(?!-)[A-Za-z0-9._:%\-]+\z/.freeze
+        VALID_JUMP_HOST_NAME = /\A(?:\[[A-Za-z0-9._:%-]*:[A-Za-z0-9._:%-]*\]|(?!-)[A-Za-z0-9._:%-]+)\z/.freeze
+        VALID_USER_NAME = /\A(?!-)[A-Za-z0-9._+@\-]+\z/.freeze
+        VALID_PORT = /\A\d+\z/.freeze
+        VALID_PORT_RANGE = (1..65_535).freeze
 
         # The command line template
         attr_reader :command_line_template
@@ -125,22 +132,26 @@ module Net
 
         private
 
-        def validate_host_name!(host)
-          raise ArgumentError, "host name contains invalid characters: #{host.inspect}" if host.to_s.match?(INVALID_HOST_NAME)
+        def validate_host_name!(host, jump: false)
+          host = host.to_s
+          pattern = jump ? VALID_JUMP_HOST_NAME : VALID_HOST_NAME
+          raise ArgumentError, "host name contains invalid characters: #{host.inspect}" unless host.match?(pattern)
 
           host
         end
 
         def validate_user_name!(user)
-          raise ArgumentError, "user name contains invalid characters: #{user.inspect}" if user.to_s.match?(INVALID_USER_NAME)
+          user = user.to_s
+          raise ArgumentError, "user name contains invalid characters: #{user.inspect}" unless user.match?(VALID_USER_NAME)
 
           user
         end
 
         def validate_port!(port)
-          raise ArgumentError, "port is not a number: #{port.inspect}" unless port.to_s.match?(/\A\d+\z/)
+          port = port.to_s
+          raise ArgumentError, "port is not a number: #{port.inspect}" unless port.match?(VALID_PORT) && VALID_PORT_RANGE.cover?(port.to_i)
 
-          port.to_s
+          port
         end
       end
     end

@@ -48,7 +48,10 @@ module Net
         # proxy that was requested when the socket factory was instantiated.
         def open(host, port, connection_options = nil)
           build_proxy_command_equivalent(connection_options)
-          super
+          # The template brackets %h itself, so an IPv6 destination written as
+          # [::1] must be passed to it without the brackets.
+          host = host.to_s
+          super(host.start_with?("[") ? host[1..-2] : host, port, connection_options)
         end
 
         # We cannot build the ProxyCommand template until we know if the :config
@@ -63,12 +66,20 @@ module Net
           template << " -l #{escape(uri.user)}" if uri.user
           template << " -p #{uri.port}" if uri.port
           template << " -J #{escape(extra_jumps.map { |jump| jump_spec(jump) }.join(','))}" unless extra_jumps.empty?
-          template << " -F #{escape(config)}" if config != true && config
+          # Net::SSH::Config merges earlier files first (a value already set wins),
+          # while ssh reads the last -F file last and lets it win, so pass the
+          # files in reverse order to keep the jump host's view as close as
+          # possible to the connection's own.
+          Array(config).reverse_each { |file| template << " -F #{escape(file)}" } if config != true && config
           @options.each do |key, values|
             Array(values).each { |value| template << " -o #{escape(key)}=#{escape(value)}" }
           end
-          template << " -W %h:%p "
-          template << escape(uri.host)
+          # ssh -W takes host:port, and an unbracketed IPv6 address is not a
+          # valid host:port pair. Use the same quoted form as OpenSSH's implicit
+          # ProxyCommand from ProxyJump; Command#open replaces %h and %p inside
+          # the quotes, and the substituted values may not contain a quote.
+          template << " -W '[%h]:%p' "
+          template << escape(destination_host(uri.host))
 
           @command_line_template = template
         end
@@ -86,7 +97,9 @@ module Net
         end
 
         # Escape for the shell, and double any % so it survives the %h/%p
-        # substitution done on the template in Command#open.
+        # substitution done on the template in Command#open. This applies to
+        # -o values too, because Command#open rewrites %h and %p everywhere in
+        # the template, not only in the -W placeholder.
         def escape(value)
           Shellwords.escape(value).gsub("%", "%%")
         end
@@ -98,7 +111,7 @@ module Net
           raise URI::InvalidURIError if uri.host.to_s.empty? || jump_spec(uri) != jump
 
           validate_user_name!(uri.user) if uri.user
-          validate_host_name!(uri.host)
+          validate_host_name!(uri.host, jump: true)
           validate_port!(uri.port) if uri.port
           uri
         rescue URI::InvalidURIError
@@ -110,6 +123,12 @@ module Net
           spec.prepend("#{uri.user}@") if uri.user
           spec << ":#{uri.port}" if uri.port
           spec
+        end
+
+        # URI keeps the brackets of an IPv6 literal, but OpenSSH takes the
+        # destination host of an implicit ProxyCommand without them.
+        def destination_host(host)
+          host.start_with?("[") ? host[1..-2] : host
         end
       end
     end

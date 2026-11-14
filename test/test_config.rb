@@ -632,13 +632,14 @@ class TestConfig < NetSSHTest
   end
 
   def test_mix_of_proxy_command_and_proxy_jump
-    %w(test.mix1 test.mix2).each do |host|
+    expected = { "test.mix1" => "ssh -W '[%h]:%p' jump2", "test.mix2" => "ssh -W %h:%p jump2" }
+    expected.each do |host, template|
       config = Net::SSH::Config.for(host, [config(:proxy_command_proxy_jump_mix)])
 
       proxy = config[:proxy]
       proxy.build_proxy_command_equivalent if proxy.is_a? Net::SSH::Proxy::Jump
 
-      assert_equal 'ssh -W %h:%p jump2', config[:proxy].command_line_template
+      assert_equal template, config[:proxy].command_line_template
     end
   end
 
@@ -741,7 +742,7 @@ class TestConfig < NetSSHTest
       config = Net::SSH::Config.load(f, "example")
       options = Net::SSH::Config.translate(config)
       options[:proxy].build_proxy_command_equivalent
-      assert_equal 'ssh -W %h:%p jump1', options[:proxy].command_line_template
+      assert_equal "ssh -W '[%h]:%p' jump1", options[:proxy].command_line_template
     end
   end
 
@@ -769,7 +770,7 @@ class TestConfig < NetSSHTest
       assert_equal 'alice', options[:user]
       assert_equal 'example.org', options[:host_name]
       options[:proxy].build_proxy_command_equivalent
-      assert_equal 'ssh -W %h:%p jump1', options[:proxy].command_line_template
+      assert_equal "ssh -W '[%h]:%p' jump1", options[:proxy].command_line_template
     end
   end
 
@@ -793,7 +794,7 @@ class TestConfig < NetSSHTest
     with_config_from_data data do |f|
       options = Net::SSH::Config.translate(Net::SSH::Config.load(f, "example"))
       options[:proxy].build_proxy_command_equivalent
-      assert_equal 'ssh -W %h:%p jump1', options[:proxy].command_line_template
+      assert_equal "ssh -W '[%h]:%p' jump1", options[:proxy].command_line_template
     end
   end
 
@@ -805,7 +806,7 @@ class TestConfig < NetSSHTest
     '
     with_config_from_data data do |f|
       options = Net::SSH::Config.translate(Net::SSH::Config.load(f, "example"))
-      assert_equal 'ssh -W %h:%p jump1', options[:proxy].command_line_template
+      assert_equal "ssh -W %h:%p jump1", options[:proxy].command_line_template
     end
   end
 
