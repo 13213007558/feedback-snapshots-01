@@ -42,6 +42,83 @@ gem install net-ldap
 
 Simply require either `net-ldap` or `net/ldap`.
 
+## Local filter evaluation
+
+`Net::LDAP::Filter#evaluate` evaluates a filter against a directory entry
+locally, without contacting a directory server. This is useful for previewing
+which entries an authorization rule would select before the rule is published.
+
+Local evaluation is deliberately three-valued, following the filter evaluation
+rules in RFC 4511 section 4.5.1.7:
+
+- `:match` - the filter is definitely true for the entry.
+- `:no_match` - the filter is definitely false for the entry.
+- `:undetermined` - the local schema cannot decide the assertion. This includes
+  unknown attribute descriptions, unknown or inappropriate matching rules,
+  unsupported extensible matching (such as `dnAttributes`), and invalid
+  assertion values.
+
+Only an explicit `Net::LDAP::Filter::Schema` supplies matching behavior; no
+rule is inferred from an attribute name. Consequently, a filter such as
+`(!(clearanceLevel=secret))` evaluates to `:undetermined` rather than
+`:match` when `clearanceLevel` is not declared, and never silently authorizes
+the entry. `Filter#authorized?` returns true only for `:match`.
+
+```ruby
+schema = Net::LDAP::Filter::Schema.new(
+  {
+    "objectClass" => { equality: :case_ignore, substring: :case_ignore },
+    "uid"         => { equality: :case_ignore },
+    "mail"        => { equality: :case_ignore, substring: :case_ignore },
+    "gidNumber"   => { equality: :integer, ordering: :integer },
+  },
+  {
+    # Extensible matching rules must be registered explicitly, along with the
+    # attribute descriptions they may be applied to.
+    "2.5.13.2" => { rule: :case_ignore, attributes: ["uid", "mail"] },
+  }
+)
+
+filter = Net::LDAP::Filter.construct("(&(objectClass=person)(!(uid=nobody)))")
+result = filter.evaluate(entry, schema: schema)
+
+result.state        # => :match, :no_match, or :undetermined
+result.matched?     # => true only for :match
+result.reason       # => diagnostic text for an undetermined or false result
+filter.authorized?(entry, schema: schema) # => true only for :match
+```
+
+Supported schema rule kinds are `:case_ignore`, `:case_exact`,
+`:octet_string`, and `:integer`. Substring matching accepts the first three.
+An attribute option such as `;lang-fr` must itself be declared; options are not
+inherited from the base attribute type. The supported filter operations are
+AND, OR, NOT, presence, equality, substring, greater-or-equal,
+less-or-equal, binary equality, and registered extensible matches.
+
+Undetermined results propagate through compound filters exactly as RFC 4511
+requires, and never become authorization matches:
+
+| Filter | Result | Why |
+| --- | --- | --- |
+| `(uid=alice)` | `:match` | declared attribute, declared equality rule |
+| `(&(uid=alice)(missing=x))` | `:undetermined` | AND has no false child, but one child is undetermined |
+| `(&(uid=alice)(sn=nobody))` | `:no_match` | AND has a definitely false child |
+| `(|(uid=nobody)(missing=x))` | `:undetermined` | OR has no true child and one child is undetermined |
+| OR: `(uid=alice)` plus `(missing=x)` | `:match` | OR has a definitely true child |
+| `(!(missing=x))` | `:undetermined` | NOT preserves undetermined instead of becoming `:match` |
+| `(uid:9.9.9:=alice)` | `:undetermined` | extensible rule is not registered |
+
+Previewing a directory sample is a loop over entries:
+
+```ruby
+entries = Net::LDAP::Dataset.read_ldif(File.open("sample.ldif")).to_entries
+rule = Net::LDAP::Filter.construct("(&(objectClass=person)(!(uid=nobody)))")
+
+entries.each do |entry|
+  puts "#{entry.dn}: #{rule.evaluate(entry, schema: schema).state}"
+end
+```
+
 ## Extensions
 
 This library focuses on the core LDAP RFCs referenced in the description.

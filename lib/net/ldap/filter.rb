@@ -280,10 +280,10 @@ class Net::LDAP::Filter
       when 0xa2 # context-specific constructed 2, "not"
         ~parse_ber(ber.first)
       when 0xa3 # context-specific constructed 3, "equalityMatch"
-        if ber.last == "*"
-        else
-          eq(ber.first, ber.last)
-        end
+        # Presence has its own BER tag (0x87), so an equality assertion is
+        # always a literal value. Escaping keeps a literal asterisk from
+        # turning into a wildcard on the way back to a filter string.
+        eq(ber.first, escape(ber.last))
       when 0xa4 # context-specific constructed 4, "substring"
         str = ""
         final = false
@@ -625,6 +625,34 @@ class Net::LDAP::Filter
   end
 
   ##
+  # Evaluates this filter locally against a directory entry and returns an
+  # EvaluationResult: :match, :no_match, or :undetermined.
+  #
+  # Evaluation uses only the matching rules declared in +schema+. It never
+  # infers a rule from an attribute name and never contacts a directory
+  # server. Attribute descriptions or matching rules absent from the schema
+  # produce :undetermined rather than :no_match, so that negating an
+  # unknown rule cannot silently turn into an authorization match.
+  #
+  #   schema = Net::LDAP::Filter::Schema.new(
+  #     "objectClass" => { equality: :case_ignore, substring: :case_ignore },
+  #     "mail" => { equality: :case_ignore, substring: :case_ignore },
+  #     "uid" => { equality: :case_ignore }
+  #   )
+  #   filter = Net::LDAP::Filter.construct("(&(objectClass=person)(!(uid=*)))")
+  #   filter.evaluate(entry, schema: schema).state # => :match, :no_match, ...
+  def evaluate(entry, schema: nil)
+    Evaluator.new(schema).evaluate(self, entry)
+  end
+
+  ##
+  # Returns true only when #evaluate returns MATCH. Undetermined results are
+  # deliberately not authorized.
+  def authorized?(entry, schema: nil)
+    evaluate(entry, schema: schema).matched?
+  end
+
+  ##
   #--
   # We got a hash of attribute values.
   # Do we match the attributes?
@@ -783,3 +811,7 @@ class Net::LDAP::Filter
     private :parse_filter_branch
   end # class Net::LDAP::FilterParser
 end # class Net::LDAP::Filter
+
+require_relative 'filter/schema'
+require_relative 'filter/evaluator'
+

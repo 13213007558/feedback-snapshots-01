@@ -1,5 +1,7 @@
 === Unreleased
 * Move readme to md in #452
+* Add three-valued, schema-driven local filter evaluation via
+  Net::LDAP::Filter#evaluate and Net::LDAP::Filter::Schema
 
 === Net::LDAP 0.21.0
 * Patch bind success by @HarlemSquirrel in #447
