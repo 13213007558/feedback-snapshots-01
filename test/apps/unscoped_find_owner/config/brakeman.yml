@@ -1,0 +1,6 @@
+---
+:unscoped_find_owners:
+  :current_account:
+    :model: Account
+    :associations:
+      :orders: Order
