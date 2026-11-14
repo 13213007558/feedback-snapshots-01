@@ -5,6 +5,18 @@ module SecureHeaders
   describe Cookie do
     let(:raw_cookie) { "_session=thisisatest" }
 
+    # Independent RFC 6265-shaped parser used to verify the emitted header
+    # without relying on the implementation under test.
+    def parse_set_cookie(cookie)
+      pair, *attributes = cookie.split(";")
+      name, value = pair.split("=", 2)
+      flags = attributes.each_with_object({}) do |attribute, result|
+        key, attribute_value = attribute.strip.split("=", 2)
+        result[key.downcase] = attribute_value.nil? ? true : attribute_value
+      end
+      [name, value, flags]
+    end
+
     it "does not tamper with cookies when using OPT_OUT is used" do
       cookie = Cookie.new(raw_cookie, OPT_OUT)
       expect(cookie.to_s).to eq(raw_cookie)
@@ -106,6 +118,90 @@ module SecureHeaders
         raw_cookie = "_session=thisisatest"
         cookie = Cookie.new(raw_cookie, samesite: true, secure: OPT_OUT, httponly: OPT_OUT)
         expect(cookie.to_s).to eq("_session=thisisatest; SameSite=Lax")
+      end
+    end
+
+    context "attribute recognition" do
+      let(:config) { { secure: true, httponly: true, samesite: { lax: true } } }
+
+      it "does not treat a cookie with the same name as an existing attribute" do
+        cookie = Cookie.new("Secure=abc; Path=/", config)
+        expect(cookie.to_s).to eq("Secure=abc; Path=/; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "does not treat a comma inside a quoted value as an attribute separator" do
+        cookie = Cookie.new(%q(foo="a, secure"; Path=/), config)
+        expect(cookie.to_s).to eq(%q(foo="a, secure"; Path=/; secure; HttpOnly; SameSite=Lax))
+      end
+
+      it "does not treat a comma inside an attribute value as an attribute separator" do
+        cookie = Cookie.new("foo=bar; Path=/a,secure", config)
+        expect(cookie.to_s).to eq("foo=bar; Path=/a,secure; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "does not percent-decode attribute names" do
+        cookie = Cookie.new("foo=bar; %53ecure", config)
+        expect(cookie.to_s).to eq("foo=bar; %53ecure; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "does not match attribute names by prefix or suffix" do
+        cookie = Cookie.new("foo=bar; Secure2; XHttpOnly; SameSiteX", config)
+        expect(cookie.to_s).to eq("foo=bar; Secure2; XHttpOnly; SameSiteX; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "preserves an Expires attribute containing a comma" do
+        raw_cookie = "foo=bar; Expires=Wed, 09 Jun 2021 10:18:14 GMT; Path=/"
+        cookie = Cookie.new(raw_cookie, config)
+        expect(cookie.to_s).to eq("#{raw_cookie}; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "recognizes existing attributes regardless of case and surrounding whitespace" do
+        cookie = Cookie.new("foo=bar;  sEcUrE ; httponly ; samesite=Strict", config)
+        expect(cookie.to_s).to eq("foo=bar;  sEcUrE ; httponly ; samesite=Strict")
+      end
+
+      it "preserves values containing separators and escape-like fragments verbatim" do
+        raw_cookie = "foo=a%3Bsecure%2Csecure\\,secure; Path=/"
+        cookie = Cookie.new(raw_cookie, config)
+        expect(cookie.to_s).to eq("#{raw_cookie}; secure; HttpOnly; SameSite=Lax")
+      end
+
+      it "keeps the cookie-pair value byte-for-byte identical" do
+        raw_cookie = %q(foo="a, secure, HttpOnly"; Path=/)
+        name, value, = parse_set_cookie(Cookie.new(raw_cookie, config).to_s)
+        expect(name).to eq("foo")
+        expect(value).to eq(%q("a, secure, HttpOnly"))
+      end
+    end
+
+    context "malformed SameSite attributes" do
+      let(:config) { { secure: true, httponly: true, samesite: { lax: true } } }
+
+      it "replaces a SameSite attribute with no value" do
+        cookie = Cookie.new("foo=bar; SameSite", config)
+        expect(cookie.to_s).to eq("foo=bar; SameSite=Lax; secure; HttpOnly")
+      end
+
+      it "replaces an unknown SameSite value without adding a duplicate attribute" do
+        cookie = Cookie.new("foo=bar; SameSite=Bogus", config)
+        output = cookie.to_s
+        _, _, attributes = parse_set_cookie(output)
+        expect(output).to eq("foo=bar; SameSite=Lax; secure; HttpOnly")
+        expect(attributes["samesite"]).to eq("Lax")
+      end
+
+      it "normalizes every invalid SameSite attribute to the existing valid value" do
+        cookie = Cookie.new("foo=bar; SameSite=Bogus; SameSite=Strict; SameSite=", config)
+        output = cookie.to_s
+        _, _, attributes = parse_set_cookie(output)
+        expect(output).to eq("foo=bar; SameSite=Strict; SameSite=Strict; SameSite=Strict; secure; HttpOnly")
+        expect(attributes["samesite"]).to eq("Strict")
+      end
+
+      it "leaves an unparseable line untouched" do
+        %w(noequals =abc ;;;).each do |raw_cookie|
+          expect(Cookie.new(raw_cookie, config).to_s).to eq(raw_cookie)
+        end
       end
     end
   end

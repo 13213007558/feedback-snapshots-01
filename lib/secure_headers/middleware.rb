@@ -29,9 +29,24 @@ module SecureHeaders
       cookies = headers["Set-Cookie"]
       return unless cookies
 
-      cookies_array = cookies.is_a?(Array) ? cookies : cookies.split("\n")
-      secured_cookies = cookies_array.map { |cookie| SecureHeaders::Cookie.new(cookie, config).to_s }
-      headers["Set-Cookie"] = cookies.is_a?(Array) ? secured_cookies : secured_cookies.join("\n")
+      if cookies.is_a?(Array)
+        # Preserve one header field per cookie. Non-String entries are left
+        # untouched rather than dropped or merged.
+        headers["Set-Cookie"] = cookies.map do |cookie|
+          cookie.is_a?(String) ? SecureHeaders::Cookie.new(cookie, config).to_s : cookie
+        end
+      else
+        # Legacy Rack allowed multiple cookies in a single String separated by
+        # newlines. Keep them separate and normalize the line separator.
+        # Splitting bytewise keeps invalid byte sequences from raising; each
+        # cookie is handed to the parser with its original encoding.
+        encoding = cookies.encoding
+        secured_cookies = cookies.b.split("\n".b).map do |cookie|
+          cookie = cookie.delete_suffix("\r".b)
+          SecureHeaders::Cookie.new(cookie.force_encoding(encoding), config).to_s
+        end
+        headers["Set-Cookie"] = secured_cookies.join("\n")
+      end
     end
 
     # disable Secure cookies for non-https requests
