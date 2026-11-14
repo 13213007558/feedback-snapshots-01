@@ -1,5 +1,16 @@
 # News
 
+## Unreleased
+
+### Additions
+
+  * Added XInclude support (`REXML::XInclude`).  Includes are expanded
+    through an explicit, caller-supplied resolver; the processor never opens
+    file paths or URLs on its own.  Nested `xml:base` is resolved per RFC
+    3986, XML and text includes are distinguished, each inserted node records
+    its origin, and cycles, limits and authorization denials are fatal and
+    cannot be retried through `xi:fallback`.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

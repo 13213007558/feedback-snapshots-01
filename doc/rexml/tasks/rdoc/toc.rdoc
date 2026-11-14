@@ -133,3 +133,12 @@
 - {Clones}[../../tasks/rdoc/parent_rdoc.html#label-Clones]
   - {Task: Clone Deeply}[../../tasks/rdoc/parent_rdoc.html#label-Task-3A+Clone+Deeply]
 
+=== {XInclude}[../../tasks/rdoc/xinclude_rdoc.html]
+- {The Resolver Contract}[../../tasks/rdoc/xinclude_rdoc.html#label-The+Resolver+Contract]
+- {Task: Expand Includes from an In-Memory Table}[../../tasks/rdoc/xinclude_rdoc.html#label-Task-3A+Expand+Includes+from+an+In-Memory+Table]
+- {Task: Authorize Reads Before They Happen}[../../tasks/rdoc/xinclude_rdoc.html#label-Task-3A+Authorize+Reads+Before+They+Happen]
+- {XML versus Text Includes}[../../tasks/rdoc/xinclude_rdoc.html#label-XML+versus+Text+Includes]
+- {Base URI Handling}[../../tasks/rdoc/xinclude_rdoc.html#label-Base+URI+Handling]
+- {Provenance}[../../tasks/rdoc/xinclude_rdoc.html#label-Provenance]
+- {Fatal Errors and Fallback}[../../tasks/rdoc/xinclude_rdoc.html#label-Fatal+Errors+and+Fallback]
+

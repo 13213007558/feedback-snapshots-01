@@ -1,0 +1,114 @@
+== XInclude
+
+REXML supports the {XInclude 1.0}[https://www.w3.org/TR/xinclude/]
++xi:include+ element through REXML::XInclude.  Unlike many XInclude
+implementations, REXML never opens a file path or URL itself.  Every included
+resource is supplied by a caller-provided *resolver*, so the embedding
+application keeps full control over what can be read.  There is no built-in
+file or network access in the XInclude processor.
+
+=== The Resolver Contract
+
+A resolver is any object that responds to:
+
+- +read(uri)+ returns the resource content as a String.  Raising
+  REXML::XInclude::ResourceError via
+  +REXML::XInclude::ResourceError.missing!(uri)+ signals a missing resource,
+  which is the only condition that allows an +xi:fallback+ to run.
+- +authorized?(uri)+ (optional) returns a truthy value when +uri+ may be
+  read.  When it returns false, or raises
+  REXML::XInclude::AuthorizationDenied, the inclusion fails and +read+ is
+  never called for that URI.
+
+A Proc responding to +call(uri)+ may also be used; it is treated as the
++read+ operation and every URI is considered authorized.
+
+=== Task: Expand Includes from an In-Memory Table
+
+  require "rexml/document"
+  require "rexml/xinclude"
+
+  store = {
+    "mem:/main.xml" => '<root xmlns:xi="http://www.w3.org/2001/XInclude">' \
+                       '<xi:include href="part.xml"/></root>',
+    "mem:/part.xml" => "<part>included</part>",
+  }
+  resolver = Object.new
+  resolver.define_singleton_method(:read) { |uri| store.fetch(uri) }
+
+  document = REXML::Document.new(store["mem:/main.xml"])
+  result   = REXML::XInclude.include(document, resolver,
+                                     base_uri: "mem:/main.xml")
+  result.document.to_s # => "...<part xml:base='mem:/part.xml'>included</part>..."
+
+The input document is never modified; the expanded tree is returned on
+REXML::XInclude::Result.
+
+=== Task: Authorize Reads Before They Happen
+
+  class AllowListResolver
+    def initialize(store, allowed)
+      @store, @allowed = store, allowed
+    end
+
+    def authorized?(uri)
+      @allowed.include?(uri)
+    end
+
+    def read(uri)
+      # Never reached for a URI that authorized? refused.
+      @store.fetch(uri)
+    end
+  end
+
+A denied resource raises REXML::XInclude::AuthorizationDenied.  This is a
+fatal error: an +xi:fallback+ cannot be used to retry the inclusion through
+another address, and the resolver's +read+ is guaranteed not to have run.
+
+=== XML versus Text Includes
+
+- +parse="xml"+ (the default) parses the resource as a well-formed document
+  and splices its top-level nodes into the including document.  Nested
+  +xi:include+ elements inside the resource are expanded recursively.
+- +parse="text"+ inserts the resource verbatim as a single REXML::Text node,
+  so markup characters are escaped on output and no nested processing occurs.
+
+The include mode is recorded on each REXML::XInclude::Source.
+
+=== Base URI Handling
+
+Relative +href+ values and nested +xml:base+ attributes are resolved using
+the rules of {RFC 3986}[https://www.rfc-editor.org/rfc/rfc3986].  When an
+included element's base URI differs from the include site, an absolute
++xml:base+ is written onto it (base URI fixup), so included content keeps a
+correct base URI after expansion.
+
+=== Provenance
+
+REXML::XInclude::Result#sources maps every inserted node to the
+REXML::XInclude::Source that produced it.  Each source records the resolved
+URI, include mode, raw +href+, effective base URI, optional text encoding,
+and the source of the resource that contained the +xi:include+ element.
+Use REXML::XInclude::Source#chain to walk the inclusion path from the
+outermost document.
+
+  result.source_of(node).uri    # => "mem:/part.xml"
+  result.source_of(node).mode   # => :xml or :text
+  result.source_of(node).chain  # => ["mem:/main.xml", "mem:/part.xml"]
+
+REXML::XInclude::Result#events is an ordered audit trail of every resolver
+interaction (+read+, +denied+, +missing+, or +error+).
+
+=== Fatal Errors and Fallback
+
+Only a *missing* resource permits +xi:fallback+ processing.  The following
+are always fatal and never fall back, even when a fallback element is present:
+
+- REXML::XInclude::AuthorizationDenied
+- REXML::XInclude::IncludeCycle
+- REXML::XInclude::LimitExceeded (nesting depth, include count, text size)
+- REXML::XInclude::MalformedResource
+- REXML::XInclude::ConfigurationError
+- non-missing REXML::XInclude::ResourceError
+
+On any fatal error the original input document is left unchanged.
