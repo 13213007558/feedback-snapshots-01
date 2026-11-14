@@ -2,6 +2,9 @@
 
 require_relative 'helper'
 
+require 'json'
+require 'openssl'
+
 separate_testing do
   require_relative '../lib/rack/rewindable_input'
 end
@@ -124,6 +127,24 @@ module RewindableTest
     @rio.close.must_be_nil
   end
 
+  it "raise IOError when accessed after close" do
+    @rio.read.must_equal "hello world"
+    @rio.close
+    proc { @rio.read }.must_raise(IOError)
+    proc { @rio.gets }.must_raise(IOError)
+    proc { @rio.each { |line| } }.must_raise(IOError)
+    proc { @rio.rewind }.must_raise(IOError)
+    proc { @rio.size }.must_raise(IOError)
+  end
+
+  it "raise IOError when closed before anything was buffered and then accessed" do
+    @rio.close
+    proc { @rio.read }.must_raise(IOError)
+    proc { @rio.gets }.must_raise(IOError)
+    proc { @rio.rewind }.must_raise(IOError)
+    proc { @rio.size }.must_raise(IOError)
+  end
+
   after do
   @rio.close
   @rio = nil
@@ -162,6 +183,141 @@ describe Rack::RewindableInput do
     end
 
     include RewindableTest
+  end
+end
+
+describe Rack::RewindableInput do
+  describe "when the wrapped IO fails partway through staging" do
+    def setup
+      @source = StringIO.new(("hello world" * 4096).dup)
+      def @source.read(*args)
+        @chunks = (@chunks || 0) + 1
+        raise Errno::EIO, "read failed" if @chunks > 2
+        super
+      end
+      @rio = Rack::RewindableInput.new(@source)
+      def @rio.filesystem_has_posix_semantics?
+        @staged_tempfile = @rewindable_io
+        @staged_tempfile_path = @rewindable_io.path
+        super
+      end
+    end
+
+    it "re-raises the staging error from every entry point" do
+      proc { @rio.read }.must_raise(Errno::EIO)
+      proc { @rio.read }.must_raise(Errno::EIO)
+      proc { @rio.gets }.must_raise(Errno::EIO)
+      proc { @rio.each { |line| } }.must_raise(Errno::EIO)
+      proc { @rio.rewind }.must_raise(Errno::EIO)
+      proc { @rio.size }.must_raise(Errno::EIO)
+    end
+
+    it "never exposes the staged prefix as the complete body" do
+      proc { @rio.read }.must_raise(Errno::EIO)
+      @rio.instance_variable_get(:@rewindable_io).must_be_nil
+    end
+
+    it "releases the tempfile created for the failed staging" do
+      proc { @rio.read }.must_raise(Errno::EIO)
+      tempfile = @rio.instance_variable_get(:@staged_tempfile)
+      tempfile.must_be :closed?
+      File.exist?(@rio.instance_variable_get(:@staged_tempfile_path)).must_equal false
+    end
+
+    it "does not close the wrapped IO, which is still owned by its creator" do
+      proc { @rio.read }.must_raise(Errno::EIO)
+      @source.wont_be :closed?
+      @rio.close
+      @source.wont_be :closed?
+    end
+
+    after do
+      @rio.close
+    end
+  end
+
+  describe "when writing to the tempfile fails" do
+    it "treats a zero-byte write as a staging failure instead of silently truncating" do
+      rio = Rack::RewindableInput.new(StringIO.new("hello world".dup))
+      def rio.filesystem_has_posix_semantics?
+        def @rewindable_io.write(buffer)
+          0
+        end
+        super
+      end
+      proc { rio.read }.must_raise(IOError)
+      proc { rio.read }.must_raise(IOError)
+      proc { rio.size }.must_raise(IOError)
+      rio.close
+    end
+
+    it "propagates tempfile write errors and keeps raising them" do
+      rio = Rack::RewindableInput.new(StringIO.new("hello world".dup))
+      def rio.filesystem_has_posix_semantics?
+        def @rewindable_io.write(buffer)
+          raise Errno::ENOSPC, "no space left on device"
+        end
+        super
+      end
+      proc { rio.read }.must_raise(Errno::ENOSPC)
+      proc { rio.gets }.must_raise(Errno::ENOSPC)
+      proc { rio.rewind }.must_raise(Errno::ENOSPC)
+      rio.close
+    end
+  end
+
+  describe "given a signed request whose staging fails partway through" do
+    it "never lets downstream readers see the truncated prefix as a valid body" do
+      secret = "test-secret"
+      body = %({"amount":100,"to":"alice","memo":"#{'x' * 16384}"})
+      signature = OpenSSL::HMAC.hexdigest("SHA256", secret, body)
+
+      source = StringIO.new(body.dup)
+      def source.read(*args)
+        @chunks = (@chunks || 0) + 1
+        raise Errno::ECONNRESET, "connection reset by peer" if @chunks > 2
+        super
+      end
+
+      input = Rack::RewindableInput.new(source)
+      def input.filesystem_has_posix_semantics?
+        @staged_tempfile = @rewindable_io
+        @staged_tempfile_path = @rewindable_io.path
+        super
+      end
+
+      verify_signature = lambda do |rack_input|
+        candidate = rack_input.read
+        OpenSSL::HMAC.hexdigest("SHA256", secret, candidate) == signature
+      end
+      parse_body = lambda do |rack_input|
+        JSON.parse(rack_input.read)
+      end
+
+      # The signature middleware triggers staging, which fails partway
+      # through: the error surfaces instead of a truncated body passing
+      # for the complete, signed request.
+      proc { verify_signature.call(input) }.must_raise(Errno::ECONNRESET)
+
+      # Every later entry point keeps failing loudly rather than serving
+      # the staged prefix as if it were the complete body.
+      proc { parse_body.call(input) }.must_raise(Errno::ECONNRESET)
+      proc { input.rewind }.must_raise(Errno::ECONNRESET)
+      proc { input.gets }.must_raise(Errno::ECONNRESET)
+      proc { input.each { |line| } }.must_raise(Errno::ECONNRESET)
+      proc { input.size }.must_raise(Errno::ECONNRESET)
+
+      # The failed staging released its tempfile instead of leaking it
+      # past the end of the request.
+      tempfile = input.instance_variable_get(:@staged_tempfile)
+      tempfile.must_be :closed?
+      File.exist?(input.instance_variable_get(:@staged_tempfile_path)).must_equal false
+
+      # The original input is still owned (and open) by its original owner.
+      source.wont_be :closed?
+
+      input.close
+    end
   end
 end
 
