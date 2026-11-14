@@ -36,13 +36,18 @@ module Loofah
         #  like their constituent nodes, we need to jam all the logic into a single module.
         #
         scrubber = ScrubBehavior.resolve_scrubber(scrubber)
+        scrub_with_budget!(scrubber, scrubber.new_budget)
+      end
+
+      # :nodoc:
+      def scrub_with_budget!(scrubber, budget)
         case self
         when Nokogiri::XML::Document
-          scrubber.traverse(root) if root
+          scrubber.traverse_with_budget(root, budget) if root
         when Nokogiri::XML::DocumentFragment
-          children.scrub!(scrubber)
+          children.scrub_with_budget!(scrubber, budget)
         else
-          scrubber.traverse(self)
+          scrubber.traverse_with_budget(self, budget)
         end
         self
       end
@@ -50,7 +55,14 @@ module Loofah
 
     module NodeSet # :nodoc:
       def scrub!(scrubber)
-        each { |node| node.scrub!(scrubber) }
+        scrubber = ScrubBehavior.resolve_scrubber(scrubber)
+        scrub_with_budget!(scrubber, scrubber.new_budget)
+        self
+      end
+
+      # :nodoc:
+      def scrub_with_budget!(scrubber, budget)
+        each { |node| node.scrub_with_budget!(scrubber, budget) }
         self
       end
     end

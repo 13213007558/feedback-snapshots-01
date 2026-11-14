@@ -216,6 +216,21 @@ end
 Loofah.xml_document(File.read('plague.xml')).scrub!(bring_out_your_dead)
 ```
 
+Traversal uses an explicit stack, so deeply nested input cannot exhaust Ruby's call stack. Each scrub also has a work budget: `max_nodes` defaults to 1,000,000 node visits, and `max_depth` is unlimited unless set. Exceeding either limit raises `Loofah::Scrubber::BudgetExceeded`; because the document may already be partly modified, treat that exception as a failed scrub and discard the output rather than using it as sanitized content.
+
+``` ruby
+scrubber = Loofah::Scrubber.new(max_nodes: 100_000, max_depth: 1_000) do |node|
+  # ...
+end
+begin
+  Loofah.html5_fragment(untrusted_html).scrub!(scrubber)
+rescue Loofah::Scrubber::BudgetExceeded
+  # reject the input
+end
+```
+
+The same limits can be passed to the built-in scrubbers, e.g. `Loofah::Scrubbers::Prune.new(max_nodes: 10_000)`.
+
 ### Built-In HTML Scrubbers
 
 Loofah comes with a set of sanitizing scrubbers that use `html5lib`'s safelist algorithm:

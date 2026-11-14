@@ -112,8 +112,9 @@ module Loofah
     #     => "ohai! <div>div is safe</div> but foo is <b>not</b>"
     #
     class Strip < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :bottom_up
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -135,8 +136,9 @@ module Loofah
     #     => "ohai! <div>div is safe</div> "
     #
     class Prune < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -157,8 +159,9 @@ module Loofah
     #     => "ohai! <div>div is safe</div> &lt;foo&gt;but foo is &lt;b&gt;not&lt;/b&gt;&lt;/foo&gt;"
     #
     class Escape < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -189,8 +192,9 @@ module Loofah
     #  Certainly not me.
     #
     class Whitewash < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -222,8 +226,9 @@ module Loofah
     #     => "ohai! <a href='http://www.myswarmysite.com/' rel="nofollow">I like your blog post</a>"
     #
     class NoFollow < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -248,8 +253,9 @@ module Loofah
     #  behavior as setting rel="noopener".
     #
     class TargetBlank < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -273,8 +279,9 @@ module Loofah
     #     => "ohai! <a href='http://www.myswarmysite.com/' rel="noopener">I like your blog post</a>"
     #
     class NoOpener < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -295,8 +302,9 @@ module Loofah
     #     => "ohai! <a href='http://www.myswarmysite.com/' rel="noreferrer">I like your blog post</a>"
     #
     class NoReferrer < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -309,8 +317,9 @@ module Loofah
 
     # This class probably isn't useful publicly, but is used for #to_text's current implemention
     class NewlineBlockElements < Scrubber # :nodoc:
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :bottom_up
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -342,8 +351,9 @@ module Loofah
     #     http://timelessrepo.com/json-isnt-a-javascript-subset
     #
     class Unprintable < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         @direction = :top_down
+        configure_budget(options)
       end
 
       def scrub(node)
@@ -364,9 +374,10 @@ module Loofah
     #     => "<p>Some text here in a logical paragraph.</p><p>Some more text, apparently a second paragraph.</p>"
     #
     class DoubleBreakpoint < Scrubber
-      def initialize # rubocop:disable Lint/MissingSuper
+      def initialize(options = {}) # rubocop:disable Lint/MissingSuper
         # a top-down walk would empty a paragraph before reaching a paragraph nested in it
         @direction = :bottom_up
+        configure_budget(options)
       end
 
       def scrub(node)
