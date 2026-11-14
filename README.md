@@ -162,6 +162,53 @@ end
 For more information see the [MQTT::Client#get] method.
 
 
+### Persistent sessions and recovery ###
+
+When `clean_session` is false, a broker may restore an existing session after
+a reconnection. A reconnection is not proof that the session was restored, so
+`connect` returns an explicit `MQTT::Client::SessionRecovery` result:
+
+~~~ ruby
+client = MQTT::Client.new(:host => 'myserver.example.com', :clean_session => false)
+result = client.connect('secure-consumer')
+
+if result.resumed?
+  # Session Present was 1: the broker restored the session and its
+  # subscriptions are still active.
+elsif result.new_session?
+  # Session Present was 0: the broker created a new session. Any local
+  # messages and subscriptions from the previous session are gone.
+  client.resubscribe
+end
+~~~
+
+The local session boundary consists of the broker host, port and TLS mode,
+the client identifier and the `clean_session` setting. Local queued messages
+are only reused when all of these are unchanged and the broker restored the
+session. Changing the broker target or losing the session discards the old
+queue, so messages from one session can never be presented as messages from
+another.
+
+In-flight QoS 1 publishes are always abandoned when the connection is
+re-established: a PUBACK from a previous connection is not proof that a new
+operation was accepted. The result reports `pending_acknowledgements_lost?`
+and the abandoned packet identifiers, which are never reused for a later
+publish.
+
+The `resubscribe` method re-sends SUBSCRIBE packets for the topic filters
+known to the client. It should be called whenever `new_session?` is true:
+
+~~~ ruby
+result = client.connect('secure-consumer')
+client.resubscribe if result.new_session?
+~~~
+
+`client.last_session_result` holds the result of the most recent successful
+connection. See `examples/persistent_session_recovery.rb` for a complete,
+self-contained demonstration of two disconnections: one where the broker
+restores the session and one where it has lost it.
+
+
 ### Parsing and serialising of packets ###
 
 The parsing and serialising of MQTT and MQTT-SN packets is a separate lower-level API.
@@ -193,6 +240,9 @@ Limitations
  * QoS 2 is not currently supported by client
  * Automatic re-connects to the server are not supported
  * No local persistence for packets
+
+Applications must drive reconnection themselves, then call `resubscribe`
+when the recovery result reports that the broker created a new session.
 
 
 Resources

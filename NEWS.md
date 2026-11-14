@@ -1,6 +1,25 @@
 Ruby MQTT NEWS
 ==============
 
+Unreleased
+----------
+
+* `MQTT::Client#connect` now returns a `MQTT::Client::SessionRecovery` result
+  reporting whether the broker restored the session (Session Present) or
+  created a new one.
+* Local session state is scoped by broker host/port/TLS mode, client
+  identifier and clean session setting. Queued messages are discarded when
+  the target changes or the broker loses the session.
+* CONNACK validation rejects Session Present when Clean Session was requested,
+  when it is set for MQTT 3.1.0, and on refused connections.
+* In-flight QoS 1 acknowledgements are abandoned on reconnection and their
+  packet identifiers are not reused, so an old PUBACK cannot complete a new
+  operation.
+* Added `subscribed_topics`, `resubscribe` and `abandoned_puback_ids` so an
+  application can safely re-establish subscriptions and audit lost replies.
+* Added `examples/persistent_session_recovery.rb` demonstrating two
+  disconnections: a resumed session and a lost session.
+
 Ruby MQTT Version 0.7.0 (2025-10-29)
 ------------------------------------
 

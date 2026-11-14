@@ -561,6 +561,23 @@ describe MQTT::Client do
       expect(socket).not_to be_closed
     end
 
+    it "should return the CONNACK packet" do
+      socket.write("\x20\x02\x00\x00")
+      socket.rewind
+      packet = client.send(:receive_connack)
+      expect(packet).to be_a(MQTT::Packet::Connack)
+      expect(packet.session_present).to be_falsey
+    end
+
+    it "should report the Session Present flag to the caller" do
+      client.clean_session = false
+      client.client_id = 'myclient'
+      socket.write("\x20\x02\x01\x00")
+      socket.rewind
+      packet = client.send(:receive_connack)
+      expect(packet.session_present).to be_truthy
+    end
+
     it "should raise an exception if the packet type isn't CONNACK" do
       socket.write("\xD0\x00")
       socket.rewind
@@ -596,6 +613,244 @@ describe MQTT::Client do
       socket.rewind
       expect { client.send(:receive_connack) }.to raise_error(MQTT::ProtocolException, /not authorised/i)
       expect(socket).to be_closed
+    end
+
+    it "should reject Session Present when Clean Session was requested" do
+      socket.write("\x20\x02\x01\x00")
+      socket.rewind
+      expect { client.send(:receive_connack) }.to raise_error(
+        MQTT::ProtocolException,
+        'Session Present flag set when Clean Session was requested'
+      )
+      expect(socket).to be_closed
+    end
+
+    it "should accept Session Present when Clean Session was not requested" do
+      client.clean_session = false
+      client.client_id = 'myclient'
+      socket.write("\x20\x02\x01\x00")
+      socket.rewind
+      expect { client.send(:receive_connack) }.not_to raise_error
+      expect(socket).not_to be_closed
+    end
+
+    it "should reject Session Present for protocol version 3.1.0" do
+      client.version = '3.1.0'
+      client.clean_session = false
+      client.client_id = 'myclient'
+      socket.write("\x20\x02\x01\x00")
+      socket.rewind
+      expect { client.send(:receive_connack) }.to raise_error(
+        MQTT::ProtocolException,
+        /Session Present flag set in MQTT 3.1.0/
+      )
+      expect(socket).to be_closed
+    end
+
+    it "should reject Session Present on a refused connection" do
+      client.clean_session = false
+      client.client_id = 'myclient'
+      socket.write("\x20\x02\x01\x05")
+      socket.rewind
+      expect { client.send(:receive_connack) }.to raise_error(
+        MQTT::ProtocolException,
+        /not authorised.*Session Present must be 0/i
+      )
+      expect(socket).to be_closed
+    end
+  end
+
+  describe "session recovery across reconnections" do
+    let(:client) { MQTT::Client.new(:host => 'broker.example.com', :port => 1883, :clean_session => false) }
+    let(:sockets) { [] }
+
+    before(:each) do
+      allow(TCPSocket).to receive(:new) do
+        socket = StringIO.new
+        socket.set_encoding('binary') if socket.respond_to?(:set_encoding)
+        sockets << socket
+        socket
+      end
+      allow(Thread).to receive(:new)
+    end
+
+    def connect_with_session_present(client, present, client_id = 'secure-client')
+      allow(client).to receive(:receive_connack).and_return(
+        MQTT::Packet::Connack.new(:return_code => 0, :session_present => present)
+      )
+      client.connect(client_id)
+    end
+
+    def disconnect_client(client)
+      client.disconnect(false)
+    end
+
+    def queue_message(client, payload = 'old-payload')
+      client.instance_variable_get('@read_queue').push(
+        MQTT::Packet::Publish.new(:topic => 'secure/topic', :payload => payload)
+      )
+    end
+
+    it "reports the first connection as a new session" do
+      result = connect_with_session_present(client, false)
+      expect(result).to be_a(MQTT::Client::SessionRecovery)
+      expect(result.status).to eq(:new_session)
+      expect(result.new_session?).to be_truthy
+      expect(result.resumed?).to be_falsey
+      expect(result.first_connection?).to be_truthy
+      expect(result.identity_changed?).to be_falsey
+      expect(result.local_state_discarded?).to be_falsey
+      expect(client.last_session_result).to eq(result)
+    end
+
+    it "reports a resumed session for the same broker and client id" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      queue_message(client)
+      result = connect_with_session_present(client, true)
+
+      expect(result.status).to eq(:resumed)
+      expect(result.resumed?).to be_truthy
+      expect(result.identity_changed?).to be_falsey
+      expect(result.local_state_reused?).to be_truthy
+      expect(result.local_state_discarded?).to be_falsey
+      expect(client.queue_length).to eq(1)
+    end
+
+    it "discards queued messages when the broker has lost the session" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      queue_message(client)
+      result = connect_with_session_present(client, false)
+
+      expect(result.status).to eq(:new_session)
+      expect(result.identity_changed?).to be_falsey
+      expect(result.local_state_discarded?).to be_truthy
+      expect(client.queue_length).to eq(0)
+    end
+
+    it "discards local state when the broker target changes even if Session Present is set" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      queue_message(client)
+
+      client.port = 8883
+      result = connect_with_session_present(client, true)
+
+      expect(result.status).to eq(:resumed)
+      expect(result.identity_changed?).to be_truthy
+      expect(result.boundary_changed?).to be_truthy
+      expect(result.local_state_reused?).to be_falsey
+      expect(result.local_state_discarded?).to be_truthy
+      expect(client.queue_length).to eq(0)
+    end
+
+    it "discards local state when the client id changes" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      queue_message(client)
+
+      result = connect_with_session_present(client, true, 'other-client')
+
+      expect(result.identity_changed?).to be_truthy
+      expect(result.local_state_discarded?).to be_truthy
+      expect(client.queue_length).to eq(0)
+    end
+
+    it "discards local state when clean_session changes" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      queue_message(client)
+
+      client.clean_session = true
+      result = connect_with_session_present(client, false)
+
+      expect(result.identity_changed?).to be_truthy
+      expect(result.local_state_discarded?).to be_truthy
+      expect(client.queue_length).to eq(0)
+    end
+
+    it "invalidates in-flight acknowledgements even when the session resumes" do
+      connect_with_session_present(client, false)
+
+      # Simulate an in-flight QoS 1 publish whose PUBACK never arrives.
+      client.send(:wait_for_puback, 42)
+      @inflight_pubacks = client.instance_variable_get('@inflight_puback_ids')
+      @inflight_pubacks[42] = true
+
+      disconnect_client(client)
+      result = connect_with_session_present(client, true)
+
+      expect(result.pending_acknowledgements_lost?).to be_truthy
+      expect(result.abandoned_puback_ids).to include(42)
+      expect(client.instance_variable_get('@pubacks')).to be_empty
+
+      # A stale acknowledgement must not be treated as new session traffic.
+      client.send(:handle_packet, MQTT::Packet::Puback.new(:id => 42))
+      expect(client.instance_variable_get('@pubacks')).to be_empty
+    end
+
+    it "does not reuse the packet id of an abandoned acknowledgement" do
+      connect_with_session_present(client, false)
+      client.instance_variable_set(:@last_packet_id, 0xffff)
+      client.instance_variable_get('@abandoned_puback_ids')[1] = true
+
+      expect(client.send(:next_packet_id)).to eq(2)
+    end
+
+    it "re-establishes known subscriptions after a new session" do
+      connect_with_session_present(client, false)
+      client.subscribe('secure/topic', ['secure/other', 1])
+      expect(client.subscriptions).to eq('secure/topic' => 0, 'secure/other' => 1)
+
+      disconnect_client(client)
+      result = connect_with_session_present(client, false)
+      expect(result.new_session?).to be_truthy
+
+      expect(client).to receive(:send_packet).with(
+        an_instance_of(MQTT::Packet::Subscribe)
+      ) do |packet|
+        expect(packet.topics).to eq([['secure/other', 1], ['secure/topic', 0]])
+      end
+      client.resubscribe
+    end
+
+    it "forgets an unsubscribed filter" do
+      connect_with_session_present(client, false)
+      client.subscribe('secure/topic')
+      client.unsubscribe('secure/topic')
+      expect(client.subscriptions).to be_empty
+    end
+
+    it "does not accept a message read by a previous connection's reader" do
+      connect_with_session_present(client, false)
+      stale_epoch = client.instance_variable_get('@session_epoch') - 1
+      packet = MQTT::Packet::Publish.new(:topic => 'secure/topic', :payload => 'stale')
+
+      client.send(:handle_packet, packet, stale_epoch)
+      expect(client.queue_empty?).to be_truthy
+
+      client.send(:handle_packet, packet, stale_epoch + 1)
+      expect(client.queue_length).to eq(1)
+    end
+
+    it "returns the recovery result from a block form connection" do
+      connect_with_session_present(client, false)
+      disconnect_client(client)
+      allow(client).to receive(:receive_connack).and_return(
+        MQTT::Packet::Connack.new(:return_code => 0, :session_present => true)
+      )
+      result = client.connect('secure-client') { |c| expect(c.last_session_result).to be_a(MQTT::Client::SessionRecovery) }
+      expect(result.resumed?).to be_truthy
+    end
+
+    it "exposes recovery details as a hash and via brackets" do
+      result = connect_with_session_present(client, false)
+      expect(result[:status]).to eq(:new_session)
+      expect(result['session_present']).to be false
+      expect(result.to_h[:client_id]).to eq('secure-client')
+      expect(result.to_h[:host]).to eq('broker.example.com')
+      expect(result.to_h[:port]).to eq(1883)
     end
   end
 
@@ -713,6 +968,12 @@ describe MQTT::Client do
       inject_puback(1)
       client.publish('topic','payload', false, 1)
       expect(socket.string).to eq("\x32\x10\x00\x05topic\x00\x01payload")
+    end
+
+    it "should not reuse a packet id with an abandoned acknowledgement" do
+      client.instance_variable_set(:@last_packet_id, 0xffff)
+      client.instance_variable_get(:@abandoned_puback_ids)[1] = true
+      expect(client.send(:next_packet_id)).to eq(2)
     end
 
     it "should write a valid PUBLISH packet to the socket with the QoS set to 2" do

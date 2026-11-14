@@ -4,6 +4,208 @@ autoload :URI, 'uri'
 # Client class for talking to an MQTT server
 module MQTT
   class Client
+    # The network endpoint that a local MQTT session belongs to.
+    #
+    # Broker identities are part of the session boundary because the same
+    # client identifier used against a different broker is a different session.
+    BrokerIdentity = Struct.new(:host, :port, :ssl) do
+      def to_s
+        "#{ssl ? 'mqtts' : 'mqtt'}://#{host}:#{port}"
+      end
+    end
+
+    # The complete boundary for locally held session state.
+    #
+    # A change to any of these values makes previously held local state
+    # unusable for the new connection, even if the broker reports that it
+    # resumed a session for the same client identifier.
+    SessionIdentity = Struct.new(:broker, :client_id, :clean_session) do
+      def to_s
+        "#{broker} client_id=#{client_id.inspect} clean_session=#{clean_session}"
+      end
+    end
+    SessionBoundary = SessionIdentity
+
+    # The explicit result of establishing a new connection.
+    #
+    # It reports what the broker did with the session (Session Present) and
+    # whether local state from a previous connection had to be discarded.
+    class SessionRecovery
+      # Broker endpoint used for this connection attempt
+      attr_reader :broker
+
+      # Client identifier used for the CONNECT packet
+      attr_reader :client_id
+
+      # Value of the Clean Session flag sent in the CONNECT packet
+      attr_reader :clean_session
+
+      # True if the broker resumed an existing session
+      attr_reader :session_present
+
+      # Local session boundary used for this attempt
+      attr_reader :identity
+
+      # Local session boundary from the previous connection (if any)
+      attr_reader :previous_identity
+
+      # True if local transient state was discarded for this attempt
+      attr_reader :local_state_discarded
+
+      # True if local transient state was kept for this attempt
+      attr_reader :local_state_reused
+
+      def initialize(identity, previous_identity, session_present, local_state_discarded, local_state_reused = false)
+        @identity = identity
+        @broker = identity.broker
+        @client_id = identity.client_id
+        @clean_session = identity.clean_session
+        @previous_identity = previous_identity
+        @session_present = session_present ? true : false
+        @local_state_discarded = local_state_discarded ? true : false
+        @local_state_reused = local_state_reused ? true : false
+      end
+
+      # Hostname of the broker
+      def host
+        @broker.host
+      end
+
+      # Port number of the broker
+      def port
+        @broker.port
+      end
+
+      # True if TLS/SSL was enabled for the broker connection
+      def ssl
+        @broker.ssl
+      end
+
+      # True if the broker restored a stored session
+      def resumed?
+        @session_present
+      end
+      alias broker_resumed_session? resumed?
+      alias resumed_session? resumed?
+      alias session_present? resumed?
+
+      # True if the broker created a new session
+      def new_session?
+        !@session_present
+      end
+      alias broker_created_new_session? new_session?
+      alias created_new_session? new_session?
+
+      # Machine readable session recovery outcome
+      def status
+        resumed? ? :resumed : :new_session
+      end
+      alias result status
+
+      def to_sym
+        status
+      end
+
+      # True when the broker target, client identifier or clean session
+      # setting differs from the previous local session.
+      def identity_changed?
+        !@previous_identity.nil? && @previous_identity != @identity
+      end
+      alias boundary_changed? identity_changed?
+
+      # True if this result is for the first connection made by this client
+      def first_connection?
+        @previous_identity.nil?
+      end
+
+      # True if queued messages from the previous connection were discarded
+      def local_state_discarded?
+        @local_state_discarded
+      end
+      alias queued_messages_discarded? local_state_discarded?
+
+      # True if queued messages from the previous connection were kept
+      def local_state_reused?
+        @local_state_reused
+      end
+      alias queued_messages_reused? local_state_reused?
+
+      # True if a QoS 1 publish still waiting for its PUBACK must not expect
+      # the acknowledgement to complete after this recovery.
+      def pending_acknowledgements_lost?
+        @pending_acknowledgements_lost
+      end
+
+      def pending_acknowledgements_lost=(value)
+        @pending_acknowledgements_lost = value ? true : false
+      end
+
+      # Packet ids of operations from previous connections that must never
+      # complete a future publish.
+      def abandoned_puback_ids
+        @abandoned_puback_ids.dup
+      end
+
+      def abandoned_puback_ids=(ids)
+        @abandoned_puback_ids = ids.dup
+      end
+
+      # Human readable summary of what happened to local state.
+      def recovery
+        return :fresh if first_connection?
+
+        if identity_changed?
+          :target_changed
+        elsif !@session_present
+          :session_lost
+        elsif pending_acknowledgements_lost?
+          :reconnected
+        else
+          :resumed
+        end
+      end
+
+      # Allow the result to be read like the hash used by older callers.
+      def [](key)
+        to_h[key.to_sym]
+      end
+
+      def to_h
+        {
+          :status => status,
+          :result => result,
+          :recovery => recovery,
+          :session_present => @session_present,
+          :resumed => resumed?,
+          :new_session => new_session?,
+          :broker => @broker,
+          :host => host,
+          :port => port,
+          :ssl => ssl,
+          :client_id => @client_id,
+          :clean_session => @clean_session,
+          :identity => @identity,
+          :previous_identity => @previous_identity,
+          :identity_changed => identity_changed?,
+          :first_connection => first_connection?,
+          :local_state_discarded => local_state_discarded?,
+          :local_state_reused => local_state_reused?,
+          :pending_acknowledgements_lost => pending_acknowledgements_lost?,
+          :abandoned_puback_ids => abandoned_puback_ids
+        }
+      end
+      alias to_hash to_h
+
+      def to_s
+        "#<#{self.class}: #{status}, identity=#{@identity.inspect}, " \
+          "identity_changed=#{identity_changed?}, " \
+          "local_state_discarded=#{local_state_discarded?}>"
+      end
+    end
+
+    # Alias for callers that prefer an explicit result class name
+    SessionResult = SessionRecovery
+
     # Hostname of the remote server
     attr_accessor :host
 
@@ -61,6 +263,9 @@ module MQTT
 
     # Last ping response time
     attr_reader :last_ping_response
+
+    # Result of the most recent connection attempt
+    attr_reader :last_session_result
 
     # Timeout between select polls (in seconds)
     SELECT_TIMEOUT = 0.5
@@ -180,6 +385,14 @@ module MQTT
       @read_thread = nil
       @write_semaphore = Mutex.new
       @pubacks_semaphore = Mutex.new
+      @session_semaphore = Mutex.new
+      @subscribed_topics = {}
+      @abandoned_puback_ids = {}
+      @inflight_puback_ids = {}
+      @lost_pubacks_since_connect = false
+      @session_identity = nil
+      @session_epoch = 0
+      @last_session_result = nil
     end
 
     # Get the OpenSSL context, that is used if SSL/TLS is enabled
@@ -227,7 +440,13 @@ module MQTT
     end
 
     # Connect to the MQTT server
+    #
+    # A successful call returns a {SessionRecovery} result describing whether
+    # the broker resumed the previous session or created a new one, and what
+    # happened to locally held session state.
+    #
     # If a block is given, then yield to that block and then disconnect again.
+    # The result is also available from {#last_session_result}.
     def connect(clientid = nil)
       @client_id = clientid unless clientid.nil?
 
@@ -241,54 +460,77 @@ module MQTT
       raise 'No MQTT server host set when attempting to connect' if @host.nil?
 
       unless connected?
-        # Create network socket
-        tcp_socket = open_tcp_socket
+        identity = current_session_boundary
+        # A failed attempt must not leave the previous recovery result
+        # looking like the outcome of this connection.
+        @last_session_result = nil
 
-        if @ssl
-          # Set the protocol version
-          ssl_context.ssl_version = @ssl if @ssl.is_a?(Symbol)
+        begin
+          # Create network socket
+          tcp_socket = open_tcp_socket
 
-          @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
-          @socket.sync_close = true
+          if @ssl
+            # Set the protocol version
+            ssl_context.ssl_version = @ssl if @ssl.is_a?(Symbol)
 
-          # Set hostname on secure socket for Server Name Indication (SNI)
-          @socket.hostname = @host if @socket.respond_to?(:hostname=)
+            @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
+            @socket.sync_close = true
 
-          @socket.connect
+            # Set hostname on secure socket for Server Name Indication (SNI)
+            @socket.hostname = @host if @socket.respond_to?(:hostname=)
 
-          @socket.post_connection_check(@host) if @verify_host
-        else
-          @socket = tcp_socket
-        end
+            @socket.connect
 
-        # Construct a connect packet
-        packet = MQTT::Packet::Connect.new(
-          :version => @version,
-          :clean_session => @clean_session,
-          :keep_alive => @keep_alive,
-          :client_id => @client_id,
-          :username => @username,
-          :password => @password,
-          :will_topic => @will_topic,
-          :will_payload => @will_payload,
-          :will_qos => @will_qos,
-          :will_retain => @will_retain
-        )
+            @socket.post_connection_check(@host) if @verify_host
+          else
+            @socket = tcp_socket
+          end
 
-        # Send packet
-        send_packet(packet)
+          # Construct a connect packet
+          packet = MQTT::Packet::Connect.new(
+            :version => @version,
+            :clean_session => @clean_session,
+            :keep_alive => @keep_alive,
+            :client_id => @client_id,
+            :username => @username,
+            :password => @password,
+            :will_topic => @will_topic,
+            :will_payload => @will_payload,
+            :will_qos => @will_qos,
+            :will_retain => @will_retain
+          )
 
-        # Receive response
-        receive_connack
+          # Send packet
+          send_packet(packet)
 
-        # Start packet reading thread
-        @read_thread = Thread.new(Thread.current) do |parent|
-          Thread.current[:parent] = parent
-          receive_packet while connected?
+          # Receive response and validate the Session Present combination
+          connack = receive_connack
+          session_present = connack.respond_to?(:session_present) ? connack.session_present : false
+
+          # Decide what can be kept from the previous local session before
+          # accepting any packets from this connection.
+          result = establish_session(identity, session_present)
+          @last_session_result = result
+
+          # Start packet reading thread
+          epoch = @session_epoch
+          @read_thread = Thread.new(Thread.current) do |parent|
+            Thread.current[:parent] = parent
+            receive_packet(epoch) while connected? && epoch == @session_epoch
+          end
+        rescue ::Exception
+          # Never leave a half-open socket or a stale open connection behind.
+          begin
+            @socket.close if !@socket.nil? && !@socket.closed?
+          rescue StandardError
+            nil
+          end
+          @socket = nil
+          raise
         end
       end
 
-      return unless block_given?
+      return @last_session_result unless block_given?
 
       # If a block is given, then yield and disconnect
       begin
@@ -296,6 +538,8 @@ module MQTT
       ensure
         disconnect
       end
+
+      @last_session_result
     end
 
     # Disconnect from the MQTT server.
@@ -322,6 +566,41 @@ module MQTT
       !@socket.nil? && !@socket.closed?
     end
 
+    # The identity used for the most recent successful connection.
+    #
+    # Returns nil if the client has not connected yet.
+    def session_identity
+      @session_identity
+    end
+    alias session_boundary session_identity
+
+    # True if the broker reported that it resumed an existing session for the
+    # most recent successful connection.
+    def session_present?
+      !@last_session_result.nil? && @last_session_result.resumed?
+    end
+
+    # The topic filters this client wants to be subscribed to.
+    #
+    # This is retained across reconnections so that {#resubscribe} can
+    # re-establish them after the broker has created a new session.
+    def subscriptions
+      @subscribed_topics.dup
+    end
+    alias subscribed_topics subscriptions
+
+    # Re-send SUBSCRIBE packets for all known topic filters.
+    #
+    # This should be called by the application when the broker reports that
+    # a new session was created (Session Present is 0). Subscriptions are
+    # bound to the broker session, so they must not be assumed to still exist
+    # after the previous session has been lost.
+    def resubscribe
+      return nil if @subscribed_topics.empty?
+
+      subscribe(@subscribed_topics)
+    end
+
     # Publish a message on a particular topic to the MQTT server.
     def publish(topic, payload = '', retain = false, qos = 0)
       raise ArgumentError, 'Topic name cannot be nil' if topic.nil?
@@ -337,7 +616,16 @@ module MQTT
 
       queue = qos.zero? ? nil : wait_for_puback(packet.id)
 
-      res = send_packet(packet)
+      begin
+        res = send_packet(packet)
+        @pubacks_semaphore.synchronize { @inflight_puback_ids[packet.id] = true } if queue
+      rescue ::Exception
+        @pubacks_semaphore.synchronize do
+          @pubacks.delete(packet.id)
+          @inflight_puback_ids.delete(packet.id)
+        end
+        raise
+      end
 
       return unless queue
 
@@ -347,12 +635,33 @@ module MQTT
         response = queue.pop
         case response
         when :read_timeout
-          return -1 if current_time > deadline
-        when :close
+          if current_time > deadline
+            @pubacks_semaphore.synchronize do
+              @pubacks.delete(packet.id)
+              @inflight_puback_ids.delete(packet.id)
+              @abandoned_puback_ids[packet.id] = true
+            end
+            return -1
+          end
+        when :close, :session_lost
+          # The connection (and possibly the whole session) is gone, so the
+          # pending acknowledgement must not be completed by later traffic.
+          # Remember the id: a delayed acknowledgement for it must never be
+          # matched with a future operation that happens to reuse the id.
+          @pubacks_semaphore.synchronize do
+            already_retired = @abandoned_puback_ids.key?(packet.id)
+            @pubacks.delete(packet.id)
+            @inflight_puback_ids.delete(packet.id)
+            @abandoned_puback_ids[packet.id] = true
+            # establish_session may have already reported this operation as
+            # lost; do not count it again on the next reconnection.
+            @lost_pubacks_since_connect = true unless already_retired
+          end
           return -1
         else
           @pubacks_semaphore.synchronize do
-            @pubacks.delete packet.id
+            @pubacks.delete(packet.id)
+            @inflight_puback_ids.delete(packet.id)
           end
           break
         end
@@ -378,7 +687,16 @@ module MQTT
         :id => next_packet_id,
         :topics => topics
       )
-      send_packet(packet)
+
+      result = send_packet(packet)
+
+      # Remember the filters and requested QoS once they have been sent, so
+      # that they can be re-established if the broker creates a new session.
+      packet.topics.each do |topic, qos|
+        @subscribed_topics[topic] = qos
+      end
+
+      result
     end
 
     # Return the next message received from the MQTT server.
@@ -461,48 +779,73 @@ module MQTT
         :topics => topics,
         :id => next_packet_id
       )
-      send_packet(packet)
+      result = send_packet(packet)
+
+      packet.topics.each { |topic| @subscribed_topics.delete(topic) }
+
+      result
     end
 
     private
 
     # Try to read a packet from the server
     # Also sends keep-alive ping packets.
-    def receive_packet
+    def receive_packet(epoch = @session_epoch)
+      # A reader belonging to a previous connection must not touch the
+      # socket of the current session.
+      return if epoch != @session_epoch
+
+      socket = @socket
+      return if socket.nil?
+
       # Poll socket - is there data waiting?
-      result = IO.select([@socket], [], [], SELECT_TIMEOUT)
-      handle_timeouts
+      result = IO.select([socket], [], [], SELECT_TIMEOUT)
+      handle_timeouts if epoch == @session_epoch
       unless result.nil?
         # Yes - read in the packet
-        packet = MQTT::Packet.read(@socket)
-        handle_packet packet
+        packet = MQTT::Packet.read(socket)
+        handle_packet packet, epoch
       end
-      keep_alive!
+      keep_alive! if epoch == @session_epoch
     # Pass exceptions up to parent thread
     rescue ::Exception => exp
-      unless @socket.nil?
+      if epoch == @session_epoch && !@socket.nil?
         @socket.close
         @socket = nil
         handle_close
+        Thread.current[:parent].raise(exp)
       end
-      Thread.current[:parent].raise(exp)
     end
 
     def wait_for_puback(id)
+      queue = Queue.new
       @pubacks_semaphore.synchronize do
-        @pubacks[id] = Queue.new
+        @pubacks[id] = { :queue => queue, :epoch => @session_epoch }
       end
+      queue
     end
 
-    def handle_packet(packet)
+    def handle_packet(packet, epoch = @session_epoch)
       if packet.class == MQTT::Packet::Publish
-        # Add to queue
-        @read_queue.push(packet)
+        @session_semaphore.synchronize do
+          # Re-check under the same lock used when a session is replaced:
+          # a reader from a previous connection must never enqueue into the
+          # new session even if it raced with establish_session.
+          return if epoch != @session_epoch
+
+          @read_queue.push(packet)
+        end
       elsif packet.class == MQTT::Packet::Pingresp
         @last_ping_response = current_time
       elsif packet.class == MQTT::Packet::Puback
         @pubacks_semaphore.synchronize do
-          @pubacks[packet.id] << packet if @pubacks[packet.id]
+          # An acknowledgement for an operation from an earlier connection
+          # is never allowed to complete anything on this connection, and its
+          # identifier stays reserved so a future publish cannot reuse it.
+          return if @abandoned_puback_ids.key?(packet.id)
+
+          waiter = @pubacks[packet.id]
+          waiter[:queue] << packet if waiter && waiter[:epoch] == @session_epoch
         end
       end
       # Ignore all other packets
@@ -511,14 +854,84 @@ module MQTT
 
     def handle_timeouts
       @pubacks_semaphore.synchronize do
-        @pubacks.each_value { |q| q << :read_timeout }
+        @pubacks.each_value { |waiter| waiter[:queue] << :read_timeout }
       end
     end
 
     def handle_close
       @pubacks_semaphore.synchronize do
-        @pubacks.each_value { |q| q << :close }
+        @pubacks.each_value { |waiter| waiter[:queue] << :close }
       end
+    end
+
+    # Set up the local state for a newly established connection.
+    #
+    # The broker's Session Present flag is only trusted as far as the local
+    # session boundary allows: it can never cause messages or acknowledgements
+    # from another broker, client identifier or connection mode to be reused.
+    def establish_session(identity, session_present)
+      @session_semaphore.synchronize do
+        previous_identity = @session_identity
+        identity_changed = !previous_identity.nil? && previous_identity != identity
+
+        # Local queued messages can only belong to this exact session if the
+        # broker actually resumed it and the boundary has not changed.
+        reusable = !previous_identity.nil? && !identity_changed &&
+                   !identity.clean_session && session_present
+
+        # Invalidate readers and pending operations before touching the queues,
+        # so that nothing from the previous connection can leak into the new
+        # session while it is being set up.
+        @session_epoch += 1
+
+        # A network reconnect always breaks the request/response relationship
+        # for in-flight QoS 1 publishes: a broker may resend its PUBACK on a
+        # resumed connection, but it is not proof that the new operation was
+        # accepted. Retire the packet ids of every operation that was sent but
+        # never acknowledged, so an old acknowledgement cannot be matched to a
+        # later publish that reuses the same id.
+        pending_replies = 0
+        @pubacks_semaphore.synchronize do
+          pending_replies = @inflight_puback_ids.size
+          (@inflight_puback_ids.keys | @pubacks.keys).each do |id|
+            @abandoned_puback_ids[id] = true
+          end
+          @pubacks.each_value { |waiter| waiter[:queue] << :session_lost }
+          @pubacks.clear
+          @inflight_puback_ids.clear
+          pending_replies = 1 if @lost_pubacks_since_connect
+          @lost_pubacks_since_connect = false
+        end
+
+        # Messages queued for an old session must not be handed to the caller
+        # as if they arrived on the current connection.
+        discarded_messages = false
+        unless reusable
+          discarded_messages = !@read_queue.empty?
+          @read_queue.clear
+        end
+
+        @session_identity = identity
+
+        result = SessionRecovery.new(
+          identity,
+          previous_identity,
+          session_present,
+          discarded_messages,
+          reusable
+        )
+        result.pending_acknowledgements_lost = pending_replies > 0
+        result.abandoned_puback_ids = @abandoned_puback_ids.keys
+        result
+      end
+    end
+
+    def current_session_boundary
+      SessionIdentity.new(
+        BrokerIdentity.new(@host, @port, @ssl ? true : false),
+        @client_id,
+        @clean_session ? true : false
+      )
     end
 
     if Process.const_defined? :CLOCK_MONOTONIC
@@ -550,6 +963,15 @@ module MQTT
     end
 
     # Read and check a connection acknowledgement packet
+    #
+    # Validates the Session Present flag against the Clean Session flag that
+    # was sent in the CONNECT packet:
+    # * Clean Session 1 must always be answered with Session Present 0.
+    # * Session Present 1 is only meaningful when Clean Session is 0.
+    # * Protocol version 3.1.0 has no Session Present flag, so the reserved
+    #   bit must be 0.
+    #
+    # Returns the Connack packet on success.
     def receive_connack
       Timeout.timeout(@ack_timeout) do
         packet = MQTT::Packet.read(@socket)
@@ -562,9 +984,32 @@ module MQTT
           # 3.2.2.3 If a server sends a CONNACK packet containing a non-zero
           # return code it MUST then close the Network Connection
           @socket.close
+          if packet.session_present
+            raise MQTT::ProtocolException,
+                  "#{packet.return_msg} (Session Present must be 0 for a refused connection)"
+          end
           raise MQTT::ProtocolException, packet.return_msg
         end
+
+        validate_session_present(packet)
+        packet
       end
+    end
+
+    # Check that the Session Present flag is consistent with the connection
+    # request and the protocol version.
+    def validate_session_present(packet)
+      return unless packet.session_present
+
+      if @version == '3.1.0'
+        @socket.close
+        raise MQTT::ProtocolException, 'Session Present flag set in MQTT 3.1.0 CONNACK'
+      end
+
+      return unless @clean_session
+
+      @socket.close
+      raise MQTT::ProtocolException, 'Session Present flag set when Clean Session was requested'
     end
 
     # Send a packet to server
@@ -598,9 +1043,19 @@ module MQTT
     end
 
     def next_packet_id
-      @last_packet_id = (@last_packet_id || 0).next
-      @last_packet_id = 1 if @last_packet_id > 0xffff
-      @last_packet_id
+      @pubacks_semaphore.synchronize do
+        # All 16-bit ids cannot be abandoned at once; if that ever happens,
+        # the oldest reservations are no longer meaningful and are dropped.
+        @abandoned_puback_ids.clear if @abandoned_puback_ids.size >= 0xffff
+
+        begin
+          @last_packet_id = (@last_packet_id || 0).next
+          @last_packet_id = 1 if @last_packet_id > 0xffff
+        end while @abandoned_puback_ids.key?(@last_packet_id) ||
+                    @pubacks.key?(@last_packet_id)
+
+        @last_packet_id
+      end
     end
 
     def open_tcp_socket
