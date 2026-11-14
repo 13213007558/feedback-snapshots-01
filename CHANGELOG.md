@@ -6,10 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* `OAuth::RequestProxy::RackRequest` accepts a `:method_override` option
+  (`:bound`, `:effective`, `:original`).
 
 ### Changed
+* `OAuth::RequestProxy::RackRequest#method` now signs the method the application
+  will dispatch when `Rack::MethodOverride` is in use, binding the OAuth
+  signature to the final action. Previously the wire method was signed while
+  the overridden method was dispatched, allowing action substitution (for
+  example a signed `POST` executing as `DELETE`).
 
 ### Fixed
+* Form `_method` overrides added after signing are rejected; the override must
+  be part of the signed parameter set.
 
 ### Removed
 

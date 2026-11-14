@@ -302,6 +302,34 @@ hydra.run
 @response = req.response
 ```
 
+## Method Overrides with Rack
+
+`Rack::MethodOverride` lets a client POST with `_method=DELETE` (or an
+`X-HTTP-Method-Override` header) and have the application dispatch `DELETE`.
+That creates a gap between *what was signed* and *what will run*.
+
+`OAuth::RequestProxy::RackRequest` signs the method the application will
+actually dispatch, so the signature is bound to the final action. It supports a
+`:method_override` option:
+
+| Policy       | Behavior                                                                                                                                                     |
+|:-------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `:bound`     | **Default.** A form `_method` is honored only when the signed parameter set contains it with the overridden value. Header overrides sign the dispatched method. |
+| `:effective` | Always sign the method the application will dispatch, regardless of how the override arrived.                                                                  |
+| `:original`  | Legacy behavior: sign the method received on the wire and ignore the override. **Vulnerable** to action substitution; opt in only for compatibility.            |
+
+For a verifier in front of `Rack::MethodOverride` (or a stack where the override
+middleware runs first), use the default:
+
+```ruby
+OAuth::Signature.verify(rack_request, consumer_secret: secret, token_secret: token_secret)
+```
+
+There is no safe way to bind a header-triggered override into an OAuth 1.0
+signature, because `X-HTTP-Method-Override` is not a signable parameter. Either
+sign the effective method (`:effective`/default) or strip the header at the edge
+and use a signed `_method` form field instead.
+
 ## More Information
 
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]
