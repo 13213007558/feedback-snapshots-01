@@ -11,7 +11,7 @@ class Rails6Tests < Minitest::Test
   def expected
     @@expected ||= {
       :controller => 0,
-      :model => 0,
+      :model => 1,
       :template => 4,
       :generic => 37
     }
@@ -847,4 +847,25 @@ class Rails6Tests < Minitest::Test
       confidence: 0,
       relative_path: "Gemfile"
   end
+
+  def test_format_validation_reports_leaking_alternative_only
+    assert_warning :type => :model,
+      :warning_type => "Format Validation",
+      :warning_code => 30,
+      :line => 2,
+      :message => /Alternative 1 of 2 \(`pre`\) has no end anchor/,
+      :confidence => 0,
+      :relative_path => "app/models/coupon.rb"
+
+    assert_no_warning :type => :model,
+      :warning_type => "Format Validation",
+      :line => 3,
+      :relative_path => "app/models/coupon.rb"
+
+    assert_no_warning :type => :model,
+      :warning_type => "Format Validation",
+      :line => 4,
+      :relative_path => "app/models/coupon.rb"
+  end
+
 end
