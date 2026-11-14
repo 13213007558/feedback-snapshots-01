@@ -161,6 +161,17 @@ class Net::LDAP::PDU
     !success?
   end
 
+  # A Notice of Disconnection is an unsolicited Extended Response sent
+  # with message ID 0 and the responseName OID defined in RFC 4511
+  # section 4.4.1. Both the message ID, application tag and OID are
+  # verified so an ordinary, unmatched response can never be mistaken
+  # for a disconnection.
+  def notice_of_disconnection?
+    message_id.zero? &&
+      app_tag == ExtendedResponse &&
+      extended_response == Net::LDAP::NoticeOfDisconnectOid
+  end
+
   ##
   # Return serverSaslCreds, which are only present in BindResponse packets.
   #--

@@ -196,14 +196,26 @@ class Net::LDAP::Connection #:nodoc:
   # with mismatched IDs gets queued for subsequent reads by the origin of that
   # message ID.
   #
+  # An unsolicited Notice of Disconnection (message ID 0, RFC 4511 4.4.1) is
+  # never queued. It terminates the connection and raises
+  # Net::LDAP::NoticeOfDisconnectionError for every operation waiting on this
+  # connection, including ones started later, so no caller can block waiting
+  # for a normal result that will never arrive.
+  #
   # Returns a Net::LDAP::PDU object or nil.
   def queued_read(message_id)
+    raise_disconnection if @disconnected
+
     if pdu = message_queue[message_id].shift
       return pdu
     end
 
     # read messages until we have a match for the given message_id
     while pdu = read
+      if pdu.notice_of_disconnection?
+        handle_notice_of_disconnection(pdu)
+      end
+
       return pdu if pdu.message_id == message_id
 
       message_queue[pdu.message_id].push pdu
@@ -227,6 +239,28 @@ class Net::LDAP::Connection #:nodoc:
       hash[key] = []
     end
   end
+
+  # Internal: Record the authoritative reason for a server-initiated
+  # disconnection, drop every cached but unconsumed message, and close the
+  # socket so no further request can be written to it.
+  def handle_notice_of_disconnection(pdu)
+    @disconnected = Net::LDAP::NoticeOfDisconnectionError.new(
+      pdu.result_code, pdu.error_message, pdu.result[:matchedDN]
+    )
+
+    @message_queue&.clear
+    close
+    raise_disconnection
+  end
+  private :handle_notice_of_disconnection
+
+  # Internal: Re-raise the stored disconnection reason so later operations
+  # fail with the same cause instead of attempting a new request on a dead
+  # connection or returning a fabricated successful result.
+  def raise_disconnection
+    raise @disconnected if @disconnected
+  end
+  private :raise_disconnection
 
   # Internal: Reads and parses data from the configured connection.
   #
@@ -264,6 +298,12 @@ class Net::LDAP::Connection #:nodoc:
   # Returns the return value from writing to the connection, which in some
   # cases is the Integer number of bytes written to the socket.
   def write(request, controls = nil, message_id = next_msgid)
+    # Never transmit another request on a connection the server has already
+    # torn down. Security-sensitive operations (bind, password modify, etc.)
+    # must fail with the stored disconnection reason rather than being sent
+    # into a closed or recycled socket.
+    raise_disconnection
+
     instrument "write.net_ldap_connection" do |payload|
       packet = [message_id.to_ber, request, controls].compact.to_ber_sequence
       payload[:content_length] = socket.write(packet)

@@ -34,6 +34,24 @@ class Net::LDAP
   class SearchScopeInvalidError < Error; end
   class ResponseTypeInvalidError < Error; end
   class ResponseMissingOrInvalidError < Error; end
+
+  # Raised when the server sends an unsolicited Notice of Disconnection
+  # (RFC 4511 section 4.4.1). Carries the result code and diagnostic
+  # message supplied by the server so every operation waiting on the
+  # connection fails with the same, authoritative reason.
+  class NoticeOfDisconnectionError < Error
+    attr_reader :result_code, :error_message, :matched_dn
+
+    def initialize(result_code, error_message = "", matched_dn = "")
+      @result_code = result_code
+      @error_message = error_message
+      @matched_dn = matched_dn
+
+      suffix = error_message.to_s.empty? ? "" : ": #{error_message}"
+      super("Connection disconnected by server (#{result_code})#{suffix}")
+    end
+  end
+
   class EmptyDNError < Error; end
   class InvalidDNError < Error; end
   class HashTypeUnsupportedError < Error; end

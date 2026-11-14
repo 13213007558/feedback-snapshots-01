@@ -306,6 +306,9 @@ class Net::LDAP
     3 => :string, # SearchFilter-extensible
     4 => :string, # SearchFilter-extensible
     7 => :string, # serverSaslCreds
+    10 => :string, # ExtendedResponse responseName, including the
+    # Notice of Disconnection responseName
+    # (RFC 4511 section 4.4.1)
   }
   constructed = {
     0 => :array, # RFC-2251 Control and Filter-AND
@@ -342,6 +345,10 @@ class Net::LDAP
   StartTlsOid = '1.3.6.1.4.1.1466.20037'
   PasswdModifyOid = '1.3.6.1.4.1.4203.1.11.1'
   WhoamiOid = '1.3.6.1.4.1.4203.1.11.3'
+
+  # Unsolicited Notification OID for the Notice of Disconnection.
+  # https://tools.ietf.org/html/rfc4511#section-4.4.1
+  NoticeOfDisconnectOid = '1.3.6.1.4.1.1466.20036'
 
   # https://tools.ietf.org/html/rfc4511#section-4.1.9
   # https://tools.ietf.org/html/rfc4511#appendix-A
