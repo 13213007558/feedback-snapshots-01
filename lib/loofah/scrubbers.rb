@@ -403,6 +403,30 @@ module Loofah
       end
     end
     #
+    #  === scrub!(:svg_local_references)
+    #
+    #  +:svg_local_references+ enforces strict local references inside inline SVG and is intended
+    #  to run after a sanitizing scrubber:
+    #
+    #     Loofah.html5_fragment(icon_svg).scrub!(:strip).scrub!(:svg_local_references)
+    #
+    #  A reference in +href+, +xlink:href+, an SVG paint/filter presentation attribute, or a
+    #  +url(#...)+ token in a +style+ attribute survives only when it points at exactly one element
+    #  in the same fragment whose type is allowed for that attribute and which carries no references
+    #  itself. Dangling, duplicate-id, mistyped, chained, and cyclic references are removed.
+    #
+    class SvgLocalReferences < Scrubber
+      def initialize # rubocop:disable Lint/MissingSuper
+        @direction = :top_down
+      end
+
+      def scrub(node)
+        Loofah::HTML5::SvgLocalReferences.scrub(node)
+        STOP
+      end
+    end
+
+    #
     #  A hash that maps a symbol (like +:prune+) to the appropriate Scrubber (Loofah::Scrubbers::Prune).
     #
     MAP = {
@@ -417,6 +441,7 @@ module Loofah
       newline_block_elements: NewlineBlockElements,
       unprintable: Unprintable,
       double_breakpoint: DoubleBreakpoint,
+      svg_local_references: SvgLocalReferences,
     }
 
     class << self

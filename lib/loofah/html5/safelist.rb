@@ -974,9 +974,17 @@ module Loofah
       ])
 
       ACCEPTABLE_SVG_PROPERTIES = Set.new([
+        "clip-path",
+        "cursor",
         "fill",
         "fill-opacity",
         "fill-rule",
+        "filter",
+        "marker",
+        "marker-end",
+        "marker-mid",
+        "marker-start",
+        "mask",
         "stroke",
         "stroke-width",
         "stroke-linecap",

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* New `:svg_local_references` scrubber (`Loofah::Scrubbers::SvgLocalReferences`, backed by `Loofah::HTML5::SvgLocalReferences`) that enforces strict local references inside inline SVG. Run it after a sanitizing scrubber (for example `Loofah.html5_fragment(svg).scrub!(:strip).scrub!(:svg_local_references)`). A reference in `href`/`xlink:href`, an SVG paint or filter presentation attribute, or a `url(#...)` token in a `style` attribute survives only when it resolves to exactly one element in the same fragment, of a type allowed for that attribute, which carries no references itself. Dangling, duplicate-id, mistyped, chained, and cyclic references are removed instead of being left for the browser to resolve against the host document. Unreferenced paint servers (gradients, clip paths, filters, masks, markers, patterns, symbols) and empty `defs` wrappers are pruned.
+* `Loofah::HTML5::SvgLocalReferences.reference_graph` exposes the reference graph of a sanitized tree (each referencing node, the holding attribute or `style:<property>`, the referenced id, and its resolved target), which supports validating sanitized output by re-parsing it rather than string-matching a leading `#`.
+* The SVG CSS properties `clip-path`, `filter`, `mask`, `marker`, `marker-end`, `marker-mid`, `marker-start`, and `cursor` are now accepted in `style` attributes.
+
+### Changed
+
+* `Loofah::HTML5::Scrub.scrub_css` retains a property containing only a local `url(#id)` paint reference so the `:svg_local_references` scrubber can resolve it; properties containing any external or malformed `url()` are still rejected as before.
+
 ## 2.25.3 / 2026-11-01
 
 ### Security

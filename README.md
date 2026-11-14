@@ -240,6 +240,29 @@ doc.scrub!(:targetblank)       # adds target="_blank" attribute to links
 doc.scrub!(:double_breakpoint) # where `<br><br>` appears in a `p` tag, close the `p` and open a new one
 ```
 
+### Strict SVG Local References
+
+When users upload inline SVG icons, the regular sanitizers check only the *shape* of references
+like `fill="url(#g)"` or `<use href="#u">` (that they begin with `#`), not whether the target
+exists in the same fragment. A dangling reference is resolved by the browser against the host
+document, where an attacker-chosen id can hijack styling, clipping, or a `<use>` shadow tree.
+
+The `:svg_local_references` scrubber is intended to run after a sanitizing scrubber and keeps a
+reference only when it points at exactly one surviving element in the same fragment whose type is
+allowed for that attribute, and which carries no references itself (so chains and cycles are
+rejected). It covers `href`/`xlink:href`, the SVG paint and filter presentation attributes, and
+`url(#...)` tokens in `style` attributes:
+
+``` ruby
+Loofah.html5_fragment(icon_svg)
+      .scrub!(:strip)
+      .scrub!(:svg_local_references)
+```
+
+Invalid references are removed (a paint fallback such as `url(#g) red` degrades to `red`), and
+paint servers, gradients, clip paths, and similar elements that nothing references anymore are
+pruned.
+
 See `Loofah::Scrubbers` for more details and example usage.
 
 

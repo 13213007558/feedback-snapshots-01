@@ -17,6 +17,7 @@ require_relative "loofah/elements"
 require_relative "loofah/html5/safelist"
 require_relative "loofah/html5/libxml2_workarounds"
 require_relative "loofah/html5/scrub"
+require_relative "loofah/html5/svg_local_references"
 
 require_relative "loofah/scrubber"
 require_relative "loofah/scrubbers"

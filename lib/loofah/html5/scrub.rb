@@ -139,7 +139,7 @@ module Loofah
 
           style_tree.each do |node|
             next unless node[:node] == :property
-            next if node[:children].any? { |child| CSS_URLISH_NODES.include?(child[:node]) }
+            next if node[:children].any? { |child| external_urlish_node?(child) }
 
             name = node[:name].downcase
             next unless SafeList::ALLOWED_CSS_PROPERTIES.include?(name) ||
@@ -195,7 +195,7 @@ module Loofah
           node[:children].any? do |child|
             case child[:node]
             when *CSS_URLISH_NODES
-              true
+              external_urlish_node?(child)
             when :string
               !CSS_PROPERTY_STRING_WITHOUT_EMBEDDED_QUOTES.match?(child[:raw])
             when :function
@@ -204,6 +204,15 @@ module Loofah
               false
             end
           end
+        end
+
+        # A local `url(#id)` paint reference is retained and left to the SvgLocalReferences pass to
+        # resolve; any other url-ish token is external content and keeps the property rejected.
+        def external_urlish_node?(node)
+          return false unless CSS_URLISH_NODES.include?(node[:node])
+          return true unless node[:node] == :url
+
+          !(node[:value].is_a?(String) && node[:value].start_with?("#"))
         end
 
         def scrub_attribute_that_allows_local_ref(attr_node)

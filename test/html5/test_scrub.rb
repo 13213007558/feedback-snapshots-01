@@ -137,6 +137,18 @@ class UnitHTML5Scrub < Loofah::TestCase
       it "removes properties whose surviving tokens join into a comment" do
         assert_empty(Loofah::HTML5::Scrub.scrub_css("cursor:url/(a)*/(http://example.com/x.png),auto"))
       end
+
+      it "keeps a local paint reference for the strict svg reference pass to resolve" do
+        assert_equal("fill:url(#g);", Loofah::HTML5::Scrub.scrub_css("fill:url(#g)"))
+        assert_equal(
+          "clip-path:url(#c);",
+          Loofah::HTML5::Scrub.scrub_css("clip-path:url(#c)"),
+        )
+      end
+
+      it "still rejects a property that mixes a local and an external url" do
+        assert_empty(Loofah::HTML5::Scrub.scrub_css("fill:url(#g) url(http://bad.com/x)"))
+      end
     end
 
     describe "whitespace" do
