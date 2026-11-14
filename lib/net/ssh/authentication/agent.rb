@@ -20,6 +20,12 @@ module Net
       # Raised when the agent closes the connection before replying.
       class AgentClosedConnection < AgentError; end
 
+      # Raised when an agent reply violates the protocol framing (oversized
+      # frames or fields, truncated fields, or structurally corrupted blobs).
+      # The connection is poisoned before this is raised, as its stream can no
+      # longer be kept in sync with the agent's message boundaries.
+      class AgentProtocolError < AgentError; end
+
       # This class implements a simple client for the ssh-agent protocol. It
       # does not implement any specific protocol, but instead copies the
       # behavior of the ssh-agent functions in the OpenSSH library (3.8).
@@ -63,6 +69,19 @@ module Net
         SSH_AGENT_RSA_SHA2_256 = 0x02
         SSH_AGENT_RSA_SHA2_512 = 0x04
 
+        # Upper bounds for data received over the agent socket. The agent is
+        # treated as untrusted input: these keep a malicious or broken agent
+        # from making the client allocate unbounded amounts of memory.
+        #
+        # Maximum size of a single agent message, matching OpenSSH's
+        # AGENT_MAX_MSGLEN (the 4-byte length prefix is not included).
+        MAX_PACKET_LENGTH = 256 * 1024
+        # Maximum number of identities a single IDENTITIES_ANSWER may claim.
+        MAX_IDENTITIES = 1024
+        # Maximum size of any single length-prefixed field (key blob, comment
+        # or signature).
+        MAX_FIELD_LENGTH = 64 * 1024
+
         # The underlying socket being used to communicate with the SSH agent.
         attr_reader :socket
 
@@ -79,6 +98,7 @@ module Net
         # report status.
         def initialize(logger = nil)
           self.logger = logger
+          @closed = false
         end
 
         # Connect to the agent process using the socket factory and socket name
@@ -92,6 +112,7 @@ module Net
         end
 
         def open_agent_socket!
+          @closed = false
           debug { "connecting to ssh-agent" }
           @socket =
             if @agent_socket_factory
@@ -139,21 +160,30 @@ module Net
           raise AgentError, "could not get identity count" if agent_failed(type)
           raise AgentError, "bad authentication reply: #{type}" if type != SSH2_AGENT_IDENTITIES_ANSWER
 
+          count = read_bounded_long(body, MAX_IDENTITIES, "identity count")
           identities = []
-          body.read_long.times do
-            key_str = body.read_string
-            comment_str = body.read_string
+          count.times do
+            key_str = read_agent_string(body, "key blob")
+            comment_str = read_agent_string(body, "comment")
             begin
               key = Buffer.new(key_str).read_key
               if key.nil?
-                error { "ignoring invalid key: #{comment_str}" }
+                error { "ignoring invalid key: #{safe_for_log(comment_str)}" }
                 next
               end
               key.extend(Comment)
               key.comment = comment_str
               identities.push key
             rescue Net::SSH::UnsupportedKeyType, NotImplementedError => e
-              error { "ignoring unimplemented key:#{e.message} #{comment_str}" }
+              # The key type is known to be unsupported, but its blob was
+              # length-delimited and consumed cleanly, so the framing is still
+              # intact and the remaining identities can be parsed.
+              error { "ignoring unimplemented key:#{e.message} #{safe_for_log(comment_str)}" }
+            rescue StandardError => e
+              # A key type we claim to support but whose blob is structurally
+              # corrupt cannot be trusted; poison the connection rather than
+              # risk parsing the next bytes out of sync.
+              poison_connection!("corrupt key blob: #{e.class} (#{e.message})")
             end
           end
 
@@ -163,7 +193,15 @@ module Net
         # Closes this socket. This agent reference is no longer able to
         # query the agent.
         def close
+          @closed = true
           @socket.close
+        end
+
+        # Whether this agent reference can no longer be used. A connection is
+        # closed explicitly or poisoned after a framing violation leaves its
+        # byte stream out of sync with the agent's message boundaries.
+        def closed?
+          @closed == true
         end
 
         # Using the agent and the given public key, sign the given data. The
@@ -174,7 +212,7 @@ module Net
           raise AgentError, "agent could not sign data with requested identity" if agent_failed(type)
           raise AgentError, "bad authentication response #{type}" if type != SSH2_AGENT_SIGN_RESPONSE
 
-          return reply.read_string
+          return read_agent_string(reply, "signature")
         end
 
         # Adds the private key with comment to the agent.
@@ -231,34 +269,120 @@ module Net
           buffer = Buffer.from(*args)
           data = [buffer.length + 1, type.to_i, buffer.to_s].pack("NCA*")
           debug { "sending agent request #{type} len #{buffer.length}" }
-          @socket.send data, 0
+          write_full(data)
         end
 
         # Read the next packet from the agent. This will return a two-part
         # tuple consisting of the packet type, and the packet's body (which
         # is returned as a Net::SSH::Buffer).
         def read_packet
-          header = @socket.read(4)
-          raise AgentClosedConnection, "agent closed the connection" if header.nil?
+          header = read_full(4)
+          length = Net::SSH::Buffer.new(header).read_long
+          if length < 1 || length > MAX_PACKET_LENGTH
+            poison_connection!("agent packet length #{length} exceeds the #{MAX_PACKET_LENGTH}-byte limit")
+          end
 
-          buffer = Net::SSH::Buffer.new(header)
-          body = @socket.read(buffer.read_long)
-          raise AgentClosedConnection, "agent closed the connection" if body.nil?
-
-          buffer.append(body)
+          body = read_full(length)
+          buffer = Net::SSH::Buffer.new(body)
           type = buffer.read_byte
-          debug { "received agent packet #{type} len #{buffer.length - 4}" }
+          debug { "received agent packet #{type} len #{length - 1}" }
           return type, buffer
         end
 
         # Send the given packet and return the subsequent reply from the agent.
         # (See #send_packet and #read_packet).
         def send_and_wait(type, *args)
+          if closed?
+            raise AgentClosedConnection, "agent connection is closed; the previous reply violated the protocol framing"
+          end
           send_packet(type, *args)
           read_packet
         rescue Errno::ECONNRESET, Errno::EPIPE => e
           # Linux reports an agent that closes with our request unread as a reset, not EOF.
-          raise AgentClosedConnection, "agent closed the connection (#{e.class})"
+          poison_connection!("agent closed the connection (#{e.class})", AgentClosedConnection)
+        end
+
+        # Reads exactly +length+ bytes, retrying on short reads. A truncated
+        # frame (the agent reaches EOF before the whole message arrived) means
+        # the stream has no usable boundary, so the connection is poisoned.
+        def read_full(length)
+          data = +""
+          until data.bytesize == length
+            chunk = @socket.read(length - data.bytesize)
+            raise AgentClosedConnection, "agent closed the connection" if chunk.nil? || chunk.empty?
+            data << chunk
+          end
+          data
+        rescue AgentClosedConnection => e
+          poison_connection!(e.message, AgentClosedConnection)
+        end
+
+        # Writes the whole message, retrying when the socket accepts only part
+        # of it. A short or failed write leaves the request half-sent, so the
+        # connection cannot be reused.
+        def write_full(data)
+          written = 0
+          while written < data.bytesize
+            count = @socket.send(data.byteslice(written, data.bytesize - written), 0)
+            if count.nil? || count <= 0
+              poison_connection!("agent accepted no more data while writing request")
+            end
+            written += count
+          end
+        end
+
+        # Reads a length-prefixed field, enforcing the field size limit and
+        # requiring the declared bytes to be fully present inside the reply.
+        # Any violation means the message's internal framing is corrupt.
+        def read_agent_string(buffer, field_name)
+          length = buffer.read_long
+          if length.nil?
+            poison_connection!("truncated #{field_name} length")
+          elsif length > MAX_FIELD_LENGTH
+            poison_connection!("#{field_name} length #{length} exceeds the #{MAX_FIELD_LENGTH}-byte limit")
+          elsif length > buffer.available
+            poison_connection!("truncated #{field_name}: #{length} bytes declared but #{buffer.available} available")
+          end
+          buffer.read(length)
+        end
+
+        # Like Buffer#read_long, but rejects values outside the permitted
+        # range so that a hostile count cannot drive unbounded allocation or
+        # iteration.
+        def read_bounded_long(buffer, maximum, field_name)
+          value = buffer.read_long
+          if value.nil?
+            poison_connection!("truncated #{field_name}")
+          elsif value < 0 || value > maximum
+            poison_connection!("#{field_name} #{value} exceeds the limit of #{maximum}")
+          end
+          value
+        end
+
+        # Marks the connection unusable and closes the socket before raising,
+        # so callers never keep reading bytes whose message boundaries are no
+        # longer known.
+        def poison_connection!(message, exception_class = AgentProtocolError)
+          @closed = true
+          begin
+            @socket.close unless @socket.nil?
+          rescue StandardError
+            # Closing is best effort; the protocol error is what matters.
+          end
+          raise exception_class, message
+        end
+
+        # Escapes control characters (including newlines) in untrusted agent
+        # text before it is written to a log, so a malicious comment cannot
+        # forge additional log lines.
+        def safe_for_log(text)
+          text.to_s.each_char.map do |char|
+            if char.ord < 0x20 || char.ord == 0x7F
+              "\\x%02X" % char.ord
+            else
+              char
+            end
+          end.join
         end
 
         # Returns +true+ if the parameter indicates a "failure" response from

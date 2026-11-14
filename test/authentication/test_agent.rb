@@ -1,4 +1,6 @@
 require_relative '../common'
+require 'logger'
+require 'stringio'
 require 'net/ssh/authentication/agent'
 
 module Authentication
@@ -93,8 +95,9 @@ module Authentication
 
     def test_negotiate_reconnects_when_agent_closes_on_version_request
       closing_socket = mock("closing socket")
-      closing_socket.stubs(:send)
+      closing_socket.stubs(:send).returns(10)
       closing_socket.stubs(:read).returns(nil)
+      closing_socket.stubs(:close)
       fresh_socket = MockSocket.new
 
       opener = stub("socket factory")
@@ -111,6 +114,7 @@ module Authentication
     def test_read_packet_raises_agent_closed_connection_on_eof
       closing_socket = mock("closing socket")
       closing_socket.stubs(:read).returns(nil)
+      closing_socket.stubs(:close)
 
       a = Net::SSH::Authentication::Agent.new
       a.stubs(:unix_socket_class).returns(stub(open: closing_socket))
@@ -121,8 +125,8 @@ module Authentication
 
     def test_identities_raises_agent_closed_connection_on_connection_reset
       resetting_socket = stub("resetting socket")
-      resetting_socket.stubs(:send)
-      resetting_socket.stubs(:read).raises(Errno::ECONNRESET)
+      resetting_socket.stubs(:send).raises(Errno::ECONNRESET)
+      resetting_socket.stubs(:close)
 
       a = Net::SSH::Authentication::Agent.new
       a.stubs(:unix_socket_class).returns(stub(open: resetting_socket))
@@ -134,6 +138,7 @@ module Authentication
     def test_identities_raises_agent_closed_connection_on_broken_pipe
       closed_socket = stub("closed socket")
       closed_socket.stubs(:send).raises(Errno::EPIPE)
+      closed_socket.stubs(:close)
 
       a = Net::SSH::Authentication::Agent.new
       a.stubs(:unix_socket_class).returns(stub(open: closed_socket))
@@ -275,6 +280,149 @@ module Authentication
     def test_close_should_close_socket
       socket.expects(:close)
       agent.close
+    end
+
+    def test_identities_reads_frames_delivered_in_arbitrary_segments
+      reply = frame(SSH2_AGENT_IDENTITIES_ANSWER,
+                    :long, 1,
+                    :string, Net::SSH::Buffer.from(:key, key).to_s,
+                    :string, "segmented key")
+      scripted = ScriptedSocket.new(slice_into_chunks(reply, 3))
+
+      result = scripted_agent(scripted).identities
+
+      assert_equal 1, result.size
+      assert_equal key.to_blob, result.first.to_blob
+      assert_equal "segmented key", result.first.comment
+      refute scripted.closed?
+    end
+
+    def test_oversized_frame_length_poisons_the_connection
+      scripted = ScriptedSocket.new([[Net::SSH::Authentication::Agent::MAX_PACKET_LENGTH + 1].pack("N")])
+
+      error = assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).identities }
+      assert_match(/packet length/, error.message)
+      assert scripted.closed?
+      assert scripted_agent(scripted).closed?
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).identities }
+      assert_equal 1, scripted.sent.size
+    end
+
+    def test_frame_truncated_by_eof_poisons_the_connection
+      scripted = ScriptedSocket.new([[12].pack("N"), "\x0Cabc"])
+
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).identities }
+      assert scripted.closed?
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).identities }
+      assert_equal 1, scripted.sent.size
+    end
+
+    def test_identity_count_above_the_limit_poisons_the_connection
+      body = Net::SSH::Buffer.from(:long, Net::SSH::Authentication::Agent::MAX_IDENTITIES + 1)
+      scripted = ScriptedSocket.new([frame_raw(SSH2_AGENT_IDENTITIES_ANSWER, body.to_s)])
+
+      assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).identities }
+      assert scripted.closed?
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).identities }
+      assert_equal 1, scripted.sent.size
+    end
+
+    def test_oversized_key_blob_field_poisons_the_connection
+      body = Net::SSH::Buffer.from(:long, 1,
+                                   :long, Net::SSH::Authentication::Agent::MAX_FIELD_LENGTH + 1)
+      scripted = ScriptedSocket.new([frame_raw(SSH2_AGENT_IDENTITIES_ANSWER, body.to_s)])
+
+      assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).identities }
+      assert scripted.closed?
+    end
+
+    def test_truncated_key_blob_field_poisons_the_connection
+      body = Net::SSH::Buffer.from(:long, 1, :long, 64, :raw, "short")
+      scripted = ScriptedSocket.new([frame_raw(SSH2_AGENT_IDENTITIES_ANSWER, body.to_s)])
+
+      assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).identities }
+      assert scripted.closed?
+    end
+
+    def test_structurally_corrupt_known_key_blob_poisons_the_connection
+      corrupt_blob = Net::SSH::Buffer.from(:string, "ssh-ed25519", :string, "too-short").to_s
+      reply = frame(SSH2_AGENT_IDENTITIES_ANSWER,
+                    :long, 1, :string, corrupt_blob, :string, "corrupt")
+      scripted = ScriptedSocket.new([reply])
+
+      assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).identities }
+      assert scripted.closed?
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).identities }
+      assert_equal 1, scripted.sent.size
+    end
+
+    def test_unknown_but_skippable_key_type_keeps_the_connection_usable
+      unknown_blob = Net::SSH::Buffer.from(:string, "rsa-sha2-512", :bignum, key.e, :bignum, key.n).to_s
+      reply = frame(SSH2_AGENT_IDENTITIES_ANSWER,
+                    :long, 2,
+                    :string, unknown_blob, :string, "unknown",
+                    :string, Net::SSH::Buffer.from(:key, key).to_s, :string, "good")
+      scripted = ScriptedSocket.new([reply])
+
+      result = scripted_agent(scripted).identities
+      assert_equal ["good"], result.map(&:comment)
+      refute scripted.closed?
+      refute scripted_agent(scripted).closed?
+    end
+
+    def test_half_sent_signature_response_poisons_the_connection
+      signature = "A" * 40
+      body = Net::SSH::Buffer.from(:long, signature.bytesize, :raw, signature[0, 10])
+      scripted = ScriptedSocket.new([frame_raw(SSH2_AGENT_SIGN_RESPONSE, body.to_s)])
+
+      assert_raises(Net::SSH::Authentication::AgentProtocolError) { scripted_agent(scripted).sign(key, "data") }
+      assert scripted.closed?
+      assert_raises(Net::SSH::Authentication::AgentClosedConnection) { scripted_agent(scripted).sign(key, "data") }
+      assert_equal 1, scripted.sent.size
+    end
+
+    def test_unexpected_signature_message_type_is_reported_without_poisoning
+      scripted = ScriptedSocket.new([frame(255)])
+
+      assert_raises(Net::SSH::Authentication::AgentError) { scripted_agent(scripted).sign(key, "data") }
+      refute scripted.closed?
+      refute scripted_agent(scripted).closed?
+
+      scripted.enqueue(frame(SSH2_AGENT_SIGN_RESPONSE, :string, "signature"))
+      assert_equal "signature", scripted_agent(scripted).sign(key, "data")
+    end
+
+    def test_malicious_comment_cannot_forge_log_lines
+      malicious = "legit\nERROR forged log line\r\n\x00binary".dup.force_encoding("BINARY")
+      output = StringIO.new
+      logger = Logger.new(output)
+      logger.level = Logger::DEBUG
+
+      unknown_blob = Net::SSH::Buffer.from(:string, "rsa-sha2-512", :bignum, key.e, :bignum, key.n).to_s
+      reply = frame(SSH2_AGENT_IDENTITIES_ANSWER,
+                    :long, 1, :string, unknown_blob, :string, malicious)
+      scripted = ScriptedSocket.new([reply])
+      agent_with_logger(logger, scripted).identities
+
+      logged = output.string
+      assert_includes logged, "legit"
+      assert_includes logged, "\\x0A"
+      assert_includes logged, "\\x0D"
+      assert_includes logged, "\\x00"
+      # Every physical log line must be a real Logger line; the injected
+      # newline must never start a bare forged "ERROR" entry.
+      logged.each_line do |line|
+        refute_match(/\AERROR forged log line/, line)
+      end
+      assert_equal 1, logged.each_line.count { |line| line.start_with?("E, ") }
+    end
+
+    def test_request_is_fully_sent_when_the_socket_accepts_partial_writes
+      scripted = PartialWriteSocket.new([frame(SSH2_AGENT_SIGN_RESPONSE, :string, "signature")])
+
+      assert_equal "signature", scripted_agent(scripted).sign(key, "data")
+      assert scripted.request_fully_sent?
+      refute scripted.closed?
     end
 
     def test_sign_should_fail_if_response_is_SSH_AGENT_FAILURE
@@ -512,6 +660,103 @@ module Authentication
 
     private
 
+    def frame(type, *args)
+      frame_raw(type, Net::SSH::Buffer.from(*args).to_s)
+    end
+
+    def frame_raw(type, body)
+      [body.bytesize + 1, type].pack("NC") + body
+    end
+
+    def slice_into_chunks(data, chunk_size)
+      data.each_char.each_slice(chunk_size).map { |chunk| chunk.join }
+    end
+
+    def scripted_agent(scripted_socket)
+      @scripted_agents ||= {}
+      @scripted_agents[scripted_socket] ||= begin
+        a = Net::SSH::Authentication::Agent.new
+        a.stubs(:unix_socket_class).returns(stub(open: scripted_socket))
+        a.connect!
+        a
+      end
+    end
+
+    def agent_with_logger(logger, scripted_socket)
+      a = Net::SSH::Authentication::Agent.new(logger)
+      a.stubs(:unix_socket_class).returns(stub(open: scripted_socket))
+      a.connect!
+      a
+    end
+
+    # An in-memory socket whose replies are delivered as a queue of chunks,
+    # so tests can feed frames in arbitrary segments without a real agent.
+    class ScriptedSocket
+      attr_reader :sent
+
+      def initialize(chunks = [])
+        @chunks = chunks.dup
+        @sent = []
+        @closed = false
+      end
+
+      def enqueue(chunk)
+        @chunks << chunk
+      end
+
+      def send(data, _flags)
+        @sent << data
+        data.bytesize
+      end
+
+      def read(length)
+        return nil if @closed
+
+        @chunks.shift while @chunks.first && @chunks.first.empty?
+        return nil if @chunks.empty?
+
+        chunk = @chunks.first
+        if chunk.bytesize <= length
+          @chunks.shift
+        else
+          @chunks[0] = chunk.byteslice(length, chunk.bytesize - length)
+          chunk = chunk.byteslice(0, length)
+        end
+        chunk
+      end
+
+      def close
+        @closed = true
+      end
+
+      def closed?
+        @closed
+      end
+    end
+
+    # A socket that only accepts a couple of bytes per send call, exercising
+    # the write loop that handles partial writes.
+    class PartialWriteSocket < ScriptedSocket
+      WRITE_CHUNK = 7
+
+      def initialize(chunks = [])
+        super
+        @received = +""
+      end
+
+      def send(data, flags)
+        count = [WRITE_CHUNK, data.bytesize].min
+        @received << data.byteslice(0, count)
+        count
+      end
+
+      def request_fully_sent?
+        frame = Net::SSH::Buffer.new(@received)
+        length = frame.read_long
+        length && @received.bytesize == length + 4
+      end
+    end
+
     def make_cert(key)
       cert = Net::SSH::Buffer.new(CERT).read_key
       cert.key = key
@@ -541,6 +786,7 @@ module Authentication
         type = buffer.read_byte
         @expectation.call(self, type, buffer)
         @expectation = nil
+        data.bytesize
       end
 
       def read(length)
