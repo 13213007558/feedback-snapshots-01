@@ -304,6 +304,7 @@ hydra.run
 
 ## More Information
 
+* Diagnosing `signature_invalid` mismatches with a partner: [docs/diagnostics.md](docs/diagnostics.md) (diagnostic-use-only signature explanation reports)
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]
 * Mailing List/Google Group: [![Mailing List](https://img.shields.io/badge/group-mailinglist-violet.svg?style=social&logo=google)][mailinglist]
 * GitHub Discussions: [![Discussion](https://img.shields.io/badge/discussions-github-brightgreen.svg?style=flat)][gh_discussions]

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+* `OAuth::Diagnostic` — diagnostic-use-only signature explanation reports for
+  comparing normalization pipelines with a partner without exchanging secrets;
+  sensitive values are replaced by HMAC correlation tags keyed with an
+  ephemeral, caller-supplied diagnostic key. See docs/diagnostics.md
+
 ### Changed
 
 ### Fixed

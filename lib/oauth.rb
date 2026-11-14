@@ -9,6 +9,7 @@ require "oauth/version"
 require "oauth/oauth"
 
 require "oauth/client/helper"
+require "oauth/diagnostic"
 require "oauth/signature/plaintext"
 require "oauth/signature/hmac/sha1"
 require "oauth/signature/hmac/sha256"
