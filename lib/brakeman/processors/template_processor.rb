@@ -43,8 +43,16 @@ class Brakeman::TemplateProcessor < Brakeman::BaseProcessor
   end
 
   #Adds output to the list of outputs.
+  #
+  #SafeBuffers bypass ERB's auto-escaping: once unescaped content has been
+  #safe_concat'd into a buffer, outputting it (even with <%= %>) is not safe.
   def process_output exp
     exp.value = process exp.value
+
+    if node_type?(exp, :output, :escaped_output) and unsafe_safe_buffer?(exp.value)
+      exp.node_type = :output
+    end
+
     @current_template.add_output exp unless exp.original_line
     exp
   end

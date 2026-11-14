@@ -9,6 +9,7 @@
 * Check validation regexes in non-activerecord models (Eliot Sykes)
 * Skip top-level vendor directory before recursive globbing (Conor O'Donnell)
 * Support Rails 7.1+ positional enum syntax in SQL injection check (Michael Vogl/Yuriy Tumanov)
+* Track mutable SafeBuffer appends through aliases and helper return values
 
 # 8.0.6 - 2026-08-13
 

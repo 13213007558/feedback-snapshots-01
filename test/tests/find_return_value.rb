@@ -186,4 +186,41 @@ class FindReturnValueTests < Minitest::Test
     end
     RUBY
   end
+
+  def test_safe_buffer_safe_concat_return
+    value = Brakeman::FindReturnValue.return_value RubyParser.new.parse(<<-RUBY)
+      def x
+        buffer = "".html_safe
+        buffer.safe_concat(params[:x])
+        buffer
+      end
+    RUBY
+
+    assert_equal s(:call, s(:call, s(:str, ""), :html_safe), :safe_concat,
+                   s(:call, s(:params), :[], s(:lit, :x))), value
+  end
+
+  def test_safe_buffer_plain_concat_return
+    assert_returns '"".html_safe', <<-RUBY
+      def x
+        buffer = "".html_safe
+        buffer << params[:x]
+        buffer
+      end
+    RUBY
+  end
+
+  def test_safe_buffer_alias_return
+    value = Brakeman::FindReturnValue.return_value RubyParser.new.parse(<<-RUBY)
+      def x
+        buffer = "".html_safe
+        other = buffer
+        other.safe_concat(params[:x])
+        buffer
+      end
+    RUBY
+
+    assert_equal s(:call, s(:call, s(:str, ""), :html_safe), :safe_concat,
+                   s(:call, s(:params), :[], s(:lit, :x))), value
+  end
 end

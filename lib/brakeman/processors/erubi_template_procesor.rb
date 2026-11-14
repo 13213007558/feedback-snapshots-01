@@ -17,15 +17,15 @@ class Brakeman::ErubiTemplateProcessor < Brakeman::TemplateProcessor
     #_buf is the default output variable for Erubi
     if node_type?(target, :lvar, :ivar) and (target.value == :_buf or target.value == :@output_buffer)
       if method == :<< or method == :safe_concat
-
         arg = normalize_output(exp.first_arg)
 
         if arg.node_type == :str #ignore plain strings
           ignore
-        elsif node_type? target, :ivar and target.value == :@output_buffer
-          add_escaped_output arg
-        else
+        elsif method == :safe_concat
+          # SafeBuffer#safe_concat inserts its argument without escaping.
           add_output arg
+        else
+          add_escaped_output arg
         end
       elsif method == :to_s
         ignore

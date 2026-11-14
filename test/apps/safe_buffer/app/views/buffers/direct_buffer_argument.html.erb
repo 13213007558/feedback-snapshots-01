@@ -1,0 +1,5 @@
+<% source = "".html_safe %>
+<% source.safe_concat(params[:nested]) %>
+<% buffer = "".html_safe %>
+<% buffer.concat(source) %>
+<%= buffer %>

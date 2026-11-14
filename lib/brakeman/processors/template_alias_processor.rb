@@ -16,6 +16,68 @@ class Brakeman::TemplateAliasProcessor < Brakeman::AliasProcessor
     @template = template
     @current_file = template.file
     @called_from = called_from
+    @template_controller = controller_for_template(template, called_from)
+    @helper_modules = helper_modules_for(@template_controller)
+  end
+
+  #Determine which controller renders this template, so methods defined in
+  #its helper modules can be resolved while processing the template.
+  def controller_for_template template, called_from = nil
+    path = called_from || template.render_path
+
+    if path
+      path.each do |loc|
+        return loc[:class] if loc[:type] == :controller
+      end
+    end
+
+    # Fall back to the template name, e.g. users/index => UsersController
+    if template.name.to_s.include? "/"
+      dir = template.name.to_s.split("/")[0..-2].join("/")
+      candidate = :"#{dir.split('/').map { |part| part.split('_').map(&:capitalize).join }.join('::')}Controller"
+      if tracker.controllers[candidate]
+        return candidate
+      end
+    end
+
+    nil
+  end
+
+  #Helpers included in views by default for the controller.
+  def helper_modules_for controller_name
+    names = [:ApplicationHelper]
+
+    if controller_name
+      base = controller_name.to_s.sub(/Controller\z/, "").split("::").last
+      names.unshift :"#{base}Helper"
+    end
+
+    names.filter_map { |name| tracker.libs[name] }
+  end
+
+  #Resolve calls to helper methods declared in app/helpers.
+  def find_helper_method method_name
+    if @template_controller and (method = super)
+      method
+    else
+      @helper_modules.each do |mod|
+        if method = mod.get_method(method_name)
+          return method
+        end
+      end
+
+      nil
+    end
+  end
+
+  def process_call exp
+    exp = super
+
+    if call? exp and exp.target.nil? and find_helper_method(exp.method)
+      exp = get_call_value(exp)
+    end
+
+    exp
   end
 
   #Process template

@@ -1,0 +1,4 @@
+<% buffer = "".html_safe %>
+<% alias_buffer = buffer %>
+<% alias_buffer.safe_concat(params[:aliased]) %>
+<%= buffer %>

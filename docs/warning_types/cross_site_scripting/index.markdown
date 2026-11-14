@@ -28,6 +28,25 @@ This raises a warning like:
 
 However, the confidence level for this warning will be weak, because it is not directly outputting the cookie value.
 
+### Mutable SafeBuffers
+
+`html_safe` returns a `SafeBuffer`, which bypasses ERB auto-escaping even when output with `<%= %>`. Buffers are mutable and may be built up in a helper then returned to a view:
+
+    def status_badge
+      buffer = "".html_safe
+      buffer.safe_concat(params[:status])
+      buffer
+    end
+
+The methods used to add content have different security meanings:
+
+* `buffer << value` and `buffer.concat(value)` escape `value` unless it is already marked HTML safe, so ordinary string appends are not reported.
+* `buffer.safe_concat(value)` inserts `value` without escaping. SafeBuffer#replace and append-style methods only remain safe when the argument is not user-controlled.
+* Assigning a new value to the variable (`buffer = params[:x]`) drops the buffer; normal auto-escaping applies again unless the value is output with `<%==` or `raw`.
+* Multiple variables may refer to the same buffer. An unsafe append through any alias affects every reference, including a helper's return value.
+
+Brakeman reports the expression that introduced the unsafe content together with the view line where the buffer is output. Fixed markup such as `buffer.safe_concat("<b>warning</b>")` is not reported, because the angle brackets are static and not user-controlled.
+
 Some methods are known to Brakeman to either be dangerous (`link_to` is one) or safe (`escape_once`). Users can specify safe methods using the `--safe-methods` option. Alternatively, Brakeman can be set to _only_ warn when values are used directly with the `--report-direct` option.
 
 ### Model Attributes

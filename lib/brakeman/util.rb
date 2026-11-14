@@ -199,6 +199,114 @@ module Brakeman::Util
       (exp.node_type == :call or exp.node_type == :safe_call)
   end
 
+  # Methods that mutate a SafeBuffer in place and return the same buffer.
+  SAFE_BUFFER_MUTATION_METHODS = Set[:<<, :concat, :safe_concat, :replace, :prepend, :insert]
+
+  SAFE_BUFFER_CLASSES = [
+    s(:colon2, s(:const, :ActiveSupport), :SafeBuffer),
+    s(:colon2, s(:const, :ActionView), :OutputBuffer)
+  ]
+
+  #Check if _exp_ is an expression which is known to evaluate to a SafeBuffer.
+  #
+  #This is structural and intentionally conservative: it follows the receiver of
+  #buffer-producing methods. Values like +params[:x].html_safe+ are SafeBuffers,
+  #as are buffers built with ActiveSupport::SafeBuffer.new.
+  def safe_buffer? exp
+    return false unless sexp? exp
+
+    if call? exp
+      case exp.method
+      when :html_safe
+        true
+      when :new
+        SAFE_BUFFER_CLASSES.include? exp.target
+      when :safe_concat, :<<, :concat, :replace, :prepend, :insert
+        safe_buffer? exp.target
+      when :+, :*
+        safe_buffer? exp.target
+      else
+        false
+      end
+    else
+      false
+    end
+  end
+
+  #Check if _exp_ is static content, whose literal characters carry no
+  #application data. Used to avoid treating safe_concat of fixed markup as
+  #an injection point.
+  def static_content? exp
+    return true if string? exp or symbol? exp or number? exp
+
+    return false unless sexp? exp
+
+    if call? exp
+      case exp.method
+      when :html_safe, :to_s, :freeze, :dup
+        static_content? exp.target
+      when :+, :<<, :concat, :safe_concat
+        static_content?(exp.target) and static_content?(exp.first_arg)
+      else
+        false
+      end
+    else
+      case exp.node_type
+      when :str, :lit, :nil, :true, :false, :sym
+        true
+      when :array, :hash
+        exp[1..].all? { |e| static_content?(e) }
+      else
+        false
+      end
+    end
+  end
+
+  #Check if _exp_ is dynamic content explicitly marked as HTML safe, which
+  #bypasses the escaping SafeBuffer#concat normally performs.
+  def explicitly_html_safe? exp
+    call? exp and exp.method == :html_safe and not static_content?(exp.target)
+  end
+
+  #Check if _exp_ is a SafeBuffer which may contain unescaped dynamic content.
+  #
+  #SafeBuffer#safe_concat never escapes its argument. SafeBuffer#concat (and
+  #aliases such as #<<) escape ordinary strings, but do not escape arguments
+  #that are already marked HTML safe. Once a buffer contains such content,
+  #duplicating it with #+ preserves the unsafe content.
+  def unsafe_safe_buffer? exp
+    return false unless safe_buffer?(exp)
+    return false unless call? exp
+
+    case exp.method
+    when :safe_concat
+      not static_content?(exp.first_arg)
+    when :html_safe
+      if safe_buffer? exp.target
+        unsafe_safe_buffer? exp.target
+      else
+        not static_content?(exp.target)
+      end
+    when :new
+      not static_content?(exp.first_arg)
+    when :<<, :concat, :prepend, :insert
+      unsafe_safe_buffer?(exp.target) or
+        unsafe_safe_buffer?(exp.first_arg) or
+        explicitly_html_safe?(exp.first_arg)
+    when :replace
+      unsafe_safe_buffer?(exp.first_arg) or
+        explicitly_html_safe?(exp.first_arg)
+    when :+
+      unsafe_safe_buffer?(exp.target) or
+        unsafe_safe_buffer?(exp.first_arg) or
+        explicitly_html_safe?(exp.first_arg)
+    when :*
+      unsafe_safe_buffer? exp.target
+    else
+      false
+    end
+  end
+
   #Check if _exp_ represents a Regexp: s(:lit, /.../)
   def regexp? exp
     exp.is_a? Sexp and exp.node_type == :lit and exp[1].is_a? Regexp

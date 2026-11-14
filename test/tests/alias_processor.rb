@@ -1505,6 +1505,78 @@ class AliasProcessorTests < Minitest::Test
     end
   end
 
+
+  def test_safe_buffer_safe_concat_is_unsafe
+    assert_alias '"".html_safe.safe_concat(params[:x])', <<-INPUT
+    buffer = "".html_safe
+    buffer.safe_concat(params[:x])
+    buffer
+    INPUT
+  end
+
+  def test_safe_buffer_concat_escapes
+    assert_alias '"".html_safe', <<-INPUT
+    buffer = "".html_safe
+    buffer << params[:x]
+    buffer
+    INPUT
+
+    assert_alias '"".html_safe', <<-INPUT
+    buffer = "".html_safe
+    buffer.concat(params[:x])
+    buffer
+    INPUT
+  end
+
+  def test_safe_buffer_static_safe_concat_is_safe
+    assert_alias '"".html_safe', <<-INPUT
+    buffer = "".html_safe
+    buffer.safe_concat("<b>static</b>")
+    buffer
+    INPUT
+  end
+
+  def test_safe_buffer_alias_shares_state
+    assert_alias '"".html_safe.safe_concat(params[:x])', <<-INPUT
+    buffer = "".html_safe
+    other = buffer
+    other.safe_concat(params[:x])
+    buffer
+    INPUT
+
+    assert_alias '"".html_safe.safe_concat(params[:x])', <<-INPUT
+    buffer = "".html_safe
+    other = buffer
+    buffer.safe_concat(params[:x])
+    other
+    INPUT
+  end
+
+  def test_safe_buffer_reassignment_drops_state
+    assert_alias 'params[:x]', <<-INPUT
+    buffer = "".html_safe
+    buffer = params[:x]
+    buffer
+    INPUT
+  end
+
+  def test_safe_buffer_replace_with_static_markup_drops_state
+    assert_alias '("".html_safe.safe_concat(params[:x])).replace("<b>static</b>")', <<-INPUT
+    buffer = "".html_safe
+    buffer.safe_concat(params[:x])
+    buffer.replace("<b>static</b>")
+    buffer
+    INPUT
+  end
+
+  def test_safe_buffer_html_safe_argument_is_unsafe
+    assert_alias '("".html_safe << params[:x].html_safe)', <<-INPUT
+    buffer = "".html_safe
+    buffer << params[:x].html_safe
+    buffer
+    INPUT
+  end
+
   def test_alias_processor_failure
     assert_raises do
       Brakeman::AliasProcessor.new.process s(:block, s(:attrasgn, s(:call, nil, :x), :"[]!", s(:lit, 1), s(:lit, 2)))

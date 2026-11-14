@@ -33,6 +33,10 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
     @meth_env = nil
     @current_file = current_file
     @mass_limit = (tracker && tracker.options[:mass_limit]) || 1000 # arbitrary default
+    @buffer_tokens = {}
+    @buffer_var_tokens = {}
+    @buffer_token_vars = Hash.new { |h, k| h[k] = Set.new }
+    @next_buffer_token = 0
     set_env_defaults
   end
 
@@ -201,6 +205,14 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
 
     if method == :send or method == :__send__ or method == :try
       collapse_send_call exp, first_arg
+    end
+
+    # Buffers are mutable: keep track of which variables refer to the same
+    # buffer and how its safety state changes. See handle_buffer_mutation.
+    if SAFE_BUFFER_MUTATION_METHODS.include?(method) and
+       (token = buffer_token(target_var))
+      handle_buffer_mutation token, target_var, exp, method, first_arg
+      return exp
     end
 
     if node_type? target, :or and [:+, :-, :*, :/].include? method
@@ -534,6 +546,13 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
 
   def meth_env
     begin
+      saved_buffer_tokens = @buffer_tokens
+      saved_buffer_vars = @buffer_var_tokens
+      saved_buffer_token_vars = @buffer_token_vars
+      @buffer_tokens = {}
+      @buffer_var_tokens = {}
+      @buffer_token_vars = Hash.new { |h, k| h[k] = Set.new }
+
       env.scope do
         set_env_defaults
         @meth_env = env.current
@@ -541,6 +560,9 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
       end
     ensure
       @meth_env = nil
+      @buffer_tokens = saved_buffer_tokens
+      @buffer_var_tokens = saved_buffer_vars
+      @buffer_token_vars = saved_buffer_token_vars
     end
   end
 
@@ -561,10 +583,179 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
     end
   end
 
+  #Returns a token for the mutable SafeBuffer referenced by +var+, if known.
+  #
+  #Two variables assigned the same buffer (directly, or through another
+  #variable) share a token, so changes to one are reflected in the other.
+  #This is necessary because SafeBuffer mutation is in-place: the safety of a
+  #variable depends on all the appends and replacements that happened to the
+  #buffer, and not just on the expression it was assigned at creation time.
+  def buffer_token var
+    return nil unless var.respond_to? :node_type
+    return nil unless node_type? var, :lvar, :ivar
+
+    @buffer_var_tokens[var]
+  end
+
+  #Returns the token for the value of +exp+ if it is a SafeBuffer.
+  #
+  #Only variables and previously-seen buffer expressions are considered. The
+  #environment already replaces variables with their values when possible, so
+  #most aliases are handled by track_buffer_assignment directly.
+  def buffer_token_for_value exp, seen = Set.new
+    return nil unless sexp? exp
+
+    if node_type? exp, :lvar, :ivar
+      return buffer_token(exp) if buffer_token(exp)
+
+      if value = env[exp] and not seen.include?(value)
+        seen << value
+        return buffer_token_for_value(value.deep_clone, seen)
+      end
+    end
+
+    nil
+  end
+
+  def new_buffer_token
+    @next_buffer_token += 1
+    @next_buffer_token
+  end
+
+  #Records the state of a buffer and associates it with its variable.
+  def set_buffer_token var, token
+    @buffer_var_tokens[var] = token
+    (@buffer_token_vars[token] ||= Set.new) << var
+  end
+
+  #Marks a buffer as containing unescaped content.
+  def mark_buffer_unsafe token, exp
+    state = (@buffer_tokens[token] ||= {})
+    state[:unsafe] = true
+    state[:append_point] ||= exp
+
+    set_buffer_value token, exp
+  end
+
+  #All variables bound to the same buffer should resolve to the expression
+  #that shows how the unsafe content entered the buffer.
+  def set_buffer_value token, exp
+    if vars = @buffer_token_vars[token]
+      vars.each do |var|
+        env[var] = exp.deep_clone(exp.line) if env[var]
+      end
+    end
+  end
+
+  #Track assignments to buffers, including aliases to the same buffer.
+  def track_buffer_assignment var, value, original_value = nil, self_assign = false
+    # Direct alias: x = y, where y refers to a buffer
+    if original_value and (token = buffer_token(original_value))
+      set_buffer_token var, token
+      return
+    end
+
+    # Assignment through replacement changes the buffer reference. If the
+    # assigned value is not a buffer, the variable no longer refers to the
+    # previous buffer.
+    if safe_buffer?(value) and (token = buffer_token_for_value(value))
+      set_buffer_token var, token
+    elsif safe_buffer?(value) and not self_assign
+      set_buffer_token var, new_buffer_token
+    elsif self_assign and (token = buffer_token(var))
+      # x = x.something - keep referring to the same buffer for in-place ops
+      set_buffer_token var, token
+      if buffer_mutation?(value, token) and unsafe_buffer_mutation?(value)
+        mark_buffer_unsafe token, value
+      end
+    else
+      remove_buffer_var var
+    end
+  end
+
+  def remove_buffer_var var
+    if token = @buffer_var_tokens.delete(var)
+      if vars = @buffer_token_vars[token]
+        vars.delete var
+      end
+    end
+  end
+
+  def buffer_mutation? value, token
+    call? value and SAFE_BUFFER_MUTATION_METHODS.include?(value.method) and
+      buffer_token_for_value(value.target) == token
+  end
+
+  def unsafe_buffer_mutation? value
+    case value.method
+    when :safe_concat
+      not static_content?(value.first_arg)
+    else
+      explicitly_html_safe?(value.first_arg) or
+        (token = buffer_token_for_value(value.target) and @buffer_tokens[token] and @buffer_tokens[token][:unsafe])
+    end
+  end
+
+  #Applies the semantics of a SafeBuffer mutation to the shared buffer token.
+  #
+  #  buf.safe_concat(x)  - x is inserted without escaping
+  #  buf << x / concat(x) - x is escaped unless already marked HTML safe
+  #  buf.replace(x)      - previous contents are replaced
+  def handle_buffer_mutation token, var, exp, method, arg
+    state = @buffer_tokens[token] ||= {}
+
+    case method
+    when :safe_concat
+      unless static_content?(arg)
+        state[:unsafe] = true
+        state[:append_point] = exp
+        set_buffer_value token, exp
+      end
+    when :<<, :concat, :prepend, :insert
+      if state[:unsafe]
+        # Already unsafe. Preserve the original point where unsafe content
+        # entered the buffer.
+      elsif explicitly_html_safe?(arg) or unsafe_safe_buffer?(arg)
+        # Already-safe arguments are not escaped, so any unsafe content they
+        # carry stays unsafe in this buffer.
+        state[:unsafe] = true
+        state[:append_point] = exp
+        set_buffer_value token, exp
+      elsif (arg_token = buffer_token_for_value(arg)) and
+            (arg_state = @buffer_tokens[arg_token]) and arg_state[:unsafe]
+        state[:unsafe] = true
+        state[:append_point] = arg_state[:append_point] || exp
+        set_buffer_value token, state[:append_point]
+      end
+    when :replace
+      if explicitly_html_safe?(arg) or unsafe_safe_buffer?(arg)
+        state[:unsafe] = true
+        state[:append_point] = exp
+        set_buffer_value token, exp
+      else
+        # Whatever was in the buffer has been replaced. SafeBuffer#replace
+        # escapes a plain argument, so the previous unsafe content is gone.
+        state[:unsafe] = false
+        state[:append_point] = nil
+
+        # Update every alias, otherwise the stale unsafe expression would
+        # still be returned/output.
+        if vars = @buffer_token_vars[token]
+          vars.each do |var|
+            env[var] = exp.deep_clone(exp.line) if env[var]
+          end
+        end
+      end
+    end
+
+    exp
+  end
+
   #Local assignment
   # x = 1
   def process_lasgn exp
     self_assign = self_assign?(exp.lhs, exp.rhs)
+    rhs_var = exp.rhs if node_type?(exp.rhs, :lvar, :ivar)
     exp.rhs = process exp.rhs if sexp? exp.rhs
     return exp if exp.rhs.nil?
 
@@ -577,6 +768,8 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
       set_value local, get_rhs(exp)
     end
 
+    track_buffer_assignment local, exp.rhs, rhs_var, self_assign
+
     exp
   end
 
@@ -584,6 +777,7 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
   # @x = 1
   def process_iasgn exp
     self_assign = self_assign?(exp.lhs, exp.rhs)
+    rhs_var = exp.rhs if node_type?(exp.rhs, :lvar, :ivar)
     exp.rhs = process exp.rhs
     ivar = Sexp.new(:ivar, exp.lhs).line(exp.line)
 
@@ -596,6 +790,8 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
     else
       set_value ivar, get_rhs(exp)
     end
+
+    track_buffer_assignment ivar, exp.rhs, rhs_var, self_assign
 
     exp
   end
@@ -1227,18 +1423,32 @@ class Brakeman::AliasProcessor < Brakeman::SexpProcessor
     method_name = call.method
 
     #Look for helper methods and see if we can get a return value
-    if found_method = tracker.find_method(method_name, @current_class)
+    if found_method = find_helper_method(method_name)
       helper = found_method.src
 
       if sexp? helper
         value = process_helper_method helper, call.args
-        value.line(call.line)
-        return value
+        # The returned expression is inlined at the call site. Move its line
+        # numbers there so warnings point at the view output location, while
+        # the expression itself still shows the append/assignment that made
+        # the buffer unsafe.
+        value.deep_clone(call.line)
       else
         raise "Unexpected value for method: #{found_method}"
       end
     else
       call
+    end
+  end
+
+  #Resolve a method that may be defined in a helper module included by the
+  #current controller. Template processing does not otherwise make helpers
+  #visible, so methods like +some_buffer_helper+ inside views would be opaque.
+  def find_helper_method method_name
+    if @current_class
+      tracker.find_method(method_name, @current_class)
+    else
+      nil
     end
   end
 

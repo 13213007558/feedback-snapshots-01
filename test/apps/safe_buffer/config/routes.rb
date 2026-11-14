@@ -1,0 +1,15 @@
+SafeBuffer::Application.routes.draw do
+  get "buffers/helper_safe_concat"
+  get "buffers/helper_plain_concat"
+  get "buffers/helper_static_markup"
+  get "buffers/helper_alias"
+  get "buffers/helper_replace_static"
+  get "buffers/direct_safe_concat"
+  get "buffers/direct_plain_concat"
+  get "buffers/direct_static_markup"
+  get "buffers/direct_alias"
+  get "buffers/direct_reassign"
+  get "buffers/direct_reassign_raw"
+  get "buffers/plain_escaped"
+  get "buffers/direct_buffer_argument"
+end
