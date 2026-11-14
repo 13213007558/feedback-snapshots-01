@@ -1,0 +1,100 @@
+[
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc5011.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5011.txt",
+    "sha256": "e00a848ca0fb6da1925ea828ea893a746f4d02528d70fedaab44b447c0778ed1",
+    "bytes": 30138
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc4035.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4035.txt",
+    "sha256": "8978b120636c69b2080b12768266ec48cd4c0879583310863a62f7c409908084",
+    "bytes": 130589
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc4033.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4033.txt",
+    "sha256": "b6803149a879dff56cbaffcb8c5a1795d2a2d2facdc3400ebd9937e38724e4cd",
+    "bytes": 52445
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc5155.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5155.txt",
+    "sha256": "c3083458ed7ef69360397a7a6ec44374b245e4e5a03725c834c54908cb7f77ff",
+    "bytes": 112140
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc1982.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc1982.txt",
+    "sha256": "b22fa98e10e66340804f50fe22c7c9299f66dea7ed90cac17800a4bccda7dc15",
+    "bytes": 14440
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc4034.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4034.txt",
+    "sha256": "6c32963b76808ec4e5f1282b5e13c5216df4670d21e1590bf29af4066f49b355",
+    "bytes": 63879
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc6698.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc6698.txt",
+    "sha256": "daecd0cdee8d8b8896c8f463c95237d32d42bbe1ecfc1c65a232cb1300d3f668",
+    "bytes": 84034
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc4255.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4255.txt",
+    "sha256": "c5eff6e6b9375f14cf82b34941d2495a6667f5a5cc6a74c57f619ac57003e5aa",
+    "bytes": 18399
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc7671.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc7671.txt",
+    "sha256": "56547af092d9c7b31e3ec89762329953f513e354f23d556d82161773d41f5037",
+    "bytes": 80496
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc8659.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8659.txt",
+    "sha256": "5f0e193e3bfad5273fe8dd1086d060bdec951505d61bfd0111ae832c1f3e293d",
+    "bytes": 35766
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc8945.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8945.txt",
+    "sha256": "f225ac6b0c5c0c1e4c9dc97adb0156faccfebbeaef4e84aebc5fdf727079ae62",
+    "bytes": 55994
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc9156.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9156.txt",
+    "sha256": "50b4bcfc02fff681ecaeb9d4043bd395c560e31bb28c90230cd60475203f93d0",
+    "bytes": 28173
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc9460.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9460.txt",
+    "sha256": "0741d5743b7b4cd54762e53633b597e442b3d8299b80a9d5f2acec6d9beae433",
+    "bytes": 111648
+  },
+  {
+    "repo": "dnsruby",
+    "file": ".feedback/specs/rfc7646.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc7646.txt",
+    "sha256": "b7dbfb4139314464ece2f712547445f666463d6dbceaf929c101002330d048e6",
+    "bytes": 36117
+  }
+]
