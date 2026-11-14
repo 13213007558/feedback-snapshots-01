@@ -46,4 +46,26 @@ class Net::LDAP
   class FilterTypeUnknownError < Error; end
   class FilterSyntaxInvalidError < Error; end
   class EntryOverflowError < Error; end
+  class AttributeRangeError < Error; end
+  class InvalidAttributeRangeError < AttributeRangeError; end
+
+  # Raised when a complete attribute value set is required but the read did
+  # not finish. Partial values remain available through
+  # RangedAttributeResult#partial_values for diagnostics, but must not be used
+  # as an authorization snapshot.
+  class IncompleteAttributeError < AttributeRangeError
+    attr_reader :result
+
+    def initialize(result = nil)
+      if result.respond_to?(:attribute) && result.respond_to?(:dn)
+        @result = result
+        super(
+          "attribute #{result.attribute.inspect} on #{result.dn.inspect} is not " \
+          "complete (#{result.reason}); refusing to expose partial values",
+        )
+      else
+        super(result)
+      end
+    end
+  end
 end

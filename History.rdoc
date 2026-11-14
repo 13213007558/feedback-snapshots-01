@@ -1,4 +1,7 @@
 === Unreleased
+* Add `Net::LDAP#read_ranged_attribute` to read complete Active Directory
+  ranged attributes (`member;range=N-*`) with object-identity and version
+  checks before a permission snapshot may be replaced.
 * Move readme to md in #452
 
 === Net::LDAP 0.21.0

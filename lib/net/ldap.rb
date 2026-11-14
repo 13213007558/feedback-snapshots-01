@@ -23,6 +23,7 @@ require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
 require_relative 'ldap/entry'
+require_relative 'ldap/ranged_attribute'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
@@ -801,6 +802,130 @@ class Net::LDAP
       end
     end
   end
+
+  # Reads an attribute that an Active Directory server may split into
+  # numbered ranges, returning a Net::LDAP::RangedAttributeResult that
+  # distinguishes a complete empty set from an unfinished read.
+  #
+  # This is separate from RFC 2696 paged results: each request is a
+  # base-object search for <tt>attribute;range=N-*</tt> (or <tt>N-M</tt> when
+  # +:page_size+ is given), always against the same +:dn+. The reader
+  # validates that:
+  #
+  # * the first range starts at zero;
+  # * later ranges are contiguous (an earlier start aborts as overlap, a later
+  #   start aborts as a gap);
+  # * only a terminal <tt>*</tt> range completes the read, never a numeric end;
+  # * the entry DN, objectGUID and uSNChanged stay the same for every page.
+  #
+  # On aborted reads, #values raises Net::LDAP::IncompleteAttributeError.
+  # #partial_values is for diagnostics only. Callers can use #replaceable?
+  # (or #snapshot) to decide whether an existing permission snapshot may be
+  # replaced; #retryable? indicates that a fresh read from range zero is safe.
+  #
+  # Supported arguments:
+  # * :dn (or :base): the entry to read; required unless the LDAP object has a
+  #   default base.
+  # * :attribute: the attribute name, defaulting to +"member"+.
+  # * :page_size: request explicit <tt>N-M</tt> ranges of this size instead of
+  #   letting the server choose its chunk size.
+  # * :identity_attribute: object identity attribute, defaulting to
+  #   +"objectGUID"+.
+  # * :version_attribute: object version attribute, defaulting to
+  #   +"uSNChanged"+.
+  # * :require_object_identity / :require_object_version: require those
+  #   attributes to be present and stable before a snapshot is replaceable
+  #   (default true). A complete multi-page read without a stable identity is
+  #   never replaceable, even if this requirement is relaxed.
+  # * :max_pages: safety bound on the number of responses (default 1000).
+  # * :treat_missing_as_empty: when the object exists but has no values at
+  #   all, return a complete empty result (default true).
+  #
+  # Example:
+  #
+  #  result = ldap.read_ranged_attribute(:dn => group_dn,
+  #                                      :attribute => "member")
+  #  if result.replaceable?
+  #    replace_permission_snapshot(group_dn, result.values)
+  #  elsif result.retryable?
+  #    schedule_full_retry(group_dn, result.reason)
+  #  else
+  #    raise Net::LDAP::IncompleteAttributeError, result
+  #  end
+  def read_ranged_attribute(args = {})
+    attribute     = (args[:attribute] || "member").to_s
+    dn            = args[:dn] || args[:base]
+    identity_attr = args.fetch(:identity_attribute, "objectGUID")
+    version_attr  = args.fetch(:version_attribute, "uSNChanged")
+    page_size     = args[:page_size] && Integer(args[:page_size])
+    filter        = args[:filter] || Net::LDAP::Filter.eq("objectClass", "*")
+
+    if dn.nil? || dn.to_s.empty?
+      raise Net::LDAP::NoSearchBaseError, "attribute range read requires :dn"
+    end
+
+    if page_size && page_size <= 0
+      raise ArgumentError, "page_size must be positive"
+    end
+
+    reader = Net::LDAP::RangedAttributeReader.new(
+      dn:                     dn,
+      attribute:              attribute,
+      identity_attribute:     identity_attr,
+      version_attribute:      version_attr,
+      require_identity:       args.fetch(:require_object_identity, true),
+      require_version:        args.fetch(:require_object_version, true),
+      max_pages:              args.fetch(:max_pages, Net::LDAP::RangedAttributeReader::DEFAULT_MAX_PAGES),
+      allow_unranged:         args.fetch(:allow_unranged, true),
+      treat_missing_as_empty: args.fetch(:treat_missing_as_empty, true),
+      validate_page_size:     args.fetch(:validate_page_size, true),
+    )
+
+    instrument "read_ranged_attribute.net_ldap",
+               dn:        dn,
+               attribute: attribute,
+               page_size: page_size do |payload|
+      result = reader.read do |offset, _page_count|
+        range = if page_size
+                  "#{attribute};range=#{offset}-#{offset + page_size - 1}"
+                else
+                  "#{attribute};range=#{offset}-*"
+                end
+
+        attrs = [range, identity_attr, version_attr].compact
+
+        entries = search(
+          :base               => dn,
+          :scope              => SearchScope_BaseObject,
+          :filter             => filter,
+          :attributes         => attrs,
+          :return_result      => true,
+          :ignore_server_caps => args.fetch(:ignore_server_caps, true),
+        )
+
+        operation_result = get_operation_result
+        entry            = entries && entries.first
+
+        page = Net::LDAP::RangedAttributeReader.page_from_entry(
+          entry,
+          attribute:          attribute,
+          identity_attribute: identity_attr,
+          version_attribute:  version_attr,
+        )
+        page.result_code = operation_result.code
+
+        page
+      end
+
+      payload[:complete]    = result.complete?
+      payload[:reason]      = result.reason
+      payload[:page_count]  = result.page_count
+      payload[:replaceable] = result.replaceable?
+
+      result
+    end
+  end
+  alias_method :search_ranged_attribute, :read_ranged_attribute
 
   # #bind connects to an LDAP server and requests authentication based on
   # the <tt>:auth</tt> parameter passed to #open or #new. It takes no

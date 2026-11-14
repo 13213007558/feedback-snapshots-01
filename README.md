@@ -26,6 +26,33 @@ the most recent LDAP RFCs (4510–4519, plus portions of 4520–4532).
 
 See [Net::LDAP on rubydoc.info](https://www.rubydoc.info/gems/ruby-net-ldap/Net/LDAP) for documentation and usage samples.
 
+### Active Directory ranged attributes
+
+Active Directory splits large multi-valued attributes such as `member` into
+ranges (`member;range=0-1499`, `member;range=1500-*`). `read_ranged_attribute`
+reads every slice of one object and proves the result is complete before it
+can be used as a permission snapshot.
+
+```ruby
+result = ldap.read_ranged_attribute(dn: group_dn, attribute: "member")
+
+if result.replaceable?
+  # Every range was contiguous, the terminal "*" range was seen, and the
+  # object identity/version stayed stable. result.values is safe to apply.
+  replace_permission_snapshot(group_dn, result.values)
+elsif result.retryable?
+  # Never resume from the last offset: retry the whole read from range 0.
+  schedule_full_retry(group_dn, result.reason)
+else
+  alert(group_dn, result.reason)
+end
+```
+
+`result.values` raises `Net::LDAP::IncompleteAttributeError` when the read is
+incomplete; `result.partial_values` exists only for diagnostics. A complete
+read with no values reports `complete? == true` and `empty? == true`, which is
+deliberately different from an unfinished read.
+
 ## Requirements
 
 Net::LDAP requires a Ruby 3.0.0 compatible interpreter or better.
