@@ -20,6 +20,35 @@ Psych.safe_load('--- foo') # => 'foo'
 Psych.dump("foo")     # => "--- foo\n...\n"
 ```
 
+## Redacting a document
+
+`Psych::Redactor` emits a redacted copy of a YAML document while preserving
+graph semantics (anchors, aliases, merge keys and cycles). Sensitive values
+shared through an alias, a `<<` merge key or a cycle are hidden at every
+occurrence, and the original parsed tree is left untouched.
+
+```ruby
+yaml = <<~YAML
+  defaults: &db
+    password: hunter2
+  services:
+    primary: *db
+YAML
+
+result = Psych::Redactor.redact(yaml, paths: [["defaults", "password"]])
+puts result.yaml
+# defaults: &db
+#   password: "[REDACTED]"
+# services:
+#   primary: *db
+
+# Paths hidden because they shared a sensitive value:
+result.additional_paths.each { |entry| puts entry }
+```
+
+Append `Psych::Redactor::KEY` to a path to redact a mapping key instead of its
+paired value, and pass `replacement:` to change the placeholder.
+
 ## Dependencies
 
 * libyaml
