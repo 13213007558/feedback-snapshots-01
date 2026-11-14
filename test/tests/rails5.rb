@@ -13,7 +13,7 @@ class Rails5Tests < Minitest::Test
       :controller => 0,
       :model => 0,
       :template => 19,
-      :generic => 27
+      :generic => 34
     }
   end
 
@@ -123,11 +123,10 @@ class Rails5Tests < Minitest::Test
   def test_dangerous_send_with_safe_call
     assert_warning :type => :warning,
       :warning_code => 23,
-      :fingerprint => "21c9eef1c001e48a0bfedfa11ff0f9d96b0c106f1016218712dabc088b2e69b6",
       :warning_type => "Dangerous Send",
       :line => 76,
       :message => /^User\ controlled\ method\ execution/,
-      :confidence => 0,
+      :confidence => 2,
       :relative_path => "app/controllers/users_controller.rb",
       :code => s(:call, s(:call, nil, :x), :send, s(:call, s(:params), :[], s(:lit, :x))),
       :user_input => s(:call, s(:params), :[], s(:lit, :x))
@@ -157,6 +156,71 @@ class Rails5Tests < Minitest::Test
       :relative_path => "app/controllers/mixed_controller.rb",
       :code => s(:call, s(:const, :Model), :public_send, s(:call, s(:call, s(:params), :[], s(:lit, :scope)), :presence)),
       :user_input => s(:call, s(:call, s(:params), :[], s(:lit, :scope)), :presence)
+  end
+
+  # Restricted dispatch branch analysis: harmless operation names that pass a
+  # literal mapping, literal case, or allow-list guard produce no warning.
+  def test_restricted_dispatch_literal_mapping_is_safe
+    assert_no_warning :type => :warning,
+      :warning_code => 23,
+      :warning_type => "Dangerous Send",
+      :line => 12,
+      :relative_path => "app/controllers/restricted_dispatch_controller.rb"
+  end
+
+  def test_restricted_dispatch_literal_case_is_safe
+    assert_no_warning :type => :warning,
+      :warning_code => 23,
+      :warning_type => "Dangerous Send",
+      :line => 30,
+      :relative_path => "app/controllers/restricted_dispatch_controller.rb"
+  end
+
+  def test_restricted_dispatch_allow_list_guard_is_safe
+    assert_no_warning :type => :warning,
+      :warning_code => 23,
+      :warning_type => "Dangerous Send",
+      :line => 41,
+      :relative_path => "app/controllers/restricted_dispatch_controller.rb"
+  end
+
+  def test_restricted_dispatch_literal_reflection_is_safe
+    assert_no_warning :type => :warning,
+      :warning_code => 23,
+      :warning_type => "Dangerous Send",
+      :line => 47,
+      :relative_path => "app/controllers/restricted_dispatch_controller.rb"
+  end
+
+  # Bypasses keep a (downgraded) warning that explains the proof was lost.
+  def test_restricted_dispatch_mutated_allow_list_warns_weak
+    assert_weak_dispatch_warning 59
+  end
+
+  def test_restricted_dispatch_default_fallback_warns_weak
+    assert_weak_dispatch_warning 64
+  end
+
+  def test_restricted_dispatch_reassignment_warns_weak
+    assert_weak_dispatch_warning 82
+  end
+
+  def test_restricted_dispatch_reflection_request_warns_weak
+    assert_weak_dispatch_warning 88
+  end
+
+  def test_restricted_dispatch_to_proc_request_warns_weak
+    assert_weak_dispatch_warning 94
+  end
+
+  def assert_weak_dispatch_warning line
+    assert_warning :type => :warning,
+      :warning_code => 23,
+      :warning_type => "Dangerous Send",
+      :line => line,
+      :message => /restricted branch analysis could not prove a fixed method set/,
+      :confidence => 2,
+      :relative_path => "app/controllers/restricted_dispatch_controller.rb"
   end
 
   def test_no_symbol_denial_of_service

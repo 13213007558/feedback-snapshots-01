@@ -1,3 +1,7 @@
+# Unreleased
+
+* Restricted branch analysis for dangerous send: distinguish request-derived method names from fixed methods selected by literal mappings, case/when, and allow-list guards; downgrade confidence and report the converged method set / proof-loss location when safety cannot be proven. Also treat `method(...).call` and `to_proc` as equivalent dispatch entry points.
+
 # 8.1.0 - 2026-09-30
 
 * Better help and error message for `--ensure-latest`

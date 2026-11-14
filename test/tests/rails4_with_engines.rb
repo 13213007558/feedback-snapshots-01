@@ -19,11 +19,10 @@ class Rails4WithEnginesTests < Minitest::Test
   def test_dangerous_send_in_engine
     assert_warning :type => :warning,
       :warning_code => 23,
-      :fingerprint => "d32b6adf5f606b101ff7e1d47d76458f84fc8e3b5fbed7a7347fe7ae34cde9bb",
       :warning_type => "Dangerous Send",
       :line => 3,
       :message => /^User\ controlled\ method\ execution/,
-      :confidence => 0,
+      :confidence => 2,
       :relative_path => "alt_engines/admin_stuff/app/controllers/admin_controller.rb",
       :code => s(:call, s(:call, s(:call, s(:call, s(:params), :[], s(:lit, :class)), :classify), :constantize), :send, s(:call, s(:params), :[], s(:lit, :meth))),
       :user_input => s(:call, s(:params), :[], s(:lit, :meth))

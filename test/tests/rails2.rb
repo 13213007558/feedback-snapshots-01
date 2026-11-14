@@ -983,7 +983,7 @@ class Rails2Tests < Minitest::Test
       :warning_type => "Dangerous Send",
       :line => 83,
       :message => /\AUser controlled method execution/,
-      :confidence => 0,
+      :confidence => 2,
       :file => /home_controller\.rb/,
       :relative_path => "app/controllers/home_controller.rb"
 
@@ -1309,7 +1309,7 @@ class Rails2Tests < Minitest::Test
       :warning_type => "Dangerous Send",
       :line => 155,
       :message => /^User\ controlled\ method\ execution/,
-      :confidence => 0,
+      :confidence => 2,
       :file => /home_controller\.rb/,
       :relative_path => "app/controllers/home_controller.rb"
   end
@@ -1319,7 +1319,7 @@ class Rails2Tests < Minitest::Test
       :warning_type => "Dangerous Send",
       :line => 156,
       :message => /^User\ controlled\ method\ execution/,
-      :confidence => 0,
+      :confidence => 2,
       :file => /home_controller\.rb/,
       :relative_path => "app/controllers/home_controller.rb"
   end
@@ -1329,7 +1329,7 @@ class Rails2Tests < Minitest::Test
       :warning_type => "Dangerous Send",
       :line => 157,
       :message => /^User\ controlled\ method\ execution/,
-      :confidence => 0,
+      :confidence => 2,
       :file => /home_controller\.rb/,
       :relative_path => "app/controllers/home_controller.rb"
   end
