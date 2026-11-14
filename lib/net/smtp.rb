@@ -894,15 +894,15 @@ module Net
     end
 
     def starttls
-      getok('STARTTLS')
+      getok('STARTTLS', '220')
     end
 
     def helo(domain)
-      getok("HELO #{domain}")
+      getok("HELO #{domain}", '250')
     end
 
     def ehlo(domain)
-      getok("EHLO #{domain}")
+      getok("EHLO #{domain}", '250')
     end
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
@@ -975,7 +975,7 @@ module Net
         end
         recv_response()
       }
-      check_response res
+      check_response res, '250'
       res
     end
 
@@ -985,8 +985,10 @@ module Net
 
     def get_response(reqline)
       validate_line reqline
-      @socket.writeline reqline
-      recv_response()
+      critical {
+        @socket.writeline reqline
+        recv_response()
+      }
     end
 
     private
@@ -998,22 +1000,32 @@ module Net
       end
     end
 
-    def getok(reqline)
+    def getok(reqline, expect = nil)
       validate_line reqline
       res = critical {
         @socket.writeline reqline
         recv_response()
       }
-      check_response res
+      check_response res, expect
       res
     end
 
     def recv_response
       buf = ''.dup
+      status = nil
       while true
         line = @socket.readline
         buf << line << "\n"
-        break unless line[3,1] == '-'   # "210-PIPELINING"
+        m = /\A(\d{3})([ -]|\z)/.match(line) or
+          raise ProtocolError, "wrong SMTP reply line format: #{line.inspect}"
+        if status
+          unless m[1] == status
+            raise ProtocolError, "SMTP reply code changed from #{status} to #{m[1]} in a multiline reply"
+          end
+        else
+          status = m[1]
+        end
+        break unless m[2] == '-'
       end
       Response.parse(buf)
     end
@@ -1028,15 +1040,15 @@ module Net
       end
     end
 
-    def check_response(res)
-      unless res.success?
+    def check_response(res, expect = nil)
+      unless expect ? res.status == expect : res.success?
         raise res.exception_class.new(res)
       end
     end
 
     def check_continue(res)
-      unless res.continue?
-        raise SMTPUnknownError.new(res, message: "could not get 3xx (#{res.status}: #{res.string})")
+      unless res.status == '354'
+        raise SMTPUnknownError.new(res, message: "could not get 354 (#{res.status}: #{res.string})")
       end
     end
 

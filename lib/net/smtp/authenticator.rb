@@ -34,7 +34,7 @@ module Net
       # @return [String] message from server
       def continue(arg)
         res = smtp.get_response arg
-        raise res.exception_class.new(res) unless res.continue?
+        raise res.exception_class.new(res) unless res.status == '334'
         res.string.split[1]
       end
 
@@ -42,7 +42,7 @@ module Net
       # @return [Net::SMTP::Response] response from server
       def finish(arg)
         res = smtp.get_response arg
-        raise SMTPAuthenticationError.new(res) unless res.success?
+        raise SMTPAuthenticationError.new(res) unless res.status == '235'
         res
       end
 

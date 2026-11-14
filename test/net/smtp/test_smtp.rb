@@ -249,7 +249,7 @@ module Net
       server.start
       smtp = Net::SMTP.start 'localhost', server.port
       err = assert_raise(Net::SMTPUnknownError) { smtp.data('message') }
-      assert_equal "could not get 3xx (250: 250 OK\n)", err.message
+      assert_equal "could not get 354 (250: 250 OK\n)", err.message
       assert_equal "250", err.response.status
     end
 
@@ -698,22 +698,22 @@ module Net
     end
 
     def ehlo(_)
-      res = [+"220-servername\r\n"]
+      res = [+"250-servername\r\n"]
       @capa.each do |k, v|
         case v
         when nil, false
           # do nothing
         when true
-          res.push "220-#{k.upcase}\r\n"
+          res.push "250-#{k.upcase}\r\n"
         when String
-          res.push "220-#{k.upcase} #{v.upcase}\r\n"
+          res.push "250-#{k.upcase} #{v.upcase}\r\n"
         when Array
-          res.push "220-#{k.upcase} #{v.map(&:upcase).join(' ')}\r\n"
+          res.push "250-#{k.upcase} #{v.map(&:upcase).join(' ')}\r\n"
         else
           raise "invalid capacities: #{k}=>#{v}"
         end
       end
-      res.last.sub!(/^220-/, '220 ')
+      res.last.sub!(/^250-/, '250 ')
       @sock.puts res.join
     end
 
