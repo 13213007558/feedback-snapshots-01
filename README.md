@@ -295,6 +295,24 @@ mail.delivery_method :exim, :location => "/usr/bin/exim"
 mail.deliver
 ```
 
+The sendmail/exim transports stream the message to the spawned process over a
+dedicated pipe while draining its diagnostics on another, so a slow or noisy
+process can never deadlock the writer. Two settings bound the work:
+
+```ruby
+mail.delivery_method :sendmail,
+                     :read_timeout => 60,        # max idle seconds; nil disables it
+                     :max_stderr_bytesize => 4096 # diagnostics retained for errors
+```
+
+A non-zero exit after the whole message was handed off raises
+`Mail::Sendmail::DeliveryError` (a definite local failure). If the transfer
+could not be confirmed — a timeout, an early exit before the body finished, or a
+broken pipe — `Mail::Sendmail::DeliveryUnknownError` (a subclass of
+`DeliveryError`) is raised instead, signalling that the delivery result is
+unknown and the message may be retried. Neither error interpolates the message
+body or the recipient list.
+
 Mail may be "delivered" to a logfile, too, for development and testing:
 
 ```ruby

@@ -24,6 +24,11 @@ Bug Fixes:
 
 * Regression: Preserve message-level charset when adding parts (related to Rails ActionMailer) @shields
 * Regression: Adding a part should not reset the mail's charset to nil @railsbob
+* Make the Sendmail/Exim delivery path deadlock-free: stream the message over a
+  dedicated pipe in non-blocking segments while draining size-capped diagnostics
+  on another, enforce a read timeout, and always reap the child and close
+  handles. Distinguish definite local failures (DeliveryError) from unconfirmed
+  transfers (DeliveryUnknownError) without echoing the message or recipients.
 
 Performance:
 
