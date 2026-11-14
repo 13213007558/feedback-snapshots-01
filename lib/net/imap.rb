@@ -948,6 +948,7 @@ module Net
 
     dir = File.expand_path("imap", __dir__)
     autoload :ConnectionState,        "#{dir}/connection_state"
+    autoload :DebugLogger,            "#{dir}/debug_logger"
     autoload :ResponseReader,         "#{dir}/response_reader"
     autoload :SASL,                   "#{dir}/sasl"
     autoload :SASLAdapter,            "#{dir}/sasl_adapter"
@@ -977,6 +978,11 @@ module Net
 
     # Returns the global debug mode.
     # Delegates to {Net::IMAP.config.debug}[rdoc-ref:Config#debug].
+    #
+    # When debug is enabled, what is printed is controlled by
+    # {Net::IMAP.config.debug_mode}[rdoc-ref:Config#debug_mode]: +:safe+ (the
+    # default) redacts passwords, \SASL credentials, and literal message
+    # bodies, while +:raw+ prints every exchanged byte verbatim.
     def self.debug; config.debug end
 
     # Sets the global debug mode.
@@ -1243,7 +1249,7 @@ module Net
       @ssl_ctx_params, @ssl_ctx = build_ssl_ctx(ssl)
 
       # Basic Client State
-      @debug_output_bol = true
+      @debug_logger = DebugLogger.new(@config)
       @exception = nil
       @greeting = nil
       @capabilities = nil
@@ -3742,7 +3748,7 @@ module Net
     def get_response
       buff = @reader.read_response_buffer
       return nil if buff.length == 0
-      $stderr.print(buff.gsub(/^/n, "S: ")) if config.debug?
+      @debug_logger.server_read(buff)
       @parser.parse(buff)
     end
 
@@ -3925,17 +3931,7 @@ module Net
 
     def put_string(str)
       @sock.print(str)
-      if config.debug?
-        if @debug_output_bol
-          $stderr.print("C: ")
-        end
-        $stderr.print(str.gsub(/\n/n) { $'.empty? ? $& : "\nC: " })
-        if /\n\z/n.match(str)
-          @debug_output_bol = true
-        else
-          @debug_output_bol = false
-        end
-      end
+      @debug_logger.client_write(str)
     end
 
     def enforce_logindisabled?

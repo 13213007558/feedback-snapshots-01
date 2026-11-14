@@ -143,6 +143,8 @@ module Net
     # from ::global and #load_defaults doesn't update them.
     #
     # * #debug (aliased as #debug?): whether debug mode is enabled
+    # * #debug_mode: what debug output prints when #debug is enabled
+    #   (+:safe+ redacts secrets, +:raw+ prints every byte verbatim)
     #
     # ==== Backward compatibility
     # These attributes will be removed by some future release.
@@ -252,6 +254,9 @@ module Net
       #   errors.  _This may include recoverable errors._
       # * ResponseParser makes extra assertions.
       #
+      # Use #debug_mode to choose between secret-redacting (+:safe+) and
+      # verbatim (+:raw+) protocol logging.
+      #
       # *NOTE:* Versioned default configs inherit #debug from Config.global, and
       # #load_defaults will not override #debug.
       attr_accessor :debug, type: :boolean, default: false
@@ -260,6 +265,33 @@ module Net
       # :call-seq: debug? -> boolean
       #
       # Alias for #debug
+
+      # Controls what is printed when #debug is enabled.
+      #
+      # ==== Valid options
+      #
+      # [+:safe+ <em>(default)</em>]
+      #   Debug output is filtered through DebugLogger so that secrets are
+      #   never printed:
+      #
+      #   * +LOGIN+ passwords are redacted, whether sent as an atom, a quoted
+      #     string, or a literal.
+      #   * +AUTHENTICATE+ initial responses and \SASL continuation
+      #     challenge/response payloads are redacted in both directions.
+      #   * Literal payloads in both directions are redacted, hiding message
+      #     bodies (e.g. +FETCH+ and +APPEND+) while retaining their declared
+      #     lengths.
+      #
+      #   Redaction follows the protocol state and the actual byte boundaries
+      #   on the wire; it is not based on matching secret strings.  Every log
+      #   line keeps its direction (+C:+ or +S:+), length, and command tag.
+      #
+      # [+:raw+]
+      #   The historical debug behavior: every byte exchanged with the server
+      #   is printed verbatim, including passwords, bearer tokens, and message
+      #   bodies.  Select this explicitly only when the debug output itself is
+      #   handled as sensitive data.
+      attr_accessor :debug_mode, type: Enum[:safe, :raw], default: :safe
 
       # Seconds to wait until a connection is opened.
       #
