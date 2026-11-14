@@ -710,6 +710,32 @@ rescue JWT::TokenError
 end
 ```
 
+#### Selecting a key when several JWKs share the same kid
+
+During key rotation a partner may briefly publish two public keys with the same `kid`.
+The plain `jwks` option keeps its historical behaviour and uses the first matching key, so the result then depends on the order of the JWKS.
+For order independent verification use `JWT::JWK::KeySelector`, which is given the same algorithm and key usage constraints as the decode call and tries every compatible candidate itself:
+
+```ruby
+key_selector = JWT::JWK::KeySelector.new(
+  jwks: jwks_loader,               # a JWKS, a Set or a loader proc
+  algorithms: ['RS256'],           # algorithms the caller accepts
+  max_candidates: 5                # optional, defaults to 5
+)
+
+JWT.decode(token, nil, true, algorithms: ['RS256'], jwk_key_finder: key_selector)
+```
+
+The selector applies the following rules:
+
+- candidates must match the requested `kid` (or `x5t`) and be compatible with an allowed algorithm, the key type (`kty`) and the advertised usage (`use: 'sig'` or a `key_ops` entry containing `verify`),
+- keys carrying identical public key material are treated as a single candidate, so a duplicated key verifies exactly once,
+- when exactly one distinct candidate verifies the token its key is returned, independently of the position of the key in the JWKS,
+- when more than one distinct candidate verifies the same token, `JWT::AmbiguousKeyError` is raised instead of attributing the token to one of them,
+- when the number of compatible candidates exceeds `max_candidates`, `JWT::TooManyCandidateKeys` is raised before any signature is tried. This is a configuration problem, the candidates are not silently truncated and a later signature failure is not reported instead.
+
+Both errors inherit from `JWT::JWKError` and their messages only reference the `kid` and candidate counts, never key material.
+
 ### Importing and exporting JSON Web Keys
 
 The ::JWT::JWK class can be used to import both JSON Web Keys and OpenSSL keys

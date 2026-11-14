@@ -76,6 +76,16 @@ module JWT
   # The JWKError class is raised when there is an error with the JSON Web Key (JWK).
   class JWKError < DecodeError; end
 
+  # Raised when a JWKS configuration exposes more key candidates for one token
+  # than the configured limit allows. This is a configuration problem rather
+  # than a signature failure, so the candidates are never silently truncated.
+  class TooManyCandidateKeys < JWKError; end
+
+  # Raised when more than one distinct key candidate verifies the same token.
+  # The token cannot be attributed to a single key without depending on the
+  # order of the JWKS, so verification is rejected instead of picking one.
+  class AmbiguousKeyError < JWKError; end
+
   # Raised when a JWK uses a key type (kty) that this library does not support.
   class UnsupportedKeyType < JWKError; end
 end

@@ -6,7 +6,7 @@
 
 **Features:**
 
-- Your contribution here
+- Add `JWT::JWK::KeySelector`, an opt-in key finder for JWKS sets that may contain several keys sharing the same `kid`. Candidates are filtered by the caller's algorithm, key type and usage constraints, identical public keys are treated as one candidate, multiple distinct verifying keys raise `JWT::AmbiguousKeyError`, and exceeding the `max_candidates` limit raises `JWT::TooManyCandidateKeys` before any signature is tried. Available through the `jwk_key_finder` decode option and as an `EncodedToken` key finder.
 
 **Fixes and enhancements:**
 

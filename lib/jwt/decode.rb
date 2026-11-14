@@ -64,7 +64,9 @@ module JWT
 
     def set_key
       @key = find_key(&@keyfinder) if @keyfinder
-      if @options[:jwks]
+      if @options[:jwk_key_finder]
+        @key = @options[:jwk_key_finder].call(token)
+      elsif @options[:jwks]
         @key = ::JWT::JWK::KeyFinder.new(
           jwks: @options[:jwks],
           allow_nil_kid: @options[:allow_nil_kid],
