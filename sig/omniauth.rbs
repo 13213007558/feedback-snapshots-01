@@ -99,6 +99,8 @@ module OmniAuth
 
     def self?.deep_merge: (Hash[untyped, untyped] hash, Hash[untyped, untyped] other_hash) -> Hash[untyped, untyped]
 
+    def self?.deep_dup: (untyped value) -> untyped
+
     def self?.camelize: (String | Symbol word, ?bool first_letter_in_uppercase) -> String
   end
 
@@ -296,6 +298,7 @@ module OmniAuth
       def fail!: (String | Symbol message_key, ?Exception? exception) -> rack_response
       def store_origin: () -> void
       def omniauth_params: () -> Hash[String, untyped]
+      def sanitize_params: (untyped value) -> untyped
       def request_call?: () -> boolish
     end
 
@@ -531,6 +534,10 @@ module OmniAuth
     # The request phase's query and form params, minus the authenticity
     # token, which the callback phase hands back as `omniauth.params`.
     def omniauth_params: () -> Hash[String, untyped]
+
+    # Removes the authenticity token at every nesting level and deep-copies
+    # the structure so the saved params share nothing with request.params.
+    def sanitize_params: (untyped value) -> untyped
 
     def store_origin: () -> void
 

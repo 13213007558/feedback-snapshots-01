@@ -38,6 +38,49 @@ describe OmniAuth::Utils do
     end
   end
 
+  describe '.deep_dup' do
+    it 'copies nested hashes and arrays into separate objects' do
+      hash = {'a' => {'b' => [1, {'c' => 2}]}, 'd' => []}
+      copy = OmniAuth::Utils.deep_dup(hash)
+
+      expect(copy).to eq(hash)
+      expect(copy).not_to equal(hash)
+      expect(copy['a']).not_to equal(hash['a'])
+      expect(copy['a']['b']).not_to equal(hash['a']['b'])
+      expect(copy['a']['b'].last).not_to equal(hash['a']['b'].last)
+      expect(copy['d']).not_to equal(hash['d'])
+    end
+
+    it 'leaves the copy independent of later mutations of the original' do
+      hash = {'a' => {'b' => [1]}}
+      copy = OmniAuth::Utils.deep_dup(hash)
+      hash['a']['b'] << 2
+      hash['a']['c'] = 3
+
+      expect(copy).to eq('a' => {'b' => [1]})
+    end
+
+    it 'preserves hash subclasses and shares scalar values as-is' do
+      scalar = +'value'
+      hash = {'a' => OmniAuth::KeyStore.new('b' => 1), 's' => scalar}
+      copy = OmniAuth::Utils.deep_dup(hash)
+
+      expect(copy['a']).to be_a(OmniAuth::KeyStore)
+      expect(copy['s']).to equal(scalar)
+    end
+
+    it 'dups arrays of scalars and an empty structure' do
+      expect(OmniAuth::Utils.deep_dup([])).to eq([])
+      expect(OmniAuth::Utils.deep_dup({})).to eq({})
+      expect(OmniAuth::Utils.deep_dup([1, 'two', nil])).to eq([1, 'two', nil])
+    end
+
+    it 'returns non-container values unchanged' do
+      expect(OmniAuth::Utils.deep_dup('scalar')).to eq('scalar')
+      expect(OmniAuth::Utils.deep_dup(nil)).to be_nil
+    end
+  end
+
   describe '.camelize' do
     before do
       @old_camelizations = OmniAuth.config.camelizations

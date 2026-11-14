@@ -194,15 +194,37 @@ module OmniAuth
       end
     end
 
-    # The authenticity token never goes into omniauth.params, so the app
-    # can't leak it by echoing the params back.
+    # The authenticity token never goes into omniauth.params, at any nesting
+    # level, so the app can't leak it by echoing the params back. The token
+    # also arrives as an Array (authenticity_token[]=...), which a key-only
+    # check has to match regardless of its value's type.
     AUTHENTICITY_PARAM = 'authenticity_token'.freeze
 
     # The params the app sent to the request phase, from both the query
     # string and the form, which the callback phase hands back as
     # env['omniauth.params'].
     def omniauth_params
-      request.params.reject { |key, _| key.eql?(AUTHENTICITY_PARAM) }
+      sanitize_params(request.params)
+    end
+
+    # Removes the authenticity token from every nesting level and returns a
+    # deep copy, so the saved params share no nested Hash or Array with
+    # request.params. Without the copy, code running later in the request (a
+    # hook or the strategy's request phase) could mutate request.params and
+    # have the change land in the session after this boundary was computed.
+    def sanitize_params(value)
+      case value
+      when Hash
+        value.each_with_object(value.class.new) do |(key, nested), sanitized|
+          next if key.eql?(AUTHENTICITY_PARAM)
+
+          sanitized[key] = sanitize_params(nested)
+        end
+      when Array
+        value.map { |nested| sanitize_params(nested) }
+      else
+        value
+      end
     end
 
     # Remembers where the user came from (the origin param, or else the

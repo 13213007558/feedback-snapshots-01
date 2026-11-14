@@ -173,6 +173,22 @@ module OmniAuth
       target
     end
 
+    # A copy whose nested Hashes and Arrays are separate objects, so changing
+    # the copy can't reach the original through a shared nested value. The
+    # structure comes from Rack's parameter parser, which only builds Hashes,
+    # Arrays and Strings; anything else is shared as-is because it is already
+    # immutable or outside what the parser can construct.
+    def deep_dup(value)
+      case value
+      when Hash
+        value.each_with_object(value.class.new) { |(key, nested), copy| copy[key] = deep_dup(nested) }
+      when Array
+        value.map { |nested| deep_dup(nested) }
+      else
+        value
+      end
+    end
+
     def camelize(word, first_letter_in_uppercase = true)
       camelized = OmniAuth.config.camelizations[word.to_s]
       return camelized if camelized

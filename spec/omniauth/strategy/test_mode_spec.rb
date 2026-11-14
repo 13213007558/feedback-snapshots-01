@@ -41,6 +41,22 @@ describe OmniAuth::Strategy, 'test mode' do
       expect(strategy.env['omniauth.params']).to eq({})
     end
 
+    it 'strips a nested authenticity token when saving the request params' do
+      previous_validation_phase = OmniAuth.config.request_validation_phase
+      OmniAuth.config.request_validation_phase = nil
+      env = Rack::MockRequest.env_for(
+        'http://app.example/auth/test?form[authenticity_token]=sec&form[keep]=1',
+        :method => 'POST',
+        'rack.input' => StringIO.new(''),
+        'rack.session' => {}
+      )
+      ExampleStrategy.new(app).call(env)
+
+      expect(env['rack.session']['omniauth.params']).to eq('form' => {'keep' => '1'})
+    ensure
+      OmniAuth.config.request_validation_phase = previous_validation_phase
+    end
+
     it 'does not set omniauth.auth when a failure is mocked' do
       OmniAuth.config.mock_auth[:test] = :invalid_credentials
       strategy = ExampleStrategy.new(app)
