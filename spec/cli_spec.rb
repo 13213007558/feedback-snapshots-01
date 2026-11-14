@@ -30,6 +30,10 @@ describe Bundler::Audit::CLI do
       expect(database).to receive(:size).and_return(size)
       expect(database).to receive(:last_updated_at).and_return(last_updated_at)
       expect(database).to receive(:commit_id).and_return(commit_id)
+      expect(database).to receive(:snapshot).and_return(
+        double(Bundler::Audit::Snapshot, content_digest: 'sha256:deadbeef',
+                                         dirty: false, update_state: :none)
+      )
     end
 
     it "prints total advisory count" do
@@ -61,6 +65,10 @@ describe Bundler::Audit::CLI do
           expect(database).to receive(:size).and_return(size)
           expect(database).to receive(:last_updated_at).and_return(last_updated_at)
           expect(database).to receive(:commit_id).and_return(commit_id)
+          expect(database).to receive(:snapshot).and_return(
+            double(Bundler::Audit::Snapshot, content_digest: 'sha256:deadbeef',
+                                             dirty: false, update_state: :none)
+          )
         end
 
         it "prints updated message and then the stats" do

@@ -52,10 +52,20 @@ module Bundler
           end
 
           def print_xml_testsuite(report)
+            properties = ""
+
+            if report.database_commit
+              properties = %{    <properties>} \
+                         + %{<property name="database-commit" value="#{xml(report.database_commit)}"/>} \
+                         + %{<property name="database-digest" value="#{xml(report.database_digest)}"/>} \
+                         + %{</properties>}
+            end
+
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
               %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">},
+              properties
             )
 
             yield

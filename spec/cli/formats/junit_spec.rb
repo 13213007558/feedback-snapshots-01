@@ -349,5 +349,23 @@ describe Bundler::Audit::CLI::Formats::Junit do
     it "must restore $stdout" do
       expect($stdout).to_not be(stdout)
     end
+
+    context "when the report has a database snapshot" do
+      let(:snapshot) do
+        Bundler::Audit::Snapshot.new(
+          database_path: '/db', commit: 'abc123', last_updated_at: nil,
+          digest: 'deadbeef', advisories: []
+        )
+      end
+
+      let(:report) { super().tap { |report| report.snapshot = snapshot } }
+
+      it "must include the database commit and digest as properties" do
+        expect(output).to include(
+          '<property name="database-commit" value="abc123"/>',
+          '<property name="database-digest" value="sha256:deadbeef"/>'
+        )
+      end
+    end
   end
 end

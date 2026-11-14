@@ -17,6 +17,7 @@
 
 require 'bundler/audit/scanner'
 require 'bundler/audit/version'
+require 'bundler/audit/snapshot/store'
 require 'bundler/audit/cli/formats'
 
 require 'thor'
@@ -45,6 +46,9 @@ module Bundler
       method_option :gemfile_lock, type: :string, aliases: '-G',
                                    default: 'Gemfile.lock'
       method_option :output, type: :string, aliases: '-o'
+      method_option :ignore_dirty, type: :boolean
+      method_option :snapshot_dir, type: :string
+      method_option :snapshot, type: :boolean, default: true
 
       def check(dir=Dir.pwd)
         unless File.directory?(dir)
@@ -65,7 +69,10 @@ module Bundler
           update(options[:database])
         end
 
-        database = Database.new(options[:database])
+        database = Database.new(
+          options[:database],
+          store: options[:snapshot] ? Snapshot::Store.new(options[:snapshot_dir]) : nil
+        )
         scanner  = begin
                      Scanner.new(dir,options[:gemfile_lock],database,options[:config])
                    rescue Bundler::GemfileLockNotFound => exception
@@ -73,7 +80,18 @@ module Bundler
                      exit 1
                    end
 
-        report = scanner.report(ignore: options.ignore)
+        report = begin
+                   scanner.report(
+                     ignore:       options[:ignore],
+                     ignore_dirty: !!options[:ignore_dirty]
+                   )
+                 rescue Snapshot::DirtyWorktree => error
+                   say_error(error.message, :red)
+                   exit 1
+                 rescue Snapshot::Unavailable => error
+                   say_error(error.message, :red)
+                   exit 1
+                 end
 
         output = if options[:output]
                    File.new(options[:output],'w')
@@ -100,6 +118,19 @@ module Bundler
 
         if (commit_id = database.commit_id)
           puts "  commit:\t#{commit_id}"
+
+          begin
+            snapshot = database.snapshot(ignore_dirty: true)
+
+            puts "  digest:\t#{snapshot.content_digest}"
+            puts "  worktree:\tdirty" if snapshot.dirty
+
+            unless snapshot.update_state == :none
+              puts "  update:\t#{snapshot.update_state}"
+            end
+          rescue Snapshot::Error
+            puts "  digest:\tunavailable"
+          end
         end
       end
 
@@ -126,8 +157,12 @@ module Bundler
 
       desc 'update', 'Updates the ruby-advisory-db'
       method_option :quiet, type: :boolean, aliases: '-q'
+      method_option :database, type: :string, aliases: '-D',
+                               default: Database::DEFAULT_PATH
 
       def update(path=Database::DEFAULT_PATH)
+        path = options[:database] || path
+
         unless Database.exists?(path)
           download(path)
           return
@@ -157,6 +192,54 @@ module Bundler
         end
 
         stats(path) unless options.quiet?
+      end
+
+      desc 'prune', 'Removes old ruby-advisory-db snapshots'
+      method_option :snapshot_dir, type: :string
+      method_option :force, type: :boolean
+      method_option :older_than, type: :string
+
+      def prune
+        store = Snapshot::Store.new(options[:snapshot_dir] || Snapshot::Store::DEFAULT_DIR)
+
+        older_than = options[:older_than] && Time.parse(options[:older_than])
+
+        removed = store.prune(force: options[:force], older_than: older_than)
+
+        say "Pruned #{removed.size} snapshot(s)" unless options[:quiet]
+      end
+
+      desc 'verify [REPORT]', 'Verifies a report against ruby-advisory-db'
+      method_option :database, type: :string, aliases: '-D',
+                               default: Database::DEFAULT_PATH
+      method_option :snapshot_dir, type: :string
+
+      def verify(path='-')
+        require 'json'
+
+        input   = (path == '-') ? $stdin.read : File.read(path)
+        report  = ::JSON.parse(input)
+        metadata = report['database']
+
+        unless metadata
+          say_error "Report does not contain database metadata", :red
+          exit 1
+        end
+
+        database = Database.new(
+          options[:database],
+          store: Snapshot::Store.new(options[:snapshot_dir])
+        )
+
+        begin
+          snapshot = database.snapshot_with_digest(metadata['digest'])
+        rescue Snapshot::Unavailable => error
+          say_error error.message, :red
+          exit 1
+        end
+
+        say "Database matches: #{metadata['commit'] || metadata['source']} " \
+            "#{snapshot.content_digest}", :green
       end
 
       desc 'version', 'Prints the bundler-audit version'

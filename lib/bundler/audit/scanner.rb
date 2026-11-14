@@ -55,6 +55,14 @@ module Bundler
       # @return [Hash]
       attr_reader :config
 
+      # The database snapshot used by the most recent scan.
+      #
+      # All results of a scan are read from this snapshot, so an update
+      # that happens while scanning cannot mix old and new advisories.
+      #
+      # @return [Snapshot, nil]
+      attr_reader :snapshot
+
       #
       # Initializes a scanner.
       #
@@ -77,6 +85,7 @@ module Bundler
       def initialize(root=Dir.pwd,gemfile_lock='Gemfile.lock',database=Database.new,config_dot_file='.bundler-audit.yml')
         @root     = File.expand_path(root)
         @database = database
+        @snapshot = nil
 
         gemfile_lock_path = File.join(@root,gemfile_lock)
 
@@ -122,6 +131,8 @@ module Bundler
           yield result if block_given?
         end
 
+        report.snapshot = @snapshot
+
         return report
       end
 
@@ -145,6 +156,8 @@ module Bundler
       #
       def scan(options={},&block)
         return enum_for(__method__,options) unless block
+
+        @snapshot = @database.snapshot(ignore_dirty: options.fetch(:ignore_dirty,false))
 
         scan_sources(options,&block)
         scan_specs(options,&block)
@@ -224,8 +237,11 @@ module Bundler
                    config.ignore
                  end
 
+        snapshot = @snapshot ||
+                   @database.snapshot(ignore_dirty: options.fetch(:ignore_dirty,false))
+
         @lockfile.specs.each do |gem|
-          @database.check_gem(gem) do |advisory|
+          snapshot.check_gem(gem) do |advisory|
             is_ignored = ignore.intersect?(advisory.identifiers.to_set)
             next if is_ignored
 

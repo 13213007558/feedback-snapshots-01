@@ -110,5 +110,28 @@ describe Bundler::Audit::CLI::Formats::JSON do
         expect(output_json[:results]).to be_empty
       end
     end
+
+    context "when the report has a database snapshot" do
+      let(:snapshot) do
+        Bundler::Audit::Snapshot.new(
+          database_path: '/db', commit: 'abc123',
+          last_updated_at: Time.utc(2026,1,1), digest: 'deadbeef',
+          advisories: []
+        )
+      end
+
+      let(:report) { super().tap { |report| report.snapshot = snapshot } }
+
+      it 'must output the database commit and content digest' do
+        expect(output_json[:database]).to include(
+          source: 'git',
+          commit: 'abc123',
+          digest: 'sha256:deadbeef',
+          advisories: 0,
+          update_state: 'none',
+          dirty: false
+        )
+      end
+    end
   end
 end

@@ -16,7 +16,13 @@
 #
 
 require 'bundler/audit/advisory'
+require 'bundler/audit/snapshot'
+require 'bundler/audit/snapshot/store'
 
+require 'digest'
+require 'open3'
+require 'rubygems/package'
+require 'stringio'
 require 'time'
 require 'yaml'
 
@@ -45,10 +51,18 @@ module Bundler
       # @since 0.8.0
       DEFAULT_PATH = ENV.fetch('BUNDLER_AUDIT_DB',USER_PATH)
 
+      # Name of the marker file written into `.git/` for an in-progress update.
+      UPDATE_MARKER = 'bundler-audit-update'
+
       # The path to the advisory database.
       #
       # @return [String]
       attr_reader :path
+
+      # Optional on-disk snapshot store.
+      #
+      # @return [Snapshot::Store, nil]
+      attr_reader :store
 
       #
       # Initializes the Advisory Database.
@@ -59,12 +73,13 @@ module Bundler
       # @raise [ArgumentError]
       #   The path was not a directory.
       #
-      def initialize(path=self.class.path)
+      def initialize(path=self.class.path,store: nil)
         unless File.directory?(path)
           raise(ArgumentError,"#{path.dump} is not a directory")
         end
 
-        @path = path
+        @path  = path
+        @store = store
       end
 
       #
@@ -182,13 +197,152 @@ module Bundler
       end
 
       #
+      # Whether the working tree contains uncommitted changes.
+      #
+      # An update marker is stored under `.git/`, so it does not count as
+      # a change to the working tree.
+      #
+      # @return [Boolean]
+      #
+      # @since 0.9.4
+      #
+      def dirty?
+        return false unless git?
+
+        output,status = Open3.capture2(
+          'git','-C',@path,'status','--porcelain=v1','--untracked-files=normal'
+        )
+
+        raise(Snapshot::Unavailable,"could not inspect #{@path.inspect}") unless status.success?
+
+        !output.strip.empty?
+      end
+
+      #
+      # Captures an immutable snapshot of the database as it exists now.
+      #
+      # For a git repository the snapshot is read from the current `HEAD`
+      # commit via `git archive`, so concurrent changes to the working tree
+      # or an in-progress update cannot affect it.  For a plain directory
+      # every advisory file is read once and re-checked for concurrent
+      # modification.
+      #
+      # If the working tree has uncommitted changes, a
+      # {Snapshot::DirtyWorktree} exception is raised rather than silently
+      # scanning stale committed data.  The exception is only suppressed
+      # when an update is known to be running or to have been interrupted;
+      # in those cases the old `HEAD` is still scanned and `#update_state`
+      # records why the working tree was ignored.
+      #
+      # @param [Boolean] ignore_dirty
+      #   Explicitly scan committed data even if the working tree is dirty.
+      #
+      # @return [Snapshot]
+      #
+      # @raise [Snapshot::DirtyWorktree]
+      #   The git working tree contains uncommitted changes.
+      #
+      # @raise [Snapshot::Unavailable]
+      #   The database version or contents could not be read.
+      #
+      # @since 0.9.4
+      #
+      def snapshot(ignore_dirty: false)
+        if git?
+          # Resolve the commit before inspecting the worktree: if an update
+          # advances HEAD between the two steps, the worktree check would
+          # otherwise describe a different version than the one returned.
+          commit = current_commit
+
+          snapshot_from_commit(commit, update_state: update_state,
+                                       ignore_dirty: ignore_dirty)
+        else
+          snapshot_from_directory
+        end
+      end
+
+      #
+      # Re-captures a snapshot from an exact git commit.
+      #
+      # This is used to verify a report's `database.commit` and
+      # `database.digest` after the fact.
+      #
+      # @param [String] commit
+      #
+      # @return [Snapshot]
+      #
+      # @raise [Snapshot::Unavailable]
+      #   The commit does not exist locally.
+      #
+      # @since 0.9.4
+      #
+      def snapshot_at(commit)
+        unless git?
+          raise(Snapshot::Unavailable,"#{@path.inspect} is not a git repository")
+        end
+
+        snapshot_from_commit(commit, update_state: update_state,
+                                     ignore_dirty: true)
+      end
+
+      #
+      # Re-loads a snapshot by its exact content digest.
+      #
+      # This needs a {Snapshot::Store} to be configured, and either the
+      # stored snapshot itself or the advisory files with that exact
+      # content.
+      #
+      # @param [String] digest
+      #   A `sha256:...` digest from a report's `database.digest`.
+      #
+      # @return [Snapshot]
+      #
+      # @raise [Snapshot::Unavailable]
+      #   The digest cannot be reproduced from the store or database.
+      #
+      # @since 0.9.4
+      #
+      def snapshot_with_digest(digest)
+        if @store
+          begin
+            return @store.load(digest)
+          rescue KeyError
+            # Fall back to reading the database below.
+          end
+        end
+
+        # Without an archive the live database must still reproduce the
+        # exact contents, including any set of clean but uncommitted files
+        # that a dirty scan would have read.
+        candidate = snapshot(ignore_dirty: true)
+
+        unless candidate.content_digest == digest
+          raise(Snapshot::Unavailable,
+                "database #{@path.inspect} does not contain #{digest.inspect}")
+        end
+
+        candidate
+      end
+
+      #
       # Updates the ruby-advisory-db.
+      #
+      # The update is a plain `git pull` on a clean working tree, so it
+      # either advances `HEAD` completely or leaves the old commit untouched.
+      # A marker file under `.git/` records
+      # that an update is in progress; if the process dies mid-update the
+      # marker is left behind, later updates roll the working tree back to
+      # the recorded commit before retrying, and scans report
+      # `update_state: :interrupted` while still using the old commit.
       #
       # @param [Hash] options
       #   Additional options.
       #
       # @option options [Boolean] :quiet
       #   Specify whether `git` should be `--quiet`.
+      #
+      # @option options [String] :branch
+      #   The remote branch to update from (`master` by default).
       #
       # @return [true, nil]
       #   * `true` - the ruby-advisory-db git repository was successfully
@@ -202,17 +356,60 @@ module Bundler
       # @since 0.8.0
       #
       def update!(options={})
-        if git?
-          Dir.chdir(@path) do
-            command = %w[git pull]
-            command << '--quiet' if options[:quiet]
-            command << 'origin' << 'master'
+        unless (options.keys - [:quiet, :branch]).empty?
+          raise "Invalid option(s)"
+        end
 
-            unless system(*command)
-              raise(UpdateFailed,"failed to update #{@path.inspect}")
-            end
+        return nil unless git?
 
-            return true
+        recover_interrupted_update!
+
+        if dirty?
+          raise(UpdateFailed,
+                "cannot update #{@path.inspect}: the working tree has " \
+                "uncommitted changes; commit or discard them first")
+        end
+
+        old_commit = current_commit
+        marker     = nil
+
+        begin
+          marker = begin
+                     File.open(update_marker_path,
+                               File::WRONLY|File::CREAT|File::EXCL,0o600)
+                   rescue Errno::EEXIST
+                     raise(UpdateFailed,
+                           "another update of #{@path.inspect} is already " \
+                           "in progress") if update_state == :running
+
+                     # A previous update died without cleaning up; recover
+                     # from it and retry once.
+                     recover_interrupted_update!
+                     File.open(update_marker_path,
+                               File::WRONLY|File::CREAT|File::EXCL,0o600)
+                   end
+
+          marker.write("from=#{old_commit}\npid=#{Process.pid}\n" \
+                       "started_at=#{Time.now.utc.iso8601}\n")
+          marker.flush
+
+          command = %w[git pull]
+          command << '--quiet' if options[:quiet]
+          command << 'origin' << (options[:branch] || 'master')
+
+          # `git pull` only runs on a clean working tree, and a snapshot is
+          # always read from the resulting commit.  If the pull fails, git
+          # leaves the old commit in place; a later update cleans up any
+          # marker left by an interrupted pull.
+          unless system(*command, chdir: @path)
+            raise(UpdateFailed,"failed to update #{@path.inspect}")
+          end
+
+          return true
+        ensure
+          if marker
+            marker.close
+            File.unlink(update_marker_path) if File.exist?(update_marker_path)
           end
         end
       end
@@ -226,11 +423,7 @@ module Bundler
       # @since 0.9.0
       #
       def commit_id
-        if git?
-          Dir.chdir(@path) do
-            `git rev-parse HEAD`.chomp
-          end
-        end
+        current_commit if git?
       end
 
       #
@@ -242,12 +435,40 @@ module Bundler
       #
       def last_updated_at
         if git?
-          Dir.chdir(@path) do
-            Time.parse(`git log --date=iso8601 --pretty="%cd" -1`)
-          end
+          output,status = Open3.capture2(
+            'git','-C',@path,'log','-1','--date=iso8601','--format=%cd',current_commit
+          )
+
+          raise(Snapshot::Unavailable,"could not read #{@path.inspect}") unless status.success?
+
+          Time.parse(output)
         else
           File.mtime(@path)
         end
+      end
+
+      #
+      # The state of any update for the database.
+      #
+      # @return [:none, :running, :interrupted]
+      #
+      # @since 0.9.4
+      #
+      def update_state
+        return :none unless git?
+
+        marker = update_marker_path
+        return :none unless File.exist?(marker)
+
+        pid = File.read(marker)[/^pid=(\d+)$/,1].to_i
+
+        if pid > 0 && process_alive?(pid)
+          :running
+        else
+          :interrupted
+        end
+      rescue Errno::ENOENT
+        :none
       end
 
       #
@@ -265,9 +486,7 @@ module Bundler
       def advisories(&block)
         return enum_for(__method__) unless block_given?
 
-        each_advisory_path do |path|
-          yield Advisory.load(path)
-        end
+        snapshot.advisories.each(&block)
       end
 
       #
@@ -285,12 +504,10 @@ module Bundler
       # @return [Enumerator]
       #   If no block is given, an Enumerator will be returned.
       #
-      def advisories_for(name)
+      def advisories_for(name,&block)
         return enum_for(__method__,name) unless block_given?
 
-        each_advisory_path_for(name) do |path|
-          yield Advisory.load(path)
-        end
+        snapshot.advisories_for(name).each(&block)
       end
 
       #
@@ -309,14 +526,10 @@ module Bundler
       # @return [Enumerator]
       #   If no block is given, an Enumerator will be returned.
       #
-      def check_gem(gem)
+      def check_gem(gem,&block)
         return enum_for(__method__,gem) unless block_given?
 
-        advisories_for(gem.name) do |advisory|
-          if advisory.vulnerable?(gem.version)
-            yield advisory
-          end
-        end
+        snapshot.check_gem(gem,&block)
       end
 
       #
@@ -326,7 +539,7 @@ module Bundler
       #   The number of advisories.
       #
       def size
-        each_advisory_path.count
+        snapshot.size
       end
 
       #
@@ -352,32 +565,273 @@ module Bundler
       protected
 
       #
-      # Enumerates over every advisory path in the database.
+      # The current `HEAD` commit.
       #
-      # @yield [path]
-      #   The given block will be passed each advisory path.
+      # @return [String]
       #
-      # @yieldparam [String] path
-      #   A path to an advisory `.yml` file.
-      #
-      def each_advisory_path(&block)
-        Dir.glob(File.join(@path,'gems','*','*.yml'),&block)
+      def current_commit
+        rev_parse('HEAD')
       end
 
       #
-      # Enumerates over the advisories for the given gem.
+      # Resolves a git revision to a commit ID.
       #
-      # @param [String] name
-      #   The gem of the gem.
+      # @param [String] revision
       #
-      # @yield [path]
-      #   The given block will be passed each advisory path.
+      # @return [String]
       #
-      # @yieldparam [String] path
-      #   A path to an advisory `.yml` file.
+      def rev_parse(revision)
+        output,status = Open3.capture2(
+          'git','-C',@path,'rev-parse','--verify',"#{revision}^{commit}"
+        )
+
+        unless status.success?
+          raise(Snapshot::Unavailable,
+                "could not resolve #{revision.inspect} in #{@path.inspect}")
+        end
+
+        output.chomp
+      end
+
       #
-      def each_advisory_path_for(name,&block)
-        Dir.glob(File.join(@path,'gems',name,'*.yml'),&block)
+      # The path to the update marker.
+      #
+      # @return [String]
+      #
+      def update_marker_path
+        File.join(@path,'.git',UPDATE_MARKER)
+      end
+
+      #
+      # Removes a marker left behind by an interrupted update and rolls
+      # back any partially applied working-tree changes.
+      #
+      def recover_interrupted_update!
+        marker = update_marker_path
+        return unless File.exist?(marker)
+
+        contents = File.read(marker)
+        pid      = contents[/^pid=(\d+)$/,1].to_i
+
+        if pid > 0 && process_alive?(pid)
+          raise(UpdateFailed,
+                "another update of #{@path.inspect} is currently running " \
+                "(pid #{pid})")
+        end
+
+        from = contents[/^from=(.+)$/,1]
+
+        # A dead update process may have left the working tree partially
+        # updated.  Only roll back when HEAD moved away from the recorded
+        # starting commit; if HEAD is unchanged, dirty files are the user's
+        # own edits and must not be destroyed.
+        if from && current_commit != from && dirty?
+          system('git','reset','--hard',from, chdir: @path)
+        end
+
+        File.unlink(marker)
+      rescue Errno::ENOENT
+        # Another process cleaned up the marker concurrently.
+      end
+
+      #
+      # Determines whether a process is still running.
+      #
+      # @param [Integer] pid
+      #
+      # @return [Boolean]
+      #
+      def process_alive?(pid)
+        Process.kill(0,pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+
+      #
+      # Captures a snapshot of a plain (non-git) database directory.
+      #
+      # Advisory files are read once and their sizes/mtimes re-checked
+      # afterwards; if anything changed during the read, the snapshot is
+      # captured again so that the digest matches a single consistent read.
+      #
+      # @return [Snapshot]
+      #
+      # @raise [Snapshot::Unavailable]
+      #   The files kept changing while being read.
+      #
+      def snapshot_from_directory
+        attempts = 0
+
+        loop do
+          attempts += 1
+
+          begin
+            entries = advisory_paths.map do |absolute_path|
+              relative_path = relative(absolute_path)
+              before        = File.stat(absolute_path)
+              content       = File.binread(absolute_path)
+
+              # Read once more and compare, so a file rewritten within the
+              # same mtime tick cannot produce a torn snapshot.
+              unless content == File.binread(absolute_path)
+                raise(IOError,"changed while reading")
+              end
+
+              after = File.stat(absolute_path)
+
+              unless before.size == after.size && before.mtime == after.mtime
+                raise(IOError,"changed while reading")
+              end
+
+              [relative_path, content]
+            end
+
+            return build_snapshot(commit: nil, last_updated_at: File.mtime(@path),
+                                  entries: entries, update_state: :none,
+                                  dirty: false)
+          rescue IOError
+            if attempts >= 3
+              raise(Snapshot::Unavailable,
+                    "advisory database #{@path.inspect} changed while being read")
+            end
+            sleep(0.05)
+          end
+        end
+      rescue Errno::ENOENT
+        raise(Snapshot::Unavailable,
+              "advisory database #{@path.inspect} changed while being read")
+      end
+
+      #
+      # Captures a snapshot from an exact git commit.
+      #
+      # @param [String] commit
+      #
+      # @param [Symbol] update_state
+      #
+      # @param [Boolean] ignore_dirty
+      #
+      # @return [Snapshot]
+      #
+      def snapshot_from_commit(commit,update_state:,ignore_dirty:)
+        dirty = dirty?
+
+        if dirty && update_state == :none && !ignore_dirty
+          raise(Snapshot::DirtyWorktree,
+                "the working tree of #{@path.inspect} has uncommitted changes; " \
+                "a consistent scan cannot be tied to a single database version. " \
+                "Commit or discard the changes, or rerun with ignore_dirty: true")
+        end
+
+        entries = archive_entries(commit)
+        timestamp = commit_timestamp(commit)
+
+        build_snapshot(commit: commit, last_updated_at: timestamp,
+                       entries: entries, update_state: update_state,
+                       dirty: dirty)
+      end
+
+      #
+      # Builds a {Snapshot} from relative paths and raw file contents.
+      #
+      # @param [String, nil] commit
+      # @param [Time, nil] last_updated_at
+      # @param [Array<Array(String, String)>] entries
+      # @param [Symbol] update_state
+      # @param [Boolean] dirty
+      #
+      # @return [Snapshot]
+      #
+      def build_snapshot(commit:,last_updated_at:,entries:,update_state:,dirty:)
+        snapshot = Snapshot.build(
+          database_path: @path, commit: commit,
+          last_updated_at: last_updated_at, entries: entries,
+          update_state: update_state, dirty: dirty
+        )
+
+        return snapshot unless @store
+
+        # The store is an archive; the returned snapshot already holds its
+        # advisories in memory.  The archive lease is released immediately
+        # so it does not outlive the capture.
+        @store.materialize(snapshot,entries).close
+
+        snapshot
+      end
+
+      #
+      # Reads all advisory files from a git commit without touching the
+      # working tree.
+      #
+      # @param [String] commit
+      #
+      # @return [Array<Array(String, String)>]
+      #
+      def archive_entries(commit)
+        command = ['git','-C',@path,'archive','--format=tar',commit,'--','gems']
+        output, error, status = Open3.capture3(*command)
+
+        unless status.success?
+          raise(Snapshot::Unavailable,
+                "could not read commit #{commit.inspect} of #{@path.inspect}: #{error.strip}")
+        end
+
+        entries = []
+
+        Gem::Package::TarReader.new(StringIO.new(output)) do |tar|
+          tar.each do |entry|
+            next unless entry.file?
+
+            relative_path = entry.full_name
+
+            if relative_path.start_with?('gems/') &&
+               relative_path.end_with?('.yml')
+              entries << [relative_path, entry.read]
+            end
+          end
+        end
+
+        entries
+      end
+
+      #
+      # The timestamp of a commit.
+      #
+      # @param [String] commit
+      #
+      # @return [Time]
+      #
+      def commit_timestamp(commit)
+        output,status = Open3.capture2(
+          'git','-C',@path,'log','-1','--date=iso8601','--format=%cd',commit
+        )
+
+        raise(Snapshot::Unavailable,"could not read #{@path.inspect}") unless status.success?
+
+        Time.parse(output)
+      end
+
+      #
+      # All advisory file paths in a plain database directory.
+      #
+      # @return [Array<String>]
+      #
+      def advisory_paths
+        Dir.glob(File.join(@path,'gems','*','*.yml')).sort
+      end
+
+      #
+      # The path relative to the database root.
+      #
+      # @param [String] absolute_path
+      #
+      # @return [String]
+      #
+      def relative(absolute_path)
+        absolute_path.delete_prefix(@path + File::SEPARATOR)
       end
 
     end

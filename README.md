@@ -148,6 +148,79 @@ Output the audit's results in JSON, to a file:
 $ bundle-audit check --format json --output bundle-audit.json
 ```
 
+## Database Snapshots
+
+Every scan captures an immutable snapshot of the advisory database *before*
+it produces its first result. All findings in a report are therefore read from
+one exact database version, even if `bundle-audit update` runs in parallel.
+
+The snapshot is identified by:
+
+* `commit` — the ruby-advisory-db git commit the scan read, and
+* `digest` — a `sha256:` digest over the exact advisory paths and file
+  contents that were read (not just the commit ID, so plain directory
+  databases and edited files are covered too).
+
+Both are written to the JSON output:
+
+```json
+{
+  "version": "0.9.4",
+  "created_at": "2026-11-14 12:00:00 +0000",
+  "results": [],
+  "database": {
+    "source": "git",
+    "commit": "89cdde9a725bb6f8a483bca97c5da344e060ac61",
+    "digest": "sha256:2918e39c...",
+    "advisories": 429,
+    "last_updated_at": "2020-03-01T14:27:30-08:00",
+    "update_state": "none",
+    "dirty": false
+  }
+}
+```
+
+A snapshot is read with `git archive <commit> -- gems`, so it never depends on
+the current working tree and never uses process-global `chdir`. Scans that
+started before an update keep their old snapshot; scans started after it use
+the new commit.
+
+Behavior in edge cases:
+
+* **Update succeeds** — new scans use the new commit; running scans finish
+  against their old snapshot.
+* **Update is interrupted** — a marker under `.git/` records the commit the
+  update started from. The old commit stays scannable and its report records
+  `"update_state": "interrupted"`. The next `bundle-audit update` rolls any
+  partially applied working tree back before updating.
+* **An advisory is deleted** — scans that started before the deletion keep
+  reporting it; new scans no longer see it. Deleting the commit itself does
+  not affect snapshots that were already captured.
+* **The working tree has uncommitted changes** — `check` refuses to scan
+  (exit 1) instead of silently producing a report that matches neither the
+  commit nor the working tree. Pass `--ignore-dirty` to scan the committed
+  data anyway. `update` also refuses to run on a dirty worktree.
+
+Snapshots are also archived under
+`$BUNDLER_AUDIT_SNAPSHOT_DIR` (default: the system temp directory) so a report
+can be re-verified after the live database moves on:
+
+```shell
+$ bundle-audit verify bundle-audit.json
+Database matches: 89cdde9a... sha256:2918e39c...
+
+$ bundle-audit prune                  # remove archived snapshots
+$ bundle-audit prune --force          # even ones still leased by a scan
+```
+
+`verify` first looks for the report's digest in the archive and falls back to
+reading a database whose contents still match. Pruning is always safe for
+running scans: a snapshot's advisories are held in memory, so deleting
+archived files cannot change a report that is already being produced.
+
+Use `--snapshot-dir DIR` on `check`, `verify`, and `prune` to select the
+archive location.
+
 ## Rake Tasks
 
 Bundler-audit provides `rake` tasks for checking the code and for updating

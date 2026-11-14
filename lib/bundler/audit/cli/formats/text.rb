@@ -53,7 +53,16 @@ module Bundler
               say("No vulnerabilities found", :green) unless options.quiet?
             end
 
+            if report.database_commit && !options.quiet?
+              say "Database: ", :red
+              say report.database_commit
+              say "Database digest: ", :red
+              say report.database_digest
+            end
+
             $stdout = original_stdout
+
+            return report
           end
 
           private

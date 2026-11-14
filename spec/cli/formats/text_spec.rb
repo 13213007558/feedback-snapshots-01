@@ -338,5 +338,21 @@ describe Bundler::Audit::CLI::Formats::Text do
     it "must restore $stdout" do
       expect($stdout).to_not be(stdout)
     end
+
+    context "when the report has a database snapshot" do
+      let(:snapshot) do
+        Bundler::Audit::Snapshot.new(
+          database_path: '/db', commit: 'abc123', last_updated_at: nil,
+          digest: 'deadbeef', advisories: []
+        )
+      end
+
+      let(:report) { super().tap { |report| report.snapshot = snapshot } }
+
+      it "must print the database commit and digest" do
+        expect(output_lines).to include('Database: abc123')
+        expect(output_lines).to include('Database digest: sha256:deadbeef')
+      end
+    end
   end
 end

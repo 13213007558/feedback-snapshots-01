@@ -1,4 +1,5 @@
 require 'bundler/audit/results'
+require 'bundler/audit/snapshot'
 require 'bundler/audit/version'
 
 require 'time'
@@ -22,6 +23,35 @@ module Bundler
       # @return [Time]
       attr_reader :created_at
 
+      # The database snapshot all results were read from.
+      #
+      # @return [Snapshot, nil]
+      attr_accessor :snapshot
+
+      # The database metadata stored in the report.
+      #
+      # @return [Hash{Symbol => Object}, nil]
+      #
+      def database
+        @snapshot && @snapshot.to_h
+      end
+
+      # The advisory database commit, if the database was a git repository.
+      #
+      # @return [String, nil]
+      #
+      def database_commit
+        @snapshot && @snapshot.commit
+      end
+
+      # The digest of the exact advisory contents used by the scan.
+      #
+      # @return [String, nil]
+      #
+      def database_digest
+        @snapshot && @snapshot.content_digest
+      end
+
       # The list of all results.
       #
       # @return [Array<Results::Result>]
@@ -42,9 +72,10 @@ module Bundler
       #
       # @param [#each] results
       #
-      def initialize(results=[])
+      def initialize(results=[], snapshot: nil)
         @version    = VERSION
         @created_at = Time.now
+        @snapshot   = snapshot
 
         @results = []
         @insecure_sources = []
@@ -137,11 +168,15 @@ module Bundler
       # @return [Hash{Symbol => Object}]
       #
       def to_h
-        {
+        hash = {
           version:    @version,
           created_at: @created_at,
           results:    @results.map(&:to_h)
         }
+
+        hash[:database] = database if @snapshot
+
+        return hash
       end
 
     end

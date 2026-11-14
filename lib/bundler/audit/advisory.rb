@@ -49,14 +49,41 @@ module Bundler
       # @api semipublic
       #
       def self.load(path)
-        id   = File.basename(path).chomp('.yml')
-        data = File.open(path) do |yaml|
-                 if Psych::VERSION >= '3.1.0'
-                   YAML.safe_load(yaml, permitted_classes: [Date])
-                 else
-                   # XXX: psych < 3.1.0 YAML.safe_load calling convention
-                   YAML.safe_load(yaml, [Date])
-                 end
+        id = File.basename(path).chomp('.yml')
+
+        return parse(File.read(path),path,id)
+      end
+
+      #
+      # Parses an advisory from YAML data.
+      #
+      # This is used by {Snapshot} so that advisories are loaded from
+      # exactly the bytes that were captured for the snapshot, instead
+      # of re-opening files which may have changed since.
+      #
+      # @param [String] content
+      #   The YAML contents of the advisory file.
+      #
+      # @param [String] path
+      #   The path the advisory file would have been read from.
+      #
+      # @param [String, nil] id
+      #   Optional advisory ID, defaults to the basename of `path`.
+      #
+      # @return [Advisory]
+      #
+      # @api semipublic
+      #
+      # @since 0.9.4
+      #
+      def self.parse(content,path,id=nil)
+        id ||= File.basename(path).chomp('.yml')
+
+        data = if Psych::VERSION >= '3.1.0'
+                 YAML.safe_load(content, permitted_classes: [Date])
+               else
+                 # XXX: psych < 3.1.0 YAML.safe_load calling convention
+                 YAML.safe_load(content, [Date])
                end
 
         unless data.kind_of?(Hash)

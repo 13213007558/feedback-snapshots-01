@@ -1,3 +1,20 @@
+### Unreleased
+
+* Added immutable database snapshots. Every scan captures one exact version of
+  ruby-advisory-db before producing results, tied to the git commit and a
+  `sha256:` digest of the advisory files actually read.
+  * Reports (JSON, JUnit, and text) now include the database commit and digest.
+  * `bundle-audit verify REPORT` re-checks a report against the stored snapshot
+    or a database that still matches the digest.
+  * `bundle-audit prune` removes archived snapshots; running scans are not
+    affected.
+  * Updates no longer use process-global `chdir`; scans and updates can run in
+    parallel.
+  * A dirty advisory database working tree now makes `check` and `update` fail
+    explicitly. Pass `--ignore-dirty` to scan the committed data anyway.
+  * Interrupted updates leave the old commit usable and are rolled back by the
+    next update.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.

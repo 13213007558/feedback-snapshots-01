@@ -135,13 +135,34 @@ describe Bundler::Audit::Database do
     end
 
     context "when :path already exists" do
-      let(:dest_dir) { Fixtures.join('existing-ruby-advisory-db') }
+      let(:dest_dir) { Dir.mktmpdir('existing-ruby-advisory-db',ENV['TMPDIR']) }
 
-      before { FileUtils.cp_r(Fixtures::Database::PATH,dest_dir) }
+      before do
+        FileUtils.cp_r(
+          Dir[File.join(Fixtures::Database::PATH,'gems')],
+          dest_dir
+        )
+        FileUtils.cp(
+          File.join(Fixtures::Database::PATH,'Gemfile.lock'),
+          dest_dir
+        )
+        system('git','init','--quiet','--template=',dest_dir)
+
+        # Guard against `git init` silently falling back to an enclosing
+        # repository if the scratch directory could not be created.
+        expect(File.directory?(File.join(dest_dir,'.git'))).to be(true)
+        system('git','-C',dest_dir,'add','.')
+        system('git','-C',dest_dir,
+               '-c','user.name=Spec','-c','user.email=spec@example.com',
+               'commit','--quiet','-m','fixture')
+        system('git','-C',dest_dir,'remote','add','origin',Fixtures::Database::PATH)
+        system('git','-C',dest_dir,'fetch','--quiet','origin','master')
+        system('git','-C',dest_dir,'reset','--hard','FETCH_HEAD')
+      end
       before { stub_const("#{described_class}::DEFAULT_PATH",dest_dir) }
 
       it "should execute `git pull`" do
-        expect_any_instance_of(subject).to receive(:system).with('git', 'pull', 'origin', 'master').and_return(true)
+        expect_any_instance_of(subject).to receive(:system).with('git', 'pull', 'origin', 'master', chdir: dest_dir).and_return(true)
 
         subject.update!(quiet: false)
       end
@@ -150,7 +171,7 @@ describe Bundler::Audit::Database do
 
       context "when the `git pull` fails" do
         it do
-          expect_any_instance_of(subject).to receive(:system).with('git', 'pull', 'origin', 'master').and_return(false)
+          expect_any_instance_of(subject).to receive(:system).with('git', 'pull', 'origin', 'master', chdir: dest_dir).and_return(false)
 
           expect(subject.update!(quiet: false)).to eq(false)
         end
@@ -224,14 +245,14 @@ describe Bundler::Audit::Database do
   describe "#update!" do
     context "when the database is a git repository" do
       it do
-        expect(subject).to receive(:system).with('git', 'pull', 'origin', 'master').and_return(true)
+        expect(subject).to receive(:system).with('git', 'pull', 'origin', 'master', chdir: subject.path).and_return(true)
 
         subject.update!
       end
 
       context "when the :quiet option is given" do
         it do
-          expect(subject).to receive(:system).with('git', 'pull', '--quiet', 'origin', 'master').and_return(true)
+          expect(subject).to receive(:system).with('git', 'pull', '--quiet', 'origin', 'master', chdir: subject.path).and_return(true)
 
           subject.update!(quiet: true)
         end
@@ -239,7 +260,7 @@ describe Bundler::Audit::Database do
 
       context "when the `git pull` command fails" do
         it do
-          expect(subject).to receive(:system).with('git', 'pull', 'origin', 'master').and_return(false)
+          expect(subject).to receive(:system).with('git', 'pull', 'origin', 'master', chdir: subject.path).and_return(false)
 
           expect {
             subject.update!

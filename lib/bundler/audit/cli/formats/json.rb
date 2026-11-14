@@ -44,6 +44,8 @@ module Bundler
             else
               output.write(::JSON.generate(hash))
             end
+
+            return report
           end
 
           def criticality_label(advisory)
