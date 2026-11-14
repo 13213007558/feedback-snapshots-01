@@ -1,0 +1,5161 @@
+[
+  {
+    "id": "R01",
+    "group": "read",
+    "title": "same-host referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R02",
+    "group": "read",
+    "title": "cross-host referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R03",
+    "group": "read",
+    "title": "no Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R04",
+    "group": "read",
+    "title": "empty Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R05",
+    "group": "read",
+    "title": "cross-host referer plus X-Requested-With",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R06",
+    "group": "read",
+    "title": "cross-host referer plus evil Origin",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R07",
+    "group": "read",
+    "title": "cross-host referer plus X-Origin",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R08",
+    "group": "read",
+    "title": "same host but different scheme and port",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R09",
+    "group": "read",
+    "title": "malformed Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R10",
+    "group": "read",
+    "title": "vendor JSON media type",
+    "method": "GET",
+    "path": "/vendor",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/vendor"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/vnd.api+json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R11",
+    "group": "read",
+    "title": "text/html response",
+    "method": "GET",
+    "path": "/html",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "<p>secret</p>",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/html"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/html"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "<p>secret</p>",
+        "observed": "<p>secret</p>",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R12",
+    "group": "read",
+    "title": "no Content-Type response",
+    "method": "GET",
+    "path": "/not-modified",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 304,
+      "body": "",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/not-modified"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {},
+    "checks": {
+      "status": {
+        "expected": 304,
+        "observed": 304,
+        "pass": true
+      },
+      "body": {
+        "expected": "",
+        "observed": "",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R13",
+    "group": "read",
+    "title": "capitalized Content-Type response header",
+    "method": "GET",
+    "path": "/read-uppercase",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read-uppercase"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "Content-Type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R14",
+    "group": "read",
+    "title": "CORS reflects evil Origin with credentials",
+    "method": "GET",
+    "path": "/cors",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/cors"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "access-control-allow-origin": "https://evil.example",
+      "access-control-allow-credentials": "true",
+      "vary": "Origin"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "headers": {
+        "expected": {
+          "access-control-allow-origin": "https://evil.example",
+          "access-control-allow-credentials": "true"
+        },
+        "observed": {
+          "access-control-allow-origin": "https://evil.example",
+          "access-control-allow-credentials": "true"
+        },
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R15",
+    "group": "read",
+    "title": "cross-host referer plus null Origin",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R16",
+    "group": "read",
+    "title": "strict Referer option with missing Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": {
+      "allow_empty_referrer": false
+    },
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R17",
+    "group": "read",
+    "title": "umbrella, evil Origin and evil referer GET",
+    "method": "GET",
+    "path": "/read",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=Akj7psf4eYW8%2BDKboBjsR8kF%2B5Qu3AcP8b9KGaw%2B%2BxqU%2B5KfV2gsc2ah5nz03Z10%2B2iAfJbrc1i62PMcEtuytbJUcOjem5HfKe96BhN4vE9vZymJRMy%2FIpYzzXkBuYKLJIp6KRpf4dHktsdP4jh5nJJDSitOKgqM4UtsfWc2z6DUtbks3676jT8DCv6%2FIlR3vxPI8DrULz1ufUlRp%2FeS3zx4DGBbN7Ijp8KDLs3Iuqc3snFT9S%2BSCS53cm%2FFddpMKs1FHdEH1JvjAyWvpOfy%2FfLifxpaHRKd%2FaBd%2F7OXtLaswTBNZs8uvmX0RH3dPC1nKGMGA4OAq74NkFxxooKkP277SBVmqR7mD1Xb2oUCLcVOHtoygK9YQY8fVq2D; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R18",
+    "group": "read",
+    "title": "umbrella, CORS reflection on evil Origin GET",
+    "method": "GET",
+    "path": "/cors",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/cors"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "access-control-allow-origin": "https://evil.example",
+      "access-control-allow-credentials": "true",
+      "vary": "Origin",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=AjhkXAAbp%2BZ6VmUPMR3JDDBiGpAWSDC0zy7NGvvkxeKoYZhlLevx2khU5%2Fct%2FgyqYC0rMNudOV48x960NGm0O8of0UJJfqmbd2EBVs%2FCyCbMdZj7mTCvjSiPgT5Sceh0uLpXmJmnWX%2FdtbF6HRrCOu1seI9QFgVCsAJL48ouHW%2Bo%2BF6qanfOVlyx4QLoqed9%2FQFUgBlA5f1hzlefqBQEe9pj9pYZAQUGSQ9vVj8MSyEhdZHobSwynxYTXCsotXu55QcVRI1i0dRl3%2FZXs%2FJ2WP2JZOs2w6jNI4rjaUQe0eHU7s9A21ss8hphE%2BCSMCSVdJ%2F%2FS4nWFCxkmKaEAvizNZfRLHSl09beWEDGMJ1F7aUL2LA%2FJNMcuGBft%2F2w; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "headers": {
+        "expected": {
+          "access-control-allow-origin": "https://evil.example",
+          "access-control-allow-credentials": "true"
+        },
+        "observed": {
+          "access-control-allow-origin": "https://evil.example",
+          "access-control-allow-credentials": "true"
+        },
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R19",
+    "group": "read",
+    "title": "empty Origin header with evil Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R20",
+    "group": "read",
+    "title": "lowercase xhr marker is not xhr?",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R21",
+    "group": "read",
+    "title": "evil Origin alone, no Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "R22",
+    "group": "read",
+    "title": "evil X-Origin alone, no Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W01",
+    "group": "write",
+    "title": "cross-host referer POST, eager commit",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W02",
+    "group": "write",
+    "title": "no Referer POST, eager commit",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W03",
+    "group": "write",
+    "title": "evil Origin POST, JsonCsrf alone",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W04",
+    "group": "write",
+    "title": "authenticated POST with evil referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=Am%2BkZRJhillKMvNaBagvK2WMdlgr4yu5kEUH8uZbOLMOgE0tisQ4GEGL7dhTYhJvwuY%2BtZPbu5p36Jzs0ZfIVdRd76W8nagbKeGuC7f%2FJQ%2BEIaO8uRSbuvsSRmuC%2BOSZJRcVRyzqBPCjpEmZm%2Fewch7kzUOVwi2rTVEoZ99jYhmkkFXJ9gwtZ9bRyQSMRN2OW30vjTrnvhXQhb00SyysLH5uGdJMhgnZvJuWB%2F8TRmvMgBwkgWeA454YOndHVl6hDP1TMbsRCeEL%2FaSCutAZms18w4P6d%2F0G02%2BuDs6CXgBwBVx2eRKhPnaBcLjoMtg%2FMvHQavQMUDf%2BDpxVobLLS%2BXN4w%2B%2BkbUMA8p1SmAQvGv%2BcBwLxrkDN7Ffz41N; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W05",
+    "group": "write",
+    "title": "authenticated POST without Referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=AqJ2rPEZaXeXCF4h6%2BzcZKw2qU0otgIdBVQDWfPGY6wsAfUI%2FSnOO0vp8F%2BAVcfR8%2B%2BpFNYmCNtuDH3GK7DVdMF0%2BkElyMcruAZO6J4ofar%2BchTogMu%2B5Q%2Fk5IKe9kKRRgGO48nE0VUxJRNfQ7JFqItf2aMYYIzhb1kCxGxu6W0JKA2Lo2GKoIjZOmJecHC5btITXbn%2BpVm7%2FdLdkVLQH5BDC4bdCwGMRi72%2B0Z2phKYFFQFQ3ens5mbtXl0h3TAFEOf46eCxpVRc5%2BfWHPC88afqH27KiG%2FjKimp%2FFPbyRgW%2FpqgOej%2B9M8JNwH%2Fp37ubtYzKrhY%2F%2FhmpKjWDuL9qpR%2B%2FBLLw%2Bw5D%2FQ%2BOFQWEGVpFsX%2Fp9CXUNv2gdt; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W06",
+    "group": "write",
+    "title": "streaming body, write deferred to each",
+    "method": "POST",
+    "path": "/stream-write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/stream-write"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W07",
+    "group": "write",
+    "title": "body close performs the write",
+    "method": "POST",
+    "path": "/close-write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "close"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/close-write"
+        ],
+        [
+          "write",
+          "close"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W08",
+    "group": "write",
+    "title": "HTML response, eager commit",
+    "method": "POST",
+    "path": "/write-html",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "<p>ok</p>",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write-html"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/html"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "<p>ok</p>",
+        "observed": "<p>ok</p>",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W09",
+    "group": "write",
+    "title": "204 response, eager commit",
+    "method": "POST",
+    "path": "/nocontent",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 204,
+      "body": "",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/nocontent"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {},
+    "checks": {
+      "status": {
+        "expected": 204,
+        "observed": 204,
+        "pass": true
+      },
+      "body": {
+        "expected": "",
+        "observed": "",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W10",
+    "group": "write",
+    "title": "reaction report on JsonCsrf",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": {
+      "reaction": "report"
+    },
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "flag": {
+        "expected": null,
+        "observed": null,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W11",
+    "group": "write",
+    "title": "reaction drop_session on JsonCsrf",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": {
+      "reaction": "drop_session"
+    },
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W12",
+    "group": "write",
+    "title": "umbrella default, evil Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W13",
+    "group": "write",
+    "title": "umbrella default, evil referer no Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=AleufzCtshx%2Br18QS9pTmw7cI%2F4LMooq6%2ByltDJS%2BiL%2FnIX9BwpODmAVqPRWwb%2FKTTuB0chEDkoihPfpzlrZuMO0p986DxpWsZNyRsgFw9ZgDn1ZMO%2BlZqHPgJceS8MBVDFUqG9eQ15B1QqzJ7iCdYRVaCtLhLaUgACh%2FauxVrt51%2BKbpV9%2Bb1yjT4PdG%2Bn2bqx3QctkyB3qZ6KIbHbwxj7eO4npyU0VjDRB0qBhDiOh%2FiVPWkvXbzowpYX%2BcudjmOqUMqExGyIaLRQ4y%2BsBaPcp3bk8o300k%2FuzS4Ayc6KXsrFxFa3E%2FodfisB7aD6M3TidRXU8psTAHjjubRR12gB3XECk6XlYeEq8BvbhRcX2Eoic%2BslWykqRi4FY; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W14",
+    "group": "write",
+    "title": "umbrella default, no Origin no Referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=AgbkbVA9M%2FIX%2B2lKtPcyqA7l2nPCdwWMEsPuzJcW%2BqtZjv7skaGRjsngBkcOR4nvJFlkyXuBGsB%2Bcc0X2Z5LXozYlkXcYLz9fxMRW7n%2FeUXYvFFb6S4Wc%2Buy1SAe8RyDSCgy7dNCk627hc%2BwRNkQmMmjidwgyMc%2BhjuEMyPfH3xSIabNgyOOPieSyelUNjZYygY742QurmlPPeSSYMg4fYiJZk6j3EOocHu%2B6s1Ml948mTWUEACtWhxKwCFiqvCxPpi%2FlgLn3HvSVcJowOxTAm6UoGkuR5cuk12Z8sKYeC7%2BAe7Wfhc5QPf1CSz1hFAstfV1JaGd3jq7bS6L8JM%2BniE82Oih%2F%2ByNr8lOCoqV4ln571MPOy7rTRenRCcA; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W15",
+    "group": "write",
+    "title": "umbrella report mode, evil Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": {
+      "reaction": "report"
+    },
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": true,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=AiX6kwj8W4lJR8apEc7Puu6UxP5NBAeUcIh%2BSvJh8WYP%2BMaL9dhDPTZsJm7kpzmTdOCeduzwOiPQpw9uLZAG2QhCfCtNA0Ah0EgpYobk3jF0owjivjrlQmx4GtAHaTRnQs0IgvCid48LfGQxKFlREVaNUdjizwMvKnmpYIINYxbJ129vobPuuOZDFAMJt%2FbHDrYZJx%2BXNL%2F6e5X43dlNxBit8GwpsXTijQL5BvVOXuq1nffJ%2BOCEXh6kqc3WxJPze1WoVcl35p9q6%2FFjM%2F9JpwFTkLd4jkh6KCy4dSUNY3i6VQRdEXpMpX3fFpXTm0Paph%2B%2FbkIDVa%2F0GYUHCsJ3dfoPdtIJ2xXekfoeTeirZfZwa6PDT2EzUkgGBuSM; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "flag": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W16",
+    "group": "write",
+    "title": "umbrella report mode, evil referer no Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": {
+      "reaction": "report"
+    },
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": true,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=Ahdcdn0%2BwcOOFPly8a0zNCCC%2Fqt5xe8eUoEC8N5miwsZ8m3%2FrQ72PcQdnuWzSGfbWHwNF%2FNCK3bJKHN2xhFir6p%2B%2BNuKIhjCdPwxymCqlUow2aXV8UlE%2BlkYWQWro2DPmRUcK5bmUd%2F1NtydHA0xwdRVPoq%2BylCM4G5TCTqAAb639xi%2BHUe403%2FPNPzaor5IKtJUOScJDa67y6WtJC6dtLizi94ZYbi4EGPNFoIs%2FF1pB%2BMWG3tUeu7pq%2Fvjr%2Bivc58JJ5Y4p2fQkaM9NevWNG3MhuWJmXMrv%2BMR3XIJ5odYFOvvawcChVRWEevUb7c2SlRlvG9EgToUPqqqaBqxlvBMoRdooY5bUI1JRMdaMc7o7zVHisUjIK3DLyP2; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "flag": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W17",
+    "group": "write",
+    "title": "StrictOrigin pre-app, evil Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "strict_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W18",
+    "group": "write",
+    "title": "StrictOrigin pre-app, missing Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "strict_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W19",
+    "group": "write",
+    "title": "StrictOrigin pre-app, same Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "strict_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W20",
+    "group": "write",
+    "title": "AuthenticityToken, no token",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "authenticity_token",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=Ajwx2iwXp97sexxcC6WpB6S%2FMuGQ84WLsD4CfotVLE3%2BVPGLNiAtcmBwuz0qcbKBAOr8g%2FSu9L%2Fj0NKEW7dSX8nXcKISxElEt%2Bmc8LOGynnGHm9Kenos4PM3G7Zszy%2FiKvF1Hwr4%2FQDN5tlKgXvVo9bMkkdjls9wekUTsN8R4BwZQFjNt%2BsPXgl%2FoF8L6%2FQiCI4YlLDD7kQsyHXz6ALtn1sRQfQ1mC%2BKFBUhTlzrO9Pnn9pzhlFupkcv9wU%2F9HKnUTguWsfUHVtcUBKPSzfBJv4eHwZIyb5vpUi4wmRbhAQMzrsSV4YEcd0iO7DmHKqw4XXyvxC4enlv%2B7Z8VoM7rGh%2BayoQgibsEA%2FYxr8P9JFjIVSs6F9q%2FIX5bw6o; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W21",
+    "group": "write",
+    "title": "AuthenticityToken, valid token",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "authenticity_token",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=ApgPP2bEef%2FFc2LJUpwNUv8QxwbIeedVRvLr9Az34dBU9wbYel2KBq%2B%2FOEJm8QITV%2Bh%2FxyqZZ4YTTBcA4eCpPdPMSq%2FCi3ZPPCfKQLUFgSVQunqNxs4eX%2FWW3kS02DZ0YBv0Vt1JZtG4V1XMzCtd4J38qt0ecsv7EwUf6Jzlc6KL37jEopDRMzkg3YG3Vt%2FFiAQO4FAkHhnQgOUCMPmaUXxsM568DC%2FilvxpvesuacZqcbjUINmWWcp2vHxSfiiaXEkluY95qLH8movqsTCGN9SJQkY6wOFebuKWm3DyKYDxvHFGDBKl1vDaexqykraE4jzB%2FAXPszsJ0FDo92UZwsWBucj7JO9Er5cHuGG%2FTY7ocr%2BdCqLrZ%2F4XxMHL; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W22",
+    "group": "write",
+    "title": "FormToken, XHR header bypasses token",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "form_token",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=ArPx7%2Bwk5rq7xZjphUU1qozQqdOigG1GW4JX5g0p46vREZeJ5KFbUdkDeQP455z34ra7zzQtoNkqBL1W86W8nAun3CXvaNeMb6caV%2BsXT21dstVF7QTPHSs37Ny%2BnmTyWEQg%2B38f8ZEGGFLRpgSdantZk6h3guWGFIx55h7gXZWXLnEVTrL7Bz8ENCAIEuMBLX%2BVGph40%2BVSutthEQ5iF4bAJKulsaRP1oKhsSnNJ%2Btj61NH3nZNMkz40Kvf3juUXuC8qU7VDjU48CkwfBDGmS9l3wm7y0kkdJEwf9sDYv6dNvUv67x2QGNHUEF%2FxOTeUGz8pa57orwYJYiw%2F%2FqzcGocjRwjfQUhK0bO4jqPihDCncc8sZRhABDp2GQH; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W23",
+    "group": "write",
+    "title": "RemoteToken, missing Referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "remote_token",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=AiNZzxh8u%2F9CavM9yeKY8FA1FKNN0QtVe3CJavjEkXPmcJ3xWAi90ZoFwzwmg2H%2BeiyMBk4%2BjPGd6EUGLufViZpssLk0VGZaz1v6dRZMV2VTWWxzMHR0aTRs6vlhA3HGVlZmfS1I6P596%2FZUq3k1Ve6%2F%2BRy8qMxac8DGsDUDPSnQpVWNHyUHGCqsXsngi%2FEHrXrwxfeNB6bqyoJJqcsDk94dUp654rp36K%2Bc%2Fl%2FaTgv%2FFWMJLPvGk6%2FNgH0Pz9dLD0mtFqSvT3Ffu3EUP%2FnCktmOR7ssCn98qcgcuZHQWyFW6TrxMuX8cg1UG7kJEpZqB%2FjSIG67lDrD5lHMFnwtxXPa5Mtcv4pTaNluCovMF3n5Qo1MRBsvqtbJiqoI; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W24",
+    "group": "write",
+    "title": "RemoteToken, evil Referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "remote_token",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=AoX62%2B7d1uF6tNbSfskRQB4c5mV%2FjPsQ%2BheoYr9Prx3VQCUf8r7ooj9HDtE%2FoXZ1UusiVzU5PnFFq9lbDD%2BHMKbzaeXggNa2ZErCG88VSpA8z8vAPsVoga1zHsJcBAOhGzV2S1Prv9LJ9hJhf0XSWTRyZT1%2B727IFRmG6wG4X5CLC%2BnYF4mkWx8FE3BrK68WmeZpBWIrmL0wM2igEoLlC9HpKZoDwPVLpYMAwDjmVsLXi3WqKhElY4igKeF%2FS%2FdgMpc78OZXEcE6%2F79GZxxgMqJlvJF1gbpM4ZtgDX6GVuY8YKZUgD0csKdPvv7svwj3aeeh%2FYjXOUwOaYj%2FWSII4vPsNW8mgypb3GeBdh2y8KPCKJJ%2BJLL4c544KPur; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W25",
+    "group": "write",
+    "title": "RemoteToken, evil Origin but missing Referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "remote_token",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=Ah5fR3yTVqbPZqlqxKFYANejSU9YoLwrD2qJ%2Fk8nCrKgOMBDfs7fdp%2BZ%2BOYwroD52VnvB5JcmM3kpXsSo6%2B7WFAGNktZpfezRtfptrEd4CgnRZ30iEPFuvSbMQXdI%2FpLtUa%2BoYx2udoULtf%2BRkmpEWR6CwWc%2FN2qcg0d5YhDrDijgBtNu3vHfsHD4oKbFbEV2fWy9Z73v3clTQK0%2BZJ%2BddTiJ6JnqCPmgjQbnAtgnHkP96eZath3%2FYacoIdT%2BC4c4lWqcIM3H5gBjrbVhN8rMlGvNDdJUtoVRMDpmXk%2FrPuqpo6bue4qD6HsAJsNXMd5ZI7sS9%2Bl6sd8dw9d0jZiM4cyDLVTKmdXjJwPKUm37j%2BovxQmFsnN6DoahpDv; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W26",
+    "group": "write",
+    "title": "umbrella without session, same Origin",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 401,
+      "body": "{\"error\":\"auth\"}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff"
+    },
+    "checks": {
+      "status": {
+        "expected": 401,
+        "observed": 401,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"error\":\"auth\"}",
+        "observed": "{\"error\":\"auth\"}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W27",
+    "group": "write",
+    "title": "umbrella default, X-Origin evil no Referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=AsfZfVhN9SGKxurTW88LqffzCr8%2Fl0tRvcyHrHwnR00IVJKZJ2lSSKGA7hu38%2Bw0EljUhEytfAzgPryvFGogZJAskesk1GYLjdUmiJGQ2vbLvLTVNJ8Bqg1XjlzCRHLSNBhvlv1V1qlTEujZ6mrUlz%2FrDG08DYVlFN1cdwlAuRMxdbWhsCLDd8y10kGvxDAAPIth5h1iqHddtPknci0PrFrK3zHZY%2Fx2vrWrqV5c8N6wiyafEpTTFv%2BbESqwRRx0RYxeuYXndDqoNnSvrIagYCX5XEAV5saDcwWVHizaCFAim3XvYm3mValNwFriYi%2BB7R9qmbG5fGSP444Pi78DmOfIo4%2BASQakZOPpVaIie5dn3uEsIGydKftOb43I; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W28",
+    "group": "write",
+    "title": "JsonCsrf alone, X-Origin evil no Referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=Alsh1sJPT9Si3AYOrekGX9yJupNq86MPXtAF5UkLKrIcvCtMXr44iyj2GAbJc16EM4e5nyA2mdjZrn7bSp9Xl1dA16TYPUKkCrOrskgH6vck8HQkHUHG7jBR%2BB9RwwOrTiLC7ec93o68gx24X2Fhd9b%2FtKvPQvXGvETtZUdGIU%2BRmAEo3NceAnemjjztNMxIOwJwcG%2BOcLa%2FYcDKhdxGcP3u5JtS5oD5DBTOdvUtIRgQ5cfgZwSboc%2BgucWB%2FZXQeBGKVpvRcPSDoHq6UlKMgftZS0o0aO4kButUaH6OtVMQF8aWi22rtB8DMp2w1EP2dFda9W8UB0uJw5UbEHqaWcVoeENBdrlzkjvq0D%2BrF3Naqu1t4O3XFDXy5%2Bd7; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W29",
+    "group": "write",
+    "title": "umbrella default, null Origin POST",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W30",
+    "group": "write",
+    "title": "umbrella default, evil referer plus same-host Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=AjIhhjtctlP1lQOEPBEpTA53ipSZ%2F4yPfmOZFSk%2BLtQ1ktLvDbNw6N%2BQpM7EUx3doDskajT7xwdxH0hA5VSIbh1u3ii7XEDY2NJlXKQe24AFT7ZcHujMgVQiEH3mMFTwaRDAuXayXO%2FSjhYgBwV4hqUSMq1DVyT6bcyWWtNp9yZqduFu8KQHwYlr2Atvq2rITP2GmiEKwPxxMD5CuannPfpFbRlf1BjCkLr%2FMt04Dv0JMoazS%2Boyy3cRHa%2FhrnLdIZcwgfLlUVz20jpXZtRMfibhIL8cdS%2FN8nGjBnmpvE%2FhJy2EbDXanB8qLMPzaCGPQjSMjQJJwu%2FjlGMzYYWAVb0M52iNwcdqZ4mqcqISYGA9jQZYE4aCJQkCu%2FGP; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W31",
+    "group": "write",
+    "title": "HttpOrigin alone, evil referer plus same-host Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "http_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=AokDyxUAlH3J94CWKZ4L1Swq8C9cBu7zclQR33iR5m4VYd33MMSldSdnG%2F9%2FMpcQ8ck3ARq4URz3YwmVjfnHYvEx26up1wW%2BDdLH8X5i9a37e0HdZMYNupDbfY2bKlzrai8LHz%2FSun0SWnF6pjIBpgbsfFxC01g1QXjv29PSuGzDk4bHcZ1Mlotc4tj2qpa5ADAm0pAO3J%2FnpJ1bS0IEKtoda9oikh00%2BE1dAtYqJ%2BYmRrEzsvlLd%2FTn1dJTBwm2A2iUMvHuKGdMvZGygHfVTUgqd4J23JVEP%2BsBq%2FgXefQmLgZkjXEzBdjRkMUEYdeBjqPStaBTpSkCeDONpbs%2Fb29TWllci%2FXTPXjhgBqYuYSM9%2BXOpN4PO5IuAFTk; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W32",
+    "group": "write",
+    "title": "umbrella, valid token plus evil referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "umbrella",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=AnWLzwpl8wz1%2FEAueuqPijs8odpTYaesiJuilqQciBgp%2BhrpTbpweZSZZ%2B57158OtVggvJ2FW%2FUEb23jpCbrMAZmV48L%2Bg78bypO9aISQqy%2B8arpHRTazssRUHdXcLMgGXBqiPYSAaCoujDtVffNpJwGkEX0TdqF92I5j%2BCcSgHyzTyA4l58Ah420SjjkfO%2BXv%2BVjPxw0Y%2BOn8tbEaM%2BN00W92ywYpu9ZGFV2puvk7EW7t9myhTKwHd%2F9V8MnsmMtmHbVRLdX7dlFuEahmqAbGVUcvq%2FGti1%2FQaUyVwG4lBUaTVxu9CHBNWcVi1dCuYRjQ9tN7W2ryXSjkRB2g6oV8US7UZrS9SHxvPcrcT97TdhX3rMOfSMAh0H46Mi; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W33",
+    "group": "write",
+    "title": "umbrella drop_session, evil Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": {
+      "reaction": "drop_session"
+    },
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=Ao22K%2BCMxuXrVFObpCC1EHipnKZQGeIQ3lQW8hPgjG8k1xpY0cL%2B%2FSdYX8rU6igvFE7z2MNSkCHz2NIX1cezWkXR1Jd1xd4A%2FmyFHu8sltZZafPy0uqSKswWSOiDPcibcSm%2FYjyds%2B%2F%2B54SbsVCJl%2BMs5W5s%2BuMa11JDjNSHptW4dUHXWjRBJKW0V8HctEgZQF%2FdYlCZ0sq8HH4VZf1H5V8dm0WAAJ2klFKnyG0ZdUhdlx8kWnZipKXYYg6g6RRvGfkQCxMu6f%2FOzH6DSaDwYqDwnoXIAtnqANn%2Bx31J2giLtckUthEGaGA8KjxmBx699bw%2BkuEXAbwzgaJpnlhr7Ggx0PaQWMixFVHKZMrlQxfj4GEk5iyDSemIALn7; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W34",
+    "group": "write",
+    "title": "JsonCsrf allow_if true, evil referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": {
+      "allow_if": "#<Proc:0x00000001253ec4e0 /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261114-SEC12-070/workspace/security/json-csrf-lab/harness.rb:394 (lambda)>"
+    },
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W35",
+    "group": "write",
+    "title": "Sinatra-like drop_session, no session, evil Origin",
+    "method": "POST",
+    "path": "/write",
+    "stack": "umbrella",
+    "stack_options": {
+      "reaction": "drop_session",
+      "without_session": true
+    },
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W36",
+    "group": "write",
+    "title": "HttpOrigin alone, missing Origin, evil Referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "http_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W37",
+    "group": "write",
+    "title": "JsonCsrf strict Referer, missing Referer POST",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": {
+      "allow_empty_referrer": false
+    },
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W38",
+    "group": "write",
+    "title": "state-changing GET with evil Referer",
+    "method": "GET",
+    "path": "/write-get",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "get"
+      ],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/write-get"
+        ],
+        [
+          "write",
+          "get"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W39",
+    "group": "write",
+    "title": "HttpOrigin alone, missing Origin, no Referer",
+    "method": "POST",
+    "path": "/write",
+    "stack": "http_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W40",
+    "group": "write",
+    "title": "umbrella drop_session, evil Origin, auth-gated endpoint",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "umbrella",
+    "stack_options": {
+      "reaction": "drop_session"
+    },
+    "actual": {
+      "status": 401,
+      "body": "{\"error\":\"auth\"}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "x-content-type-options": "nosniff",
+      "set-cookie": "rack.session=AoDgnRKRsU3a1ys7IHKCCUXVnh2K03tpZAwpmea%2BVK9Izv6DmA%2Fo9YxGSuUc808eITas6dda58esGK%2FL3MNfRL0qRSMxpfI8KRo0S6f2P2Nh6g4iexDNstpaTRmrxqV6FhU2Ij%2BY%2BtLfBGoclQrNmz2uU6wj1UToo4o3t%2F4g0%2FYSaI8MSTGGqj7cnCcE%2BhZ8VdEfytK3RmJijVE36lZzN25r9ecBGqKOmIYupto9Aypcf740kDnQfRWkFGzN0jgaVDrKarEd2ReIr0bDiWiKjKibRbt%2Bl2uwWAI%2FGiW619rLzNFZ%2FbWZF5vNq5l0DUEaveSbBg3YL%2FmE6jvJ2K3AFhsVkZLqgvQmHQ86VFf5GCRWRTF2JNZ04cuYVKec; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 401,
+        "observed": 401,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"error\":\"auth\"}",
+        "observed": "{\"error\":\"auth\"}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "auth": {
+        "expected": false,
+        "observed": false,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W41",
+    "group": "write",
+    "title": "JsonCsrf alone, null Origin POST",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W42",
+    "group": "write",
+    "title": "JsonCsrf alone, empty Origin POST",
+    "method": "POST",
+    "path": "/write",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/write"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W43",
+    "group": "write",
+    "title": "state-changing GET with same-host Referer",
+    "method": "GET",
+    "path": "/write-get",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "get"
+      ],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/write-get"
+        ],
+        [
+          "write",
+          "get"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W44",
+    "group": "write",
+    "title": "state-changing GET without Referer",
+    "method": "GET",
+    "path": "/write-get",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "get"
+      ],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/write-get"
+        ],
+        [
+          "write",
+          "get"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "W45",
+    "group": "write",
+    "title": "state-changing GET with evil Referer plus Origin",
+    "method": "GET",
+    "path": "/write-get",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "get"
+      ],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/write-get"
+        ],
+        [
+          "write",
+          "get"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "N01",
+    "group": "navigation",
+    "title": "top-level cross-site GET",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "N02",
+    "group": "navigation",
+    "title": "top-level GET without Referer",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"secret\":1}",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"secret\":1}",
+        "observed": "{\"secret\":1}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "N03",
+    "group": "navigation",
+    "title": "top-level cross-site form POST",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain",
+      "set-cookie": "rack.session=AgJnLfiVaeDJnowcYDLU17U84hUADfBXN%2FHcoZcA0OMRdPt3SwxaejzWBOlWMbIJUvDt57wpEwnJezo6bu7QHpd6%2FObxZpbuP%2FZjKfHzUII3znzdL%2FC1FRK6wA8XzHAqUhhPE%2BBPNe3gjg7H7MOY4RwKQ%2B%2F7ECknNwj6hpu%2FIno4pOzSuxNU1H30apGU9TjUpkD4rh1yY36ZZgnIR7xYs%2BZL7Ft19vLYT7ucpe8SdzSOeRnmU0L%2FkKjaEdLVsXPxO63Kn3sxEQ%2BvuSaiEJgvXGgDjYR7JqzXO3wou%2F0YYVGulHm2gT%2Ba20ESDpvjT2Pz5dOYjsSSgXQ0P4gnpI9K7JHjjEf9S1LuooWqFB1OR9HIZPRh5gcvvazvAQCL; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "N04",
+    "group": "navigation",
+    "title": "top-level form POST without Referer",
+    "method": "POST",
+    "path": "/transfer",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 200,
+      "body": "{\"ok\":true}",
+      "app_calls": 1,
+      "writes": 1,
+      "side_effects": [
+        "eager"
+      ],
+      "events": [
+        [
+          "app",
+          "POST",
+          "/transfer"
+        ],
+        [
+          "write",
+          "eager"
+        ]
+      ],
+      "auth": true,
+      "body_each": 1,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": null,
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "application/json",
+      "set-cookie": "rack.session=Ak8sg%2BwzIdfBAO7d%2BmKrNs%2Fliq8Fur5bXKiGihkhVwpD%2BzZkJ1ukefQ8S%2FnhaYZQMqrBI%2BsVKP5HpLRnY1f15YU5hyCYEZLOcdmBOi5l4%2FVvRkMFTBQ%2Bi1K4EYSItzqADtbqV4MkNgs9Pkwi3n9h4%2B0TGDIoa2g674fmndxt5OzMOWU6AYiVKwsrdaEztEb4cPDyIHrbIuJclfFhSCC4iEh6efcxDSPvs%2BeeIaB7hn3ZgbHE9yH8pSHsyrR2Mev1MKTfPP%2FUhFNdsWFwvNn63lskvFRFMgsLd7x7HwEWL6xGQHODtv74NGTtU29Y2WxZg0Ygeo9L%2BIsPDgc6g49WanQhBSKupBc4ktBTYO8nfsHdhKVIVe0zTtssPeJ6; path=/; httponly"
+    },
+    "checks": {
+      "status": {
+        "expected": 200,
+        "observed": 200,
+        "pass": true
+      },
+      "body": {
+        "expected": "{\"ok\":true}",
+        "observed": "{\"ok\":true}",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "auth": {
+        "expected": true,
+        "observed": true,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "D01",
+    "group": "diagnostics",
+    "title": "JsonCsrf instrumentation on deny",
+    "method": "GET",
+    "path": "/read",
+    "stack": "json_csrf",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 1,
+      "writes": 0,
+      "side_effects": [],
+      "events": [
+        [
+          "app",
+          "GET",
+          "/read"
+        ]
+      ],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 1,
+      "flag": null,
+      "instrument_events": [],
+      "attack_key": null,
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "instrument_events": {
+        "expected": [],
+        "observed": [],
+        "pass": true
+      },
+      "attack_key": {
+        "expected": null,
+        "observed": null,
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 1,
+        "observed": 1,
+        "pass": true
+      }
+    }
+  },
+  {
+    "id": "D02",
+    "group": "diagnostics",
+    "title": "HttpOrigin instrumentation on deny",
+    "method": "POST",
+    "path": "/read",
+    "stack": "http_origin",
+    "stack_options": null,
+    "actual": {
+      "status": 403,
+      "body": "Forbidden",
+      "app_calls": 0,
+      "writes": 0,
+      "side_effects": [],
+      "events": [],
+      "auth": false,
+      "body_each": 0,
+      "body_close": 0,
+      "flag": null,
+      "instrument_events": [
+        [
+          "rack.protection",
+          "httporigin"
+        ]
+      ],
+      "attack_key": "httporigin",
+      "error": null
+    },
+    "response_headers": {
+      "content-type": "text/plain"
+    },
+    "checks": {
+      "status": {
+        "expected": 403,
+        "observed": 403,
+        "pass": true
+      },
+      "body": {
+        "expected": "Forbidden",
+        "observed": "Forbidden",
+        "pass": true
+      },
+      "app_calls": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "writes": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "instrument_events": {
+        "expected": [
+          [
+            "rack.protection",
+            "httporigin"
+          ]
+        ],
+        "observed": [
+          [
+            "rack.protection",
+            "httporigin"
+          ]
+        ],
+        "pass": true
+      },
+      "attack_key": {
+        "expected": "httporigin",
+        "observed": "httporigin",
+        "pass": true
+      },
+      "body_each": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      },
+      "body_close": {
+        "expected": 0,
+        "observed": 0,
+        "pass": true
+      }
+    }
+  }
+]
