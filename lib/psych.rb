@@ -308,6 +308,17 @@ module Psych
   # A Psych::DisallowedClass exception will be raised if the yaml contains a
   # class that isn't in the +permitted_classes+ list.
   #
+  # Entries in +permitted_classes+ may be Class or Module objects, or class
+  # names for backwards compatibility.  Passing a class object binds the
+  # permission to that object's identity: if the constant that originally
+  # named the class is later rebound to another class, documents naming the
+  # old constant still load the approved class, and documents naming an
+  # unapproved class are rejected without running its constants' autoloads or
+  # object hooks.  To require every entry to be a Class or Module, pass
+  # <tt>permitted_classes_mode: :identity</tt>.  Passing
+  # <tt>permitted_classes_mode: :name</tt> restores the purely name-based
+  # behaviour.
+  #
   # A Psych::AliasesNotEnabled exception will be raised if the yaml contains aliases
   # but the +aliases+ keyword argument is set to false.
   #
@@ -320,12 +331,13 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, permitted_classes_mode: :auto
     result = parse(yaml, filename: filename)
     return fallback unless result
 
-    class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
-                                               permitted_symbols.map(&:to_s))
+    class_loader = ClassLoader::Restricted.new(permitted_classes,
+                                               permitted_symbols.map(&:to_s),
+                                               mode: permitted_classes_mode)
     scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
     visitor = if aliases
                 Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
@@ -366,7 +378,7 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, permitted_classes_mode: :auto
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +387,8 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    permitted_classes_mode: permitted_classes_mode
   end
 
   ###
@@ -668,11 +681,12 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
-  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false
+  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false, permitted_classes_mode: :auto
     documents = parse_stream(yaml, filename: filename).children.map do |child|
       stream = Psych::Nodes::Stream.new
       stream.children << child
-      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases)
+      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases,
+                permitted_classes_mode: permitted_classes_mode)
     end
 
     if block_given?

@@ -82,13 +82,13 @@ module Psych
           require 'bigdecimal' unless defined? BigDecimal
           class_loader.big_decimal._load o.value
         when "!ruby/object:DateTime"
-          class_loader.date_time
+          klass = class_loader.date_time
           t = @ss.parse_time(o.value)
-          DateTime.civil(*t.to_a[0, 6].reverse, Rational(t.utc_offset, 86400)) +
+          klass.civil(*t.to_a[0, 6].reverse, Rational(t.utc_offset, 86400)) +
             (t.subsec/86400)
         when '!ruby/encoding'
-          class_loader.encoding
-          ::Encoding.find o.value
+          klass = class_loader.encoding
+          klass.find o.value
         when "!ruby/object:Complex"
           class_loader.complex
           Complex(o.value)
