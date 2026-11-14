@@ -162,6 +162,44 @@ end
 For more information see the [MQTT::Client#get] method.
 
 
+### Proxying and rewriting packets ###
+
+`MQTT::Proxy` forwards packets between a client and an upstream server. A
+filter can change a PUBLISH packet's topic and, for QoS 1 and QoS 2, its
+packet identifier. When an identifier is changed the proxy remembers the
+mapping for that connection and translates PUBACK, PUBREC, PUBREL and
+PUBCOMP packets on the way back, so both sides keep seeing their own
+identifier. The mapping belongs to a single connection and is discarded when
+that connection closes.
+
+~~~ ruby
+proxy = MQTT::Proxy.new(
+  :local_host => '127.0.0.1',
+  :local_port => 1883,
+  :server_host => 'broker.example.com',
+  :server_port => 1883
+)
+
+proxy.client_filter = lambda do |packet|
+  if packet.is_a?(MQTT::Packet::Publish) && packet.topic.start_with?('private/')
+    packet.topic = packet.topic.sub('private/', 'public/')
+    packet.id = packet.id + 1000 if packet.qos > 0
+  end
+  packet
+end
+
+proxy.run
+~~~
+
+Filters may return `nil` to drop a packet. A filter must not change a
+PUBLISH packet's QoS or DUP flag, change the type of an acknowledgement, or
+change an acknowledgement's identifier; the proxy rejects such a rewrite
+before forwarding it. A retransmitted PUBLISH reuses the identifier from its
+first rewrite rather than calling the filter again. If a rewrite cannot be
+correlated with the other side of the connection, the proxy raises
+`MQTT::Proxy::InvalidRewrite` and closes the connection rather than
+inventing an acknowledgement.
+
 ### Parsing and serialising of packets ###
 
 The parsing and serialising of MQTT and MQTT-SN packets is a separate lower-level API.
