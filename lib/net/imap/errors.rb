@@ -17,6 +17,15 @@ module Net
     class DataFormatError < Error
     end
 
+    # Error raised when a command is forbidden by the local read-only
+    # session constraint.  See Config#read_only.
+    #
+    # The command is rejected locally, before anything is sent to the
+    # server, and the error message describes the side effect that was
+    # prevented.
+    class ReadOnlyError < Error
+    end
+
     # Error raised when the socket cannot be read, due to a Config limit.
     class ResponseReadError < Error
     end

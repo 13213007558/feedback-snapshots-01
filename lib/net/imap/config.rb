@@ -261,6 +261,35 @@ module Net
       #
       # Alias for #debug
 
+      # Whether to enforce a local read-only session constraint (boolean).
+      # The default value is +false+.
+      #
+      # When #read_only is +true+, any command that could modify messages,
+      # message flags, or mailbox structure is rejected locally with
+      # ReadOnlyError, <em>before</em> the command is sent to the server.
+      # The error message describes the side effect that was prevented.
+      #
+      # The constraint belongs to the client, not to the server session:
+      # it is not lifted by re-selecting a mailbox, by the server
+      # reporting +READ-WRITE+ access, or by extension commands.
+      #
+      # In particular:
+      # * #fetch and #uid_fetch are allowed, but message data items that
+      #   implicitly set the +\Seen+ flag (<tt>BODY[...]</tt>,
+      #   <tt>BINARY[...]</tt>, +RFC822+, and +RFC822.TEXT+) are
+      #   rejected.  Use <tt>BODY.PEEK[...]</tt> or
+      #   <tt>BINARY.PEEK[...]</tt> instead.
+      # * #close is rejected, because it expunges deleted messages.  Use
+      #   #unselect or #logout to leave the mailbox without expunging.
+      # * Commands which cannot be classified as free of side effects
+      #   (e.g. unknown extension commands) are also rejected.
+      attr_accessor :read_only, type: :boolean, default: false
+
+      # :method: read_only?
+      # :call-seq: read_only? -> boolean
+      #
+      # Alias for #read_only
+
       # Seconds to wait until a connection is opened.
       #
       # Applied separately for establishing TCP connection and starting a TLS

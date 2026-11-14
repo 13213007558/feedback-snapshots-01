@@ -3667,6 +3667,47 @@ module Net
     PORT = 143         # :nodoc:
     SSL_PORT = 993   # :nodoc:
 
+    # Commands which never modify messages, message flags, or mailbox
+    # structure.  Used to enforce Config#read_only.
+    READ_ONLY_SAFE_COMMANDS = %w[
+      CAPABILITY NOOP LOGOUT CHECK IDLE
+      AUTHENTICATE LOGIN STARTTLS ENABLE
+      SELECT EXAMINE UNSELECT
+      LIST XLIST LSUB NAMESPACE STATUS ID
+      SEARCH FETCH SORT THREAD
+      GETQUOTA GETQUOTAROOT GETACL MYRIGHTS LISTRIGHTS
+    ].to_set.freeze # :nodoc:
+
+    # Commands with side effects that are forbidden by Config#read_only,
+    # mapped to a description of the forbidden side effect.
+    READ_ONLY_UNSAFE_COMMANDS = {
+      "APPEND"      => "it would append a message to a mailbox",
+      "STORE"       => "it would modify message flags",
+      "COPY"        => "it would append messages to another mailbox",
+      "MOVE"        => "it would move messages between mailboxes",
+      "EXPUNGE"     => "it would permanently delete messages",
+      "CLOSE"       => "it would expunge messages marked \\Deleted " \
+                       "(use #unselect or #logout to leave the mailbox " \
+                       "without expunging)",
+      "CREATE"      => "it would create a mailbox",
+      "DELETE"      => "it would delete a mailbox",
+      "RENAME"      => "it would rename a mailbox",
+      "SUBSCRIBE"   => "it would modify the server's subscription list",
+      "UNSUBSCRIBE" => "it would modify the server's subscription list",
+      "SETQUOTA"    => "it would modify quota limits",
+      "SETACL"      => "it would modify access control lists",
+      "DELETEACL"   => "it would modify access control lists",
+    }.freeze # :nodoc:
+
+    # Fetch message data items that implicitly set the \Seen flag.
+    # Used to enforce Config#read_only.
+    READ_ONLY_UNSAFE_FETCH_ITEM =
+      /(?:\A|[\s(])(?:BODY(?!\.PEEK)\s*\[|BINARY(?!\.PEEK)\s*\[|
+        RFC822(?:\.TEXT)?(?![\w.]))/nix # :nodoc:
+
+    private_constant :READ_ONLY_SAFE_COMMANDS, :READ_ONLY_UNSAFE_COMMANDS,
+                     :READ_ONLY_UNSAFE_FETCH_ITEM
+
     def start_imap_connection
       @greeting        = get_server_greeting
       @capabilities    = capabilities_from_resp_code @greeting
@@ -3827,6 +3868,7 @@ module Net
 
     def send_command(cmd, *args, &block)
       args.each do validate_data _1 end
+      enforce_read_only_constraint(cmd, args)
       synchronize do
         tag = generate_tag
         command = Command[tag:, name: cmd]
@@ -3847,6 +3889,44 @@ module Net
       rescue InvalidResponseError
         disconnect
         raise
+      end
+    end
+
+    # Enforces the local read-only session constraint (Config#read_only).
+    # Raises ReadOnlyError, describing the forbidden side effect, before
+    # any data is sent to the server.  The constraint is purely
+    # client-side: it cannot be lifted by re-selecting a mailbox, by the
+    # server reporting READ-WRITE access, or by extension commands.
+    def enforce_read_only_constraint(cmd, args)
+      return unless config.read_only?
+      normalized = cmd.upcase.sub(/\AUID\s+/, "")
+      if (side_effect = READ_ONLY_UNSAFE_COMMANDS[normalized])
+        raise ReadOnlyError,
+              "read-only session forbids #{cmd}: #{side_effect}"
+      end
+      unless READ_ONLY_SAFE_COMMANDS.include?(normalized)
+        raise ReadOnlyError,
+              "read-only session forbids #{cmd}: " \
+              "it cannot be verified to be free of side effects"
+      end
+      if normalized == "FETCH" && (item = unsafe_fetch_item(args))
+        raise ReadOnlyError,
+              "read-only session forbids FETCH #{item}: " \
+              "it implicitly sets the \\Seen flag " \
+              "(use BODY.PEEK or BINARY.PEEK instead)"
+      end
+    end
+
+    def unsafe_fetch_item(args)
+      fetch_item_texts(args).find { READ_ONLY_UNSAFE_FETCH_ITEM.match?(_1) }
+    end
+
+    def fetch_item_texts(arg)
+      case arg
+      when String  then [arg]
+      when RawData then arg.data.grep(RawText).map(&:data)
+      when Array   then arg.flat_map { fetch_item_texts(_1) }
+      else []
       end
     end
 
