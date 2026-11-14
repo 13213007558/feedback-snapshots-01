@@ -9,6 +9,7 @@ require_relative "sanitize/config/restricted"
 require_relative "sanitize/config/basic"
 require_relative "sanitize/config/relaxed"
 require_relative "sanitize/css"
+require_relative "sanitize/style_manifest"
 require_relative "sanitize/transformers/clean_cdata"
 require_relative "sanitize/transformers/clean_comment"
 require_relative "sanitize/transformers/clean_css"
@@ -64,6 +65,20 @@ class Sanitize
   # _config_ if specified.
   def self.fragment(html, config = {})
     Sanitize.new(config).fragment(html)
+  end
+
+  # Like {.document}, but also returns a {StyleManifest} describing the exact
+  # inline styles that survived sanitization, suitable for generating CSP hash
+  # sources. Returns an `[html, manifest]` array.
+  def self.document_with_manifest(html, config = {})
+    Sanitize.new(config).document_with_manifest(html)
+  end
+
+  # Like {.fragment}, but also returns a {StyleManifest} describing the exact
+  # inline styles that survived sanitization, suitable for generating CSP hash
+  # sources. Returns an `[html, manifest]` array.
+  def self.fragment_with_manifest(html, config = {})
+    Sanitize.new(config).fragment_with_manifest(html)
   end
 
   # Sanitizes the given `Nokogiri::XML::Node` instance and all its children.
@@ -141,6 +156,28 @@ class Sanitize
 
   # @deprecated Use {#fragment} instead.
   alias_method :clean, :fragment
+
+  # Like {#document}, but also returns a {StyleManifest} built from the final
+  # sanitized document, before serialization. Returns an `[html, manifest]`
+  # array.
+  def document_with_manifest(html)
+    return ["", StyleManifest.new] unless html
+
+    doc = Nokogiri::HTML5.parse(preprocess(html), **@config[:parser_options])
+    node!(doc)
+    [to_html(doc), StyleManifest.build(doc)]
+  end
+
+  # Like {#fragment}, but also returns a {StyleManifest} built from the final
+  # sanitized fragment, before serialization. Returns an `[html, manifest]`
+  # array.
+  def fragment_with_manifest(html)
+    return ["", StyleManifest.new] unless html
+
+    frag = Nokogiri::HTML5.fragment(preprocess(html), **@config[:parser_options])
+    node!(frag)
+    [to_html(frag), StyleManifest.build(frag)]
+  end
 
   # Sanitizes the given `Nokogiri::XML::Node` and all its children, modifying it
   # in place.

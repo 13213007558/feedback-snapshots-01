@@ -182,6 +182,28 @@ Sanitize::CSS.properties(%[
 # ]
 ```
 
+### CSP Style Manifests
+
+When sanitized HTML is rendered with a Content Security Policy, inline styles normally require `'unsafe-inline'`. As a safer alternative, Sanitize can produce a manifest of the exact styles that survived sanitization, suitable for generating precise CSP hash sources.
+
+The manifest is built from the final sanitized DOM, so each digest covers exactly the text a browser would hash: the decoded value of each `style` attribute and the text content of each `<style>` element. Character references in the source HTML, newlines, and declarations removed by the sanitizer can never cause a mismatch, because they never enter the hashed text. Styles are recorded as separate kinds (`:element` / `:attribute`) matching the `style-src-elem` and `style-src-attr` directives, identical styles are deduplicated, and every occurrence remains traceable through its positions.
+
+```ruby
+sanitizer = Sanitize.new(Sanitize::Config::RELAXED)
+html, manifest = sanitizer.fragment_with_manifest(input)
+
+# A CSP policy fragment authorizing exactly the surviving styles:
+manifest.csp_header
+# => "style-src-elem 'sha256-...'; style-src-attr 'sha256-...'"
+
+# Verify that a (possibly stored or transmitted) output still contains only
+# approved styles. If any authorized style was modified, its digest changes
+# and the manifest can no longer prove it was approved:
+manifest.verify(html).approved? # => true
+```
+
+`Sanitize.document_with_manifest` and the class-level `Sanitize.fragment_with_manifest` / `Sanitize.document_with_manifest` methods are also available.
+
 ## Configuration
 
 In addition to the ultra-safe default settings, Sanitize comes with three other built-in configurations that you can use out of the box or adapt to meet your needs.
