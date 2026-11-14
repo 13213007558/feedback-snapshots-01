@@ -775,6 +775,370 @@ module REXMLTests
 
 
 
+    def test_strict_rejects_unsupported_data_constraint
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="SecurityConfig">
+      <attribute name="mode">
+        <data type="token" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+          <param name="pattern">safe|audit</param>
+        </data>
+      </attribute>
+      <attribute name="endpoint">
+        <text/>
+      </attribute>
+      <empty/>
+    </element>
+  </start>
+</grammar>
+      XML
+
+      # The permissive validator drops <data> and accepts a dangerous value.
+      permissive = REXML::Validation::RelaxNG.new( rng )
+      no_error( permissive,
+                %q{<SecurityConfig mode="disabled" endpoint="http://evil.example/"/>} )
+
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "data", error.construct )
+      assert_match( /Unsupported RELAX NG construct <data>/, error.message )
+      assert_not_nil( error.line )
+      assert_not_nil( error.column )
+      assert_match( %r{\A/grammar/start/element/attribute/data\z},
+                    error.path )
+    end
+
+    def test_strict_rejects_not_allowed
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <group>
+        <element name="B"><empty/></element>
+        <notAllowed/>
+      </group>
+    </element>
+  </start>
+</grammar>
+      XML
+      permissive = REXML::Validation::RelaxNG.new( rng )
+      no_error( permissive, %q{<A><B/></A>} )
+
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "notAllowed", error.construct )
+      assert_match( /notAllowed/, error.message )
+      assert_match( %r{\A/grammar/start/element/group/notAllowed\z},
+                    error.path )
+    end
+
+    def test_strict_rejects_undefined_reference
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <ref name="Missing"/>
+    </element>
+  </start>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "ref", error.construct )
+      assert_match( /Undefined RELAX NG reference "Missing"/, error.message )
+      assert_equal( "/grammar/start/element/ref", error.path )
+      assert_equal( 5, error.line )
+    end
+
+    def test_strict_rejects_undefined_reference_in_define
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <ref name="Known"/>
+    </element>
+  </start>
+  <define name="Known">
+    <element name="B">
+      <ref name="Missing"/>
+    </element>
+  </define>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "ref", error.construct )
+      assert_equal( "/grammar/define/element/ref", error.path )
+      assert_match( /Undefined RELAX NG reference/, error.message )
+    end
+
+    def test_strict_rejects_unnamespaced_construct
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <data xmlns="" type="token"/>
+      <empty/>
+    </element>
+  </start>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "data", error.construct )
+      assert_match( /not in the RELAX NG namespace/, error.message )
+    end
+
+    def test_strict_ignores_foreign_annotations_only
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0"
+         xmlns:ann="urn:example:annotation">
+  <ann:documentation>Only annotations may be foreign.</ann:documentation>
+  <start>
+    <element name="A">
+      <ann:documentation>element docs</ann:documentation>
+      <empty/>
+    </element>
+  </start>
+</grammar>
+      XML
+      validator = REXML::Validation::RelaxNG.new( rng, strict: true )
+      no_error( validator, %q{<A/>} )
+      error( validator, %q{<A><B/></A>} )
+    end
+
+    def test_strict_rejects_nullable_choice_branch
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <choice>
+        <optional>
+          <element name="B"><empty/></element>
+        </optional>
+        <element name="C"><empty/></element>
+      </choice>
+    </element>
+  </start>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_match( /choice/, error.message )
+    end
+
+    def test_strict_rejects_ambiguous_choice
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <choice>
+        <element name="B"><empty/></element>
+        <element name="B"><text/></element>
+      </choice>
+    </element>
+  </start>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_match( /Ambiguous <choice>/, error.message )
+    end
+
+    def test_strict_rejects_non_productive_recursion
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <ref name="A"/>
+  </start>
+  <define name="A">
+    <ref name="A"/>
+  </define>
+</grammar>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_match( /without consuming input/, error.message )
+    end
+
+    def test_strict_choice_interleave_ref
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="Config">
+      <interleave>
+        <ref name="Auth"/>
+        <ref name="Logging"/>
+      </interleave>
+    </element>
+  </start>
+  <define name="Auth">
+    <element name="Auth">
+      <attribute name="mode">
+        <choice>
+          <value>safe</value>
+          <value>audit</value>
+        </choice>
+      </attribute>
+      <empty/>
+    </element>
+  </define>
+  <define name="Logging">
+    <element name="Logging">
+      <attribute name="level">
+        <choice>
+          <value>info</value>
+          <value>debug</value>
+        </choice>
+      </attribute>
+      <empty/>
+    </element>
+  </define>
+</grammar>
+      XML
+      no_error( REXML::Validation::RelaxNG.new( rng, strict: true ),
+                %q{<Config><Auth mode="safe"/><Logging level="info"/></Config>} )
+      no_error( REXML::Validation::RelaxNG.new( rng, strict: true ),
+                %q{<Config><Logging level="debug"/><Auth mode="audit"/></Config>} )
+      error( REXML::Validation::RelaxNG.new( rng, strict: true ),
+             %q{<Config><Auth mode="disabled"/><Logging level="info"/></Config>} )
+      error( REXML::Validation::RelaxNG.new( rng, strict: true ),
+             %q{<Config><Logging level="info"/></Config>} )
+    end
+
+    def test_strict_nested_group_choice_ref
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="A">
+      <group>
+        <element name="B">
+          <choice>
+            <element name="X"><empty/></element>
+            <element name="Y"><empty/></element>
+          </choice>
+        </element>
+        <ref name="Tail"/>
+      </group>
+    </element>
+  </start>
+  <define name="Tail">
+    <element name="C">
+      <zeroOrMore>
+        <element name="D"><empty/></element>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>
+      XML
+      validator = REXML::Validation::RelaxNG.new( rng, strict: true )
+
+      no_error( validator, %q{<A><B><X/></B><C/></A>} )
+      no_error( validator, %q{<A><B><Y/></B><C><D/><D/></C></A>} )
+      error( validator, %q{<A><B/></B></A>} )
+      error( validator, %q{<A><C/><B><X/></B></A>} )
+      error( validator, %q{<A><B><X/></B><C><E/></C></A>} )
+    end
+
+    def test_strict_is_opt_in
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<element name="A" xmlns="http://relaxng.org/ns/structure/1.0">
+  <data type="token"/>
+</element>
+      XML
+      # Default behaviour is unchanged.
+      permissive = REXML::Validation::RelaxNG.new( rng )
+      assert_false( permissive.strict? )
+      # Explicit permissive mode is also unchanged.
+      assert_nothing_raised do
+        REXML::Validation::RelaxNG.new( rng, strict: false )
+      end
+      assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+    end
+
+    def test_strict_repetition_sequence
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<element name="A" xmlns="http://relaxng.org/ns/structure/1.0">
+  <zeroOrMore>
+    <element name="B"><empty/></element>
+    <element name="C"><empty/></element>
+  </zeroOrMore>
+</element>
+      XML
+      validator = REXML::Validation::RelaxNG.new( rng, strict: true )
+      assert_true( validator.strict? )
+
+      no_error( validator, %q{<A/>} )
+      no_error( validator, %q{<A><B/><C/><B/><C/></A>} )
+      error( validator, %q{<A><B/></A>} )
+      error( validator, %q{<A><B/><B/><C/></A>} )
+    end
+
+    def test_strict_rejects_empty_value
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<element name="A" xmlns="http://relaxng.org/ns/structure/1.0">
+  <value/>
+</element>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "value", error.construct )
+      assert_match( /empty <value>/, error.message )
+    end
+
+    def test_strict_rejects_narrowed_value
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<element name="A" xmlns="http://relaxng.org/ns/structure/1.0">
+  <value type="xsd:integer">1</value>
+</element>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_equal( "value", error.construct )
+      assert_match( /<value> type="xsd:integer"/, error.message )
+    end
+
+    def test_strict_rejects_namespace_prefixed_name
+      rng = <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<element name="p:A" xmlns="http://relaxng.org/ns/structure/1.0">
+  <empty/>
+</element>
+      XML
+      error = assert_raise( REXML::Validation::RelaxNG::CompileError ) do
+        REXML::Validation::RelaxNG.new( rng, strict: true )
+      end
+      assert_match( /namespace prefix/, error.message )
+    end
+
     def error( validator, source )
       parser = REXML::Parsers::TreeParser.new( source )
       parser.add_listener( validator.reset )
