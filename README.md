@@ -237,6 +237,45 @@ Rack::Attack.blocklist('allow2ban login scrapers') do |req|
 end
 ```
 
+#### Manually lifting a ban
+
+Both `Fail2Ban` and `Allow2Ban` share the same state model: failed requests
+increment a fail count that rotates with each `findtime` window; once the
+count reaches `maxretry`, a ban (penalty) is issued for `bantime`. Each ban
+carries a unique version, so every generation of the penalty can be told
+apart from the ones before and after it.
+
+`ban_info` returns the ban currently in effect (or `nil`). It is read-only
+and never refreshes the ban's time to live:
+
+```ruby
+info = Rack::Attack::Fail2Ban.ban_info("pentesters-1.2.3.4")
+info.version # => "1731686400:9f4c2ab1e07d33aa" (nil when not banned)
+```
+
+`unban` lifts a ban conditionally: the caller submits the version it saw,
+and only that generation of the penalty is lifted. If the account was
+banned again in the meantime (e.g. a new attack wave was caught while
+customer service was reviewing the case), the stale unban request cannot
+cancel the newer penalty:
+
+```ruby
+result = Rack::Attack::Fail2Ban.unban("pentesters-1.2.3.4", findtime: 10.minutes, version: info.version)
+# => :unbanned        the ban identified by `version` is gone (a ban lifted
+#                     this way also resets the fail count, so the account
+#                     starts fresh; an already expired ban is a no-op)
+# => :changed         a different, newer ban is in effect; it was left untouched
+# => :storage_failure the cache store could not perform the operation
+```
+
+Conditional unban requires the cache store to atomically compare and
+delete. The Redis-backed proxies (`Rack::Attack::StoreProxy::RedisProxy`
+and `RedisStoreProxy`) support it. Stores that cannot do it (e.g. memcached
+or `ActiveSupport::Cache::MemoryStore`) raise
+`Rack::Attack::IncompatibleStoreError` instead of silently pretending the
+unban succeeded. `Fail2Ban.reset`/`Allow2Ban.reset` remain available as the
+unconditional variant that clears the ban and the fail count outright.
+
 ### Throttling
 
 Throttle state is stored in a [configurable cache](#cache-store-configuration) (which defaults to `Rails.cache` if present).

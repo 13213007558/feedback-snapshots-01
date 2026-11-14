@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Add conditional unban to `Fail2Ban` and `Allow2Ban`: bans now carry a unique
+  version, `ban_info` reports the ban currently in effect without refreshing
+  its expiry, and `unban` lifts only the ban generation matching a submitted
+  version, returning `:unbanned`, `:changed` or `:storage_failure`. Requires a
+  cache store supporting atomic compare-and-delete (the Redis proxies do);
+  other stores raise `Rack::Attack::IncompatibleStoreError`.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

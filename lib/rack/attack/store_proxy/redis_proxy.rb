@@ -43,6 +43,26 @@ module Rack
           rescuing { del(key) }
         end
 
+        DELETE_IF_EQUAL_SCRIPT = <<~LUA
+          local current = redis.call("get", KEYS[1])
+          if not current then
+            return "absent"
+          elseif current == ARGV[1] then
+            redis.call("del", KEYS[1])
+            return "deleted"
+          else
+            return "mismatch"
+          end
+        LUA
+
+        # Atomically deletes the key when its value equals +expected+.
+        # Returns :deleted, :absent or :mismatch; nil on connection errors.
+        def delete_if_equal(key, expected, _options = {})
+          rescuing do
+            __getobj__.eval(DELETE_IF_EQUAL_SCRIPT, keys: [key], argv: [expected.to_s]).to_sym
+          end
+        end
+
         def delete_matched(matcher, _options = nil)
           cursor = "0"
           source = matcher.source

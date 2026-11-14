@@ -57,6 +57,22 @@ module Rack
         store.delete("#{prefix}:#{unprefixed_key}")
       end
 
+      # Deletes the key only if its current value equals +expected+.
+      # Stores that cannot perform this atomically are rejected with
+      # IncompatibleStoreError instead of pretending to succeed.
+      def delete_if_equal(unprefixed_key, expected)
+        raise Rack::Attack::MissingStoreError if store.nil?
+
+        unless store.respond_to?(:delete_if_equal)
+          raise(
+            Rack::Attack::IncompatibleStoreError,
+            "Configured store #{store.class.name} doesn't support conditional delete (#delete_if_equal)"
+          )
+        end
+
+        store.delete_if_equal("#{prefix}:#{unprefixed_key}", expected)
+      end
+
       def reset!
         if store.respond_to?(:delete_matched)
           store.delete_matched(/#{prefix}*/)
