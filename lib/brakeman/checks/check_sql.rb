@@ -324,9 +324,28 @@ class Brakeman::CheckSQL < Brakeman::BaseCheck
     elsif node_type? arg, :or
       check_query_arguments(arg.lhs) or
         check_query_arguments(arg.rhs)
+    elsif array? arg
+      check_query_array_arguments arg
     else
       #Hashes are safe...but we check above for hash, so...?
       unsafe_sql? arg, :ignore_hash
+    end
+  end
+
+  #An array query argument is normally a parameterized fragment such as
+  #["name = ?", value] where only the first element is SQL and the rest are
+  #bound values in value position. But the first element can itself be a hash
+  #(sometimes wrapped in another array) whose keys are identifiers, so those
+  #still need the dynamic-key check instead of being ignored as bind data.
+  def check_query_array_arguments arg
+    template = arg[1]
+
+    if array? template
+      check_query_array_arguments template
+    elsif hash? template
+      check_hash_keys template
+    else
+      unsafe_sql? template
     end
   end
 
