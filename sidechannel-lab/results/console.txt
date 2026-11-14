@@ -1,0 +1,167 @@
+
+=== A. Baselines (Rack::Deflater, sync=true), accept-encoding: gzip ===
+scenario                encoding  wire_bytes  decoded_bytes  cache_control    
+----------------------  --------  ----------  -------------  -----------------
+token_only              gzip      397         1733           private, no-store
+co_located_wrong_guess  gzip      582         4001           private, no-store
+echo_only               gzip      371         2290           private, no-store
+
+=== B. Reflection oracle on /reflection (same-length guesses) ===
+repeats  guess_len  guess_kind  wire_bytes  decoded_bytes  encoding
+-------  ---------  ----------  ----------  -------------  --------
+8        1          prefix      565         2881           gzip    
+8        1          wrong       566         2881           gzip    
+8        4          prefix      567         2929           gzip    
+8        4          wrong       569         2929           gzip    
+8        8          prefix      570         2993           gzip    
+8        8          wrong       572         2993           gzip    
+8        16         prefix      572         3121           gzip    
+8        16         wrong       575         3121           gzip    
+32       1          prefix      568         2977           gzip    
+32       1          wrong       570         2977           gzip    
+32       4          prefix      571         3169           gzip    
+32       4          wrong       573         3169           gzip    
+32       8          prefix      573         3425           gzip    
+32       8          wrong       575         3425           gzip    
+32       16         prefix      579         3937           gzip    
+32       16         wrong       582         3937           gzip    
+repeats  guess_len  wrong_wire  prefix_wire  delta_wire
+-------  ---------  ----------  -----------  ----------
+8        1          566         565          1         
+8        4          569         567          2         
+8        8          572         570          2         
+8        16         575         572          3         
+32       1          570         568          2         
+32       4          573         571          2         
+32       8          575         573          2         
+32       16         582         579          3         
+
+=== C. Prefix sweep (repeats=16): correct prefix vs same-length wrong ===
+prefix_len  wrong_wire  prefix_wire  delta_wire
+----------  ----------  -----------  ----------
+0           558         558          0         
+1           567         566          1         
+2           569         567          2         
+3           572         569          3         
+4           571         569          2         
+5           572         569          3         
+6           572         570          2         
+7           573         571          2         
+8           573         571          2         
+9           574         572          2         
+10          575         572          3         
+11          576         573          3         
+12          577         574          3         
+13          577         574          3         
+14          577         574          3         
+15          575         573          2         
+16          575         572          3         
+17          576         573          3         
+18          576         573          3         
+19          577         573          4         
+20          578         575          3         
+21          579         576          3         
+22          579         577          2         
+23          579         576          3         
+24          579         576          3         
+25          580         577          3         
+26          580         577          3         
+27          580         577          3         
+28          582         579          3         
+29          582         579          3         
+30          582         578          4         
+31          581         578          3         
+32          580         578          2         
+
+=== D. Separation padding between secret and reflection (repeats=32) ===
+mode    pad   wrong_wire  prefix_wire  delta_wire
+------  ----  ----------  -----------  ----------
+fixed   0     447         446          1         
+fixed   1024  459         459          0         
+fixed   4096  471         470          1         
+random  1024  1263        1261         2         
+random  4096  3429        3437         -8        
+
+=== D2. Random 4096-byte padding: wire size over 8 fresh requests ===
+prefix guess sizes: [3427, 3432, 3424, 3426, 3430, 3435, 3427, 3432]
+wrong guess sizes:  [3431, 3432, 3432, 3425, 3424, 3428, 3433, 3427]
+
+=== E. Chunked bodies on /stream (sync=true vs sync=false) ===
+chunks  sync   guess   wire_bytes  encoding
+------  -----  ------  ----------  --------
+1       true   prefix  573         gzip    
+1       true   wrong   575         gzip    
+1       false  prefix  566         gzip    
+1       false  wrong   568         gzip    
+2       true   prefix  588         gzip    
+2       true   wrong   590         gzip    
+2       false  prefix  566         gzip    
+2       false  wrong   568         gzip    
+8       true   prefix  653         gzip    
+8       true   wrong   655         gzip    
+8       false  prefix  566         gzip    
+8       false  wrong   568         gzip    
+32      true   prefix  909         gzip    
+32      true   wrong   911         gzip    
+32      false  prefix  566         gzip    
+32      false  wrong   568         gzip    
+chunks  sync   wrong_wire  prefix_wire  delta_wire
+------  -----  ----------  -----------  ----------
+1       true   575         573          2         
+1       false  568         566          2         
+2       true   590         588          2         
+2       false  568         566          2         
+8       true   655         653          2         
+8       false  568         566          2         
+32      true   911         909          2         
+32      false  568         566          2         
+
+=== F. Cache header interactions ===
+case                      encoding  wire_bytes  decoded_bytes  vary             cache_control                  
+------------------------  --------  ----------  -------------  ---------------  -------------------------------
+no-transform response     identity  1733        1733                            private, no-store, no-transform
+sensitive /reflection     gzip      566         2881           Accept-Encoding  private, no-store              
+public asset              gzip      367         6168           Accept-Encoding  public, max-age=3600           
+accept-encoding identity  identity  2881        2881           Accept-Encoding  private, no-store              
+
+=== G. SelectiveDeflation stack (sensitive bypass, public compressed) ===
+path            encoding  wire_bytes  decoded_bytes  cache_control                  
+--------------  --------  ----------  -------------  -------------------------------
+/reflection     identity  2881        2881           private, no-store, no-transform
+/separate       identity  1099        1099           private, no-store, no-transform
+/stream         identity  2881        2881           private, no-store, no-transform
+/token-only     identity  1733        1733           private, no-store, no-transform
+/public/app.js  gzip      367         6168           public, max-age=3600           
+
+=== G2. Marker-based stack (Deflater :if condition) ===
+path            encoding  wire_bytes  decoded_bytes  cache_control       
+--------------  --------  ----------  -------------  --------------------
+/reflection     identity  2881        2881           private, no-store   
+/public/app.js  gzip      367         6168           public, max-age=3600
+
+=== H1. Amplification: delta vs reflection repeat count (guess len 8) ===
+repeats  sync   wrong_wire  prefix_wire  delta_wire
+-------  -----  ----------  -----------  ----------
+8        true   572         570          2         
+8        false  566         564          2         
+32       true   575         573          2         
+32       false  568         566          2         
+128      true   589         587          2         
+128      false  582         580          2         
+512      true   618         616          2         
+512      false  611         610          1         
+
+=== H2. Repeated-sample noise on co-located oracle (repeats=128, 15 samples) ===
+prefix(AKIA-FAK): {min: 587, max: 587, mean: 587.0, std: 0.0}
+wrong   (########): {min: 589, max: 589, mean: 589.0, std: 0.0}
+
+=== H3. Distance sweep: fixed padding bytes between secret and reflection ===
+pad_bytes  wrong_wire  prefix_wire  delta_wire
+---------  ----------  -----------  ----------
+0          450         449          1         
+512        458         458          0         
+4096       474         473          1         
+16384      505         506          -1        
+32768      533         537          -4        
+
+Wrote results/results.json and results/summary.tsv

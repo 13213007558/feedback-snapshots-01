@@ -1,0 +1,9 @@
+[PASS] oracle distinguishes true first char (A) -- true=568B min=568B rank=1/38
+[PASS] gate bypasses compression on sensitive routes -- all identity + no-transform
+[PASS] public asset remains gzip compressed -- 6168B -> 367B
+[PASS] marker stack: sensitive identity, public gzip -- reflection=identity, app.js=gzip
+[PASS] no-transform disables stock Rack::Deflater -- encoding=identity
+[PASS] fixed mtime gives reproducible wire sizes -- 571 == 571
+[PASS] oracle delta survives all chunk counts (sync=true) -- delta >= 2B observed in run
+
+ALL CHECKS PASSED

@@ -1,0 +1,20 @@
+path	encoding	vary	cache_control	content_length_header	wire_bytes	decoded_bytes	roundtrip_ok	scenario
+/token-only	gzip	Accept-Encoding	private, no-store		397	1733	true	token_only
+/reflection	gzip	Accept-Encoding	private, no-store		582	4001	true	co_located_wrong_guess
+/echo-only	gzip	Accept-Encoding	private, no-store		371	2290	true	echo_only
+/reflection	gzip	Accept-Encoding	private, no-store		565	2881	true	
+/reflection	gzip	Accept-Encoding	private, no-store		566	2881	true	
+/reflection	gzip	Accept-Encoding	private, no-store		567	2929	true	
+/reflection	gzip	Accept-Encoding	private, no-store		569	2929	true	
+/reflection	gzip	Accept-Encoding	private, no-store		570	2993	true	
+/reflection	gzip	Accept-Encoding	private, no-store		572	2993	true	
+/reflection	gzip	Accept-Encoding	private, no-store		572	3121	true	
+/reflection	gzip	Accept-Encoding	private, no-store		575	3121	true	
+/reflection	gzip	Accept-Encoding	private, no-store		568	2977	true	
+/reflection	gzip	Accept-Encoding	private, no-store		570	2977	true	
+/reflection	gzip	Accept-Encoding	private, no-store		571	3169	true	
+/reflection	gzip	Accept-Encoding	private, no-store		573	3169	true	
+/reflection	gzip	Accept-Encoding	private, no-store		573	3425	true	
+/reflection	gzip	Accept-Encoding	private, no-store		575	3425	true	
+/reflection	gzip	Accept-Encoding	private, no-store		579	3937	true	
+/reflection	gzip	Accept-Encoding	private, no-store		582	3937	true	
