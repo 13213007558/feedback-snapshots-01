@@ -3,6 +3,7 @@
 require 'mail/constants'
 require 'mail/utilities'
 require 'mail/yaml'
+require 'mail/raw_evidence'
 
 module Mail
   # The Message class provides a single point of access to all things to do with an
@@ -114,6 +115,9 @@ module Mail
       @header = nil
       @charset = self.class.default_charset
       @defaulted_charset = true
+      @received_source = nil
+      @raw_evidence = nil
+      @evidence_baseline_fingerprint = nil
 
       @smtp_envelope_from = nil
       @smtp_envelope_to = nil
@@ -403,6 +407,47 @@ module Mail
     #  mail.raw_source #=> "This is an invalid email message"
     def raw_source
       @raw_source
+    end
+
+    # The exact bytes that were handed to the parser when this object (or the
+    # root message that contains it) was instantiated.  Unlike #raw_source it
+    # is never rewritten: the mbox "From " envelope line, leading whitespace
+    # and original (mixed) line endings are retained for forensic purposes.
+    #
+    # Returns nil for objects that were not built from received bytes (for
+    # example a message assembled from a hash or a part added afterwards).
+    def received_source
+      @received_source
+    end
+
+    # True when this object can map its parsed structure back onto untouched
+    # received bytes.
+    def evidenced?
+      !@received_source.nil?
+    end
+
+    # Builds (and memoizes) the Mail::RawEvidence that maps the parsed header,
+    # body, parts and multipart boundaries onto the received byte ranges.
+    #
+    # Returns nil when the object was not built from received bytes.
+    def raw_evidence
+      return nil unless evidenced?
+      @raw_evidence ||= Mail::RawEvidence.build(self, @received_source)
+    end
+
+    # Whether the evidence snapshot still describes the current object.  The
+    # reference point is the object's structure immediately after parsing, so a
+    # modification made before #raw_evidence is first called is still detected.
+    # Once modified this returns false, while the recorded bytes and digest
+    # stay unchanged.
+    def evidence_current?
+      return false unless evidenced?
+      Mail::RawEvidence.structure_fingerprint(self) == @evidence_baseline_fingerprint
+    end
+
+    # Inverse of #evidence_current?.
+    def evidence_stale?
+      !evidence_current?
     end
 
     # Sets the envelope from for the email
@@ -1835,7 +1880,9 @@ module Mail
       end
       hash['delivery_handler'] = delivery_handler.to_s if delivery_handler
       hash['transport_encoding'] = transport_encoding.to_s
-      special_variables = [:@header, :@delivery_handler, :@transport_encoding]
+      special_variables = [:@header, :@delivery_handler, :@transport_encoding,
+                           :@received_source, :@raw_evidence,
+                           :@evidence_baseline_fingerprint]
       if multipart?
         hash['multipart_body'] = []
         body.parts.map { |part| hash['multipart_body'] << part.to_yaml }
@@ -2089,6 +2136,9 @@ module Mail
     def init_with_hash(hash)
       passed_in_options = IndifferentHash.new(hash)
       self.raw_source = ''
+      @received_source = nil
+      @raw_evidence = nil
+      @evidence_baseline_fingerprint = nil
 
       @header = Mail::Header.new
       @body = Mail::Body.new
@@ -2117,10 +2167,17 @@ module Mail
     end
 
     def init_with_string(string)
+      # Keep an untouched, frozen copy of exactly what was received. The
+      # parser below may strip an mbox "From " line and lstrip the source, so
+      # @raw_source cannot be trusted as forensic evidence.
+      @received_source = string.to_s.dup.force_encoding(Encoding::BINARY).freeze
+      @raw_evidence = nil
       self.raw_source = string
       set_envelope_header
       parse_message
       @separate_parts = multipart?
+      # Anchor the staleness check to the just-parsed structure.
+      @evidence_baseline_fingerprint = Mail::RawEvidence.structure_fingerprint(self)
     end
 
     # Returns the filename of the attachment (if it exists) or returns nil

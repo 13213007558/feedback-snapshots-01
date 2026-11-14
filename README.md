@@ -394,6 +394,50 @@ is another message which can have many or no parts.
 A message will only have parts if it is a multipart/mixed or multipart/related
 content type and has a boundary defined.
 
+### Raw Evidence and Byte Ranges
+
+For forensic use, `Mail` can map the parsed header, fields, parts and multipart
+boundaries back onto the exact bytes that were received, without re-encoding or
+re-folding.  Every range is an absolute, half-open byte range
+(`start_offset...end_offset`) into the untouched source, ranges never overlap,
+and nothing is synthesised for a missing closing boundary or a part added after
+parsing.
+
+```ruby
+mail = Mail.read('message.eml')
+
+mail.evidenced?            #=> true (false for messages built from a hash)
+evidence = mail.raw_evidence
+evidence.digest            #=> SHA-256 hex digest of the received bytes
+evidence.source            #=> frozen, unmodified received bytes
+
+# Re-verify any region directly against the original message:
+evidence.nodes.each do |node|
+  evidence.slice(node.start_offset, node.end_offset)
+  node.bytes(evidence.source)   # same bytes, sliced via the node itself
+end
+
+# Header fields (folded lines and duplicate fields stay distinct):
+evidence.fields.map(&:name)
+
+# Multipart structure with boundary delimiter, preamble, epilogue and parts:
+evidence.multipart.closed?                 # was the closing boundary present?
+evidence.multipart.parts                   # part nodes (absolute ranges)
+evidence.part_nodes                        # only the parser's real parts
+```
+
+The evidence is a point-in-time snapshot.  Normal read-only access never changes
+it; once you modify the message (a header, body or part) `evidence_current?`
+becomes false while the recorded bytes and digest stay unchanged, so the old
+evidence stays distinguishable from the new content.
+
+```ruby
+mail.evidence_current?     #=> true
+mail.subject = 'changed'
+mail.evidence_stale?       #=> true
+mail.raw_evidence.digest   #=> still the digest of the original bytes
+```
+
 ### Testing and Extracting Attachments
 ```ruby
 mail.attachments.each do | attachment |
