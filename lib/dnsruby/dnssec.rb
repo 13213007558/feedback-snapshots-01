@@ -16,6 +16,7 @@
 require 'digest/sha2'
 require 'dnsruby/key_cache'
 require 'dnsruby/validation_budget'
+require 'dnsruby/validation_evidence'
 require 'dnsruby/single_verifier'
 module Dnsruby
 
@@ -206,7 +207,31 @@ module Dnsruby
     end
 
     def self.validate_with_query(query, msg)
-      ValidationBudget.with { validate_with_query_internal(query, msg) }
+      return false unless msg
+      ValidationBudget.with do
+        recorder = ValidationEvidence::Recorder.new(query, msg)
+        error = nil
+        begin
+          ValidationEvidence.with(recorder) do
+            recorder.scope(:validation) { validate_with_query_internal(query, msg) }
+          end
+        rescue VerifyError => e
+          error = e
+          raise
+        ensure
+          # Evidence export must never change the validation outcome.
+          begin
+            recorder.finish(msg, error)
+            evidence = recorder.to_evidence
+            msg.validation_evidence = evidence
+            if msg.security_level == Message::SecurityLevel.SECURE
+              [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each { |verifier| verifier.remember_evidence(evidence) }
+            end
+          rescue StandardError => evidence_error
+            Dnsruby.log.error { "Could not build DNSSEC evidence: #{evidence_error}" }
+          end
+        end
+      end
     end
 
     private_class_method def self.validate_with_query_internal(query, msg)
@@ -223,6 +248,10 @@ module Dnsruby
       if (found_sigs)
         begin
           if (verify(msg))
+            # A warm trusted-key cache can verify the message directly. Record
+            # the anchor that covers the query so the exported path can start
+            # from the key that was actually used and cite its prior proof.
+            ValidationEvidence.current&.record_fast_path_anchor(query, msg)
             msg.security_level = Message::SecurityLevel.SECURE
             return true
           end
@@ -247,28 +276,28 @@ module Dnsruby
         last_error_level = Message::SecurityLevel.BOGUS
         if (@@validation_policy == ValidationPolicy::ALWAYS_LOCAL_ANCHORS_ONLY)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-            Proc.new{|m, q| validate_with_anchors(m, q)}, msg, query)
+            Proc.new { |m, q| ValidationEvidence.scope(:local_anchors) { validate_with_anchors(m, q) } }, msg, query)
         elsif (@@validation_policy == ValidationPolicy::ALWAYS_ROOT_ONLY)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-            Proc.new{|m, q| validate_with_root(m, q)}, msg, query)
+            Proc.new { |m, q| ValidationEvidence.scope(:root) { validate_with_root(m, q) } }, msg, query)
         elsif (@@validation_policy == ValidationPolicy::LOCAL_ANCHORS_THEN_ROOT)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-            Proc.new{|m, q| validate_with_anchors(m, q)}, msg, query)
+            Proc.new { |m, q| ValidationEvidence.scope(:local_anchors) { validate_with_anchors(m, q) } }, msg, query)
           if (last_level != Message::SecurityLevel.SECURE)
             last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-              Proc.new{|m, q| validate_with_root(m, q)}, msg, query)
+              Proc.new { |m, q| ValidationEvidence.scope(:root) { validate_with_root(m, q) } }, msg, query)
           end
         elsif (@@validation_policy == ValidationPolicy::ROOT_THEN_LOCAL_ANCHORS)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-            Proc.new{|m, q| validate_with_root(m, q)}, msg, query)
+            Proc.new { |m, q| ValidationEvidence.scope(:root) { validate_with_root(m, q) } }, msg, query)
           if (last_level != Message::SecurityLevel.SECURE)
             last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-              Proc.new{|m, q| validate_with_anchors(m, q)}, msg, query)
+              Proc.new { |m, q| ValidationEvidence.scope(:local_anchors) { validate_with_anchors(m, q) } }, msg, query)
           end
         end
         if (last_level != Message::SecurityLevel.SECURE && last_level != Message::SecurityLevel.BOGUS)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
-            Proc.new{|m, q| validate_with_dlv(m, q)}, msg, query)
+            Proc.new { |m, q| ValidationEvidence.scope(:dlv) { validate_with_dlv(m, q) } }, msg, query)
         end
         #  Set the message security level!
         msg.security_level = last_level
@@ -290,13 +319,17 @@ module Dnsruby
     end
 
     private_class_method def self.try_validation_internal(last_level, last_error, last_error_level, proc, msg, query)
-      begin
-        proc.call(msg, query)
-        last_level = Message::SecurityLevel.new([msg.security_level.code, last_level.code].max)
-      rescue VerifyError => e
-        if (last_error_level < last_level)
-          last_error = e.to_s
-          last_error_level = last_level
+      ValidationEvidence.scope(:attempt) do
+        begin
+          proc.call(msg, query)
+          last_level = Message::SecurityLevel.new([msg.security_level.code, last_level.code].max)
+          ValidationEvidence.mark_attempt(true)
+        rescue VerifyError => e
+          ValidationEvidence.mark_attempt(false)
+          if (last_error_level < last_level)
+            last_error = e.to_s
+            last_error_level = last_level
+          end
         end
       end
       return last_level, last_error, last_error_level

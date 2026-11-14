@@ -113,6 +113,56 @@ For asynchronous validation, up to four workers can run at once, with another
 Cancellation is checked between operations and while waiting on the network.
 An OpenSSL operation already in progress is allowed to finish first.
 
+DNSSEC validation evidence
+--------------------------
+
+Local validation exports the records behind its conclusion so an offline
+auditor can replay it. A validated Message carries
+`validation_evidence`:
+
+```ruby
+resolver.dnssec = true
+resolver.do_validation = true
+response = resolver.query('example.com', Types.A)
+evidence = response.validation_evidence
+File.write('example-evidence.json', evidence.to_json)
+
+result = Dnsruby::ValidationEvidence.replay(evidence.to_json)
+result.security_level # => "SECURE"
+```
+
+The export contains the chosen trust anchor, each used delegation and its
+signed DS, the DS-matched DNSKEY, the selected data signature and any signed
+NSEC/NSEC3 denial proof. Unused candidate signatures are listed separately and
+never appear on the success path. Cache hits retain the evidence from the
+answer's original validation. Failed validations keep the steps reached before
+failure.
+
+Replay takes no network access. Pass `time:` and `policy:` to pin the
+validation time and allowed trust anchors; it raises
+`Dnsruby::ValidationEvidence::ReplayError` if any required record is missing,
+a signature no longer verifies, or the policy no longer matches. Adding an
+unrelated valid signature leaves the explanation digest unchanged.
+
+A cache hit returns the original conclusion and explanation digest with a
+`cache` record noting where the answer came from, so a cached answer can
+still be explained: the evidence describes the validation that authenticated
+the response when it was first received. A validation that reuses a key
+learned earlier embeds the earlier proof and labels the warm start
+`learned_key`, so it never claims the key was configured.
+
+The `bin/dnssec-evidence` command replays an exported document without a
+network connection:
+
+```sh
+bin/dnssec-evidence replay example-evidence.json \
+  --time 2026-11-14T12:00:00Z --policy policy.json
+```
+
+It exits 0 when the recorded conclusion is reproduced, 1 when evidence is
+missing or no longer verifies, and 2 for usage errors. See `DNSSEC` for the
+full document format.
+
 Dependencies
 ------------
 

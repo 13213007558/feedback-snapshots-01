@@ -120,10 +120,19 @@ module Dnsruby
         @expiration = get_expiration(m)
         @message = Message.decode(m.encode(true))
         @message.cached = true
+        @security_level = m.security_level
+        @security_error = m.security_error
+        @validation_evidence = m.validation_evidence
       end
       def message
         m = Message.decode(@message.encode)
         m.cached = true
+        m.security_level = @security_level if @security_level
+        m.security_error = @security_error
+        m.validation_evidence = if @validation_evidence
+          @validation_evidence.with_cache_hit(
+            note: "Answer came from the cache; its original validation evidence is attached.")
+        end
         #  @TODO@ What do we do about answerfrom, answersize, etc.?
         m.header.aa = false # Anything else to do here?
         #  Fix up TTLs!!

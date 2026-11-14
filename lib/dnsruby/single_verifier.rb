@@ -19,6 +19,8 @@
 # DLV, trust anchors. Dnssec controls a set of these to perform validation for
 # the client.
 # This class should only be used by Dnsruby
+require 'dnsruby/validation_clock'
+
 module Dnsruby
   class SingleVerifier # :nodoc: all
     class VerifierType
@@ -55,6 +57,18 @@ module Dnsruby
       #  The configured_ds_store is the set of DS records which have been configured
       #  by the client as trust anchors. Use Dnssec#add_trust_anchor to add these
       @configured_ds_store = []
+      # Evidence from the last successful validation by this verifier. Warm
+      # trusted-key reuse cites it so the conclusion remains replayable.
+      @prior_evidence = nil
+    end
+
+    def prior_evidence
+      @trust_mutex.synchronize { @prior_evidence }
+    end
+
+    def remember_evidence(evidence)
+      return unless evidence
+      @trust_mutex.synchronize { @prior_evidence = evidence.to_h }
     end
 
     def set_hints(hints)
@@ -145,6 +159,30 @@ module Dnsruby
       end
     end
 
+    def record_learned_trust(key = nil, expiration: nil, via: 'DNSKEY RRSet')
+      recorder = ValidationEvidence.current
+      return unless recorder
+      prior = prior_evidence
+      if key
+        recorder.learned_key(key, expiration: expiration, via: via,
+          verifier: verifier_type_name, prior: prior)
+      else
+        recorder.learned_keys(@trust_mutex.synchronize { @trusted_keys.keys },
+          verifier: verifier_type_name, prior: prior)
+      end
+    end
+    private :record_learned_trust
+
+    def verifier_type_name
+      case @verifier_type
+      when VerifierType::ROOT then 'root'
+      when VerifierType::ANCHOR then 'local'
+      when VerifierType::DLV then 'dlv'
+      else @verifier_type.to_s
+      end
+    end
+    private :verifier_type_name
+
     def remove_trust_anchor(t)
       @trust_mutex.synchronize do
         configured = false
@@ -214,7 +252,7 @@ module Dnsruby
       #       end
 
       #  Now check that we are in the validity period for the RRSIG
-      now = Time.now.to_i
+      now = ValidationClock.now_i
       if ((sigrec.expiration < now) || (sigrec.inception > now))
         raise VerifyError.new("Signature record not in validity period")
       end
@@ -244,6 +282,7 @@ module Dnsruby
     #  k can be a KeyCache, or an RRSet of DNSKEYs.
     def add_trusted_key(k)
       publish_trust { @trusted_keys.add(k) }
+      record_learned_trust
     end
 
     def add_root_ds(ds)
@@ -320,7 +359,7 @@ module Dnsruby
       found = false
       ds_rrset.sigs.each { |sig|
         if ((sig.type_covered == Types.DS) || ((sig.type_covered == Types.DLV)&& (@verifier_type==VerifierType::DLV)))
-          if (sig.inception <= Time.now.to_i)
+          if (sig.inception <= ValidationClock.now_i)
             #  Check sig.expiration, sig.algorithm
             if (sig.expiration > expiration)
               expiration = sig.expiration
@@ -334,6 +373,7 @@ module Dnsruby
             ValidationBudget.current&.check!(1)
             if ds.check_key(key)
               publish_trust { @trusted_keys.add_key_with_expiration(key, expiration) }
+              record_learned_trust(key, expiration: expiration, via: 'DS')
               found = true
             end
           end
@@ -479,6 +519,40 @@ module Dnsruby
     end
 
     def verify_nsecs(msg) # :nodoc:
+      recorder = ValidationEvidence.current
+      question = msg.question[0]
+      proof = nil
+      if recorder && question
+        if (msg.rrsets('NSEC').length > 0) || (msg.rrsets('NSEC3').length > 0)
+          proof = if msg.rcode == RCode.NXDOMAIN
+            'name_error'
+          elsif msg.rcode == RCode.NOERROR && msg.answer.length == 0
+            'no_data'
+          elsif msg.rcode == RCode.NOERROR
+            'wildcard_absence'
+          end
+        end
+        recorder.begin_denial(proof || 'none', name: question.qname, qtype: question.qtype) if proof
+        if proof
+          witness = msg.authority.rrsets('NSEC').first || msg.authority.rrsets('NSEC3').first
+          if witness && witness.sigs.first
+            recorder.denial_source(witness.sigs.first.signers_name)
+          end
+        end
+      end
+      begin
+        verify_nsecs_internal(msg)
+        if recorder && proof
+          recorder.complete_denial([{ 'proof' => proof, 'name' => question.qname.to_s(true),
+                                      'type' => question.qtype.to_s }])
+        end
+      rescue VerifyError => e
+        recorder.abort_denial(e) if recorder && proof
+        raise
+      end
+    end
+
+    private def verify_nsecs_internal(msg)
       #  NSEC(3) handling. Get NSEC(3)s in four cases : (RFC 4035, section 3.1.3)
       #  a) No data - <SNAME, SCLASS> matches, but no <SNAME, SCLASS, STYPE) (§3.1.3.1)
       #      - will expect NSEC in Authority (and associated RRSIG)
@@ -582,6 +656,7 @@ module Dnsruby
             next if (nsec.name.wild?)
             if (check_record_proves_no_wildcard(msg, nsec))
               proven_no_wildcards = true
+              ValidationEvidence.current&.denial_record(nsec)
             end
           }
         }
@@ -590,6 +665,7 @@ module Dnsruby
         #         print "No proof that no RRSets could match through wildcard expansion\n"
         raise VerifyError.new("No proof that no RRSets could match through wildcard expansion")
       end
+      ValidationEvidence.current&.denial_wildcard_checked!
 
     end
 
@@ -622,6 +698,7 @@ module Dnsruby
             next if (nsec.name.wild?)
             if nsec.check_name_in_range(name)
               proven_name_in_nsecs = true
+              ValidationEvidence.current&.denial_record(nsec)
               qtype_present = false
               if (qtype)
                 if (nsec.types.include?qtype)
@@ -676,6 +753,7 @@ module Dnsruby
               #             return false
             end
             done = true
+            ValidationEvidence.current&.denial_record(nsec)
           }
         }
       }
@@ -771,13 +849,14 @@ module Dnsruby
           end
         end
         discovered.each do |rrset|
-          if rrset.sigs[0].expiration < Time.now.to_i
+          if rrset.sigs[0].expiration < ValidationClock.now_i
             publish_trust { @discovered_ds_store.delete(rrset) }
           elsif rrset.rrs.any? { |ds| ValidationBudget.current&.check!(1); ds.check_key(key) }
             publish_trust do
               @trusted_keys.add_key_with_expiration(key, rrset.sigs[0].expiration)
               @discovered_ds_store.delete(rrset)
             end
+            record_learned_trust(key, expiration: rrset.sigs[0].expiration, via: 'discovered DS')
           end
         end
       end
@@ -862,6 +941,7 @@ module Dnsruby
               ValidationBudget.current&.check!(1)
               if ds.check_key(key)
                 publish_trust { @trusted_keys.add_key_with_expiration(key, sigrecs.first.expiration) }
+                record_learned_trust(key, expiration: sigrecs.first.expiration, via: 'DS')
               end
             end
           end
@@ -875,20 +955,62 @@ module Dnsruby
 
       error = VerifyError.new("Signing key not found")
       canonical_data = {}
+      rejected = []
       each_matching_key(keys, sigrecs) do |keyrec, sigrec|
         begin
           ValidationBudget.current&.signature!
-          return verify_rrset_with_key(rrset, keyrec, sigrec, canonical_data)
+          verify_rrset_with_key(rrset, keyrec, sigrec, canonical_data)
+          record_verified_signature(rrset, keyrec, sigrec, keys, sigrecs, rejected)
+          return true
         rescue VerifyError => e
           error = e
+          rejected << { 'key_tag' => keyrec.key_tag, 'algorithm' => keyrec.algorithm.string,
+                        'reason' => 'signature did not verify' }
         rescue OpenSSL::OpenSSLError => e
           # Wire-decoded DNSKEYs may only be parsed by OpenSSL at this point.
           # A malformed colliding candidate must not mask a valid signing key.
           error = VerifyError.new("Signature failed to cryptographically verify: #{e.message}")
+          rejected << { 'key_tag' => keyrec.key_tag, 'algorithm' => keyrec.algorithm.string,
+                        'reason' => 'key could not be loaded' }
         end
+      end
+      recorder = ValidationEvidence.current
+      if recorder && !rejected.empty?
+        recorder.signature_failed(rrset, error, attempted: rejected,
+          signatures: sigrecs, keys: matching_keys(keys))
       end
       raise error
     end
+
+    # Only a cryptographically checked signature becomes a successful edge. Candidate
+    # signatures that were present but never tried are kept separately.
+    def record_verified_signature(rrset, keyrec, sigrec, keys, sigrecs, rejected)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      unused = sigrecs.reject { |sig| sig.equal?(sigrec) }
+      recorder.signature_verified(rrset, keyrec, sigrec,
+        role: signature_role(rrset), rejected: rejected.dup, unused: unused)
+    end
+    private :record_verified_signature
+
+    def matching_keys(keys)
+      return [] if keys.nil?
+      keys = keys.keys if keys.is_a?(KeyCache)
+      keys = keys.rrs if keys.is_a?(RRSet)
+      Array(keys)
+    end
+    private :matching_keys
+
+    def signature_role(rrset)
+      if rrset.type == Types.DS || rrset.type == Types.DLV
+        'delegation'
+      elsif rrset.type == Types.DNSKEY
+        'dnskey'
+      else
+        'data'
+      end
+    end
+    private :signature_role
 
     def verify_rrset_with_key(rrset, keyrec, sigrec, canonical_data = {})
       #  RFC 4034
@@ -956,7 +1078,7 @@ module Dnsruby
       end
       ValidationBudget.current&.check!
       #  Sort out the TTLs - set it to the minimum valid ttl
-      expiration_diff = (sigrec.expiration.to_i - Time.now.to_i).abs
+      expiration_diff = (sigrec.expiration.to_i - ValidationClock.now_i).abs
       rrset.ttl = ([rrset.ttl, sigrec.ttl, sigrec.original_ttl,
           expiration_diff].sort)[0]
       #             print "VERIFIED OK\n"
@@ -1181,6 +1303,38 @@ module Dnsruby
       return next_key
     end
 
+    def record_delegation(parent, child, ds_rrset, parent_anchor)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      parent_keys = parent_anchor.is_a?(RRSet) ? parent_anchor.rrs : [parent_anchor]
+      recorder.delegation(parent, child, ds_rrset, parent_keys: parent_keys)
+    end
+    private :record_delegation
+
+    def record_delegation_absent(parent, child, response)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      proof = response && (response.authority.rrsets('NSEC').any? || response.authority.rrsets('NSEC3').any?)
+      recorder.delegation_absent(parent, child,
+        source: proof ? 'authenticated denial present but not verified' : 'no DS RRset returned',
+        ds_count: 0)
+    end
+    private :record_delegation_absent
+
+    def record_delegation_failure(parent, child, error, ds_rrset)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      recorder.delegation_failed(parent, child, error, ds_rrset: ds_rrset)
+    end
+    private :record_delegation_failure
+
+    def record_dnskey(zone, key_rrset, ds_rrset)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      recorder.dnskey(zone, key_rrset, ds_rrset: ds_rrset)
+    end
+    private :record_dnskey
+
     def get_anchor_for(child, parent, current_anchor, parent_res = nil) # :nodoc:
       with_validation { get_anchor_for_internal(child, parent, current_anchor, parent_res) }
     end
@@ -1239,6 +1393,7 @@ module Dnsruby
               #  @TODO@ Check NSEC(3) records - still need to verify there are REALLY no ds records!
               #               print "NO DS RECORDS RETURNED FOR #{parent}\n"
               #               child_res = parent_res
+              record_delegation_absent(parent, child, ds_ret)
             else
               begin
                 if (verify(ds_rrset, current_anchor) || verify(ds_rrset))
@@ -1246,12 +1401,14 @@ module Dnsruby
                   if (!Dnssec.do_validation_with_recursor?)
                     child_res = get_nameservers_from_message(child, ds_ret)
                   end
+                  record_delegation(parent, child, ds_rrset, current_anchor)
                 end
               rescue VerifyError => e
                 #                 print "FAILED TO VERIFY DS RRSET FOR #{child}\n"
                 TheLog.info("FAILED TO VERIFY DS RRSET FOR #{child}")
                 # return false, nil
                 # raise ResolvError.new("FAILED TO VERIFY DS RRSET FOR #{child}")
+                record_delegation_failure(parent, child, e, ds_rrset)
                 raise VerifyError.new("FAILED TO VERIFY DS RRSET FOR #{child}")
               end
             end
@@ -1315,9 +1472,11 @@ module Dnsruby
           }
           begin
             verify(key_rrset, ds_rrset)
+            record_dnskey(child, key_rrset, ds_rrset)
           rescue VerifyError => e
             begin
               verify(key_rrset)
+              record_dnskey(child, key_rrset, ds_rrset)
             rescue VerifyError =>e
               verified = false
               raise VerifyError.new("Couldn't verify DNSKEY and DS records")
@@ -1447,6 +1606,7 @@ module Dnsruby
         if (actual_anchor)
           #           print("Anchor exists for #{qname}, but no signatures in #{msg}\n")
           TheLog.error("Anchor exists for #{qname}, but no signatures in #{msg}")
+          ValidationEvidence.current&.unsigned_answer(qname, signed_zone: actual_anchor.name)
           msg.security_level = Message::SecurityLevel.BOGUS
           return false
         end
@@ -1499,6 +1659,11 @@ module Dnsruby
 
       end
       TheLog.debug("Closest anchor for #{qname} is #{closest_anchor} - trying to follow down")
+      record_anchor_use(closest_anchor) if closest_anchor
+      if closest_anchor && learned_anchor?(closest_anchor)
+        ValidationEvidence.current&.learned_key(closest_anchor,
+          via: 'previously validated delegation', verifier: verifier_type_name)
+      end
       error = try_to_follow_from_anchor(closest_anchor, msg, qname)
 
       if ((msg.security_level.code < Message::SecurityLevel::SECURE) &&
@@ -1540,6 +1705,45 @@ module Dnsruby
       end
     end
 
+    def learned_anchor?(anchor)
+      @trust_mutex.synchronize { @trusted_keys.keys.include?(anchor) }
+    end
+    private :learned_anchor?
+
+    # Called when the whole-message pre-check verified from the trusted key
+    # cache. Exports the nearest covering anchor and any prior proof that
+    # established it, so warm-cache conclusions remain replayable.
+    def record_fast_path_anchor(name)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      closest = find_closest_anchor_for(name)
+      return unless closest
+      record_anchor_use(closest)
+      if learned_anchor?(closest)
+        recorder.learned_key(closest, via: 'previously validated delegation',
+          verifier: verifier_type_name, prior: prior_evidence)
+      end
+    rescue StandardError => error
+      Dnsruby.log.error { "Could not record fast-path anchor: #{error}" }
+    end
+
+    def record_anchor_use(anchor)
+      recorder = ValidationEvidence.current
+      return unless recorder
+      learned = @trust_mutex.synchronize { @trusted_keys.keys.include?(anchor) }
+      source = if @verifier_type == VerifierType::ROOT
+        'built-in root trust anchor'
+      elsif learned
+        'learned from a validated delegation'
+      else
+        'configured trust anchor'
+      end
+      recorder.trust_anchor(anchor, verifier: verifier_type_name,
+        source: source, configured: !learned,
+        prior: (learned ? prior_evidence : nil))
+    end
+    private :record_anchor_use
+
     def try_to_follow_from_anchor(closest_anchor, msg, qname) # :nodoc:
       with_validation { try_to_follow_from_anchor_internal(closest_anchor, msg, qname) }
     end
@@ -1569,6 +1773,7 @@ module Dnsruby
             if (verify(msg, actual_anchor))
               TheLog.debug("Validated #{qname}")
               msg.security_level = Message::SecurityLevel.SECURE
+              ValidationEvidence.current&.message_verified
             end
           rescue VerifyError => e
             TheLog.info("BOGUS #{qname}! Error : #{e}")
@@ -1579,6 +1784,7 @@ module Dnsruby
         end
       else
         #         print "Unable to find an anchor for #{qname}\n"
+        ValidationEvidence.current&.no_anchor(qname)
         msg.security_level = Message::SecurityLevel.INSECURE
       end
       return error

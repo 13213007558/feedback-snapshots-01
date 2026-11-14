@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# Offline DNSSEC evidence replay.
+#
+#   dnssec-evidence replay evidence.json
+#   dnssec-evidence replay evidence.json --time 2026-11-14T12:00:00Z --policy policy.json
+#
+# Exit status: 0 when replay reproduces the recorded conclusion, 1 when it
+# does not, 2 for usage or input errors.
+
+require 'json'
+require 'optparse'
+require 'time'
+require_relative '../lib/dnsruby'
+
+options = { time: nil, policy: nil }
+parser = OptionParser.new do |opts|
+  opts.banner = 'Usage: dnssec-evidence replay EVIDENCE.json [options]'
+  opts.on('--time ISO8601', 'Validation time to use (default: recorded time)') do |value|
+    begin
+      options[:time] = Time.iso8601(value)
+    rescue ArgumentError
+      warn "Invalid --time #{value.inspect}; use an ISO 8601 instant"
+      exit 2
+    end
+  end
+  opts.on('--policy FILE', 'JSON policy file with allowed trust_anchors') do |value|
+    options[:policy] = File.read(value)
+  end
+end
+
+begin
+  parser.parse!
+  command = ARGV.shift
+  unless command == 'replay' && ARGV.length == 1
+    warn parser.banner
+    exit 2
+  end
+  evidence = Dnsruby::ValidationEvidence.from(File.read(ARGV.first))
+  result = evidence.replay(time: options[:time], policy: options[:policy])
+rescue Dnsruby::ValidationEvidence::ReplayError, Errno::ENOENT, JSON::ParserError => error
+  warn "replay failed: #{error.message}"
+  exit 1
+end
+
+puts JSON.generate(
+  'conclusion' => result.security_level,
+  'cache_hit' => result.cache && result.cache['hit'] ? true : false,
+  'validation_time' => result.time,
+  'explanation_digest' => result.explanation_digest,
+  'steps' => result.steps
+)
+exit 0

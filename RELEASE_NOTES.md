@@ -12,6 +12,15 @@ compatibility notes below for the changes from 1.74.0.
 
 ### Fixes and new features
 
+* **DNSSEC validation evidence.** A validated `Message` carries
+  `validation_evidence`, a portable document listing the trust anchor,
+  delegations, DNSKEYs, selected signatures and authenticated denial proofs
+  that produced its `security_level`. Records are content addressed and unused
+  candidate signatures are kept apart from the successful path.
+  `Dnsruby::ValidationEvidence#replay` or `bin/dnssec-evidence replay` rechecks
+  the conclusion offline at a fixed time and policy. Cache hits retain their
+  original evidence, failed validations keep the steps reached, and a warm
+  trusted-key start cites the earlier proof that established the key.
 * **SVCB and HTTPS records.** Read and write these records in DNS messages and
   zone files, including relative target names, numeric `keyNNNNN` values and
   escaped text. IPv6 hints use RFC 5952 formatting.

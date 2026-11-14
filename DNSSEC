@@ -18,3 +18,74 @@ Resolver#do_validation defaults to false; set it to true to enable local DNSSEC 
 Dnsruby maintains a cache of responses, and a cache of trusted keys. Once the initial keys have been downloaded, and a set of trusted keys built up, very little overhead is required to enjoy the benefits of DNSSEC. There is, however, some initial cost (to build up the caches).
 
 Dnsruby::Dnssec.clear_trusted_keys clears learned DNSKEYs and all DS/DLV anchors, including the built-in root DS anchors; configured DNSKEY anchors are retained. To remove local anchors and built-in root trust, call clear_trust_anchors followed by clear_trusted_keys. Use remove_trust_anchor or clear_trust_anchors to remove local anchors explicitly. Dnsruby::Dnssec.reset restores the built-in root anchors, clears local anchors and cached keys, and resets the validation policy and resolver settings to their defaults.
+
+DNSSEC validation evidence
+--------------------------
+
+Every local validation records how it reached its conclusion. After a query
+(set Resolver#do_validation and Resolver#dnssec both true), the returned
+Message carries a Dnsruby::ValidationEvidence object in
+Message#validation_evidence:
+
+    response = res.query('example.com', Types.A)
+    evidence = response.validation_evidence
+    evidence.to_json              # portable, self-contained document
+    evidence.conclusion           # "SECURE", "INSECURE", "BOGUS", ...
+
+The document contains only the material the validator used: the configured or
+built-in trust anchor, each delegation's signed DS and the parent key that
+authenticated it, the child DNSKEY RRSet and the DS-matched key, the selected
+data signature, and the signed NSEC/NSEC3 records behind an authenticated
+denial. Records are content addressed by the SHA-256 of their canonical wire
+form and are referenced by steps, so the same key is never duplicated.
+
+Candidate signatures that were present but not selected are listed under
+"candidates"; they are deliberately excluded from the explanation digest. A
+successful path records the one signature and key that were actually checked.
+
+When a response comes from the cache, the cached Message keeps its original
+security level and evidence, so a cache hit can still explain itself.
+
+A later validation may reuse a key learned during an earlier one. That export
+does not pretend the key was configured: it starts at a `learned_key` step and
+embeds the earlier proof that established the key, which replay rechecks too.
+
+On failure the steps that were reached are retained, including the specific
+signature or delegation that failed. Failed attempts are labelled separately
+from the attempt that produced the conclusion, so an unsuccessful policy
+attempt is never drawn as part of a later successful path.
+
+Offline replay
+
+ValidationEvidence#replay rechecks the recorded signatures and trust edges
+without any network access. Pass the time and policy the conclusion was
+reached at:
+
+    result = evidence.replay(time: evidence.validation_time, policy: evidence.policy)
+    result.security_level       # reproduces the recorded conclusion
+    result.explanation_digest   # unchanged proof identity
+
+    Dnsruby::ValidationEvidence.replay(File.read('evidence.json'),
+      time: Time.utc(2026, 11, 14, 12),
+      policy: JSON.parse(File.read('policy.json')))
+
+Replay fails with Dnsruby::ValidationEvidence::ReplayError when a required
+record is removed, a signature no longer verifies at the fixed time, a
+recorded DS does not match its DNSKEY, a denial proof does not cover the
+query, or the policy no longer allows the recorded trust anchor. Adding an
+unrelated valid record does not change the explanation digest or the replay
+result.
+
+The integrity seal covers the query, time, policy, used steps and the exact
+bytes of each referenced record. It does not cover unused candidates or
+records, so an independent auditor can add a legitimate extra signature
+without changing the explanation, while any change to a used record is
+detected.
+
+A command-line entry point is included for auditors without a Ruby harness:
+
+    bin/dnssec-evidence replay evidence.json \
+      --time 2026-11-14T12:00:00Z --policy policy.json
+
+It prints the reproduced conclusion, cache provenance and explanation digest,
+and exits non-zero when the evidence no longer supports the conclusion.

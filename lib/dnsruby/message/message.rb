@@ -91,6 +91,10 @@ module Dnsruby
     #  true. It will be false otherwise.
     attr_accessor :cached
 
+    #  DNSSEC validation evidence explaining how this Message's security_level
+    #  was reached. See Dnsruby::ValidationEvidence.
+    attr_accessor :validation_evidence
+
 
 
     #  Create a new Message. Takes optional name, type and class
@@ -119,6 +123,7 @@ module Dnsruby
       @security_level = SecurityLevel.UNCHECKED
       @security_error = nil
       @cached = false
+      @validation_evidence = nil
       type = Types::A
       klass = Classes::IN
       if (args.length > 0)
