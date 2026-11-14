@@ -39,6 +39,7 @@ DESCRIPTION
     "lib/psych/json/ruby_events.rb", "lib/psych/json/stream.rb",
     "lib/psych/json/tree_builder.rb", "lib/psych/json/yaml_events.rb",
     "lib/psych/nodes.rb", "lib/psych/nodes/alias.rb",
+    "lib/psych/nodes/ast_validator.rb",
     "lib/psych/nodes/document.rb", "lib/psych/nodes/mapping.rb",
     "lib/psych/nodes/node.rb", "lib/psych/nodes/scalar.rb",
     "lib/psych/nodes/sequence.rb", "lib/psych/nodes/stream.rb",

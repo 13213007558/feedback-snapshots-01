@@ -51,6 +51,16 @@ module Psych
       alias :transform :to_ruby
 
       ###
+      # Validate the tree and only then convert it to Ruby.  Raises
+      # Psych::InvalidAST without invoking any object construction hooks when
+      # the tree is malformed.  Accepts the same keyword arguments as
+      # #to_ruby.
+      def validated_to_ruby(**options)
+        validate!
+        to_ruby(**options)
+      end
+
+      ###
       # Convert this node to YAML.
       #
       # See also Psych::Visitors::Emitter
@@ -64,6 +74,34 @@ module Psych
         io
       end
       alias :to_yaml :yaml
+
+      ###
+      # Validate the tree and only then emit it as YAML.  Raises
+      # Psych::InvalidAST without writing anything when the tree is malformed.
+      # Accepts the same arguments as #yaml.
+      def validated_yaml(io = nil, options = {})
+        validate!
+        yaml(io, options)
+      end
+
+      ###
+      # Validate the structural invariants of this node and every node reachable
+      # through it.  Returns the node when the tree is well formed and raises
+      # Psych::InvalidAST otherwise.
+      #
+      # Parser-produced trees always pass; this is intended for hand-built or
+      # plugin-modified trees before they reach object construction or output.
+      # See Psych::Nodes::ASTValidator.
+      def validate!
+        Nodes::ASTValidator.validate!(self)
+      end
+
+      ###
+      # Returns +true+ when the tree rooted at this node passes structural
+      # validation, +false+ otherwise.  Never raises for a malformed tree.
+      def valid_ast?
+        Nodes::ASTValidator.valid?(self)
+      end
 
       def alias?;    false; end
       def document?; false; end

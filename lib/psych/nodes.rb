@@ -6,6 +6,7 @@ require_relative 'nodes/sequence'
 require_relative 'nodes/scalar'
 require_relative 'nodes/mapping'
 require_relative 'nodes/alias'
+require_relative 'nodes/ast_validator'
 
 module Psych
   ###

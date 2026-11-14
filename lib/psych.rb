@@ -379,6 +379,39 @@ module Psych
   end
 
   ###
+  # Controlled entry point for transforming a YAML AST.
+  #
+  # Plugins that rewrite the parse tree returned by Psych.parse or
+  # Psych.parse_stream cannot assume the resulting nodes still match the
+  # structure a parser would have produced.  This method enforces an
+  # admit -> transform -> re-admit workflow:
+  #
+  # 1. +root+ is structurally validated before the block runs, so a plugin is
+  #    never handed a malformed tree.
+  # 2. The block receives the validated tree and returns the (possibly
+  #    modified) tree.
+  # 3. The returned tree is validated again before it is handed back, so edits
+  #    made inside the callback cannot bypass the admission check.
+  #
+  # Psych::InvalidAST is raised when validation fails at either stage; the
+  # object construction and output visitors are never reached for a rejected
+  # tree.  See Psych::Nodes::ASTValidator for the rules that are enforced.
+  #
+  #   tree = Psych.parse_stream(yaml)
+  #   safe_tree = Psych.transform_ast(tree) { |node| rewrite(node) }
+  #   config = safe_tree.validated_to_ruby
+  def self.transform_ast root
+    Nodes::ASTValidator.validate!(root)
+    result = yield root
+    unless result.is_a?(Nodes::Node)
+      raise Psych::InvalidAST,
+            "AST transform must return a Psych::Nodes::Node, got #{result.class}"
+    end
+    Nodes::ASTValidator.validate!(result)
+    result
+  end
+
+  ###
   # Parse a YAML string in +yaml+.  Returns the Psych::Nodes::Document.
   # +filename+ is used in the exception message if a Psych::SyntaxError is
   # raised.

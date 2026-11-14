@@ -25,4 +25,14 @@ module Psych
       super "Tried to #{action} unspecified class: #{klass_name}"
     end
   end
+
+  # Raised when a hand-built or plugin-modified YAML AST fails the structural
+  # validation performed by Psych::Nodes::ASTValidator.  A parser-produced AST
+  # can never trigger this; it only guards trees whose shape is not guaranteed
+  # to match what libyaml emits.
+  class InvalidAST < Exception
+    def initialize reason
+      super "Invalid YAML AST: #{reason}"
+    end
+  end
 end
