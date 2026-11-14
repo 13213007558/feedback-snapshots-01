@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* `Loofah::HTML5::Scrub.scrub_css`, `Loofah::HTML5::Scrub.scrub_css_attribute` and `Loofah::Helpers.sanitize_css` accept `allowed_custom_properties:`, a caller-supplied list of CSS custom property names that may be retained. Names remain case-sensitive, `var()` references are resolved transitively within the same declaration list, fallbacks are validated, and cycles are rejected; a reference that cannot be proven safe from that context is dropped. Without the option, custom properties and `var()` continue to be rejected.
+
 ## 2.25.3 / 2026-11-01
 
 ### Security

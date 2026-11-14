@@ -287,6 +287,40 @@ Loofah has two "view helpers": `Loofah::Helpers.sanitize` and `Loofah::Helpers.s
 
 These are not required automatically. You must require `loofah/helpers` to use them.
 
+`Loofah::Helpers.sanitize_css` is a replacement for Rails's `sanitize_css` helper. By default it
+rejects CSS custom properties and `var()` references. A theme editor that controls a small set of
+custom properties can pass their decoded names in `allowed_custom_properties`:
+
+``` ruby
+Loofah::Helpers.sanitize_css(
+  "--brand:#369; --tone:var(--brand); color:var(--tone)",
+  allowed_custom_properties: ["--brand", "--tone"],
+)
+# => "--brand:#369;--tone:var(--brand);color:var(--tone);"
+
+Loofah::Helpers.sanitize_css(
+  "--leak:url(https://evil.example/x.png); --tone:var(--leak); color:var(--tone)",
+  allowed_custom_properties: ["--leak", "--tone"],
+)
+# => ""
+```
+
+The same option is accepted by `Loofah::HTML5::Scrub.scrub_css` and
+`Loofah::HTML5::Scrub.scrub_css_attribute`. The rules are intentionally conservative:
+
+* Custom property names are ASCII case-sensitive (the CSS rule). The `var` function name is
+  matched ASCII case-insensitively (the CSS function rule).
+* A `var()` reference is retained only when it names an allowlisted custom property with a
+  definition in the same declaration list, and that definition is itself provably safe. Fallbacks
+  are validated, but they do not make an unresolved reference acceptable: the element may inherit
+  a value for that name.
+* Definitions involved in a reference cycle are invalid, and any declaration depending on one is
+  dropped.
+* Values may contain colors, numbers, dimensions, identifiers, strings, allowed functions and
+  nested `var()` references. URLs, `attr()` (which can read a URL from an attribute), unknown
+  functions, at-keywords and context-dependent CSS-wide keywords such as `inherit` and `revert`
+  are rejected.
+
 
 ## Requirements
 

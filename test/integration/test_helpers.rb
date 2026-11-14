@@ -52,5 +52,21 @@ class IntegrationTestHelpers < Loofah::TestCase
         Loofah::Helpers.sanitize_css("display:block;background-image:url(http://www.ragingplatypus.com/i/cam-full.jpg);background-color:blue"),
       )
     end
+
+    it "retains allowlisted custom properties and their multi-level references" do
+      assert_equal(
+        "--brand:#369;--tone:var(--brand);color:var(--tone);",
+        Loofah::Helpers.sanitize_css(
+          "--brand:#369; --tone:var(--brand); color:var(--tone)",
+          allowed_custom_properties: ["--brand", "--tone"],
+        ),
+      )
+    end
+
+    it "does not retain a resource reference passed indirectly through a variable" do
+      style = "--leak:url(https://evil.example/x.png); --tone:var(--leak); color:var(--tone)"
+
+      assert_empty(Loofah::Helpers.sanitize_css(style, allowed_custom_properties: ["--leak", "--tone"]))
+    end
   end
 end

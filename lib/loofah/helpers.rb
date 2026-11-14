@@ -31,8 +31,22 @@ module Loofah
       #    Loofah::Helpers.sanitize_css("display:block;background-image:url(http://example.com/foo.jpg)")
       #    # => "display: block;"
       #
-      def sanitize_css(style_string)
-        ::Loofah::HTML5::Scrub.scrub_css(style_string)
+      #  A theme editor can retain a small set of CSS custom properties by passing their decoded
+      #  names. References are only accepted when they resolve, transitively, to a provably safe
+      #  definition in the same declaration list:
+      #
+      #    Loofah::Helpers.sanitize_css(
+      #      "--brand:#369; --accent:var(--brand); color:var(--accent)",
+      #      allowed_custom_properties: ["--brand", "--accent"],
+      #    )
+      #    # => "--brand:#369;--accent:var(--brand);color:var(--accent);"
+      #
+      def sanitize_css(style_string, allowed_custom_properties = nil, **options)
+        if allowed_custom_properties.nil? && options.empty?
+          ::Loofah::HTML5::Scrub.scrub_css(style_string)
+        else
+          ::Loofah::HTML5::Scrub.scrub_css(style_string, allowed_custom_properties, **options)
+        end
       end
 
       #
@@ -96,8 +110,12 @@ module Loofah
           Loofah::Helpers.sanitize(html)
         end
 
-        def sanitize_css(style_string, *args)
-          Loofah::Helpers.sanitize_css(style_string)
+        def sanitize_css(style_string, *args, **options)
+          if args.empty? && options.empty?
+            Loofah::Helpers.sanitize_css(style_string)
+          else
+            Loofah::Helpers.sanitize_css(style_string, *args, **options)
+          end
         end
       end
 

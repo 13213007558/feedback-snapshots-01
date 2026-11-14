@@ -3,6 +3,7 @@
 require "cgi/escape"
 require "cgi/util" if RUBY_VERSION < "3.5"
 require "crass"
+require_relative "custom_properties"
 
 module Loofah
   module HTML5 # :nodoc:
@@ -68,7 +69,10 @@ module Loofah
         end
 
         #  alternative implementation of the html5lib attribute scrubbing algorithm
-        def scrub_attributes(node)
+        #
+        #  `allowed_custom_properties` is forwarded to `scrub_css_attribute`; see `scrub_css`.
+        def scrub_attributes(node, allowed_custom_properties = nil, **options)
+          allowed_custom_properties = CustomProperties.option_value(allowed_custom_properties, options)
           node.attribute_nodes.each do |attr_node|
             attr_name = prefixed_attribute_name(attr_node)
 
@@ -84,7 +88,7 @@ module Loofah
             scrub_attribute_value(node, attr_node, attr_name)
           end
 
-          scrub_css_attribute(node)
+          scrub_css_attribute(node, allowed_custom_properties: allowed_custom_properties)
 
           node.attribute_nodes.each do |attr_node|
             if attr_node.value !~ /[^[:space:]]/ && attr_node.name !~ DATA_ATTRIBUTE_NAME
@@ -128,18 +132,34 @@ module Loofah
           false
         end
 
-        def scrub_css_attribute(node)
+        def scrub_css_attribute(node, allowed_custom_properties = nil, **options)
+          allowed_custom_properties = CustomProperties.option_value(allowed_custom_properties, options)
           style = node.attributes["style"]
-          style.value = scrub_css(style.value) if style
+          style.value = scrub_css(style.value, allowed_custom_properties: allowed_custom_properties) if style
         end
 
-        def scrub_css(style)
+        #  Scrub a CSS declaration list.
+        #
+        #  `allowed_custom_properties` is an optional collection of decoded custom property names
+        #  (for example, `["--brand", "--space-2"]`). When it is empty, custom properties and
+        #  `var()` references are rejected exactly as before. When it is non-empty, a custom
+        #  property is retained only if it is allowlisted and can be proven safe from definitions in
+        #  the same declaration list. See Loofah::HTML5::CustomProperties for the rules.
+        def scrub_css(style, allowed_custom_properties = nil, **options)
+          allowed_custom_properties = CustomProperties.option_value(allowed_custom_properties, options)
+          allowed_names = CustomProperties.allowed_names(allowed_custom_properties)
+          return CustomProperties::Evaluator.new(style, allowed_names).sanitize if allowed_names.any?
+
           style_tree = Crass.parse_properties(style)
           sanitized_tree = []
 
           style_tree.each do |node|
             next unless node[:node] == :property
             next if node[:children].any? { |child| CSS_URLISH_NODES.include?(child[:node]) }
+            # Without an allowlist there is no way to prove what a var() reference resolves to, so
+            # drop the declaration even when the var() is nested inside an otherwise allowed
+            # function.
+            next if CustomProperties.contains_var_function?(node[:children])
 
             name = node[:name].downcase
             next unless SafeList::ALLOWED_CSS_PROPERTIES.include?(name) ||

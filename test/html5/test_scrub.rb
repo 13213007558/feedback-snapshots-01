@@ -168,6 +168,196 @@ class UnitHTML5Scrub < Loofah::TestCase
     end
   end
 
+  describe ".scrub_css with custom properties" do
+    def scrub_css(style, allowed_custom_properties)
+      Loofah::HTML5::Scrub.scrub_css(style, allowed_custom_properties: allowed_custom_properties)
+    end
+
+    describe "positive cases" do
+      it "retains a caller-allowlisted color and size" do
+        assert_equal(
+          "--brand:#369;--space-4:4px;color:var(--brand);padding:var(--space-4);",
+          scrub_css("--brand:#369; --space-4:4px; color:var(--brand); padding:var(--space-4)", ["--brand", "--space-4"]),
+        )
+      end
+
+      it "retains a multi-level variable chain" do
+        assert_equal(
+          "--brand:#369;--tone:var(--brand);--accent:var(--tone);color:var(--accent);border-color:var(--accent);",
+          scrub_css(
+            "--brand:#369; --tone:var(--brand); --accent:var(--tone); color:var(--accent); border-color:var(--accent)",
+            ["--brand", "--tone", "--accent"],
+          ),
+        )
+      end
+
+      it "retains a multi-level size calculation" do
+        assert_equal(
+          "--unit:4px;--gap:calc(var(--unit) * 2);--edge:var(--gap);padding:var(--edge);",
+          scrub_css("--unit:4px; --gap:calc(var(--unit) * 2); --edge:var(--gap); padding:var(--edge)", ["--unit", "--gap", "--edge"]),
+        )
+      end
+
+      it "validates but never uses an unused safe fallback" do
+        assert_equal(
+          "--brand:#369;color:var(--brand, #f00);",
+          scrub_css("--brand:#369; color:var(--brand, #f00)", ["--brand"]),
+        )
+      end
+
+      it "retains a safe fallback used by another definition" do
+        assert_equal(
+          "--brand:#369;--fallback:var(--brand, blue);color:var(--fallback);",
+          scrub_css("--brand:#369; --fallback:var(--brand, blue); color:var(--fallback)", ["--brand", "--fallback"]),
+        )
+      end
+
+      it "preserves the raw spelling of escaped variable names" do
+        assert_equal(
+          "--br\\61 nd:red;color:var(--brand);",
+          scrub_css("--br\\61 nd:red; color:var(--brand)", ["--brand"]),
+        )
+      end
+
+      it "preserves important on a definition" do
+        assert_equal(
+          "--brand:#369 !important;color:var(--brand);",
+          scrub_css("--brand:#369 !important; color:var(--brand)", ["--brand"]),
+        )
+      end
+    end
+
+    describe "case rules" do
+      it "matches custom property names case-sensitively" do
+        assert_equal("--Brand:#369;color:var(--Brand);", scrub_css("--Brand:#369; color:var(--Brand)", ["--Brand"]))
+        assert_equal("--Brand:#369;", scrub_css("--Brand:#369; color:var(--brand)", ["--Brand"]))
+        assert_empty(scrub_css("--Brand:#369; color:var(--Brand)", ["--brand"]))
+      end
+
+      it "matches the var function name case-insensitively" do
+        assert_equal("--brand:red;color:VAR(--brand);", scrub_css("--brand:red; color:VAR(--brand)", ["--brand"]))
+      end
+    end
+
+    describe "negative cases" do
+      it "drops a direct url() in a definition" do
+        assert_empty(scrub_css("--brand:url(https://evil.example/x.png); color:var(--brand)", ["--brand"]))
+      end
+
+      it "drops a url() passed indirectly through variables" do
+        assert_empty(
+          scrub_css(
+            "--leak:url(https://evil.example/x.png); --tone:var(--leak); color:var(--tone)",
+            ["--leak", "--tone"],
+          ),
+        )
+      end
+
+      it "drops an external reference hidden inside an allowed function" do
+        assert_empty(scrub_css("--leak:linear-gradient(url(https://evil.example/x.png), red); color:var(--leak)", ["--leak"]))
+      end
+
+      it "drops a url() reached through an escaped function name" do
+        assert_empty(scrub_css("--leak:u\\72 l(https://evil.example/x.png); color:var(--leak)", ["--leak"]))
+      end
+
+      it "drops a url() that only appears after comments are removed" do
+        assert_empty(scrub_css("--leak:u/**/rl(https://evil.example/x.png); color:var(--leak)", ["--leak"]))
+      end
+
+      it "drops attr(), which can read a url from an attribute" do
+        assert_empty(scrub_css("--leak:attr(data-bg url); color:var(--leak)", ["--leak"]))
+      end
+
+      it "drops an unsafe fallback even when it is not selected" do
+        assert_equal(
+          "--brand:#369;",
+          scrub_css("--brand:#369; color:var(--brand, url(https://evil.example/x.png))", ["--brand"]),
+        )
+      end
+
+      it "drops an unsafe fallback on an ordinary declaration" do
+        assert_equal(
+          "--brand:#369;",
+          scrub_css("--brand:#369; color:var(--brand, inherit)", ["--brand"]),
+        )
+      end
+
+      it "does not reconstruct a var() that was split by comments in a selection" do
+        result = scrub_css("--brand:#369; color:v/**/ar(--brand)", ["--brand"])
+
+        refute_includes(result, "var(")
+        refute_includes(result, "url(")
+      end
+
+      it "drops a fallback that depends on an unsafe definition" do
+        assert_equal(
+          "--brand:#369;",
+          scrub_css("--brand:#369; --leak:url(https://evil.example/x.png); color:var(--brand, var(--leak))", ["--brand", "--leak"]),
+        )
+      end
+
+      it "does not accept a fallback as evidence for a reference with no definition in this block" do
+        assert_empty(scrub_css("color:var(--brand, red)", ["--brand"]))
+      end
+
+      it "drops definitions and declarations that participate in a cycle" do
+        assert_empty(scrub_css("--a:var(--b); --b:var(--a); color:var(--a)", ["--a", "--b"]))
+        assert_empty(scrub_css("--a:var(--a); color:var(--a)", ["--a"]))
+      end
+
+      it "drops a cycle reached through a safe-looking fallback" do
+        assert_empty(scrub_css("--a:var(--b, red); --b:var(--a); color:var(--a)", ["--a", "--b"]))
+      end
+
+      it "drops a reference to a definition outside the allowlist" do
+        assert_empty(scrub_css("--other:red; --brand:var(--other); color:var(--brand)", ["--brand"]))
+      end
+
+      it "drops a definition that is not in the allowlist" do
+        assert_empty(scrub_css("--other:red; color:var(--other)", ["--brand"]))
+      end
+
+      it "drops a definition that uses context-dependent CSS-wide keywords" do
+        assert_empty(scrub_css("--brand:inherit; color:var(--brand)", ["--brand"]))
+        assert_empty(scrub_css("--brand:revert; color:var(--brand)", ["--brand"]))
+      end
+
+      it "drops an empty definition" do
+        assert_empty(scrub_css("--brand:; color:var(--brand)", ["--brand"]))
+      end
+
+      it "drops a malformed var() call" do
+        assert_equal("--brand:red;", scrub_css("--brand:red; color:var(red --brand)", ["--brand"]))
+      end
+
+      it "does not emit earlier duplicate definitions that could mask an unsafe last one" do
+        assert_empty(scrub_css("--brand:blue; --brand:url(https://evil.example/x.png); color:var(--brand)", ["--brand"]))
+      end
+    end
+
+    describe "backward compatibility" do
+      it "rejects custom properties when no allowlist is supplied" do
+        assert_empty(scrub_css("--brand:red; color:var(--brand)", nil))
+      end
+
+      it "keeps existing ordinary-property behavior when a list is supplied" do
+        assert_equal(
+          "background:#ABC012;margin:0;",
+          scrub_css("background: #ABC012; margin:0", ["--brand"]),
+        )
+      end
+    end
+
+    describe "allowlist validation" do
+      it "rejects malformed names" do
+        assert_raises(ArgumentError) { scrub_css("", ["brand"]) }
+        assert_raises(ArgumentError) { scrub_css("", ["--bad name"]) }
+        assert_raises(ArgumentError) { scrub_css("", [nil]) }
+      end
+    end
+  end
+
   describe ".allowed_uri?" do
     it "transcodes a string in another encoding before checking it" do
       assert(Loofah::HTML5::Scrub.allowed_uri?("http://example.com/é".encode(Encoding::ISO_8859_1)))
