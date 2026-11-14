@@ -1,6 +1,6 @@
 # frozen_string_literal: false
 require_relative "validation"
-require_relative "../parsers/baseparser"
+require_relative "../document"
 
 module REXML
   module Validation
@@ -32,508 +32,439 @@ module REXML
     # * nsName
     # * except
     # * name
+    #
+    # The validator consumes parser events as a token stream.  Each state is a
+    # set of pattern derivatives (see Brzozowski derivatives), so no mutable
+    # backtracking state is shared between documents.  Interleaving is handled
+    # by allowing either branch to consume the next token, which keeps every
+    # legal permutation and rejects permutations that skip a required branch.
     class RelaxNG
       include Validator
 
-      INFINITY = 1.0 / 0.0
-      EMPTY = Event.new( nil )
-      TEXT = [:start_element, "text"]
+      FAIL = Object.new
+      def FAIL.inspect
+        "FAIL"
+      end
+
+      EMPTY = [:empty].freeze
+
       attr_accessor :current
       attr_accessor :count
       attr_reader :references
 
-      # FIXME: Namespaces
       def initialize source
-        parser = REXML::Parsers::BaseParser.new( source )
-
         @count = 0
         @references = {}
-        @root = @current = Sequence.new(self)
-        @root.previous = true
-        states = [ @current ]
-        begin
-          event = parser.pull
-          case event[0]
-          when :start_element
-            case event[1]
-            when "empty"
-            when "element", "attribute", "text", "value"
-              states[-1] << event
-            when "optional"
-              states << Optional.new( self )
-              states[-2] << states[-1]
-            when "choice"
-              states << Choice.new( self )
-              states[-2] << states[-1]
-            when "oneOrMore"
-              states << OneOrMore.new( self )
-              states[-2] << states[-1]
-            when "zeroOrMore"
-              states << ZeroOrMore.new( self )
-              states[-2] << states[-1]
-            when "group"
-              states << Sequence.new( self )
-              states[-2] << states[-1]
-            when "interleave"
-              states << Interleave.new( self )
-              states[-2] << states[-1]
-            when "mixed"
-              states << Interleave.new( self )
-              states[-2] << states[-1]
-              states[-1] << TEXT
-            when "define"
-              states << [ event[2]["name"] ]
-            when "ref"
-              states[-1] << Ref.new( event[2]["name"] )
-            when "anyName"
-              states << AnyName.new( self )
-              states[-2] << states[-1]
-            when "nsName"
-            when "except"
-            when "name"
-            when "data"
-            when "param"
-            when "include"
-            when "grammar"
-            when "start"
-            when "externalRef"
-            when "notAllowed"
-            end
-          when :end_element
-            case event[1]
-            when "element", "attribute"
-              states[-1] << event
-            when "zeroOrMore", "oneOrMore", "choice", "optional",
-              "interleave", "group", "mixed"
-              states.pop
-            when "define"
-              ref = states.pop
-              @references[ ref.shift ] = ref
-            #when "empty"
-            end
-          when :end_document
-            states[-1] << event
-          when :text
-            states[-1] << event
+        document = Document.new( source )
+        root = document.root
+        raise ArgumentError, "RelaxNG schema has no root element" if root.nil?
+        if root.name == "grammar"
+          root.elements.each( "define" ) do |define|
+            @references[ define.attributes["name"] ] = define
           end
-        end while event[0] != :end_document
+          start = root.elements[ "start" ]
+          raise ArgumentError, "RelaxNG grammar has no start pattern" if start.nil?
+          @root_pattern = compile_children( start, :sequence )
+        else
+          @root_pattern = compile_pattern( root )
+        end
+        @resolved = {}
+        reset
+      end
+
+      def reset
+        @current = [ @root_pattern ]
+        @document_finished = false
+        @depth = 0
+        self
       end
 
       def receive event
         validate( event )
       end
-    end
 
-    class State
-      def initialize( context )
-        @previous = []
-        @events = []
-        @current = 0
-        @count = context.count += 1
-        @references = context.references
-        @value = false
+      def dump
+        puts @root_pattern.inspect
       end
 
-      def reset
-        return if @current == 0
-        @current = 0
-        @events.each {|s| s.reset if s.kind_of? State }
-      end
-
-      def previous=( previous )
-        @previous << previous
-      end
-
-      def next( event )
-        #print "In next with #{event.inspect}.  "
-        #p @previous
-        return @previous.pop.next( event ) if @events[@current].nil?
-        expand_ref_in( @events, @current ) if @events[@current].class == Ref
-        if ( @events[@current].kind_of? State )
-          @current += 1
-          @events[@current-1].previous = self
-          return @events[@current-1].next( event )
-        end
-        if ( @events[@current].matches?(event) )
-          @current += 1
-          if @events[@current].nil?
-            @previous.pop
-          elsif @events[@current].kind_of? State
-            @current += 1
-            @events[@current-1].previous = self
-            @events[@current-1]
-          else
-            self
-          end
-        else
-          nil
-        end
-      end
-
-      def to_s
-        # Abbreviated:
-        self.class.name =~ /(?:::)(\w)\w+$/
-        # Full:
-        #self.class.name =~ /(?:::)(\w+)$/
-        "#$1.#@count"
-      end
-
-      def inspect
-        "< #{to_s} #{@events.collect{|e|
-          pre = e == @events[@current] ? '#' : ''
-          pre + e.inspect unless self == e
-        }.join(', ')} >"
-      end
-
-      def expected
-        [@events[@current]]
-      end
-
-      def <<( event )
-        add_event_to_arry( @events, event )
-      end
-
-
-      protected
-      def expand_ref_in( arry, ind )
-        new_events = []
-        @references[ arry[ind].to_s ].each{ |evt|
-          add_event_to_arry(new_events,evt)
-        }
-        arry[ind,1] = new_events
-      end
-
-      def add_event_to_arry( arry, evt )
-        evt = generate_event( evt )
-        if evt.kind_of? String
-          arry[-1].event_arg = evt if arry[-1].kind_of? Event and @value
-          @value = false
-        else
-          arry << evt
-        end
-      end
-
-      def generate_event( event )
-        return event if event.kind_of? State or event.class == Ref
-        evt = nil
-        arg = nil
+      def validate event
         case event[0]
         when :start_element
-          case event[1]
-          when "element"
-            evt = :start_element
-            arg = event[2]["name"]
-          when "attribute"
-            evt = :start_attribute
-            arg = event[2]["name"]
-          when "text"
-            evt = :text
-          when "value"
-            evt = :text
-            @value = true
-          end
+          start_element( event )
+        when :end_element
+          end_element( event )
         when :text
-          return event[1]
+          advance( [ :text, event[1] ], event )
+        when :cdata
+          advance( [ :text, event[1] ], event )
         when :end_document
-          return Event.new( event[0] )
-        else # then :end_element
-          case event[1]
-          when "element"
-            evt = :end_element
-          when "attribute"
-            evt = :end_attribute
+          unless @document_finished and nullable_states?( @current )
+            validation_error( event, "end of document" )
           end
-        end
-        Event.new( evt, arg )
-      end
-    end
-
-
-    class Sequence < State
-      def matches?(event)
-        @events[@current].matches?( event )
-      end
-    end
-
-
-    class Optional < State
-      def next( event )
-        if @current == 0
-          rv = super
-          return rv if rv
-          @prior = @previous.pop
-          @prior.next( event )
+        when :comment, :processing_instruction, :xmldecl
+          # Comments, PIs and the XML declaration are not part of the grammar.
         else
-          super
-        end
-      end
-
-      def matches?(event)
-        @events[@current].matches?(event) ||
-        (@current == 0 and @previous[-1].matches?(event))
-      end
-
-      def expected
-        return [ @prior.expected, @events[0] ].flatten if @current == 0
-        [@events[@current]]
-      end
-    end
-
-
-    class ZeroOrMore < Optional
-      def next( event )
-        expand_ref_in( @events, @current ) if @events[@current].class == Ref
-        if ( @events[@current].matches?(event) )
-          @current += 1
-          if @events[@current].nil?
-            @current = 0
-            self
-          elsif @events[@current].kind_of? State
-            @current += 1
-            @events[@current-1].previous = self
-            @events[@current-1]
-          else
-            self
-          end
-        else
-          @prior = @previous.pop
-          return @prior.next( event ) if @current == 0
-          nil
+          validation_error( event, event[0] )
         end
       end
 
       def expected
-        return [ @prior.expected, @events[0] ].flatten if @current == 0
-        [@events[@current]]
-      end
-    end
-
-
-    class OneOrMore < State
-      def initialize context
-        super
-        @ord = 0
-      end
-
-      def reset
-        super
-        @ord = 0
-      end
-
-      def next( event )
-        expand_ref_in( @events, @current ) if @events[@current].class == Ref
-        if ( @events[@current].matches?(event) )
-          @current += 1
-          @ord += 1
-          if @events[@current].nil?
-            @current = 0
-            self
-          elsif @events[@current].kind_of? State
-            @current += 1
-            @events[@current-1].previous = self
-            @events[@current-1]
-          else
-            self
-          end
-        else
-          return @previous.pop.next( event ) if @current == 0 and @ord > 0
-          nil
-        end
-      end
-
-      def matches?( event )
-        @events[@current].matches?(event) ||
-        (@current == 0 and @ord > 0 and @previous[-1].matches?(event))
-      end
-
-      def expected
-        if @current == 0 and @ord > 0
-          [@previous[-1].expected, @events[0]].flatten
-        else
-          [@events[@current]]
-        end
-      end
-    end
-
-
-    class Choice < State
-      def initialize context
-        super
-        @choices = []
-      end
-
-      def reset
-        super
-        @events = []
-        @choices.each { |c| c.each { |s| s.reset if s.kind_of? State } }
-      end
-
-      def <<( event )
-        add_event_to_arry( @choices, event )
-      end
-
-      def next( event )
-        # Make the choice if we haven't
-        if @events.size == 0
-          c = 0 ; max = @choices.size
-          while c < max
-            if @choices[c][0].class == Ref
-              expand_ref_in( @choices[c], 0 )
-              @choices += @choices[c]
-              @choices.delete( @choices[c] )
-              max -= 1
-            else
-              c += 1
-            end
-          end
-          @events = @choices.find { |evt| evt[0].matches? event }
-          # Remove the references
-          # Find the events
-        end
-        unless @events
-          @events = []
-          return nil
-        end
-        super
-      end
-
-      def matches?( event )
-        return @events[@current].matches?( event ) if @events.size > 0
-        !@choices.find{|evt| evt[0].matches?(event)}.nil?
-      end
-
-      def expected
-        return [@events[@current]] if @events.size > 0
-        @choices.collect do |x|
-          if x[0].kind_of? State
-            x[0].expected
-          else
-            x[0]
-          end
-        end.flatten
+        describe( @current )
       end
 
       def inspect
-        "< #{to_s} #{@choices.collect{|e| e.collect{|f|f.to_s}.join(', ')}.join(' or ')} >"
+        "<RelaxNG #{describe( @current )}>"
       end
 
-      protected
-      def add_event_to_arry( arry, evt )
-        if evt.kind_of? State or evt.class == Ref
-          arry << [evt]
-        elsif evt[0] == :text
-         if arry[-1] and
-            arry[-1][-1].kind_of?( Event ) and
-            arry[-1][-1].event_type == :text and @value
+      private
 
-            arry[-1][-1].event_arg = evt[1]
-            @value = false
-         end
+      def start_element event
+        if @document_finished
+          validation_error( event, "a second root element" )
+        end
+        states = step_current( [ :start_element, event[1] ] )
+        if states.empty?
+          validation_error( event, "element #{event[1].inspect}" )
+        end
+        states = consume_attributes( states, event[2] || {} )
+        if states.empty?
+          validation_error( event, "attributes #{event[2].inspect}" )
+        end
+        @current = states
+        @depth += 1
+      end
+
+      def end_element event
+        if @depth == 0
+          validation_error( event, "end of element" )
+        end
+        advance( [ :end_element ], event )
+        @depth -= 1
+        @document_finished = true if @depth == 0
+      end
+
+      def advance token, event
+        states = step_current( token )
+        if states.empty?
+          got = token[0] == :text ? token[1] : token[0]
+          validation_error( event, got )
+        end
+        @current = states
+        @count += 1
+      end
+
+      def step_current token
+        step_from( @current, [ token ] )
+      end
+
+      def step_from states, tokens
+        current = states
+        tokens.each do |token|
+          derived = []
+          current.each do |pattern|
+            next if pattern.equal?( FAIL )
+            expand_alternatives( derive( pattern, token, {} ), derived )
+          end
+          current = derived.uniq
+          return current if current.empty?
+        end
+        current
+      end
+
+      # Attributes are unordered and all appear in the start-element event.
+      # Try every order that lets the grammar consume all of them.
+      def consume_attributes states, attributes
+        tokens = attributes.map do |name, value|
+          [ :attribute, name, value ]
+        end
+        return states if tokens.empty?
+        results = []
+        visited = {}
+        consume_attributes_in( states, tokens, (0...tokens.size).to_a,
+                               results, visited )
+        results.uniq
+      end
+
+      def consume_attributes_in states, tokens, remaining, results, visited
+        if remaining.empty?
+          results.concat( states )
+          return
+        end
+        key = [ remaining, signature( states ) ]
+        return if visited[key]
+        visited[key] = true
+        remaining.each do |index|
+          next_states = step_from( states, [ tokens[index] ] )
+          next if next_states.empty?
+          consume_attributes_in( next_states, tokens, remaining - [ index ],
+                                 results, visited )
+        end
+      end
+
+      def signature states
+        states.map { |pattern| pattern.inspect }.join( " | " )
+      end
+
+      def expand_alternatives pattern, into
+        return if pattern.equal?( FAIL )
+        if pattern[0] == :alt
+          pattern[1].each { |child| expand_alternatives( child, into ) }
         else
-          arry << [] if evt[0] == :start_element
-          arry[-1] << generate_event( evt )
+          into << pattern
         end
       end
-    end
 
-
-    class Interleave < Choice
-      def initialize context
-        super
-        @choice = 0
+      def nullable_states? patterns
+        patterns.any? { |pattern| nullable?( pattern ) }
       end
 
-      def reset
-        @choice = 0
-      end
-
-      def next_current( event )
-        # Expand references
-        c = 0 ; max = @choices.size
-        while c < max
-          if @choices[c][0].class == Ref
-            expand_ref_in( @choices[c], 0 )
-            @choices += @choices[c]
-            @choices.delete( @choices[c] )
-            max -= 1
-          else
-            c += 1
-          end
-        end
-        @events = @choices[@choice..-1].find { |evt| evt[0].matches? event }
-        @current = 0
-        if @events
-          # reorder the choices
-          old = @choices[@choice]
-          idx = @choices.index( @events )
-          @choices[@choice] = @events
-          @choices[idx] = old
-          @choice += 1
-        end
-
-        @events = [] unless @events
-      end
-
-
-      def next( event )
-        # Find the next series
-        next_current(event) unless @events[@current]
-        return nil unless @events[@current]
-
-        expand_ref_in( @events, @current ) if @events[@current].class == Ref
-        if ( @events[@current].kind_of? State )
-          @current += 1
-          @events[@current-1].previous = self
-          return @events[@current-1].next( event )
-        end
-        return @previous.pop.next( event ) if @events[@current].nil?
-        if ( @events[@current].matches?(event) )
-          @current += 1
-          if @events[@current].nil?
-            return self unless @choices[@choice].nil?
-            @previous.pop
-          elsif @events[@current].kind_of? State
-            @current += 1
-            @events[@current-1].previous = self
-            @events[@current-1]
-          else
-            self
-          end
+      def nullable? pattern, seen = {}
+        case pattern[0]
+        when :empty
+          true
+        when :elem, :attr, :text_any, :text_exact, :end_tag
+          false
+        when :alt
+          pattern[1].any? { |child| nullable?( child, seen ) }
+        when :seq
+          nullable?( pattern[1], seen ) and nullable?( pattern[2], seen )
+        when :ilv
+          nullable?( pattern[1], seen ) and nullable?( pattern[2], seen )
+        when :star
+          true
+        when :ref
+          key = [ pattern[1], pattern[2] ]
+          return false if seen[key]
+          nullable?( resolve( pattern[1], pattern[2] ), seen.merge( key => true ) )
         else
-          nil
+          raise ArgumentError, "unknown RelaxNG pattern: #{pattern.inspect}"
         end
       end
 
-      def matches?( event )
-        return @events[@current].matches?( event ) if @events[@current]
-        !@choices[@choice..-1].find{|evt| evt[0].matches?(event)}.nil?
-      end
-
-      def expected
-        return [@events[@current]] if @events[@current]
-        @choices[@choice..-1].collect do |x|
-          if x[0].kind_of? State
-            x[0].expected
-          else
-            x[0]
+      def derive pattern, token, seen
+        case pattern[0]
+        when :empty
+          FAIL
+        when :elem
+          unless token[0] == :start_element and token[1] == pattern[1]
+            return FAIL
           end
-        end.flatten
+          sequence( pattern[2], [ :end_tag ] )
+        when :attr
+          return FAIL unless token[0] == :attribute and token[1] == pattern[1]
+          return FAIL unless attribute_value_matches?( pattern[2], token[2] )
+          EMPTY
+        when :text_any
+          token[0] == :text ? EMPTY : FAIL
+        when :text_exact
+          (token[0] == :text && token[1] == pattern[1]) ? EMPTY : FAIL
+        when :end_tag
+          token[0] == :end_element ? EMPTY : FAIL
+        when :alt
+          results = []
+          pattern[1].each do |child|
+            expand_alternatives( derive( child, token, seen ), results )
+          end
+          return FAIL if results.empty?
+          return results[0] if results.size == 1
+          [ :alt, results ]
+        when :seq
+          first = derive( pattern[1], token, seen )
+          second = nullable?( pattern[1], seen ) ?
+                     derive( pattern[2], token, seen ) : FAIL
+          alternation( sequence( first, pattern[2] ), second )
+        when :star
+          sequence( derive( pattern[1], token, seen ), pattern )
+        when :ilv
+          alternation(
+            interleave( derive( pattern[1], token, seen ), pattern[2] ),
+            interleave( pattern[1], derive( pattern[2], token, seen ) )
+          )
+        when :ref
+          key = [ pattern[1], pattern[2] ]
+          return FAIL if seen[key]
+          derive( resolve( pattern[1], pattern[2] ), token,
+                  seen.merge( key => true ) )
+        else
+          raise ArgumentError, "unknown RelaxNG pattern: #{pattern.inspect}"
+        end
       end
 
-      def inspect
-        "< #{to_s} #{@choices.collect{|e| e.collect{|f|f.to_s}.join(', ')}.join(' and ')} >"
+      def attribute_value_matches? constraint, value
+        case constraint
+        when nil, :any
+          true
+        when Array
+          constraint.include?( value )
+        else
+          constraint == value
+        end
       end
-    end
 
-    class Ref
-      def initialize value
-        @value = value
+      def alternation first, second
+        return second if first.equal?( FAIL )
+        return first if second.equal?( FAIL )
+        if first[0] == :alt and second[0] == :alt
+          [ :alt, ( first[1] + second[1] ).uniq ]
+        elsif first[0] == :alt
+          [ :alt, ( first[1] + [ second ] ).uniq ]
+        elsif second[0] == :alt
+          [ :alt, ( [ first ] + second[1] ).uniq ]
+        else
+          [ :alt, [ first, second ].uniq ]
+        end
       end
-      def to_s
-        @value
+
+      def sequence first, second
+        return FAIL if first.equal?( FAIL ) or second.equal?( FAIL )
+        return second if first == EMPTY
+        return first if second == EMPTY
+        [ :seq, first, second ]
       end
-      def inspect
-        "{#{to_s}}"
+
+      def interleave first, second
+        return FAIL if first.equal?( FAIL ) or second.equal?( FAIL )
+        return second if first == EMPTY
+        return first if second == EMPTY
+        [ :ilv, first, second ]
+      end
+
+      def repetition pattern
+        return EMPTY if pattern.equal?( EMPTY ) or pattern.equal?( FAIL )
+        [ :star, pattern ]
+      end
+
+      def resolve name, mode
+        key = [ name, mode ]
+        return @resolved[key] if @resolved.key?( key )
+        define = @references[ name ]
+        raise ArgumentError, "unknown RelaxNG reference: #{name}" if define.nil?
+        @resolved[key] = compile_children( define, mode )
+      end
+
+      def compile_children node, mode
+        parts = []
+        node.elements.each do |child|
+          if child.name == "ref"
+            parts << [ :ref, child.attributes["name"], mode ]
+          else
+            parts << compile_pattern( child )
+          end
+        end
+        combine( parts, mode )
+      end
+
+      def combine parts, mode
+        return EMPTY if parts.empty?
+        case mode
+        when :choice
+          parts.inject { |left, right| alternation( left, right ) }
+        when :interleave
+          parts.inject { |left, right| interleave( left, right ) }
+        else
+          parts.inject { |left, right| sequence( left, right ) }
+        end
+      end
+
+      def compile_pattern node
+        name = node.attributes["name"]
+        case node.name
+        when "element"
+          [ :elem, name, compile_children( node, :sequence ) ]
+        when "attribute"
+          [ :attr, name, compile_attribute_value( node ) ]
+        when "text"
+          [ :text_any ]
+        when "value"
+          [ :text_exact, node.texts.map { |text| text.value }.join ]
+        when "empty"
+          EMPTY
+        when "group"
+          compile_children( node, :sequence )
+        when "choice"
+          compile_children( node, :choice )
+        when "interleave"
+          compile_children( node, :interleave )
+        when "optional"
+          alternation( EMPTY, compile_children( node, :sequence ) )
+        when "zeroOrMore"
+          repetition( compile_children( node, :sequence ) )
+        when "oneOrMore"
+          content = compile_children( node, :sequence )
+          sequence( content, repetition( content ) )
+        when "mixed"
+          interleave( compile_children( node, :sequence ),
+                      repetition( [ :text_any ] ) )
+        when "ref"
+          [ :ref, name, :sequence ]
+        when "start", "define"
+          compile_children( node, :sequence )
+        else
+          raise ArgumentError, "unsupported RelaxNG pattern: #{node.name}"
+        end
+      end
+
+      def compile_attribute_value node
+        children = node.elements.to_a
+        return nil if children.empty?
+        value_options( children )
+      end
+
+      def value_options nodes
+        options = []
+        nodes.each do |node|
+          case node.name
+          when "value"
+            options << node.texts.map { |text| text.value }.join
+          when "choice"
+            options.concat( value_options( node.elements.to_a ) )
+          else
+            return :any
+          end
+        end
+        options.empty? ? :any : options
+      end
+
+      def validation_error event, got
+        raise ValidationException.new(
+          "Validation error.  Expected: #{describe( @current )} " \
+          "but got #{got.inspect}"
+        )
+      end
+
+      def describe patterns
+        patterns.map { |pattern| describe_pattern( pattern ) }.join( " or " )
+      end
+
+      def describe_pattern pattern
+        case pattern[0]
+        when :empty
+          "end of element"
+        when :elem
+          "element #{pattern[1].inspect}"
+        when :attr
+          "attribute #{pattern[1].inspect}"
+        when :text_any
+          "text"
+        when :text_exact
+          "text #{pattern[1].inspect}"
+        when :end_tag
+          "end of element"
+        when :seq
+          "#{describe_pattern( pattern[1] )} then " \
+          "#{describe_pattern( pattern[2] )}"
+        when :alt
+          pattern[1].map { |child| describe_pattern( child ) }.join( " or " )
+        when :ilv
+          "#{describe_pattern( pattern[1] )} interleaved with " \
+          "#{describe_pattern( pattern[2] )}"
+        when :star
+          "zero or more of #{describe_pattern( pattern[1] )}"
+        when :ref
+          "reference #{pattern[1]}"
+        else
+          pattern.inspect
+        end
       end
     end
   end
