@@ -1,4 +1,5 @@
 require 'net/ssh/authentication/methods/abstract'
+require 'net/ssh/authentication/agent_signing'
 
 module Net
   module SSH
@@ -37,7 +38,7 @@ module Net
             req = build_request(identity, next_service, username, "#{hostname}.", client_username)
             sig_data = Buffer.from(:string, session_id, :raw, req)
 
-            sig = key_manager.sign(identity, sig_data.to_s)
+            sig = key_manager.sign(identity, sig_data.to_s, purpose: :hostbased)
 
             message = Buffer.from(:raw, req, :string, sig)
 
@@ -58,6 +59,10 @@ module Net
             else
               raise Net::SSH::Exception, "unexpected server response to USERAUTH_REQUEST: #{message.type} (#{message.inspect})"
             end
+          rescue AgentSigningDenied => e
+            # Refused before reaching the agent: try the next identity.
+            debug { "skipping hostbased (#{fingerprint(identity)}): #{e.message}" }
+            false
           end
 
           # Build the "core" hostbased request string.

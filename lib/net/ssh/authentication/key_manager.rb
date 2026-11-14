@@ -2,6 +2,7 @@ require 'net/ssh/errors'
 require 'net/ssh/key_factory'
 require 'net/ssh/loggable'
 require 'net/ssh/authentication/agent'
+require 'net/ssh/authentication/agent_signing'
 
 module Net
   module SSH
@@ -41,10 +42,20 @@ module Net
         # The map of options that were passed to the key-manager
         attr_reader :options
 
+        # The transport session whose verified host key and session id are
+        # presented to the :agent_signing_authorization hook. It is optional so
+        # that a KeyManager used on its own keeps working; without it the hook
+        # is never satisfied and agent signing is refused.
+        attr_reader :transport
+
+        # The callable given as :agent_signing_authorization, or nil. See
+        # Net::SSH.start for its contract.
+        attr_reader :agent_signing_authorization
+
         # Create a new KeyManager. By default, the manager will
         # use the ssh-agent if it is running and the `:use_agent` option
         # is not false.
-        def initialize(logger, options = {})
+        def initialize(logger, options = {}, transport = nil)
           self.logger = logger
           @key_files = []
           @key_data = []
@@ -54,6 +65,9 @@ module Net
           @known_identities = {}
           @agent = nil
           @options = options
+          @transport = transport
+          @agent_signing_authorization = options[:agent_signing_authorization]
+          validate_signing_authorization!
         end
 
         # Clear all knowledge of any loaded user keys. This also clears the list
@@ -169,10 +183,16 @@ module Net
         # private key for the identity will be loaded from disk (if it hasn't
         # been loaded already) and will then be used to sign the data.
         #
+        # An identity held by the ssh-agent is only signed with when the
+        # connection's host key has been verified and the
+        # :agent_signing_authorization hook (if any) allows it for this target,
+        # key and +purpose+; otherwise AgentSigningDenied is raised. Keys loaded
+        # from disk are not affected.
+        #
         # Regardless of the identity's origin or who does the signing, this
         # will always return the signature in an SSH2-specified "signature
         # blob" format.
-        def sign(identity, data, sig_alg = nil)
+        def sign(identity, data, sig_alg = nil, purpose: :publickey)
           info = known_identities[identity] or raise KeyManagerError, "the given identity is unknown to the key manager"
 
           if info[:from] == :pubkey_file_only
@@ -200,6 +220,12 @@ module Net
 
           if info[:from] == :agent
             raise KeyManagerError, "the agent is no longer available" unless agent
+
+            target = authorize_agent_signature!(info[:identity], sig_alg, purpose, identity: identity)
+            # Re-check right before asking the agent: a rekey or a new
+            # authentication attempt may have moved the connection on while
+            # the hook was deciding.
+            assert_signing_target_current!(target, purpose)
 
             case sig_alg
             when "rsa-sha2-512"
@@ -244,6 +270,108 @@ module Net
         end
 
         private
+
+        def validate_signing_authorization!
+          authorization = @agent_signing_authorization
+          return if authorization.nil? || authorization.respond_to?(:call)
+
+          raise ArgumentError,
+                ":agent_signing_authorization must respond to call or be nil, got #{authorization.class}"
+        end
+
+        # Builds the context of a signing decision from the connection's
+        # currently verified target and asks the hook. Raises
+        # AgentSigningDenied unless the host key for the current key exchange
+        # has been verified and the hook, if one is set, returns true. Returns
+        # the target the decision was made for.
+        #
+        # The target is read from the transport for every signature, so a retry
+        # after a rekey sees the new exchange (or is refused until the new host
+        # key verifies) instead of a cached one.
+        def authorize_agent_signature!(public_key, sig_alg, purpose, identity: public_key)
+          target = verified_signing_target
+          raise AgentSigningDenied, "the host key has not been verified, so the agent may not sign" if target.nil?
+
+          return target unless agent_signing_authorization
+
+          context = AgentSigningContext.new(
+            target: target, public_key: public_key,
+            public_key_fingerprint: key_fingerprint(public_key),
+            identity: identity, identity_fingerprint: key_fingerprint(identity),
+            purpose: purpose, signature_algorithm: sig_alg
+          )
+          allowed = begin
+            agent_signing_authorization.call(context)
+          rescue AgentSigningDenied
+            raise
+          rescue StandardError => e
+            error { "agent signing authorization raised #{e.class}: #{e.message}" }
+            false
+          end
+
+          unless allowed
+            debug { "agent signing refused by :agent_signing_authorization (#{context.to_h.inspect})" }
+            raise AgentSigningDenied,
+                  "the agent may not sign #{purpose} authentication for #{context.host} (#{context.public_key_fingerprint}), " \
+                  "the :agent_signing_authorization hook refused it"
+          end
+
+          debug { "agent signing allowed for #{purpose} authentication (#{context.to_h.inspect})" }
+          target
+        end
+
+        # The fingerprint shown to the hook, in the configured format.
+        def key_fingerprint(key)
+          key.fingerprint(options[:fingerprint_hash] || 'SHA256')
+        rescue StandardError
+          nil
+        end
+
+        # Confirms that a decision still applies to the connection right before
+        # the agent is asked, so a rekey or a concurrent retry in between the
+        # hook's decision and the agent call can't reuse the earlier target.
+        def assert_signing_target_current!(target, purpose)
+          current = verified_signing_target
+          denied = lambda do |reason|
+            debug { "agent signing refused after the decision: #{reason}" }
+            raise AgentSigningDenied,
+                  "the agent may not sign #{purpose} authentication for #{target.host}, the signing target " \
+                  "changed after the :agent_signing_authorization hook allowed it (#{reason})"
+          end
+
+          denied.call("the host key is no longer verified") if current.nil?
+          denied.call("the connection moved to another key exchange") if current.key_exchange != target.key_exchange
+          denied.call("the verified host key changed") unless current.host_key.to_blob == target.host_key.to_blob
+        end
+
+        # Returns an AgentSigningTarget for the transport's current key
+        # exchange, or nil when the host key of that exchange has not been
+        # verified (yet).
+        def verified_signing_target
+          return nil unless transport && transport.respond_to?(:verified_host_key)
+
+          host_key = transport.verified_host_key
+          return nil if host_key.nil?
+
+          AgentSigningTarget.new(
+            host: transport.host,
+            port: transport.port,
+            host_key: host_key,
+            host_key_fingerprint: transport.verified_host_key_fingerprint,
+            session_id: transport_session_id,
+            key_exchange: transport.key_exchange_sequence
+          )
+        end
+
+        # The SSH session id, as generated by the initial key exchange. A
+        # transport that cannot provide one (or hasn't completed the exchange)
+        # yields nil, and the hook is told so rather than being given a made-up
+        # value.
+        def transport_session_id
+          transport.algorithms.session_id if transport.respond_to?(:algorithms) && transport.algorithms
+        rescue StandardError
+          nil
+        end
 
         # Like OpenSSH's pubkey_prepare, an agent that fails to list its keys is
         # dropped for the session so that key files are still tried.

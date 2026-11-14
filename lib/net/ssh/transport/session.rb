@@ -61,6 +61,20 @@ module Net
         # it did not send one.
         attr_reader :server_sig_algs
 
+        # The host key that was verified for the current key exchange, or nil
+        # until this transport's server host key has been verified.
+        attr_reader :verified_host_key
+
+        # The fingerprint of #verified_host_key, in the format selected by the
+        # :fingerprint_hash option.
+        attr_reader :verified_host_key_fingerprint
+
+        # Counts completed key exchanges on this connection. It
+        # increases on every completed rekey, so callbacks that decide on
+        # behalf of a key exchange can tell generations apart even though the
+        # SSH session id stays the same.
+        attr_reader :key_exchange_sequence
+
         # Instantiates a new transport layer abstraction. This will block until
         # the initial key exchange completes, leaving you with a ready-to-use
         # transport session.
@@ -91,6 +105,7 @@ module Net
 
           @queue = []
           @queued_bytes = 0
+          @key_exchange_sequence = 0
 
           @server_version = ServerVersion.new(socket, logger, options[:timeout])
 
@@ -162,11 +177,33 @@ module Net
           Net::SSH::Buffer.from(:byte, SERVICE_REQUEST, :string, service)
         end
 
+        # Records that the host key presented in the current key exchange has
+        # been verified. Called by the key exchange once the verifier (and the
+        # server's signature over the exchange hash) succeeded, so that later
+        # decisions, such as whether the ssh-agent may sign an authentication
+        # request, can rely on it. The transport forgets it again as soon as
+        # another key exchange starts.
+        def host_key_verified!(key, fingerprint)
+          @verified_host_key = key
+          @verified_host_key_fingerprint = fingerprint
+          @key_exchange_sequence = (@key_exchange_sequence || 0) + 1
+        end
+
+        # Forgets the verified host key. Called when a key exchange starts,
+        # because the new exchange presents a new host key.
+        def forget_verified_host_key
+          @verified_host_key = nil
+          @verified_host_key_fingerprint = nil
+        end
+
         # Requests a rekey operation, and blocks until the operation completes.
         # If a rekey is already pending, this returns immediately, having no
         # effect.
         def rekey!
           if !algorithms.pending?
+            # A rekey verifies a new host key; until it does, the previous one
+            # must not be presented as the target to sign for.
+            forget_verified_host_key
             algorithms.rekey!
             wait { algorithms.initialized? }
           end
@@ -228,6 +265,9 @@ module Net
               accept_ext_info(packet)
 
             when KEXINIT
+              # A new exchange presents a new host key; until it verifies, the
+              # previous one must not be used to authorize anything.
+              forget_verified_host_key
               algorithms.accept_kexinit(packet)
 
             else

@@ -1,6 +1,7 @@
 require 'common'
 require 'logger'
 require 'net/ssh/authentication/methods/publickey'
+require 'net/ssh/authentication/agent_signing'
 require 'authentication/methods/common'
 
 module Authentication
@@ -84,6 +85,47 @@ module Authentication
         end
 
         assert !subject.authenticate("ssh-connection", "jamis")
+      end
+
+      def test_authenticate_should_skip_key_whose_agent_signature_was_refused_and_try_the_next
+        key_manager.expects(:sign).with(&signature_parameters(keys.first)).raises(Net::SSH::Authentication::AgentSigningDenied)
+        key_manager.expects(:sign).with(&signature_parameters(keys.last)).returns("sig-two")
+
+        transport(pubkey_algorithms: %w[ssh-rsa ssh-dss]).expect do |t, packet|
+          assert_equal USERAUTH_REQUEST, packet.type
+          assert verify_userauth_request_packet(packet, keys.first, false)
+          t.return(USERAUTH_PK_OK, :string, keys.first.ssh_type, :string, Net::SSH::Buffer.from(:key, keys.first))
+
+          t.expect do |t2, packet2|
+            assert verify_userauth_request_packet(packet2, keys.last, false)
+            t2.return(USERAUTH_PK_OK, :string, keys.last.ssh_type, :string, Net::SSH::Buffer.from(:key, keys.last))
+
+            t2.expect do |t3, packet3|
+              assert verify_userauth_request_packet(packet3, keys.last, true)
+              assert_equal "sig-two", packet3.read_string
+              t3.return(USERAUTH_SUCCESS)
+            end
+          end
+        end
+
+        assert subject.authenticate("ssh-connection", "jamis")
+      end
+
+      def test_authenticate_should_pass_the_publickey_purpose_to_the_key_manager
+        key_manager.expects(:sign).with(keys.first, kind_of(Net::SSH::Buffer), "ssh-rsa", purpose: :publickey).returns("sig-one")
+
+        transport(pubkey_algorithms: %w[ssh-rsa]).expect do |t, packet|
+          assert verify_userauth_request_packet(packet, keys.first, false)
+          t.return(USERAUTH_PK_OK, :string, keys.first.ssh_type, :string, Net::SSH::Buffer.from(:key, keys.first))
+
+          t.expect do |t2, packet2|
+            assert verify_userauth_request_packet(packet2, keys.first, true)
+            assert_equal "sig-one", packet2.read_string
+            t2.return(USERAUTH_SUCCESS)
+          end
+        end
+
+        assert subject(keys: [keys.first]).authenticate("ssh-connection", "jamis")
       end
 
       def test_authenticate_should_return_true_if_any_key_can_authenticate

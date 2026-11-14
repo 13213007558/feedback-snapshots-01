@@ -19,7 +19,7 @@ module Net
       # Options for setting up a connection, which the master already did
       # with its own settings.
       MASTER_OWNED_OPTIONS = %i[
-        agent_socket_factory append_all_supported_algorithms auth_methods
+        agent_signing_authorization agent_socket_factory append_all_supported_algorithms auth_methods
         bind_address check_host_ip compression compression_level encryption
         fingerprint_hash global_known_hosts_file hmac host_key identity_agent
         keepalive keepalive_interval keepalive_maxcount kex key_data keycert_data

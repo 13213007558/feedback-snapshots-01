@@ -1,6 +1,7 @@
 require 'net/ssh/buffer'
 require 'net/ssh/errors'
 require 'net/ssh/authentication/methods/abstract'
+require 'net/ssh/authentication/agent_signing'
 
 module Net
   module SSH
@@ -78,7 +79,7 @@ module Net
               sig_data.write_string(session_id)
               sig_data.append(buffer.to_s)
 
-              sig_blob = key_manager.sign(identity, sig_data, sig_alg)
+              sig_blob = key_manager.sign(identity, sig_data, sig_alg, purpose: :publickey)
 
               send_request(identity, username, next_service, alg, sig_blob.to_s)
               message = session.next_message
@@ -120,6 +121,11 @@ module Net
             end
 
             authenticate_with_alg(identity, next_service, username, alg, RSA_SIGNATURE_ALGORITHMS.dig(identity.ssh_type, alg))
+          rescue AgentSigningDenied => e
+            # The key was refused before reaching the agent. As with any other
+            # refused key, try the next identity; the same key is not retried.
+            debug { "skipping publickey (#{fingerprint(identity)}): #{e.message}" }
+            false
           end
 
           # Picks the single algorithm to offer for the identity, following

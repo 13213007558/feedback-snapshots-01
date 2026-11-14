@@ -46,9 +46,16 @@ module Net
           # deliverables.
           def exchange_keys
             result = send_kexinit
-            verify_server_key(result[:server_key])
+            blob, fingerprint = verify_server_key(result[:server_key])
             session_id = verify_signature(result)
             confirm_newkeys
+
+            # Only now, after the host key verified and the exchange completed,
+            # may anything (such as an application's ssh-agent signing
+            # authorization) trust this key as this connection's target.
+            if connection.respond_to?(:host_key_verified!)
+              connection.host_key_verified!(result[:server_key], fingerprint)
+            end
 
             {
               session_id: session_id,
@@ -71,7 +78,8 @@ module Net
 
           # Verify that the given key is of the expected type, and that it
           # really is the key for the session's host. Raise Net::SSH::Exception
-          # if it is not.
+          # if it is not. Returns the key's blob and fingerprint, for recording
+          # the verification.
           def verify_server_key(key) # :nodoc:
             unless matching?(key.ssh_type, algorithms.host_key)
               raise Net::SSH::Exception, "host key algorithm mismatch '#{key.ssh_type}' != '#{algorithms.host_key}'"
@@ -82,6 +90,8 @@ module Net
             unless connection.host_key_verifier.verify(key: key, key_blob: blob, fingerprint: fingerprint, session: connection)
               raise Net::SSH::Exception, 'host key verification failed'
             end
+
+            [blob, fingerprint]
           end
 
           def generate_key_fingerprint(key)

@@ -109,6 +109,26 @@ module NetSSH
       end
     end
 
+    def test_start_should_accept_agent_signing_authorization_option
+      authorization = ->(_context) { true }
+      options = start_and_capture_transport_options(agent_signing_authorization: authorization)
+      assert_same authorization, options[:agent_signing_authorization]
+    end
+
+    def test_start_should_reject_agent_signing_authorization_that_is_not_callable
+      error = assert_raises(ArgumentError) do
+        Net::SSH.start('localhost', 'testuser', agent_signing_authorization: true)
+      end
+      assert_equal ':agent_signing_authorization must respond to call or be nil, got TrueClass', error.message
+    end
+
+    def test_default_configuration_may_set_agent_signing_authorization
+      authorization = ->(_context) { true }
+      Net::SSH.default_configuration = ->(*) { { agent_signing_authorization: authorization } }
+      options = start_and_capture_transport_options({})
+      assert_same authorization, options[:agent_signing_authorization]
+    end
+
     def test_start_should_raise_for_nil_options
       %i[proxy port config remote_user].each do |key|
         Net::SSH::Transport::Session.expects(:new).never

@@ -71,7 +71,7 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       prompt_without_tty agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms no_delay
-      control_master control_path preopen_channels
+      control_master control_path preopen_channels agent_signing_authorization
     ]
 
     class << self
@@ -156,8 +156,9 @@ module Net
     #   itself. The master's own settings then apply instead of the options
     #   for setting up a connection (:keys, :key_data, :password, :passphrase,
     #   :auth_methods, :verify_host_key, :known_hosts, :host_key, :kex,
-    #   :encryption, :hmac, :compression, :rekey_*, :proxy, :keepalive and the
-    #   like); explicitly passed ones are named at info level. Over the
+    #   :encryption, :hmac, :compression, :rekey_*, :proxy, :keepalive,
+    #   :agent_signing_authorization and the like); explicitly passed ones are
+    #   named at info level. Over the
     #   master, remote port forwarding (Service::Forward#remote and
     #   #cancel_remote) raises Net::SSH::NotSupportedOverControlMaster, as the
     #   master consumes the global request reply, so success, failure and the
@@ -324,6 +325,33 @@ module Net
     #   closes the connection. +verify_signature+ is given a block that checks
     #   the server's host key signature and must return the block's result.
     # * :fingerprint_hash => 'MD5' or 'SHA256', defaults to 'SHA256'
+    # * :agent_signing_authorization => an optional callable that decides
+    #   whether the ssh-agent may sign an authentication request, so that an
+    #   agent the application provides can't be used to sign arbitrary data.
+    #   It is called with an Net::SSH::Authentication::AgentSigningContext for
+    #   every agent signature request, and only a true return lets the agent
+    #   sign. The context carries the verified target (host, port, verified
+    #   host key and its fingerprint, and the key exchange generation), the
+    #   session id, the selected public key and its fingerprint, the purpose
+    #   (+:publickey+ or +:hostbased+) and the signature algorithm. It does not
+    #   carry the private key, the data being signed or the signature.
+    #
+    #   The agent is never asked to sign before the current key exchange's host
+    #   key has been verified; on a rekey or retried authentication the context
+    #   describes the current exchange, never the previous one. A refused key is
+    #   skipped like any other refused identity, and the same key is not tried
+    #   again. Keys loaded from files are not affected, and neither is remote
+    #   agent forwarding: an agent forwarded to the server is outside net-ssh,
+    #   so this hook does not restrict it. When the option is omitted, agent
+    #   signing still requires the host key verification, but no application
+    #   policy is applied. Net::SSH does not call the agent for anything other
+    #   than authentication signatures, so a hook is a second, application-level
+    #   check rather than the only barrier.
+    #
+    #     Net::SSH.start(host, user, agent_signing_authorization: ->(context) {
+    #       context.purpose == :publickey && context.host == "example.com"
+    #     })
+    #
     # If +user+ parameter is nil it defaults to USER from ssh_config, or
     # local username
     def self.start(host, user = nil, options = {}, &block)
@@ -470,6 +498,12 @@ module Net
       invalid_options = options.keys - VALID_OPTIONS
       if invalid_options.any?
         raise ArgumentError, "#{source}invalid option(s): #{invalid_options.join(', ')}"
+      end
+
+      authorization = options[:agent_signing_authorization]
+      unless authorization.nil? || authorization.respond_to?(:call)
+        raise ArgumentError,
+              "#{source}:agent_signing_authorization must respond to call or be nil, got #{authorization.class}"
       end
 
       reject_nil_options(options, source)

@@ -207,6 +207,39 @@ gem install bcrypt_pbkdf
 `sk-ecdsa-sha2-nistp256@openssh.com` and `sk-ssh-ed25519@openssh.com` keys work when held in `ssh-agent`.
 Loading `sk-*` private key files from disk is not supported.
 
+### Authorizing agent signatures
+
+Net::SSH uses `ssh-agent` to sign public key authentication requests. When an
+application supplies the agent, it can restrict what the agent will sign for it
+with `:agent_signing_authorization`. The callable is given an
+`Net::SSH::Authentication::AgentSigningContext` for every agent signature
+request and must return true to let the agent sign:
+
+```ruby
+Net::SSH.start("host", "user", agent_signing_authorization: ->(context) {
+  context.purpose == :publickey &&
+    context.host == "host" &&
+    context.key_exchange == 1
+}) do |ssh|
+  ssh.exec!("hostname")
+end
+```
+
+The context names the verified target (host, port, the host key that proved it
+and its fingerprint), the SSH session id and key exchange generation, the
+selected public key and its fingerprint, the purpose (`:publickey` or
+`:hostbased`) and the signature algorithm. It contains no private key, no data
+being signed and no signature.
+
+The agent is never asked to sign before the current key exchange's host key has
+been verified, and a rekey or a retried authentication presents the new
+exchange's target rather than the previous one. A refused key is skipped like
+any other refused identity; keys loaded from files are not affected. Net::SSH
+otherwise asks the agent only for authentication signatures; the hook adds the
+application's own policy on top of that. It does not restrict remote agent
+forwarding: an agent forwarded to the server is used by the server outside of
+net-ssh.
+
 ## RUBY SUPPORT
 
 * See [net-ssh.gemspec](https://github.com/net-ssh/net-ssh/blob/master/net-ssh.gemspec) for current versions ruby requirements

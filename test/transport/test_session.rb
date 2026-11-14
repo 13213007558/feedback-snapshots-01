@@ -136,6 +136,46 @@ module Transport
       assert_equal "\005\000\000\000\004sftp", session.service_request('sftp').to_s
     end
 
+    def test_host_key_is_not_verified_before_a_key_exchange
+      session!
+      assert_nil session.verified_host_key
+      assert_nil session.verified_host_key_fingerprint
+      assert_equal 0, session.key_exchange_sequence
+    end
+
+    def test_host_key_verified_records_key_fingerprint_and_sequence
+      session!
+      key = OpenSSL::PKey::RSA.new(512)
+      session.host_key_verified!(key, "SHA256:abc")
+
+      assert_same key, session.verified_host_key
+      assert_equal "SHA256:abc", session.verified_host_key_fingerprint
+      assert_equal 1, session.key_exchange_sequence
+    end
+
+    def test_rekey_forgets_the_verified_host_key_before_the_new_exchange_verifies_one
+      session!
+      session.host_key_verified!(OpenSSL::PKey::RSA.new(512), "SHA256:abc")
+      algorithms.stubs(pending?: false, initialized?: true)
+      algorithms.stubs(:rekey!).with { assert_nil session.verified_host_key }
+      session.expects(:wait).yields
+      session.rekey!
+
+      assert_nil session.verified_host_key
+    end
+
+    def test_receiving_kexinit_forgets_the_verified_host_key
+      session!
+      session.host_key_verified!(OpenSSL::PKey::RSA.new(512), "SHA256:abc")
+      packet = P(:byte, KEXINIT, :long, 0, :long, 0, :long, 0, :long, 0)
+      algorithms.stubs(:accept_kexinit).with { assert_nil session.verified_host_key }
+      socket.expects(:next_packet).twice.returns(packet, nil)
+
+      session.poll_message
+
+      assert_nil session.verified_host_key
+    end
+
     def test_rekey_when_kex_is_pending_should_do_nothing
       algorithms.stubs(pending?: true)
       algorithms.expects(:rekey!).never

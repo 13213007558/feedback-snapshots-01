@@ -613,7 +613,22 @@ module Authentication
     end
 
     def manager(options = {})
-      @manager ||= Net::SSH::Authentication::KeyManager.new(nil, { password_prompt: prompt }.merge(options))
+      @manager ||= Net::SSH::Authentication::KeyManager.new(nil, { password_prompt: prompt }.merge(options), transport)
+    end
+
+    # Stands in for the connection's transport: it reports a verified host key
+    # for the current key exchange, which agent signing authorization requires.
+    def transport(host_key: @transport_host_key ||= OpenSSL::PKey::RSA.new(512))
+      @transport ||= begin
+        algorithms = stub("algorithms", session_id: "session-id")
+        stub("transport",
+             host: "net.ssh.test",
+             port: 22,
+             algorithms: algorithms,
+             verified_host_key: host_key,
+             verified_host_key_fingerprint: host_key.fingerprint("SHA256"),
+             key_exchange_sequence: 1)
+      end
     end
   end
 end

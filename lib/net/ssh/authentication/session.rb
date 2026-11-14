@@ -60,7 +60,7 @@ module Net
           transport.send_message(transport.service_request("ssh-userauth"))
           expect_message(SERVICE_ACCEPT)
 
-          key_manager = KeyManager.new(logger, options)
+          key_manager = KeyManager.new(logger, options, transport)
           keys.each { |key| key_manager.add(key) } unless keys.empty?
           keycerts.each { |keycert| key_manager.add_keycert(keycert) } unless keycerts.empty?
           keycert_data.each { |data| key_manager.add_keycert_data(data) } unless keycert_data.empty?
