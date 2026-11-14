@@ -200,13 +200,22 @@ RSpec.describe Mail::Message do
         expect(yaml_output['headers']['Subject']).to  eq "subject"
         expect(yaml_output['headers']['Bcc']).to      eq "someonesecret@somewhere.com"
         expect(yaml_output['@body_raw']).to           eq "body"
-        expect(Mail::Utilities.blank?(yaml_output['@delivery_method'])).not_to be_truthy
+        # The delivery method is reduced to a plain Hash of settings, never a
+        # live Mail::SMTP object.
+        expect(yaml_output['@delivery_method']).to         be_a(::Hash)
+        expect(yaml_output['@delivery_method']['settings']).to be_a(::Hash)
       end
 
-      it "should deserialize after serializing" do
-        deserialized = Mail::Message.from_yaml(@yaml_mail.to_yaml)
+      it "should deserialize after serializing without restoring delivery settings" do
+        result = Mail::YAML.migrate(@yaml_mail.to_yaml)
+        deserialized = result.message
+
+        expect(deserialized).to be_a(Mail::Message)
         expect(deserialized).to eq @yaml_mail
-        expect(deserialized.delivery_method.settings).to eq @smtp_settings
+        # Delivery configuration from untrusted YAML is never applied; the
+        # custom SMTP settings from @yaml_mail are absent.
+        expect(deserialized.delivery_method.settings).not_to eq @smtp_settings
+        expect(result.notices.map(&:path)).to include('$.@delivery_method')
       end
 
       it "should serialize a Message with a custom delivery_handler" do
@@ -216,33 +225,36 @@ RSpec.describe Mail::Message do
         expect(yaml_output['delivery_handler']).to eq "DeliveryAgent"
       end
 
-      it "should load a serialized delivery handler" do
+      it "never loads a serialized delivery handler" do
         @yaml_mail.delivery_handler = DeliveryAgent
-        deserialized = Mail::Message.from_yaml(@yaml_mail.to_yaml)
-        expect(deserialized.delivery_handler).to eq DeliveryAgent
+        result = Mail::YAML.migrate(@yaml_mail.to_yaml)
+        expect(result.message.delivery_handler).to be_nil
+        expect(result.errors.map(&:path)).to include('$.delivery_handler')
       end
 
       it "should not deserialize a delivery_handler that does not exist" do
         yaml = @yaml_mail.to_yaml
         yaml_hash = Mail::YAML.load(yaml)
         yaml_hash['delivery_handler'] = "NotARealClass"
-        deserialized = Mail::Message.from_yaml(yaml_hash.to_yaml)
-        expect(deserialized.delivery_handler).to be_nil
+        result = Mail::YAML.migrate(yaml_hash.to_yaml)
+        expect(result.message.delivery_handler).to be_nil
+        expect(result.errors.map(&:path)).to include('$.delivery_handler')
       end
 
       it "should deserialize parts as an instance of Mail::PartsList" do
-        yaml = @yaml_mail.to_yaml
-        yaml_hash = Mail::YAML.load(yaml)
-        deserialized = Mail::Message.from_yaml(yaml_hash.to_yaml)
+        result = Mail::YAML.migrate(@yaml_mail.to_yaml)
+        deserialized = result.message
+        # A single-part message simply has no parts.
         expect(deserialized.parts).to be_kind_of(Mail::PartsList)
       end
 
       it "should handle multipart mail" do
         @yaml_mail.add_part Mail::Part.new(:content_type => 'text/html', :body => '<b>body</b>')
-        deserialized = Mail::Message.from_yaml(@yaml_mail.to_yaml)
+        result = Mail::YAML.migrate(@yaml_mail.to_yaml)
+        deserialized = result.message
         expect(deserialized).to be_multipart
         deserialized.parts.each {|part| expect(part).to be_a(Mail::Part)}
-        expect(deserialized.parts.map(&:body)).to eq(['body', '<b>body</b>'])
+        expect(deserialized.parts.map { |part| part.body.decoded }).to eq(['body', '<b>body</b>'])
       end
     end
 

@@ -93,8 +93,16 @@ RSpec.describe "PartsList" do
     expect(p).to respond_to(:reduce)
   end
 
-  it "should have a round-tripping YAML serialization" do
+  it "does not instantiate a PartsList from its YAML tag" do
     p = Mail::PartsList.new([1, 2])
-    expect(Mail::YAML.load(YAML.dump(p))).to eq(p)
+    yaml = YAML.dump(p)
+
+    loaded = Mail::YAML.load(yaml)
+
+    # The tagged collection is reduced to a plain Array; no Mail::PartsList
+    # object is revived from untrusted YAML.
+    expect(loaded).to eq([1, 2])
+    expect(loaded).to be_an(::Array)
+    expect(loaded).not_to be_a(Mail::PartsList)
   end
 end

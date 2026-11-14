@@ -1847,26 +1847,13 @@ module Mail
       hash.to_yaml(opts)
     end
 
+    # Rebuilds a message from a historical Mail::Message#to_yaml dump using the
+    # safe migration pipeline.  No class named by the input is instantiated,
+    # the delivery_handler is never loaded and no instance variable is injected.
+    # Use Mail::YAML.migrate when you also need the list of fields that could
+    # not be restored verbatim.
     def self.from_yaml(str)
-      hash = Mail::YAML.load(str)
-      m = self.new(:headers => hash['headers'])
-      hash.delete('headers')
-      hash.each do |k,v|
-        case
-        when k == 'delivery_handler'
-          begin
-            m.delivery_handler = Object.const_get(v) unless Utilities.blank?(v)
-          rescue NameError
-          end
-        when k == 'transport_encoding'
-          m.transport_encoding(v)
-        when k == 'multipart_body'
-          v.map {|part| m.add_part Mail::Part.from_yaml(part) }
-        when k.start_with?('@')
-          m.instance_variable_set(k.to_sym, v)
-        end
-      end
-      m
+      Mail::YAML.migrate(str).message
     end
 
     def self.from_hash(hash)
