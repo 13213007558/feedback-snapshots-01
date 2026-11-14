@@ -80,6 +80,15 @@ class Net::LDAP::PDU
   # Returns RFC-2251 Controls if any.
   attr_reader :ldap_controls
   alias_method :result_controls, :ldap_controls
+
+  ##
+  # Returns the parsed Password Policy Response control
+  # (Net::LDAP::PasswordPolicyResponse), or nil if the BindResponse did not
+  # carry one. Note that an absent control is not evidence that the password
+  # never expires: many directories simply do not implement the control. Use
+  # the bind result code together with #bind_status to classify a login.
+  attr_reader :password_policy_response
+  alias_method :password_policy, :password_policy_response
   # Messy. Does this functionality belong somewhere else?
 
   def initialize(ber_object)
@@ -127,6 +136,59 @@ class Net::LDAP::PDU
     end
 
     parse_controls(ber_object[2]) if ber_object[2]
+    parse_password_policy_response
+  end
+
+  ##
+  # Classifies a bind attempt into a single outcome that callers can branch
+  # on without re-interpreting the result code and controls. This is intended
+  # for BindResponse PDUs.
+  #
+  # A successful result code alone is never treated as "normal login": if the
+  # password-policy control reports a required change or a grace-login
+  # window, the outcome is restricted accordingly. Possible return values:
+  #
+  # +:success+:: valid credentials, no policy restriction; normal entry.
+  # +:password_change_required+:: accepted only to change the password
+  #   (password expired, reset required, or inside a grace-login window).
+  # +:account_locked+:: the directory reports the account locked.
+  # +:policy_error+:: rejected for another password-policy reason.
+  # +:warning+:: valid credentials with a non-fatal timeBeforeExpiration
+  #   warning; normal entry is still allowed. A graceAuthNsRemaining warning
+  #   maps to +:password_change_required+ instead.
+  # +:failure+:: rejected for a non-policy reason, or the result code was an
+  #   error with no usable policy control.
+  def bind_status
+    if @password_policy_response
+      policy = @password_policy_response
+
+      # Errors take precedence over warnings, matching the draft-behera
+      # grammar where a single response may carry both.
+      if policy.error?
+        return policy.bind_status(result_code)
+      end
+
+      # A graceAuthNsRemaining warning is returned alongside an
+      # invalidCredentials result code: the password has expired but the
+      # directory is still admitting a restricted login to change it. Treat
+      # that as a password-change-required state rather than a hard failure.
+      if policy.grace_authn_remaining?
+        return :password_change_required
+      end
+
+      # A timeBeforeExpiration warning does not restrict the current login.
+      # An error result code with only that warning is still a failure.
+      if policy.time_before_expiration?
+        return success? ? :warning : :failure
+      end
+
+      # The control was present but carried no usable value (e.g. malformed).
+      success? ? :success : :failure
+    elsif success?
+      :success
+    else
+      :failure
+    end
   end
 
   ##
@@ -263,18 +325,61 @@ class Net::LDAP::PDU
   # criticality or data, since criticality has a default value. Someday we
   # may want to come back here and add support for some of more-widely used
   # controls. RFC-2696 is a good example.
+  #
+  # A malformed control (one that is not a sequence, or that is missing its
+  # OID) is kept as best it can be rather than aborting the whole PDU parse,
+  # so one bad control cannot hide the bind result code or the other, valid
+  # controls.
   def parse_controls(sequence)
+    # A controls field must be a sequence of control sequences. A server that
+    # puts something else here is non-conforming; treat it as one malformed
+    # control instead of dropping the entire PDU.
+    sequence = [sequence] unless sequence.is_a?(Array)
+
     @ldap_controls = sequence.map do |control|
       o = OpenStruct.new
-      o.oid, o.criticality, o.value = control[0], control[1], control[2]
-      if o.criticality and o.criticality.is_a?(String)
-        o.value = o.criticality
+      if control.is_a?(Array) && control[0]
+        o.oid, o.criticality, o.value = control[0], control[1], control[2]
+        if o.criticality and o.criticality.is_a?(String)
+          o.value = o.criticality
+          o.criticality = false
+        end
+      else
+        o.oid = nil
         o.criticality = false
+        o.value = nil
+        o.malformed = true
       end
       o
     end
   end
   private :parse_controls
+
+  ##
+  # Locate the Password Policy Response control among the parsed controls and
+  # decode its value into a Net::LDAP::PasswordPolicyResponse.
+  #
+  # Only one such control is meaningful. If a server (or a buggy middlebox)
+  # repeats it, the first well-formed instance wins; later duplicates are
+  # ignored but counted on the returned object so the condition is visible.
+  # A control whose value cannot be decoded still produces an object that
+  # reports #malformed? instead of raising, so a malformed control never
+  # prevents the caller from seeing the bind result.
+  def parse_password_policy_response
+    ppolicy_controls = @ldap_controls.select do |control|
+      control.oid == Net::LDAP::LDAPControls::PASSWORD_POLICY_RESPONSE
+    end
+    return if ppolicy_controls.empty?
+
+    chosen = ppolicy_controls.first
+    response = Net::LDAP::PasswordPolicyResponse.from_control_value(chosen.value)
+    # A control present without a value still counts as a ppolicy control:
+    # build an empty response so callers can tell the control was there.
+    response ||= Net::LDAP::PasswordPolicyResponse.new("".b)
+    response.duplicate_controls = ppolicy_controls.size - 1
+    @password_policy_response = response
+  end
+  private :parse_password_policy_response
 
   # (provisional, must document)
   def parse_ldap_search_request(sequence)

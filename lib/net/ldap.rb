@@ -22,6 +22,7 @@ require_relative 'ldap/pdu'
 require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
+require_relative 'ldap/password_policy_control'
 require_relative 'ldap/entry'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
@@ -447,6 +448,13 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+    # Password Policy for LDAP Directories (draft-behera). The request and
+    # response share one OID; the BindResponse value is decoded by
+    # Net::LDAP::PasswordPolicyResponse. Send it as a (typically
+    # non-critical, empty-valued) request control to ask the server to return
+    # policy information.
+    PASSWORD_POLICY_RESPONSE = "1.3.6.1.4.1.42.2.27.8.5.1"
+    PASSWORD_POLICY_REQUEST  = "1.3.6.1.4.1.42.2.27.8.5.1"
   end
 
   def self.result2string(code) #:nodoc:
@@ -662,6 +670,16 @@ class Net::LDAP
   # #get_operation_result.error_message and
   # #get_operation_result.matched_dn.
   #
+  # For a #bind, the result additionally exposes:
+  # * +bind_status+ - a symbolic login outcome (+:success+, +:warning+,
+  #   +:password_change_required+, +:account_locked+, +:policy_error+, or
+  #   +:failure+). Prefer this over the boolean return of #bind when deciding
+  #   whether to grant normal system access.
+  # * +password_policy_response+ - the parsed Password Policy Response
+  #   control (Net::LDAP::PasswordPolicyResponse), or nil when the directory
+  #   returned no such control. A nil value does not mean the password never
+  #   expires; many directories never send the control.
+  #
   #--
   # Modified the implementation, 20Mar07. We might get a hash of LDAP
   # response codes instead of a simple numeric code.
@@ -671,6 +689,12 @@ class Net::LDAP
     os = OpenStruct.new
     if result.is_a?(Net::LDAP::PDU)
       os.extended_response = result.extended_response
+      # Surface the parsed Password Policy Response control (if any) and a
+      # ready-to-use classification of the bind outcome. Both are nil for a
+      # response that carried no ppolicy control; an absent control must not
+      # be read as "password never expires".
+      os.password_policy_response = result.password_policy_response
+      os.bind_status = result.bind_status if result.respond_to?(:bind_status)
       result = result.result
     end
     if result.is_a?(Hash)
@@ -859,6 +883,35 @@ class Net::LDAP
   # (You don't need to re-set the values of #host and #port.) As noted in
   # the documentation for #auth, the password parameter can be a Ruby Proc
   # instead of a String.
+  #
+  # === Password policy and restricted logins
+  #
+  # #bind returns a boolean that reflects only the LDAP resultCode, so a
+  # +true+ return does <b>not</b> by itself mean the user may enter the
+  # system normally. A directory that implements the Password Policy control
+  # (draft-behera, OID 1.3.6.1.4.1.42.2.27.8.5.1) can accept a credential yet
+  # require a password change, or admit a restricted "grace" login after the
+  # password has expired. Classify the login with #get_operation_result
+  # instead of relying on the boolean:
+  #
+  #  ldap.bind
+  #  result = ldap.get_operation_result
+  #  case result.bind_status
+  #  when :success
+  #    # normal entry
+  #  when :password_change_required
+  #    # credential accepted (or grace login), but only a password change
+  #    # is permitted; do not grant normal access
+  #  when :account_locked, :policy_error, :failure
+  #    # reject the login
+  #  when :warning
+  #    # normal entry; result.password_policy_response carries the warning
+  #  end
+  #
+  # The parsed control is available as +result.password_policy_response+
+  # (nil when the server sent none). An absent control is <b>not</b> proof
+  # that the password never expires: many directories simply do not implement
+  # the control.
   def bind(auth = @auth)
     instrument "bind.net_ldap" do |payload|
       if @open_connection
