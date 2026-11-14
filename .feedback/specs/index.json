@@ -1,0 +1,58 @@
+[
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc2045.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2045.txt",
+    "sha256": "9bb251635dd37fda97dcce6c08dea019432117a0f1e389051d2ecbf7b76350b0",
+    "bytes": 72932
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc2046.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2046.txt",
+    "sha256": "7ac4096b9263e11a704f06892638258ac1ddc0394dd75ffdc171e7b5ba0123e0",
+    "bytes": 105854
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc2047.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2047.txt",
+    "sha256": "f3b1356151ae24d616076880115c5ac0c313a88bcbe76d32d0cacf4b5f24f01d",
+    "bytes": 33262
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc2231.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2231.txt",
+    "sha256": "e69cbc8c05097736c5296575e7a2e0cb2a2a09c522640eb40ecc4a9dca56076d",
+    "bytes": 19280
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc8551.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8551.txt",
+    "sha256": "dac39f749a08d3422bd78d4e492195067e7bc03f5fc2d0dac515f0d7ed884ae2",
+    "bytes": 136849
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc8058.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8058.txt",
+    "sha256": "94f4529f3545fd0d6e7faac0f57d59ab7933b8fdf6e700017114c783b526c68f",
+    "bytes": 18219
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc8601.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8601.txt",
+    "sha256": "5b4508b7c948c1a296ef2e010a2d65f55635adb8a667f70420c4f479265586fb",
+    "bytes": 122384
+  },
+  {
+    "repo": "mail",
+    "file": ".feedback/specs/rfc3464.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3464.txt",
+    "sha256": "8d213b662d9c40a7a729db598beb1d3f0139b7532b3c9a7be06ef220c84c397c",
+    "bytes": 83060
+  }
+]

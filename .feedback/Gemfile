@@ -1,0 +1,5 @@
+source 'https://rubygems.org'
+gem 'mail', path: '..'
+gem 'rspec', '~> 3.13'
+gem 'rspec-benchmark'
+gem 'base64'
