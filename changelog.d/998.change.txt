@@ -1,0 +1,8 @@
+Added an optional :verify_host_key_evidence option. When enabled, a host-key
+refusal carries a Net::SSH::Verifiers::TrustEvidence object on the raised
+Net::SSH::HostKeyError (#trust_evidence) recording the matching known_hosts
+file, line, host pattern, entry and key type, each certificate check as
+not_run/pass/fail, and the final rejection reason. A @revoked entry stays
+decisive over a same-key pin, hashed host entries are redacted so the host
+list cannot be recovered, and collection never changes key selection.
+[#998]

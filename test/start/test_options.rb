@@ -60,6 +60,11 @@ module NetSSH
       end
     end
 
+    def test_start_should_accept_verify_host_key_evidence_option
+      options = start_and_capture_transport_options(verify_host_key_evidence: true)
+      assert_equal true, options[:verify_host_key_evidence]
+    end
+
     def test_start_should_accept_send_env_option
       assert_nothing_raised do
         options = { send_env: [/^LC_.*$/, "LANG"] }

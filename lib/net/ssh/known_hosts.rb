@@ -5,15 +5,49 @@ require 'net/ssh/authentication/ed25519_loader'
 
 module Net
   module SSH
+    # Where in a known-hosts file a HostKeyEntries entry came from. +line+ is the
+    # 1-based line number and +host_pattern+ is the specific pattern on that
+    # line that matched the looked-up host. For a hashed entry the raw
+    # |1|<salt>|<hash> token is never stored: +hashed+ is true and
+    # +host_pattern+ holds HostKeyEntryLocation::HASHED_PATTERN instead, so the
+    # evidence cannot be used to brute-force which hosts the file contains.
+    class HostKeyEntryLocation
+      HASHED_PATTERN = "[hashed-host]"
+
+      attr_reader :source, :line, :host_pattern, :hashed
+
+      def initialize(source, line, host_pattern, hashed)
+        @source = source
+        @line = line
+        @host_pattern = hashed ? HASHED_PATTERN : host_pattern
+        @hashed = hashed
+      end
+
+      def to_h
+        { source: source, line: line, host_pattern: host_pattern, hashed: hashed }
+      end
+
+      def inspect
+        "#<#{self.class} #{to_h.inspect}>"
+      end
+    end
+
     module HostKeyEntries
       # regular public key entry
       class PubKey
         # The public key itself, e.g. an OpenSSL::PKey::PKey.
-        attr_reader :key
+        attr_reader :key, :location
 
-        def initialize(key, comment: nil)
+        def initialize(key, comment: nil, location: nil)
           @key = key
           @comment = comment
+          @location = location
+        end
+
+        # :revoked for @revoked lines, :cert_authority for @cert-authority
+        # lines, :key for a plain pinned key.
+        def entry_kind
+          :key
         end
 
         def ssh_type
@@ -48,6 +82,18 @@ module Net
 
       # @cert-authority entry
       class CertAuthority
+        attr_reader :key, :location
+
+        def entry_kind
+          :cert_authority
+        end
+
+        # Type of the trusted CA key itself (e.g. "ssh-rsa"), as opposed to
+        # #ssh_types, the certificate types it is allowed to sign.
+        def ssh_type
+          @key.ssh_type
+        end
+
         def ssh_types
           %w[
             ecdsa-sha2-nistp256-cert-v01@openssh.com
@@ -59,9 +105,10 @@ module Net
           ]
         end
 
-        def initialize(key, comment: nil)
+        def initialize(key, comment: nil, location: nil)
           @key = key
           @comment = comment
+          @location = location
         end
 
         def matches_key?(server_key)
@@ -106,9 +153,20 @@ module Net
 
       # @revoked entry
       class Revoked
-        def initialize(key, comment: nil)
+        attr_reader :key, :location
+
+        def entry_kind
+          :revoked
+        end
+
+        def ssh_type
+          @key.ssh_type
+        end
+
+        def initialize(key, comment: nil, location: nil)
           @key = key
           @comment = comment
+          @location = location
         end
 
         # Returns true for the revoked key itself and for any certificate that
@@ -138,6 +196,14 @@ module Net
       # Returns true if a @revoked known-hosts entry for this host matches +key+.
       def revoked?(key)
         @revoked_keys.any? { |entry| entry.matches_key?(key) }
+      end
+
+      # Returns the @revoked entries that actually match +key+, in the order in
+      # which known-hosts files are searched. Used by the trust-decision evidence
+      # collector; unlike #revoked? it keeps every matching entry so its source
+      # file and line can be reported.
+      def revoked_matches(key)
+        @revoked_keys.select { |entry| entry.matches_key?(key) }
       end
 
       def add_host_key(key)
@@ -262,22 +328,27 @@ module Net
         host_name = entries[0]
         host_ip = entries[1]
 
-        each_entry do |marker, hostlist, key_content, comment|
+        each_entry do |marker, hostlist, key_content, comment, line|
           next if marker == "@revoked"
 
-          found = hostlist.any? { |pattern| match(host_name, pattern) } || known_host_hash?(hostlist, entries)
-          next unless found
+          plain_pattern = hostlist.find { |pattern| match(host_name, pattern) }
+          hashed_match = plain_pattern.nil? && known_host_hash?(hostlist, entries)
+          next unless plain_pattern || hashed_match
 
+          found = true
           found = hostlist.include?(host_ip) if options[:check_host_ip] && entries.size > 1 && hostlist.size > 1
           next unless found
 
           raw_key = read_key(key_content)
+          location = HostKeyEntryLocation.new(source, line,
+                                              plain_pattern || hostlist.first,
+                                              hashed_match)
 
           keys <<
             if marker == "@cert-authority"
-              HostKeyEntries::CertAuthority.new(raw_key, comment: comment)
+              HostKeyEntries::CertAuthority.new(raw_key, comment: comment, location: location)
             else
-              HostKeyEntries::PubKey.new(raw_key, comment: comment)
+              HostKeyEntries::PubKey.new(raw_key, comment: comment, location: location)
             end
         end
 
@@ -291,13 +362,19 @@ module Net
         keys = []
         entries = host.split(/,/)
 
-        each_entry do |marker, hostlist, key_content, comment|
+        each_entry do |marker, hostlist, key_content, comment, line|
           next unless marker == "@revoked"
 
-          found = entries.any? { |entry| hostlist.any? { |pattern| match(entry, pattern) } }
-          next unless found || known_host_hash?(hostlist, entries)
+          plain_pattern = entries.flat_map do |entry|
+            hostlist.select { |pattern| match(entry, pattern) }
+          end.first
+          hashed_match = plain_pattern.nil? && known_host_hash?(hostlist, entries)
+          next unless plain_pattern || hashed_match
 
-          keys << HostKeyEntries::Revoked.new(read_key(key_content), comment: comment)
+          location = HostKeyEntryLocation.new(source, line,
+                                              plain_pattern || hostlist.first,
+                                              hashed_match)
+          keys << HostKeyEntries::Revoked.new(read_key(key_content), comment: comment, location: location)
         end
 
         keys
@@ -345,12 +422,13 @@ module Net
 
       private
 
-      # Yields the marker, host patterns, key and comment of each usable line.
+      # Yields the marker, host patterns, key, comment and 1-based line number
+      # of each usable line.
       def each_entry
         return unless File.readable?(source)
 
         File.open(source) do |file|
-          file.each_line do |line|
+          file.each_line.with_index(1) do |line, line_number|
             fields = line.split(' ')
             marker = fields.shift if fields.first&.start_with?('@')
             hosts, type, key_content, comment = fields
@@ -360,7 +438,7 @@ module Net
 
             next unless SUPPORTED_TYPE.include?(type)
 
-            yield marker, hosts.split(','), key_content, comment
+            yield marker, hosts.split(','), key_content, comment, line_number
           end
         end
       end

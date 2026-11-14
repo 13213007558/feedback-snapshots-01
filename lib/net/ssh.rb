@@ -70,6 +70,7 @@ module Net
       max_win_size send_env set_env use_agent number_of_password_prompts
       append_all_supported_algorithms non_interactive password_prompt
       prompt_without_tty agent_socket_factory minimum_dh_bits verify_host_key
+      verify_host_key_evidence
       fingerprint_hash check_host_ip pubkey_algorithms no_delay
       control_master control_path preopen_channels
     ]

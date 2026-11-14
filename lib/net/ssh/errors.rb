@@ -60,6 +60,11 @@ module Net
       # situation-specific data describing the host (see #host, #port, etc.)
       attr_writer :data # :nodoc:
 
+      # The optional Net::SSH::Verifiers::TrustEvidence describing why the
+      # trust decision was made. Nil unless the :verify_host_key_evidence
+      # option was enabled.
+      attr_accessor :trust_evidence
+
       # An accessor for getting at the data that was used to look up the host
       # (see also #fingerprint, #host, #port, #ip, and #key).
       def [](key)
