@@ -112,6 +112,29 @@ module Dnsruby
   # ;; Received 135 bytes from 139.134.2.18#53(sy-dns02.tmns.net.au) in 525 ms
   #   ;;; FINALLY, THE ANSWER!
   #  Now,DNSSEC validation is performed (unless disabled).
+  #
+  #  === QNAME minimisation (RFC 9156)
+  #
+  #  By default, every nameserver along the delegation chain is sent the
+  #  full query name, which leaks the internal/service labels of the name
+  #  being resolved to servers which do not need to know them.  Setting
+  #  +qname_minimise+ to true makes the Recursor send each level of the
+  #  chain only the part of the name it needs to discover the next
+  #  delegation (one label more than the currently known zone), using a
+  #  minimised A query.  Only the final, authoritative level receives the
+  #  full QNAME, and it always receives it with the original query type -
+  #  so queries required for DNSSEC (DS, DNSKEY, RRSIG, ...) are never
+  #  minimised away.
+  #
+  #  Some (broken) servers do not cope with minimised queries.  When a
+  #  minimised probe fails (timeout, FORMERR, NOTIMP, REFUSED or SERVFAIL),
+  #  the Recursor falls back to a full-QNAME query for that level, unless
+  #  the caller sets +qname_minimise_fallback+ to false - in which case the
+  #  query fails and +errorstring+ describes why.  Aliases (CNAMEs) and
+  #  empty-non-terminal (NODATA) responses encountered at a minimised step
+  #  are handled by asking the same level for the full QNAME, since the
+  #  name then provably belongs to that zone.  An NXDOMAIN for a minimised
+  #  name terminates the lookup, as the full QNAME can then never exist.
   class Recursor
     class AddressCache # :nodoc: all
       #  Like an array, but stores the expiration of each record.
@@ -155,6 +178,22 @@ module Dnsruby
       end
     end
     attr_accessor :nameservers, :callback, :recurse, :ipv6_ok
+    #  Should QNAME minimisation (RFC 9156) be used for recursive lookups?
+    #  Defaults to false (full QNAME is sent to every level, as before).
+    attr_accessor :qname_minimise
+    #  When QNAME minimisation is on, may the Recursor fall back to a
+    #  full-QNAME query for a level whose servers do not cope with
+    #  minimised queries?  Defaults to true; set to false to make such
+    #  lookups fail instead of revealing the full QNAME.
+    attr_accessor :qname_minimise_fallback
+    #  Optional factory used to build the resolver for each level of the
+    #  recursion:  recursor.resolver_factory = ->(nameserver_ips) { ... }
+    #  The factory must return an object quacking like Dnsruby::Resolver.
+    #  Mainly useful for testing with in-memory (recording) resolvers.
+    attr_accessor :resolver_factory
+    #  Describes why the last lookup failed (e.g. because a server was
+    #  incompatible with QNAME minimisation and fallback was disabled).
+    attr_reader :errorstring
     attr_reader :hints, :dnssec
     #  The resolver to use for the queries
     attr_accessor :resolver
@@ -183,6 +222,9 @@ module Dnsruby
       end
       @resolver.dnssec = @dnssec
       @ipv6_ok = false
+      @qname_minimise = false
+      @qname_minimise_fallback = true
+      @resolver_factory = nil
     end
     # Initialize the hint servers.  Recursive queries need a starting name
     # server to work off of. This method takes a list of IP addresses to use
@@ -634,7 +676,7 @@ module Dnsruby
           nameservers.push(n.to_s)
         }
       end
-      resolver = Resolver.new({:nameserver=>nameservers})
+      resolver = new_authority_resolver(nameservers)
       resolver.dnssec = @dnssec
       resolver.recurse = false
       servers = []
@@ -642,27 +684,44 @@ module Dnsruby
         servers.push(s.server)
       }
       resolver.retry_delay = nameservers.length
-      begin
-        #  Should construct packet ourselves and clear RD bit
-        query = Message.new(name, type, klass)
-        query.header.rd = false
-        query.do_validation = true
-        query.do_caching = false
-        query.do_validation = false if no_validation
-        #             print "Sending msg from resolver, dnssec = #{resolver.dnssec}, do_validation = #{query.do_validation}\n"
-        packet = resolver.send_message(query)
-        #  @TODO@ Now prune unrelated RRSets (RFC 5452 section 6)
-        prune_rrsets_to_rfc5452(packet, known_zone)
-      rescue ResolvTimeout, IOError
-        #             TheLog.debug(";; nameserver #{levelns.to_s} didn't respond")
-        #             next
-        TheLog.debug("No response!")
-        return nil
+
+      #  QNAME minimisation (RFC 9156): if enabled, and we are not yet at
+      #  the last step of the delegation chain, probe this level with just
+      #  the next label down rather than the full QNAME.
+      packet = nil
+      minimised_qname = minimised_qname_for(name, known_zone)
+      if (minimised_qname)
+        packet = send_probe(resolver, minimised_qname, Types.A, klass, no_validation, known_zone)
+        action = minimised_response_action(packet)
+        TheLog.debug(";; _dorecursion() minimised probe [#{minimised_qname}] gave #{action}")
+        case action
+        when :referral
+          #  The referral is processed by the normal logic below.
+        when :nxdomain
+          #  A parent of the QNAME does not exist - the QNAME never can.
+          return packet
+        when :terminal
+          #  An alias, wildcard or empty non-terminal: the full QNAME
+          #  belongs to this zone, so ask this level for it directly.
+          packet = nil
+        when :incompatible
+          if (!@qname_minimise_fallback)
+            @errorstring = "Servers for #{known_zone} cannot handle QNAME minimisation and qname_minimise_fallback is disabled"
+            TheLog.debug(";; _dorecursion() #{@errorstring}")
+            return nil
+          end
+          TheLog.debug(";; _dorecursion() Falling back to full QNAME for [#{known_zone}]")
+          packet = nil
+        end
+      end
+      if (packet.nil?)
+        packet = send_probe(resolver, name, type, klass, no_validation, known_zone)
+        if (packet.nil?)
+          TheLog.debug("No response!")
+          return nil
+        end
       end
       if (packet) # @TODO@ Check that the packet *is* actually authoritative!!
-        if (@callback)
-          @callback.call(packet)
-        end
 
         of = nil
         TheLog.debug(";; _dorecursion() Response received from [" + @answerfrom.to_s + "]")
@@ -759,6 +818,80 @@ module Dnsruby
       end
 
       return nil
+    end
+
+    #  Build the resolver used to talk to one level of the delegation
+    #  chain.  Tests can inject an in-memory resolver via +resolver_factory+.
+    def new_authority_resolver(nameservers) # :nodoc:
+      if (@resolver_factory)
+        return @resolver_factory.call(nameservers)
+      end
+      Resolver.new({:nameserver=>nameservers})
+    end
+
+    #  Send a single iterative query to the current level's servers.
+    #  Returns the response Message, or nil if the servers did not respond.
+    def send_probe(resolver, qname, qtype, klass, no_validation, known_zone) # :nodoc:
+      #  Should construct packet ourselves and clear RD bit
+      query = Message.new(qname, qtype, klass)
+      query.header.rd = false
+      query.do_validation = true
+      query.do_caching = false
+      query.do_validation = false if no_validation
+      begin
+        packet = resolver.send_message(query)
+      rescue ResolvTimeout, IOError
+        TheLog.debug("No response!")
+        return nil
+      end
+      #  @TODO@ Now prune unrelated RRSets (RFC 5452 section 6)
+      prune_rrsets_to_rfc5452(packet, known_zone)
+      if (packet && @callback)
+        @callback.call(packet)
+      end
+      return packet
+    end
+
+    #  Compute the minimised query name (RFC 9156) for +name+ given the
+    #  closest known enclosing zone: the child of +known_zone+ which is on
+    #  the path to +name+.  Returns nil when minimisation is disabled or
+    #  when the next step already needs the full QNAME (the last step of
+    #  the chain) - in that case the original query type is always used,
+    #  so DNSSEC-related queries are never minimised away.
+    def minimised_qname_for(name, known_zone) # :nodoc:
+      return nil unless @qname_minimise
+      qname = Name.create(name.to_s.downcase)
+      qname.absolute = true
+      zone = Name.create(known_zone.to_s.downcase)
+      zone.absolute = true
+      #  Only names strictly below the known zone can be minimised.
+      return nil unless qname.subdomain_of?(zone)
+      minimised = Name.new(qname.to_a[-(zone.length + 1)..-1], true)
+      #  If the minimised name *is* the QNAME, this level needs the full
+      #  name (and the original qtype) anyway.
+      return nil if minimised == qname
+      return minimised.to_s
+    end
+
+    #  Classify the response to a minimised probe:
+    #  :referral     - the response delegates us further down the tree
+    #  :nxdomain     - the minimised name does not exist; nor can the QNAME
+    #  :terminal     - alias, wildcard or NODATA: the QNAME belongs to this
+    #                  zone, so this level must be asked the full QNAME
+    #  :incompatible - the server did not cope with the minimised query
+    def minimised_response_action(packet) # :nodoc:
+      return :incompatible if packet.nil?
+      rcode = packet.rcode.to_s
+      return :nxdomain if rcode == "NXDOMAIN"
+      if (rcode == "FORMERR" || rcode == "NOTIMP" || rcode == "REFUSED" || rcode == "SERVFAIL")
+        return :incompatible
+      end
+      #  An answer (e.g. a CNAME alias or wildcard) for the minimised name.
+      return :terminal if packet.answer.length > 0
+      #  A referral hands us the next zone down.
+      return :referral if packet.authority.any? {|rr| rr.type == Types::NS}
+      #  NODATA (empty non-terminal, or no A record at the minimised name).
+      return :terminal
     end
 
     def prune_rrsets_to_rfc5452(packet, zone)

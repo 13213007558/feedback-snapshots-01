@@ -61,6 +61,7 @@ TESTS = %w(
     packet
     packet_unique_push
     ptrin
+    qname_minimisation
     question
     query_control
     res_config
