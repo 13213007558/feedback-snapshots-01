@@ -1250,6 +1250,8 @@ module Net
       @enabled = Set.new
       @tls_connected = @tls_verified = false
       @connection_state = ConnectionState::NotAuthenticated.new
+      @selected_mailbox = nil
+      @selection_generation = 0
 
       # Client Protocol Receiver
       @parser = ResponseParser.new(config: @config)
@@ -1828,7 +1830,10 @@ module Net
         state_unselected! # implicitly closes current mailbox
         @responses.clear
         send_command(*args)
-          .tap do state_selected! end
+          .tap do
+            state_selected!
+            @selected_mailbox = mailbox
+          end
       end
     end
 
@@ -1848,7 +1853,61 @@ module Net
         state_unselected! # implicitly closes current mailbox
         @responses.clear
         send_command(*args)
-          .tap do state_selected! end
+          .tap do
+            state_selected!
+            @selected_mailbox = mailbox
+          end
+      end
+    end
+
+    # :call-seq:
+    #   read_context(mailbox, uidvalidity:, uids:) -> ReadContext
+    #
+    # Returns a ReadContext that binds an approved +mailbox+, +uidvalidity+,
+    # and a finite set of message +uids+ to subsequent fetches on this
+    # connection.  This can be used to enforce a limited grant—e.g. an
+    # approval from a customer-service console to read a few specific
+    # messages—so that only those messages can be fetched, and only while
+    # the connection remains in the exact same mailbox selection.
+    #
+    # The context is bound to the selection that is current when it is
+    # created.  It becomes unusable after re-SELECT (or EXAMINE), a failed
+    # SELECT, CLOSE or UNSELECT, an unsolicited +CLOSED+ response code, a
+    # UIDVALIDITY change, logout, or disconnection.  See ReadContext for
+    # details.
+    #
+    # +uids+ may be any valid input to
+    # {SequenceSet[...]}[rdoc-ref:SequenceSet@Creating+sequence+sets], but it
+    # must be finite and non-empty: ranges ending in <tt>*</tt> (or endless
+    # ranges) are rejected, because the authorized set must be fully known.
+    #
+    # Only UIDs are used—never mutable message sequence numbers.
+    #
+    #   imap.select("INBOX")
+    #   uidvalidity = imap.responses("UIDVALIDITY", &:last)
+    #   ctx = imap.read_context("INBOX", uidvalidity: uidvalidity, uids: 101..105)
+    #   ctx.uid_fetch(101..102, %w[FLAGS BODY.PEEK[]])
+    #
+    # Related: #select, #examine, #uid_fetch
+    def read_context(mailbox, uidvalidity:, uids:)
+      uidvalidity = Integer(uidvalidity)
+      uids = begin
+        SequenceSet[uids]
+      rescue DataFormatError => error
+        raise ArgumentError, error.message
+      end
+      if uids.empty? || uids.include_star?
+        raise ArgumentError,
+              "read context uids must be a finite, non-empty set"
+      end
+      synchronize do
+        ReadContext.new(
+          client:      self,
+          mailbox:     String(mailbox).freeze,
+          uidvalidity: uidvalidity,
+          uids:        uids.freeze,
+          generation:  @selection_generation,
+        )
       end
     end
 
@@ -2318,7 +2377,7 @@ module Net
     # Related: #unselect
     def close
       send_command("CLOSE")
-        .tap do state_authenticated! end
+        .tap do state_unselected! end
     end
 
     # Sends an {UNSELECT command [RFC3691 §2]}[https://www.rfc-editor.org/rfc/rfc3691#section-3]
@@ -2335,7 +2394,7 @@ module Net
     # [RFC3691[https://www.rfc-editor.org/rfc/rfc3691]].
     def unselect
       send_command("UNSELECT")
-        .tap do state_authenticated! end
+        .tap do state_unselected! end
     end
 
     # call-seq:
@@ -4041,6 +4100,48 @@ module Net
       end
     end
 
+    # Fetches +set+ with +UID FETCH+, authorized by +ctx+ (a ReadContext).
+    #
+    # The context validation and the command are executed while holding the
+    # connection lock, so a concurrent SELECT/EXAMINE/CLOSE on another thread
+    # cannot switch mailboxes between the check and the send.  Only results
+    # whose UID is authorized by +ctx+ are returned: any other FETCH data the
+    # server may have included is dropped, never wrapped as authorized
+    # content.
+    def fetch_with_read_context(ctx, set, attr, partial: nil, changedsince: nil)
+      set = SequenceSet[set]
+      synchronize do
+        validate_read_context!(ctx, set)
+        results = fetch_internal("UID FETCH", set, attr,
+                                 partial: partial, changedsince: changedsince)
+        results.select { |data| data.uid && ctx.uids.include?(data.uid) }
+      end
+    end
+
+    # NOTE: only called from #fetch_with_read_context, while synchronized.
+    # Raises ReadContextError before any command is sent.
+    def validate_read_context!(ctx, set)
+      unless connection_state.to_sym == :selected &&
+             ctx.generation == @selection_generation
+        raise ReadContextError,
+              "read context is stale: the mailbox selection has changed"
+      end
+      unless ctx.mailbox == @selected_mailbox
+        raise ReadContextError,
+              "read context is for #{ctx.mailbox.inspect}, " \
+              "not the selected mailbox"
+      end
+      unless ctx.uidvalidity == @responses["UIDVALIDITY"].last
+        raise ReadContextError,
+              "read context UIDVALIDITY #{ctx.uidvalidity} " \
+              "does not match the selected mailbox"
+      end
+      unless ctx.uids.cover?(set)
+        raise ReadContextError,
+              "requested UIDs #{set} exceed the authorized set #{ctx.uids}"
+      end
+    end
+
     def fetch_internal(cmd, set, attr, mod = nil, partial: nil, changedsince: nil)
       if partial && !cmd.start_with?("UID ")
         raise ArgumentError, "partial can only be used with uid_fetch"
@@ -4182,6 +4283,10 @@ module Net
 
     def state_unselected!
       synchronize do
+        # Any transition out of (or attempt to leave) the selected state
+        # invalidates every previously issued ReadContext.
+        @selection_generation += 1
+        @selected_mailbox = nil
         state_authenticated! if connection_state.to_sym == :selected
       end
     end
@@ -4229,6 +4334,7 @@ require_relative "imap/flags"
 require_relative "imap/response_data"
 require_relative "imap/response_parser"
 require_relative "imap/authenticators"
+require_relative "imap/read_context"
 
 require_relative "imap/deprecated_client_options"
 Net::IMAP.prepend Net::IMAP::DeprecatedClientOptions

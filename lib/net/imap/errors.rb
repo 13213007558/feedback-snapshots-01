@@ -17,6 +17,16 @@ module Net
     class DataFormatError < Error
     end
 
+    # Error raised when a ReadContext can no longer be used, because the
+    # connection's selected mailbox no longer matches the context's authorized
+    # mailbox, UIDVALIDITY, or selection, or when a requested fetch exceeds
+    # the context's authorized UID set.
+    #
+    # This error is raised before any command is sent to the server, so a
+    # stale or out-of-bounds read is never transmitted.
+    class ReadContextError < Error
+    end
+
     # Error raised when the socket cannot be read, due to a Config limit.
     class ResponseReadError < Error
     end
