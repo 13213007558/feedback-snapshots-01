@@ -120,8 +120,6 @@ module REXMLTests
 Duplicate attribute "a"
 Line: 2
 Position: 24
-Last 80 unconsumed characters:
-/>
       MESSAGE
       assert_raise(REXML::ParseException.new(message)) do
         Document.new(<<-XML)
@@ -138,8 +136,6 @@ Last 80 unconsumed characters:
 Namespace conflict in adding attribute "a": Prefix "n1" = "http://www.w3.org" and prefix "n2" = "http://www.w3.org"
 Line: 4
 Position: 140
-Last 80 unconsumed characters:
-/>
       MESSAGE
       assert_raise(REXML::ParseException.new(message)) do
         Document.new(<<-XML)
@@ -1366,8 +1362,6 @@ EOL
 Missing attribute value start quote: <bar>
 Line: 1
 Position: 16
-Last 80 unconsumed characters:
-value/>
       DETAIL
     end
 
@@ -1380,8 +1374,6 @@ value/>
 Missing attribute value end quote: <bar>: <">
 Line: 1
 Position: 17
-Last 80 unconsumed characters:
-value/>
       DETAIL
     end
 

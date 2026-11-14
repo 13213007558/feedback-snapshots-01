@@ -20,8 +20,6 @@ module REXMLTests
 Malformed XML: Invalid processing instruction node: invalid name
 Line: 1
 Position: 4
-Last 80 unconsumed characters:
-?>
         DETAIL
       end
 
@@ -33,8 +31,6 @@ Last 80 unconsumed characters:
 Malformed XML: Unclosed processing instruction: <name>
 Line: 1
 Position: 14
-Last 80 unconsumed characters:
-content
         DETAIL
       end
 
@@ -46,8 +42,6 @@ content
 Malformed XML: Unclosed processing instruction: <name>
 Line: 1
 Position: 6
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -59,8 +53,6 @@ Last 80 unconsumed characters:
 Malformed XML: XML declaration is duplicated
 Line: 1
 Position: 42
-Last 80 unconsumed characters:
- version="1.0"?>
         DETAIL
       end
 
@@ -76,8 +68,6 @@ Last 80 unconsumed characters:
           Malformed XML: XML declaration is not at the start
           Line: 1
           Position: 25
-          Last 80 unconsumed characters:
-           version="1.0" ?>
         DETAIL
       end
 
@@ -93,8 +83,6 @@ Last 80 unconsumed characters:
           Malformed XML: XML declaration misses spaces before version
           Line: 1
           Position: 7
-          Last 80 unconsumed characters:
-          ?>
         DETAIL
       end
 
@@ -110,8 +98,6 @@ Last 80 unconsumed characters:
           Malformed XML: XML declaration misses version
           Line: 1
           Position: 8
-          Last 80 unconsumed characters:
-          ?>
         DETAIL
       end
 
@@ -123,8 +109,6 @@ Last 80 unconsumed characters:
 Malformed XML: Unclosed XML declaration
 Line: 1
 Position: 19
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -140,8 +124,6 @@ Last 80 unconsumed characters:
           Malformed XML: Unclosed XML declaration
           Line: 1
           Position: 37
-          Last 80 unconsumed characters:
-          encoding="UTF-8"?>
         DETAIL
       end
 
@@ -157,8 +139,6 @@ Last 80 unconsumed characters:
           Malformed XML: Unclosed XML declaration
           Line: 1
           Position: 53
-          Last 80 unconsumed characters:
-          standalone="no"?>
         DETAIL
       end
 
@@ -174,8 +154,6 @@ Last 80 unconsumed characters:
           Malformed XML: Unclosed XML declaration
           Line: 1
           Position: 31
-          Last 80 unconsumed characters:
-          test="no"?>
         DETAIL
       end
 
@@ -187,8 +165,6 @@ Last 80 unconsumed characters:
 Malformed XML: XML declaration standalone is not yes or no : <YES>
 Line: 1
 Position: 38
-Last 80 unconsumed characters:
-?>
         DETAIL
       end
     end

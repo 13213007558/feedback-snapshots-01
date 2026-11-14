@@ -1,5 +1,21 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * `REXML::ParseException` is now a structured record of the failure:
+    it snapshots the raw byte position (`byte_position`), the parse
+    phase (`phase`) and the cause chain (`causes`, `to_h`) when it is
+    raised.  The default `to_s` no longer includes the input body nor
+    nested exception messages, so it is safe for ordinary logs; the
+    previous verbose rendering is available via `full_report` or by
+    enabling controlled diagnostics with
+    `REXML::ParseException.diagnostics_enabled = true` or
+    `REXML_DIAGNOSTICS=true`.  Entity expansion failures raised while
+    parsing are now `REXML::ParseException` (a `RuntimeError`) with
+    phase `:entity_expansion` instead of bare `RuntimeError`.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

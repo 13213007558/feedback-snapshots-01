@@ -63,6 +63,9 @@ module REXML
     # The line number of the last consumed text
     attr_reader :line
     attr_reader :encoding
+    # A hint set by the parser about what it is currently doing
+    # (e.g. :element or :entity_expansion); recorded on ParseException.
+    attr_accessor :parse_phase
 
     module Private
       SPACES_PATTERN = /\s+/um
@@ -89,6 +92,7 @@ module REXML
     def initialize(arg, encoding=nil)
       @orig = arg
       @scanner = StringScanner.new(@orig)
+      @raw_offset_base = 0
       if encoding
         self.encoding = encoding
       else
@@ -160,6 +164,20 @@ module REXML
       @scanner.pos
     end
 
+    # The byte offset in the original (undecoded) input that corresponds
+    # to the current scanner position.  For transcoded inputs (e.g.
+    # UTF-16) the consumed text is encoded back to the source encoding,
+    # so the result always addresses raw input bytes.  This performs no
+    # IO and consumes no input.
+    def raw_byte_position
+      return @scanner.pos unless @to_utf
+      consumed = @scanner.string.byteslice(0, @scanner.pos)
+      return @scanner.pos unless consumed
+      @raw_offset_base + consumed.encode(@encoding).bytesize
+    rescue EncodingError
+      @scanner.pos
+    end
+
     def position=(pos)
       @scanner.pos = pos
     end
@@ -207,6 +225,7 @@ module REXML
 
     def encoding_updated
       if @encoding != 'UTF-8'
+        @raw_offset_base = @scanner.pos
         @scanner.string = decode(@scanner.rest)
         @to_utf = true
       else
@@ -324,6 +343,20 @@ module REXML
 
     def empty?
       super and ( @source.nil? || @source.eof? )
+    end
+
+    # The byte offset in the underlying IO that corresponds to the
+    # current scanner position: bytes read from the IO minus the bytes
+    # still buffered (in the source encoding).  This performs no IO and
+    # consumes no input.
+    def raw_byte_position
+      base = @er_source.pos
+      rest = @scanner.rest
+      buffered = @to_utf ? rest.encode(@encoding).bytesize : rest.bytesize
+      buffered += @pending_buffer.bytesize if @pending_buffer
+      base - buffered
+    rescue IOError, SystemCallError, EncodingError
+      super
     end
 
     # @return the current line in the source

@@ -36,8 +36,6 @@ module REXMLTests
 Malformed entity declaration
 Line: 1
 Position: 61
-Last 80 unconsumed characters:
- invalid&name "valid-entity-value">]>
           DETAIL
         end
       end
@@ -54,8 +52,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 59
-Last 80 unconsumed characters:
- valid-name invalid-entity-value>]>
             DETAIL
           end
 
@@ -67,8 +63,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 44
-Last 80 unconsumed characters:
- valid-name "% &">]>
             DETAIL
           end
 
@@ -80,8 +74,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 61
-Last 80 unconsumed characters:
- valid-name "invalid-entity-value'>]>
             DETAIL
           end
         end
@@ -98,8 +90,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 68
-Last 80 unconsumed characters:
- valid-name SYSTEM invalid-system-literal>]>
               DETAIL
             end
 
@@ -111,8 +101,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 90
-Last 80 unconsumed characters:
- valid-name PUBLIC "valid-pubid-literal" invalid-system-literal>]>
               DETAIL
             end
 
@@ -124,8 +112,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 70
-Last 80 unconsumed characters:
- valid-name SYSTEM 'invalid-system-literal">]>
               DETAIL
             end
 
@@ -137,8 +123,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 92
-Last 80 unconsumed characters:
- valid-name PUBLIC "valid-pubid-literal" "invalid-system-literal'>]>
               DETAIL
             end
 
@@ -150,8 +134,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 45
-Last 80 unconsumed characters:
- valid-name SYSTEM>]>
               DETAIL
             end
 
@@ -163,8 +145,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 67
-Last 80 unconsumed characters:
- valid-name PUBLIC "valid-pubid-literal">]>
               DETAIL
             end
           end
@@ -180,8 +160,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 90
-Last 80 unconsumed characters:
- valid-name PUBLIC invalid-pubid-literal "valid-system-literal">]>
               DETAIL
             end
 
@@ -194,8 +172,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 74
-Last 80 unconsumed characters:
- valid-name PUBLIC "\u3042" "valid-system-literal">]>
               DETAIL
             end
 
@@ -207,8 +183,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 92
-Last 80 unconsumed characters:
- valid-name PUBLIC "invalid-pubid-literal' "valid-system-literal">]>
               DETAIL
             end
 
@@ -220,8 +194,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 45
-Last 80 unconsumed characters:
- valid-name PUBLIC>]>
               DETAIL
             end
           end
@@ -238,8 +210,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 109
-Last 80 unconsumed characters:
- valid-name PUBLIC "valid-pubid-literal" "valid-system-literal" NDATA invalid&nam
             DETAIL
           end
         end
@@ -252,8 +222,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 83
-Last 80 unconsumed characters:
- valid-name "valid-entity-value" NDATA valid-ndata-value>]>
         DETAIL
         end
       end
@@ -266,8 +234,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 102
-Last 80 unconsumed characters:
- valid-namePUBLIC"valid-pubid-literal""valid-system-literal"NDATAvalid-name>]>
         DETAIL
       end
     end
@@ -284,8 +250,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 63
-Last 80 unconsumed characters:
- % invalid&name "valid-entity-value">]>
           DETAIL
         end
       end
@@ -302,8 +266,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 61
-Last 80 unconsumed characters:
- % valid-name invalid-entity-value>]>
             DETAIL
           end
 
@@ -315,8 +277,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 46
-Last 80 unconsumed characters:
- % valid-name "% &">]>
             DETAIL
           end
 
@@ -328,8 +288,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 63
-Last 80 unconsumed characters:
- % valid-name 'invalid-entity-value">]>
             DETAIL
           end
         end
@@ -346,8 +304,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 70
-Last 80 unconsumed characters:
- % valid-name SYSTEM invalid-system-literal>]>
               DETAIL
             end
 
@@ -359,8 +315,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 92
-Last 80 unconsumed characters:
- % valid-name PUBLIC "valid-pubid-literal" invalid-system-literal>]>
               DETAIL
             end
 
@@ -372,8 +326,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 72
-Last 80 unconsumed characters:
- % valid-name SYSTEM "invalid-system-literal'>]>
               DETAIL
             end
 
@@ -385,8 +337,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 94
-Last 80 unconsumed characters:
- % valid-name PUBLIC "valid-pubid-literal" 'invalid-system-literal">]>
               DETAIL
             end
 
@@ -398,8 +348,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 47
-Last 80 unconsumed characters:
- % valid-name SYSTEM>]>
               DETAIL
             end
 
@@ -411,8 +359,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 69
-Last 80 unconsumed characters:
- % valid-name PUBLIC "valid-pubid-literal">]>
               DETAIL
             end
           end
@@ -428,8 +374,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 92
-Last 80 unconsumed characters:
- % valid-name PUBLIC invalid-pubid-literal "valid-system-literal">]>
               DETAIL
             end
 
@@ -442,8 +386,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 76
-Last 80 unconsumed characters:
- % valid-name PUBLIC "\u3042" "valid-system-literal">]>
               DETAIL
             end
 
@@ -455,8 +397,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 94
-Last 80 unconsumed characters:
- % valid-name PUBLIC 'invalid-pubid-literal" "valid-system-literal">]>
               DETAIL
             end
 
@@ -468,8 +408,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 47
-Last 80 unconsumed characters:
- % valid-name PUBLIC>]>
               DETAIL
             end
           end
@@ -483,8 +421,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 85
-Last 80 unconsumed characters:
- % valid-name "valid-entity-value" NDATA valid-ndata-value>]>
         DETAIL
         end
       end
@@ -497,8 +433,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 1
 Position: 67
-Last 80 unconsumed characters:
- %valid-nameSYSTEM"valid-system-literal">]>
         DETAIL
       end
     end
@@ -513,8 +447,6 @@ Last 80 unconsumed characters:
 Malformed entity declaration
 Line: 5
 Position: 70
-Last 80 unconsumed characters:
->  ]> <r/> 
       DETAIL
     end
 

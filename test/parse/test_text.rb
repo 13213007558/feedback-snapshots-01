@@ -13,8 +13,6 @@ module REXMLTests
           Malformed XML: Content at the start of the document (got 'a')
           Line: 1
           Position: 1
-          Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -31,8 +29,6 @@ module REXMLTests
             Malformed XML: Content at the start of the document (got 'a')
             Line: -1
             Position: -1
-            Last 80 unconsumed characters:
-
           DETAIL
         end
       end
@@ -49,8 +45,6 @@ module REXMLTests
           Malformed XML: Content at the start of the document (got 'b')
           Line: 1
           Position: 4
-          Last 80 unconsumed characters:
-          <a>
         DETAIL
       end
 
@@ -66,8 +60,6 @@ module REXMLTests
           Malformed XML: Extra content at the end of the document (got 'c')
           Line: 1
           Position: 8
-          Last 80 unconsumed characters:
-
         DETAIL
       end
     end

@@ -17,11 +17,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse(xml)
         end
-        assert_equal(<<-MESSAGE, exception.to_s)
+        assert_equal(<<-MESSAGE.chomp, exception.to_s)
 Missing end tag for 'root' (got 'not-root')
 Line: 1
 Position: #{xml.bytesize}
-Last 80 unconsumed characters:
         MESSAGE
       end
 
@@ -30,11 +29,10 @@ Last 80 unconsumed characters:
         exception = assert_raise(REXML::ParseException) do
           parse(xml)
         end
-        assert_equal(<<-MESSAGE, exception.to_s)
+        assert_equal(<<-MESSAGE.chomp, exception.to_s)
 Missing end tag for '/root'
 Line: 1
 Position: #{xml.bytesize}
-Last 80 unconsumed characters:
         MESSAGE
       end
     end

@@ -23,11 +23,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<root><![CDATA[a]></root>")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed CDATA: Missing end ']]>'
           Line: 1
           Position: 25
-          Last 80 unconsumed characters:
         DETAIL
       end
     end

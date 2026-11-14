@@ -289,8 +289,10 @@ module REXML
             return process_instruction
           elsif @source.match?("<!", true)
             if @source.match?("--", true)
+              @source.parse_phase = :comment
               return [ :comment, process_comment ]
             elsif @source.match?("DOCTYPE", true)
+              @source.parse_phase = :doctype
               base_error_message = "Malformed DOCTYPE"
               unless @source.skip_spaces
                 if @source.match?(">")
@@ -445,6 +447,7 @@ module REXML
             # here explicitly.
             @source.ensure_buffer
             if @source.match?("/", true)
+              @source.parse_phase = :element
               @namespaces_restore_stack.pop
               last_tag = @tags.pop
               md = @source.match(Private::CLOSE_PATTERN, true)
@@ -462,8 +465,10 @@ module REXML
             elsif @source.match?("!", true)
               #STDERR.puts "SOURCE BUFFER = #{source.buffer}, #{source.buffer.size}"
               if @source.match?("--", true)
+                @source.parse_phase = :comment
                 return [ :comment, process_comment ]
               elsif @source.match?("[CDATA[", true)
+                @source.parse_phase = :cdata
                 text = @source.read_until("]]>")
                 if text.chomp!("]]>")
                   return [ :cdata, text ]
@@ -477,6 +482,7 @@ module REXML
               return process_instruction
             else
               # Get the next tag
+              @source.parse_phase = :element
               md = @source.match(Private::TAG_PATTERN, true)
               unless md
                 @source.position = start_position
@@ -508,6 +514,7 @@ module REXML
               return [ :start_element, tag, attributes ]
             end
           else
+            @source.parse_phase = :text
             text = @source.read_until("<")
             if text.chomp!("<")
               @source.position -= "<".bytesize
@@ -571,51 +578,59 @@ module REXML
 
       # Unescapes all possible entities
       def unnormalize( string, entities=nil, filter=nil, expanding: nil )
-        if string.include?("\r")
-          rv = string.gsub( Private::CARRIAGE_RETURN_NEWLINE_PATTERN, "\n" )
-        else
-          rv = string.dup
-        end
-        matches = rv.scan( REFERENCE_RE )
-        return rv if matches.size == 0
-        rv.gsub!( Private::CHARACTER_REFERENCES ) {
-          m=$1
-          if m.start_with?("x")
-            code_point = Integer(m[1..-1], 16)
+        previous_phase = @source.parse_phase
+        @source.parse_phase = :entity_expansion
+        begin
+          if string.include?("\r")
+            rv = string.gsub( Private::CARRIAGE_RETURN_NEWLINE_PATTERN, "\n" )
           else
-            code_point = Integer(m, 10)
+            rv = string.dup
           end
-          Text.expand_character_reference(code_point, "&##{m};")
-        }
-        matches.collect!{|x|x[0]}.compact!
-        if filter
-          matches.reject! do |entity_reference|
-            filter.include?(entity_reference)
-          end
-        end
-        if matches.size > 0
-          matches.tally.each do |entity_reference, n|
-            entity_expansion_count_before = @entity_expansion_count
-            entity_value = entity( entity_reference, entities, expanding: expanding )
-            if entity_value
-              if n > 1
-                entity_expansion_count_delta =
-                  @entity_expansion_count - entity_expansion_count_before
-                record_entity_expansion(entity_expansion_count_delta * (n - 1))
-              end
-              re = Private::DEFAULT_ENTITIES_PATTERNS[entity_reference] || /&#{entity_reference};/
-              rv.gsub!( re, entity_value )
-              if rv.bytesize > @entity_expansion_text_limit
-                raise "entity expansion has grown too large"
-              end
+          matches = rv.scan( REFERENCE_RE )
+          return rv if matches.size == 0
+          rv.gsub!( Private::CHARACTER_REFERENCES ) {
+            m=$1
+            if m.start_with?("x")
+              code_point = Integer(m[1..-1], 16)
             else
-              er = DEFAULT_ENTITIES[entity_reference]
-              rv.gsub!( er[0], er[2] ) if er
+              code_point = Integer(m, 10)
+            end
+            Text.expand_character_reference(code_point, "&##{m};")
+          }
+          matches.collect!{|x|x[0]}.compact!
+          if filter
+            matches.reject! do |entity_reference|
+              filter.include?(entity_reference)
             end
           end
-          rv.gsub!( Private::DEFAULT_ENTITIES_PATTERNS['amp'], '&' )
+          if matches.size > 0
+            matches.tally.each do |entity_reference, n|
+              entity_expansion_count_before = @entity_expansion_count
+              entity_value = entity( entity_reference, entities, expanding: expanding )
+              if entity_value
+                if n > 1
+                  entity_expansion_count_delta =
+                    @entity_expansion_count - entity_expansion_count_before
+                  record_entity_expansion(entity_expansion_count_delta * (n - 1))
+                end
+                re = Private::DEFAULT_ENTITIES_PATTERNS[entity_reference] || /&#{entity_reference};/
+                rv.gsub!( re, entity_value )
+                if rv.bytesize > @entity_expansion_text_limit
+                  raise REXML::ParseException.new("entity expansion has grown too large", @source)
+                end
+              else
+                er = DEFAULT_ENTITIES[entity_reference]
+                rv.gsub!( er[0], er[2] ) if er
+              end
+            end
+            rv.gsub!( Private::DEFAULT_ENTITIES_PATTERNS['amp'], '&' )
+          end
+          rv
+        ensure
+          # Keep the :entity_expansion phase when this raises, so the
+          # ParseException that wraps the failure records it.
+          @source.parse_phase = previous_phase unless $!
         end
-        rv
       end
 
       private
@@ -648,7 +663,7 @@ module REXML
       def record_entity_expansion(delta=1)
         @entity_expansion_count += delta
         if @entity_expansion_count > @entity_expansion_limit
-          raise "number of entity expansions exceeded, processing aborted."
+          raise REXML::ParseException.new("number of entity expansions exceeded, processing aborted.", @source)
         end
       end
 
@@ -729,8 +744,10 @@ module REXML
       def process_instruction
         name = parse_name("Malformed XML: Invalid processing instruction node")
         if name == "xml"
+          @source.parse_phase = :xml_declaration
           xml_declaration
         else # PITarget
+          @source.parse_phase = :processing_instruction
           if @source.skip_spaces # e.g. <?name content?>
             start_position = @source.position
             content = @source.read_until("?>")

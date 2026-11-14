@@ -175,11 +175,10 @@ module REXMLTests
           parser.pull
         end
       end
-      assert_equal(<<-DETAIL, exception.to_s)
+      assert_equal(<<-DETAIL.chomp, exception.to_s)
 Parameter entity references forbidden in internal subset: "%a;"
 Line: 1
 Position: 54
-Last 80 unconsumed characters:
       DETAIL
     end
 
@@ -260,8 +259,6 @@ Last 80 unconsumed characters:
 Detected an entity reference loop: x
 Line: 4
 Position: 57
-Last 80 unconsumed characters:
-</root>\x20
       DETAIL
     end
 
@@ -282,8 +279,6 @@ Last 80 unconsumed characters:
 Detected an entity reference loop: a
 Line: 5
 Position: 77
-Last 80 unconsumed characters:
-</root>\x20
       DETAIL
     end
 
@@ -303,8 +298,6 @@ Last 80 unconsumed characters:
 Detected an entity reference loop: x
 Line: 4
 Position: 557
-Last 80 unconsumed characters:
-</root>\x20
       DETAIL
     end
 

@@ -16,11 +16,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!--")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Unclosed comment: Missing end '-->'
           Line: 1
           Position: 4
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -28,11 +27,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!-- -- -->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 11
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -40,11 +38,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!-- --->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 9
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -56,8 +53,6 @@ module REXMLTests
           Malformed node: Started with '<!' but not a comment nor ELEMENT,ENTITY,ATTLIST,NOTATION
           Line: 1
           Position: 18
-          Last 80 unconsumed characters:
-          a
         DETAIL
       end
 
@@ -65,11 +60,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!DOCTYPE foo [<!--")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Unclosed comment: Missing end '-->'
           Line: 1
           Position: 19
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -77,11 +71,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!DOCTYPE foo [<!-- -- -->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 26
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -89,11 +82,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<!DOCTYPE foo [<!-- --->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 24
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -105,8 +97,6 @@ module REXMLTests
           Malformed node: Started with '<!' but not a comment nor CDATA
           Line: 1
           Position: 6
-          Last 80 unconsumed characters:
-          a
         DETAIL
       end
 
@@ -114,11 +104,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<a><!-->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Unclosed comment: Missing end '-->'
           Line: 1
           Position: 8
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -126,11 +115,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<a><!-- -- -->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 14
-          Last 80 unconsumed characters:
         DETAIL
       end
 
@@ -138,11 +126,10 @@ module REXMLTests
         exception = assert_raise(REXML::ParseException) do
           parse("<a><!-- --->")
         end
-        assert_equal(<<~DETAIL, exception.to_s)
+        assert_equal(<<~DETAIL.chomp, exception.to_s)
           Malformed comment
           Line: 1
           Position: 12
-          Last 80 unconsumed characters:
         DETAIL
       end
     end

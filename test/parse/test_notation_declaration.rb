@@ -34,8 +34,6 @@ module REXMLTests
 Malformed notation declaration: name is missing
 Line: 2
 Position: 62
-Last 80 unconsumed characters:
-<!NOTATION>
         DETAIL
       end
 
@@ -49,8 +47,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: invalid name
 Line: 5
 Position: 74
-Last 80 unconsumed characters:
-'>  ]> <r/> 
         DETAIL
       end
 
@@ -64,8 +60,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: invalid ID type
 Line: 2
 Position: 67
-Last 80 unconsumed characters:
->
         DETAIL
       end
 
@@ -79,8 +73,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: invalid ID type
 Line: 2
 Position: 75
-Last 80 unconsumed characters:
-INVALID>
         DETAIL
       end
     end
@@ -97,8 +89,6 @@ INVALID>
 Malformed notation declaration: system literal is missing
 Line: 5
 Position: 84
-Last 80 unconsumed characters:
->  ]> <r/> 
           DETAIL
         end
 
@@ -112,8 +102,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: garbage before end >
 Line: 2
 Position: 93
-Last 80 unconsumed characters:
-x'>
           DETAIL
         end
 
@@ -144,8 +132,6 @@ x'>
 Malformed notation declaration: invalid public ID literal
 Line: 5
 Position: 129
-Last 80 unconsumed characters:
- 'double quote " is invalid' "system-literal">  ]> <r/> 
             DETAIL
           end
 
@@ -175,8 +161,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: garbage before end >
 Line: 2
 Position: 113
-Last 80 unconsumed characters:
-x'>
            DETAIL
           end
 
@@ -228,8 +212,6 @@ x'>
 Malformed notation declaration: public ID literal is missing
 Line: 5
 Position: 84
-Last 80 unconsumed characters:
->  ]> <r/> 
         DETAIL
       end
 
@@ -243,8 +225,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: invalid public ID literal
 Line: 5
 Position: 128
-Last 80 unconsumed characters:
- 'double quote \" is invalid in PubidLiteral'>  ]> <r/> 
         DETAIL
       end
 
@@ -258,8 +238,6 @@ Last 80 unconsumed characters:
 Malformed notation declaration: garbage before end >
 Line: 5
 Position: 106
-Last 80 unconsumed characters:
-x'>  ]> <r/> 
         DETAIL
       end
 

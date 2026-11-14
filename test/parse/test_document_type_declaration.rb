@@ -36,8 +36,6 @@ r SYSTEM "urn:x-rexml:test" [
 Malformed DOCTYPE: invalid name
 Line: 5
 Position: 51
-Last 80 unconsumed characters:
-+ r SYSTEM "urn:x-rexml:test" [ ]>  <r/> 
         DETAIL
       end
 
@@ -51,8 +49,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: name is missing
 Line: 1
 Position: 10
-Last 80 unconsumed characters:
-<!DOCTYPE>
         DETAIL
       end
     end
@@ -66,8 +62,6 @@ Last 80 unconsumed characters:
           Malformed DOCTYPE: unclosed
           Line: 1
           Position: 15
-          Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -81,8 +75,6 @@ Last 80 unconsumed characters:
           Malformed DOCTYPE: invalid declaration
           Line: 1
           Position: 20
-          Last 80 unconsumed characters:
-          <r>#{' '}
         DETAIL
       end
 
@@ -96,8 +88,6 @@ Last 80 unconsumed characters:
           Malformed DOCTYPE: invalid declaration
           Line: 1
           Position: 21
-          Last 80 unconsumed characters:
-          text#{' '}
         DETAIL
       end
     end
@@ -152,8 +142,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: system literal is missing
 Line: 3
 Position: 26
-Last 80 unconsumed characters:
->  <r/> 
           DETAIL
         end
 
@@ -167,8 +155,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: invalid system literal
 Line: 3
 Position: 27
-Last 80 unconsumed characters:
- '  <r/> 
           DETAIL
         end
 
@@ -182,8 +168,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: garbage after external ID
 Line: 1
 Position: 29
-Last 80 unconsumed characters:
-x'>
           DETAIL
         end
 
@@ -214,8 +198,6 @@ x'>
 Malformed DOCTYPE: invalid public ID literal
 Line: 3
 Position: 62
-Last 80 unconsumed characters:
- 'double quote " is invalid' "r.dtd">  <r/> 
             DETAIL
           end
 
@@ -245,8 +227,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: garbage after public ID literal
 Line: 3
 Position: 54
-Last 80 unconsumed characters:
- "public-id-literal" 'system>  <r/> 
             DETAIL
           end
 
@@ -260,8 +240,6 @@ Last 80 unconsumed characters:
 Malformed DOCTYPE: garbage after external ID
 Line: 1
 Position: 58
-Last 80 unconsumed characters:
-x'>
            DETAIL
           end
 

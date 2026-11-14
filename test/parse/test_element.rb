@@ -20,8 +20,6 @@ module REXMLTests
 Malformed XML: No root element
 Line: 1
 Position: 1
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -33,8 +31,6 @@ Last 80 unconsumed characters:
 Malformed XML: No root element
 Line: 1
 Position: 21
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -46,8 +42,6 @@ Last 80 unconsumed characters:
 Malformed XML: No root element
 Line: 1
 Position: 16
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -59,8 +53,6 @@ Last 80 unconsumed characters:
 Unexpected top-level end tag (got 'a')
 Line: 1
 Position: 4
-Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -72,8 +64,6 @@ Last 80 unconsumed characters:
 Missing end tag for 'a'
 Line: 1
 Position: 5
-Last 80 unconsumed characters:
-</
         DETAIL
       end
 
@@ -85,8 +75,6 @@ Last 80 unconsumed characters:
 Invalid attribute name: <:a="">
 Line: 1
 Position: 13
-Last 80 unconsumed characters:
-:a=""></x>
         DETAIL
       end
 
@@ -94,12 +82,10 @@ Last 80 unconsumed characters:
         exception = assert_raise(REXML::ParseException) do
           parse("<x :\xE2\x80\x8B>") # U+200B ZERO WIDTH SPACE
         end
-        assert_equal(<<-DETAIL.chomp.force_encoding("ASCII-8BIT"), exception.to_s)
+        assert_equal(<<-DETAIL.chomp, exception.to_s)
 Invalid attribute name: <:\xE2\x80\x8B>
 Line: 1
 Position: 8
-Last 80 unconsumed characters:
-:\xE2\x80\x8B>
         DETAIL
       end
 
@@ -111,8 +97,6 @@ Last 80 unconsumed characters:
 malformed XML: missing tag start
 Line: 2
 Position: 6
-Last 80 unconsumed characters:
-< <x/>
         DETAIL
       end
 
@@ -124,8 +108,6 @@ Last 80 unconsumed characters:
 Missing end tag for 'x'
 Line: 2
 Position: 10
-Last 80 unconsumed characters:
-</ </x>
         DETAIL
       end
 
@@ -141,8 +123,6 @@ Last 80 unconsumed characters:
           Malformed XML: Extra tag at the end of the document (got '<b')
           Line: 1
           Position: 10
-          Last 80 unconsumed characters:
-
         DETAIL
       end
 
@@ -158,8 +138,6 @@ Last 80 unconsumed characters:
           Malformed XML: Extra tag at the end of the document (got '<b')
           Line: 1
           Position: 7
-          Last 80 unconsumed characters:
-
         DETAIL
       end
     end
