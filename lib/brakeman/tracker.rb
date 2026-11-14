@@ -117,7 +117,15 @@ class Brakeman::Tracker
   #Prioritizes templates which have been rendered.
   def each_template
     if @processed.nil?
-      @processed, @rest = templates.keys.sort_by{|template| template.to_s}.partition { |k| k.to_s.include? "." }
+      rendered, @rest = templates.keys.sort_by{|template| template.to_s}.partition { |k| k.to_s.include? "." }
+
+      #Check templates rendered from controllers first, since they
+      #are processed with the "real" environment from the controller.
+      #This means warnings from controller-rendered templates are
+      #preferred when duplicate warnings are combined.
+      controller_rendered, other_rendered = rendered.partition { |k| templates[k].rendered_from_controller? }
+
+      @processed = controller_rendered + other_rendered
     end
 
     @processed.each do |k|

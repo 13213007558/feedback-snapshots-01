@@ -206,7 +206,7 @@ class Rails4WithEnginesTests < Minitest::Test
   def test_cross_site_scripting_7
     assert_warning :type => :template,
       :warning_code => 2,
-      :fingerprint => "9d94ba6993f761ff688b5a8d428c793486cd8bf42f487a44d895a96f658dca50",
+      :fingerprint => "f8f95dbb4f5be140f08cddb4ad328f88a2d0275918d909563e0d7b14a3d8c218",
       :warning_type => "Cross-Site Scripting",
       :line => 6,
       :message => /^Unescaped\ parameter\ value/,

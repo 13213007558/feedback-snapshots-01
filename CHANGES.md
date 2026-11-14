@@ -1,5 +1,7 @@
 # 8.1.0 - 2026-09-30
 
+* Fix missing warnings when a partial is rendered with different locals
+* Prefer warnings from controller-rendered templates when combining duplicates
 * Better help and error message for `--ensure-latest`
 * Fix frozen string error (Shai Coleman)
 * Update Sonar report format (fangxing)
