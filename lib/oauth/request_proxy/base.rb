@@ -164,6 +164,7 @@ module OAuth
           next unless request.env.include?(header)
 
           header = request.env[header]
+          next if header.nil?
           next unless header[0, 6] == "OAuth "
 
           # parse the header into a Hash

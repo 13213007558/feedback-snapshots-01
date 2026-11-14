@@ -6,10 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* `OAuth::AmbiguousCredentials` error and ambiguity detection in
+  `OAuth::RequestProxy::RackRequest`: a request that carries OAuth protocol
+  parameters in more than one location (Authorization header, query string,
+  and/or form body) is now rejected instead of silently merging carriers. The
+  error reports locations and parameter names only, never credential values,
+  and can be opted out of with `allow_duplicate_oauth_locations: true`.
+* `OAuth::RequestProxy::RackRequest#oauth_parameters_by_location` for
+  inspecting which carrier supplied each OAuth parameter.
+* Runnable query-string to Authorization-header migration example in
+  `examples/oauth_header_migration.rb`.
 
 ### Changed
 
 ### Fixed
+* `OAuth::RequestProxy::Base#header_params` no longer raises `NoMethodError`
+  when an authorization-related Rack env variable is present but `nil`.
 
 ### Removed
 

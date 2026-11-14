@@ -302,6 +302,67 @@ hydra.run
 @response = req.response
 ```
 
+## Migrating OAuth credentials from the URL to the Authorization header
+
+OAuth 1.0 protocol parameters (`oauth_token`, `oauth_signature`, `oauth_nonce`,
+...) can be carried in three places: the `Authorization` header, the form body,
+or the URL query string. Putting them in the URL leaks them into logs,
+referrers and browser history, so the recommended migration is to move them
+into the `Authorization` header while keeping **exactly one** credential
+carrier per request.
+
+### Signing side: pick a single `scheme`
+
+The same business parameters are signed identically in both modes; only the
+carrier of the `oauth_*` fields changes.
+
+```ruby
+# Legacy: credentials are appended to the URL query string (do not use for new code)
+request.oauth!(http, consumer, token, scheme: :query_string)
+# => GET /v1/orders?status=open&oauth_consumer_key=...&oauth_signature=...&oauth_nonce=...
+
+# Target: credentials live only in the Authorization header; the URL stays clean
+request.oauth!(http, consumer, token, scheme: :header) # :header is also the default
+# => GET /v1/orders?status=open
+#    Authorization: OAuth oauth_consumer_key="...", oauth_signature="...", oauth_nonce="...", ...
+```
+
+Never set two schemes at once. In `:header` mode the request URL contains no
+`oauth_*` value, while ordinary query/form business fields (e.g. `status`,
+`page`) are untouched and still participate in the signature base string. Do
+not remove a business field merely because its name resembles an OAuth field —
+only the protocol parameters listed in `OAuth::PARAMETERS` are relocated.
+
+### Verifying side (Rack): ambiguous carriers are rejected
+
+`OAuth::RequestProxy::RackRequest` collects parameters from the form body,
+query string and Authorization header. If `oauth_*` protocol parameters are
+present in **more than one** location on the same request it raises
+`OAuth::AmbiguousCredentials` *before* signature verification, instead of
+silently letting one carrier override the other:
+
+```ruby
+proxy = OAuth::RequestProxy.proxy(Rack::Request.new(env), consumer: consumer, token: token)
+proxy.parameters # raises OAuth::AmbiguousCredentials when header + query (or body) are both used
+```
+
+The exception exposes only locations and parameter **names** — never the
+credential values — so it is safe to log. Do not rebuild the URL from the
+`Authorization` header when handling or logging the error. If you need the
+historical merge behavior for a controlled rollback, opt in explicitly with
+`allow_duplicate_oauth_locations: true`.
+
+A complete, runnable round-trip (both legal modes plus the mixed-carrier
+failure, asserting identical business parameters and a credential-free URL) is
+in [`examples/oauth_header_migration.rb`](examples/oauth_header_migration.rb).
+
+### Rollout steps
+
+1. Ship the server change so it accepts single-carrier requests and rejects ambiguous ones.
+2. Move clients from `scheme: :query_string` (or `:body`) to `scheme: :header`, one client at a time.
+3. Watch for `OAuth::AmbiguousCredentials` in logs — each occurrence is a client still double-sending.
+4. Once no ambiguity events remain, remove the legacy query/body signing path and the `allow_duplicate_oauth_locations` opt-out.
+
 ## More Information
 
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]
