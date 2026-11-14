@@ -118,6 +118,157 @@ class AuthenticatorsTest < Net::IMAP::TestCase
     )
   end
 
+  # An independent, finite reader for the RFC7628 §3.1 grammar:
+  #
+  #   client-resp = (gs2-header kvsep *kvpair kvsep) / kvsep
+  #   gs2-header  = gs2-cb-flag "," [ gs2-authzid ] ","
+  #   gs2-cb-flag = ("p=" cb-name) / "n" / "y"
+  #   gs2-authzid = "a=" saslname
+  #   kvpair      = key "=" value kvsep
+  #
+  # Returns [gs2_cb_flag, decoded_authzid (or nil), {key => value}].
+  # Raises ArgumentError for anything outside the grammar.
+  def parse_oauthbearer_response(msg)
+    raise ArgumentError, "invalid UTF-8" unless msg.valid_encoding?
+    pos = 0
+    read = ->(pattern) {
+      match = pattern.match(msg, pos) or
+        raise ArgumentError, "parse error at offset #{pos}"
+      pos = match.end(0)
+      match[0]
+    }
+    cb_flag = read[/\G(?:n|y|p=[A-Za-z0-9._-]+)/]
+    read[/\G,/]
+    saslname = read[/\G[^,\x01]*/]
+    authzid = nil
+    unless saslname.empty?
+      saslname.match?(/\Aa=(?:[^,=\x00]|=2C|=3D)+\z/u) or
+        raise ArgumentError, "invalid gs2-authzid: #{saslname.inspect}"
+      authzid = saslname[2..].gsub("=2C", ",").gsub("=3D", "=")
+    end
+    read[/\G,/]
+    read[/\G\x01/]
+    pairs = {}
+    until msg[pos] == "\x01"
+      key   = read[/\G[A-Za-z]+/]
+      read[/\G=/]
+      value = read[/\G[^\x01]*/]
+      value.match?(/\A(?:[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F])*\z/u) or
+        raise ArgumentError, "invalid kvpair value"
+      pairs.key?(key) and raise ArgumentError, "duplicate key: #{key}"
+      pairs[key] = value
+      read[/\G\x01/]
+    end
+    read[/\G\x01/]
+    pos == msg.length or raise ArgumentError, "trailing data"
+    [cb_flag, authzid, pairs]
+  end
+
+  def test_oauthbearer_response_parses_back_to_original_fields
+    cb_flag, authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("mF_9.B5f-4.1JqM", authzid: "user@example.com",
+                  host: "server.example.com", port: 587).process(nil)
+    )
+    assert_equal "n", cb_flag
+    assert_equal "user@example.com", authzid
+    assert_equal({ "host" => "server.example.com", "port" => "587",
+                   "auth" => "Bearer mF_9.B5f-4.1JqM" }, pairs)
+  end
+
+  def test_oauthbearer_unicode_authzid_survives_roundtrip
+    _cb, authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", authzid: "用户@example.com").process(nil)
+    )
+    assert_equal "用户@example.com", authzid
+    assert_equal({ "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_authzid_gs2_delimiters_are_escaped
+    response = oauthbearer("tok", authzid: "weird,=name").process(nil)
+    assert_equal "n,a=weird=2C=3Dname,\1auth=Bearer tok\1\1", response
+    _cb, authzid, pairs = parse_oauthbearer_response(response)
+    assert_equal "weird,=name", authzid
+    assert_equal({ "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_authzid_escape_looking_input_is_not_double_decoded
+    # "=" is encoded first, so a literal "=2C" becomes "=3D2C" and a
+    # compliant reader must get back the literal string, not a comma.
+    _cb, authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", authzid: "a=2Cb").process(nil)
+    )
+    assert_equal "a=2Cb", authzid
+    assert_equal({ "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_kv_value_escape_looking_input_stays_literal
+    # The kvpair region is not saslname-encoded; "=2C" there is literal data.
+    _cb, _authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", host: "ho=2Cst").process(nil)
+    )
+    assert_equal({ "host" => "ho=2Cst", "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_empty_and_nil_authzid_are_preserved
+    assert_equal "n,,\1auth=Bearer tok\1\1",
+                 oauthbearer("tok").process(nil)
+    assert_equal "n,,\1auth=Bearer tok\1\1",
+                 oauthbearer("tok", authzid: "").process(nil)
+    _cb, authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", authzid: "").process(nil)
+    )
+    assert_nil authzid
+    assert_equal({ "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_kv_value_may_contain_equals_and_commas
+    # "=" and "," are legal inside an RFC7628 value and cannot start a new
+    # kvpair, because kvpairs are separated only by %x01.
+    _cb, _authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", qs: "a=b,c=d").process(nil)
+    )
+    assert_equal({ "qs" => "a=b,c=d", "auth" => "Bearer tok" }, pairs)
+  end
+
+  def test_oauthbearer_kv_value_may_contain_unicode
+    _cb, _authzid, pairs = parse_oauthbearer_response(
+      oauthbearer("tok", path: "/üñíçødé/路径").process(nil)
+    )
+    assert_equal "/üñíçødé/路径", pairs["path"]
+  end
+
+  def test_oauthbearer_kvsep_injection_is_rejected_before_any_response
+    # Each of these raises from .new, so no part of a client response can
+    # ever be sent for a crafted field.
+    inject = "x\1auth=Bearer fake-token"
+    assert_raise(ArgumentError) { oauthbearer("tok", host: inject) }
+    assert_raise(ArgumentError) { oauthbearer("tok", port: "993\1auth=Bearer fake-token") }
+    assert_raise(ArgumentError) { oauthbearer("tok", mthd: inject) }
+    assert_raise(ArgumentError) { oauthbearer("tok", path: inject) }
+    assert_raise(ArgumentError) { oauthbearer("tok", post: inject) }
+    assert_raise(ArgumentError) { oauthbearer("tok", qs: inject) }
+    assert_raise(ArgumentError) { oauthbearer("tok\1auth=Bearer fake-token") }
+    assert_raise(ArgumentError) { oauthbearer("tok", authzid: "user\1auth=Bearer fake-token") }
+  end
+
+  def test_oauthbearer_fields_reject_other_control_characters
+    assert_raise(ArgumentError) { oauthbearer("tok", host: "ex\0ample") }
+    assert_raise(ArgumentError) { oauthbearer("tok", host: "ex\x7Fample") }
+    assert_raise(ArgumentError) { oauthbearer("tok", path: "a\x02b") }
+    assert_raise(ArgumentError) { oauthbearer("tok", authzid: "u\0ser") }
+    assert_raise(ArgumentError) { oauthbearer("tok", authzid: "u\1ser") }
+  end
+
+  def test_oauthbearer_token_must_be_an_rfc6750_b64token
+    assert_raise(ArgumentError) { oauthbearer("tok en") }
+    assert_raise(ArgumentError) { oauthbearer("tok,en") }
+    assert_raise(ArgumentError) { oauthbearer("tok=en") }
+    assert_raise(ArgumentError) { oauthbearer("") }
+    # trailing "=" padding is legal
+    assert_equal "n,,\1auth=Bearer tok==\1\1",
+                 oauthbearer("tok==").process(nil)
+  end
+
   # ----------------------
   # SCRAM-SHA-1
   # SCRAM-SHA-256

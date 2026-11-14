@@ -14,6 +14,20 @@ module Net
       class OAuthAuthenticator
         include GS2Header
 
+        # Matches the
+        # {RFC7628 §3.1}[https://www.rfc-editor.org/rfc/rfc7628#section-3.1]
+        # +value+ production, which terminates each +kvpair+:
+        #
+        #   value = *(VCHAR / SP / HTAB / CR / LF / UTF8-2 / UTF8-3 / UTF8-4)
+        #
+        # In particular, this excludes %x00 and %x01 (+kvsep+), so a validated
+        # value can never terminate its own +kvpair+ early or inject
+        # additional +kvpairs+.
+        RFC7628_VALUE = /\A(?:[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F])*\z/u.freeze
+
+        # Matches a decimal service port number.
+        PORT_NUMBER = /\A[0-9]+\z/.freeze
+
         # Authorization identity: an identity to act as or on behalf of.  The
         # identity form is application protocol specific.  If not provided or
         # left blank, the server derives an authorization identity from the
@@ -81,6 +95,10 @@ module Net
         #   _optional_ #query — An alias for #qs
         #
         # Any other keyword parameters are quietly ignored.
+        #
+        # Every field is validated against its grammar when the authenticator
+        # is created, and ArgumentError is raised for any value that cannot be
+        # encoded safely---before any part of the client response is sent.
         def initialize(authzid: nil, host: nil, port: nil,
                        username: nil, query: nil,
                        mthd: nil, path: nil, post: nil, qs: nil, **)
@@ -92,6 +110,7 @@ module Net
           @post    = post
           @qs      = qs || query
           @done    = false
+          validate_fields!
         end
 
         # The {RFC7628 §3.1}[https://www.rfc-editor.org/rfc/rfc7628#section-3.1]
@@ -123,6 +142,45 @@ module Net
         # <b>Implemented by subclasses.</b>
         def authorization; raise "must be implemented by subclass" end
 
+        private
+
+        # Raises ArgumentError unless every field can be encoded into the
+        # RFC7628 client response without escaping its own slot.  Called from
+        # the constructor, so invalid input is rejected before any part of
+        # the response can be sent.
+        def validate_fields!
+          validate_authzid!
+          validate_rfc7628_value(:host, host)
+          validate_rfc7628_value(:mthd, mthd)
+          validate_rfc7628_value(:path, path)
+          validate_rfc7628_value(:post, post)
+          validate_rfc7628_value(:qs,   qs)
+          return if port.nil?
+          PORT_NUMBER.match?(port.to_s) or
+            raise ArgumentError, "invalid port: %p" % [port]
+        end
+
+        # The +authzid+ is encoded into the GS2 header as an RFC5801
+        # +saslname+ (which escapes ",", "=", and rejects %x00).  It must
+        # additionally not contain %x01 (+kvsep+): although the GS2 grammar
+        # is comma-delimited, a %x01 here would be seen as the start of the
+        # +kvpair+ region by receivers that split the response on +kvsep+.
+        def validate_authzid!
+          return if authzid.nil? || authzid == ""
+          encoded = gs2_saslname_encode(authzid) # raises on %x00, bad UTF-8
+          encoded.include?("\x01") and
+            raise ArgumentError, "invalid authzid: contains \\x01 (kvsep)"
+        end
+
+        # Raises ArgumentError unless +value+ is +nil+ or matches the
+        # RFC7628 +value+ grammar (RFC7628_VALUE).
+        def validate_rfc7628_value(name, value)
+          return if value.nil?
+          str = value.to_s.encode("UTF-8")
+          RFC7628_VALUE.match(str) or
+            raise ArgumentError, "invalid %s: %p" % [name, str]
+        end
+
       end
 
       # Authenticator for the "+OAUTHBEARER+" SASL mechanism, specified in
@@ -136,6 +194,14 @@ module Net
       # the resource server.  TLS _MUST_ be used for +OAUTHBEARER+ to protect
       # the bearer token.
       class OAuthBearerAuthenticator < OAuthAuthenticator
+
+        # Matches the
+        # {RFC6750 §2.1}[https://www.rfc-editor.org/rfc/rfc6750#section-2.1]
+        # +b64token+ production:
+        #
+        #   b64token = 1*(ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/")
+        #              *"="
+        B64TOKEN = /\A[A-Za-z0-9\-._~+\/]+=*\z/.freeze
 
         # An OAuth 2.0 bearer token.  See {RFC-6750}[https://www.rfc-editor.org/rfc/rfc6750]
         attr_reader :oauth2_token
@@ -181,6 +247,9 @@ module Net
           super(username: username, **args, &blk)
           @oauth2_token = oauth2_token || secret || oauth2_token_arg or
             raise ArgumentError, "missing oauth2_token"
+          B64TOKEN.match?(@oauth2_token.to_s) or
+            raise ArgumentError,
+                  "invalid oauth2_token (must be an RFC6750 b64token)"
         end
 
         # :call-seq:
