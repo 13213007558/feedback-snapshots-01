@@ -196,9 +196,19 @@ module Zip
 
       # Extracts every entry in the zip archive `zip_file_name` into
       # `destination_directory`, preserving the archive's directory structure.
-      def extract_all(zip_file_name, destination_directory = '.', &block)
+      #
+      # When `transactional:` is true the extraction is all-or-nothing: see
+      # Zip::TransactionalExtractor and Zip::File#extract_all for the full
+      # guarantees and the extra keyword options that mode accepts.
+      def extract_all(zip_file_name, destination_directory = '.',
+                      transactional: false, staging_directory: nil,
+                      ledger_path: nil, cancel_if: nil, &block)
         Zip::File.open(zip_file_name) do |zf|
-          zf.extract_all(destination_directory, &block)
+          zf.extract_all(destination_directory,
+                         transactional: transactional,
+                         staging_directory: staging_directory,
+                         ledger_path: ledger_path,
+                         cancel_if: cancel_if, &block)
         end
       end
     end
@@ -374,7 +384,42 @@ module Zip
     #
     # NB: The caller is responsible for making sure `destination_directory` is
     # safe, if it is passed.
-    def extract_all(destination_directory = '.', &block)
+    #
+    # ## Transactional extraction
+    #
+    # Pass `transactional: true` to stage every entry into a private
+    # directory and only commit once all entries have passed their integrity
+    # (CRC-32, decompressed size, supported compression) and policy
+    # (destination-exists, path-safety) checks. The destination - including
+    # any pre-existing files - is left untouched if any entry fails or the
+    # run is cancelled. See Zip::TransactionalExtractor for the full
+    # guarantees. The extra options only apply in this mode:
+    #
+    # * `staging_directory:` - where to create the per-run staging directory.
+    #   Defaults to inside the destination. Must be on the same filesystem as
+    #   the destination or Zip::CrossFilesystemError is raised up front.
+    # * `ledger_path:` - a file that records the staging area created by this
+    #   run, so cleanup tooling can identify this run's temporary resources.
+    # * `cancel_if:` - a proc called with each entry before staging it; a
+    #   truthy result aborts the run with Zip::TransactionCancelled.
+    #
+    # If an I/O error occurs during the commit phase, the validated staging
+    # area and its manifest are kept and a Zip::TransactionCommitError is
+    # raised; resume the commit with
+    # `Zip::TransactionalExtractor.resume(manifest_path)`.
+    def extract_all(destination_directory = '.', transactional: false,
+                    staging_directory: nil, ledger_path: nil,
+                    cancel_if: nil, &block)
+      if transactional
+        each { |entry| apply_restore_options(entry) }
+        TransactionalExtractor.extract(
+          entries, destination_directory,
+          on_exists: block, staging_directory: staging_directory,
+          ledger_path: ledger_path, cancel_if: cancel_if
+        )
+        return self
+      end
+
       # Partition the entries into directories and non-directories, so that
       # directories are created first.
       dirs, others = entries.partition(&:directory?)

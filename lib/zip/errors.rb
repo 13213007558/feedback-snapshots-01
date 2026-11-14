@@ -91,21 +91,58 @@ module Zip
     end
   end
 
+  # Error raised if an entry's CRC-32 checksum does not match the value
+  # declared in the archive once the whole entry has been decompressed.
+  class EntryCrcError < Error
+    # The entry that has caused this error.
+    attr_reader :entry
+
+    # The CRC-32 computed from the decompressed entry data.
+    attr_reader :computed_crc
+
+    # Create a new EntryCrcError for +entry+, whose checksum was expected
+    # to be +expected_crc+ but was computed as +computed_crc+.
+    def initialize(entry, expected_crc, computed_crc)
+      super()
+      @entry = entry
+      @expected_crc = expected_crc
+      @computed_crc = computed_crc
+    end
+
+    # The message returned by this error.
+    def message
+      "Entry '#{@entry.name}' failed the CRC check. " \
+        "Expected 0x#{format('%08x', @expected_crc)}, " \
+        "computed 0x#{format('%08x', @computed_crc)}."
+    end
+  end
+
   # Error raised if an entry is larger on extraction than it is advertised
   # to be.
   class EntrySizeError < Error
     # The entry that has caused this error.
     attr_reader :entry
 
-    # Create a new EntrySizeError with the specified entry.
-    def initialize(entry)
+    # The number of bytes actually decompressed, if known.
+    attr_reader :actual_size
+
+    # Create a new EntrySizeError with the specified entry. +actual_size+
+    # is the number of bytes that were actually read, when it is known
+    # (e.g. after a complete read produced fewer bytes than advertised).
+    def initialize(entry, actual_size = nil)
       super()
       @entry = entry
+      @actual_size = actual_size
     end
 
     # The message returned by this error.
     def message
-      "Entry '#{@entry.name}' should be #{@entry.size}B, but is larger when inflated."
+      if @actual_size.nil?
+        "Entry '#{@entry.name}' should be #{@entry.size}B, but is larger when inflated."
+      else
+        "Entry '#{@entry.name}' should be #{@entry.size}B, " \
+          "but inflated to #{@actual_size}B."
+      end
     end
   end
 
@@ -150,6 +187,75 @@ module Zip
       "The local header of this entry ('#{@entry.name}') does not contain " \
         'the correct metadata for `Zip::InputStream` to be able to ' \
         'uncompress it. Please use `Zip::File` instead of `Zip::InputStream`.'
+    end
+  end
+
+  # Error raised when a transactional extraction cannot use its staging
+  # area because it does not live on the same filesystem as the
+  # destination. Committing each entry is atomic only when the staged file
+  # can be renamed onto the destination in place, which requires both to
+  # reside on the same filesystem.
+  class CrossFilesystemError < Error
+    # Create a new CrossFilesystemError naming the two mismatching paths.
+    def initialize(destination, staging)
+      super()
+      @destination = destination
+      @staging = staging
+    end
+
+    # The message returned by this error.
+    def message
+      "The staging directory '#{@staging}' is on a different filesystem " \
+        "from the destination '#{@destination}'. Transactional extraction " \
+        'requires them to be on the same filesystem so entries can be ' \
+        'committed atomically with rename(2).'
+    end
+  end
+
+  # Error raised when a transactional extraction is aborted before commit
+  # because the caller-supplied cancellation predicate returned true. No
+  # destination files are changed.
+  class TransactionCancelled < Error
+    # Create a new TransactionCancelledError for the given entry name, if
+    # the cancellation was triggered while processing a particular entry.
+    def initialize(entry_name = nil)
+      super()
+      @entry_name = entry_name
+    end
+
+    # The message returned by this error.
+    def message
+      if @entry_name
+        "Transactional extraction was cancelled while processing '#{@entry_name}'."
+      else
+        'Transactional extraction was cancelled.'
+      end
+    end
+  end
+
+  # Error raised when the commit phase of a transactional extraction fails
+  # partway through. The validated staging area and its manifest are left in
+  # place so the operation can be retried with
+  # `Zip::TransactionalExtractor.resume`; entries committed before the failure
+  # are already on the destination.
+  class TransactionCommitError < Error
+    # The path to the manifest that records the recoverable state.
+    attr_reader :manifest_path
+
+    # Create a new TransactionCommitError wrapping the underlying +cause+
+    # and pointing at the +manifest_path+ that records the state.
+    def initialize(cause, manifest_path)
+      super()
+      @cause = cause
+      @manifest_path = manifest_path
+    end
+
+    # The message returned by this error.
+    def message
+      "Transactional extraction failed while committing the staged entries " \
+        "(#{@cause.class}: #{@cause.message}). The validated staging area was " \
+        "kept so the commit can be resumed via Zip::TransactionalExtractor.resume " \
+        "using the manifest at '#{@manifest_path}'."
     end
   end
 end

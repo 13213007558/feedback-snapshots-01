@@ -311,13 +311,8 @@ module Zip
     # which have no such earlier-entry to skip past, opt into this.
     def extract(entry_path = @name, destination_directory: '.',
                 create_parent_directories: false, &block)
-      dest_dir = ::File.absolute_path(destination_directory || '.')
-      extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
-
-      unless extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
-        warn "WARNING: skipped extracting '#{@name}' to '#{extract_path}' as unsafe."
-        return self
-      end
+      extract_path = resolve_extract_path(entry_path, destination_directory)
+      return self if extract_path.nil?
 
       block ||= proc { ::Zip.on_exists_proc }
 
@@ -327,6 +322,30 @@ module Zip
 
       __send__(:"create_#{ftype}", extract_path, &block)
       self
+    end
+
+    # Resolves `entry_path` against `destination_directory` into an absolute
+    # filesystem path, applying the same path-traversal guard that #extract
+    # uses. Returns `nil` (and emits the same warning) when the resolved path
+    # would escape the destination directory.
+    def resolve_extract_path(entry_path = @name, destination_directory = '.') # :nodoc:
+      dest_dir = ::File.absolute_path(destination_directory || '.')
+      extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
+
+      unless extract_path.start_with?(dest_dir + ::File::SEPARATOR) || dest_dir == ::File::SEPARATOR
+        warn "WARNING: skipped extracting '#{@name}' to '#{extract_path}' as unsafe."
+        return nil
+      end
+
+      extract_path
+    end
+
+    # Applies the restored permissions, ownership and times to a path that
+    # this entry has already been written to. Used both by the regular
+    # extraction path and by the transactional extractor once an entry is
+    # committed into place.
+    def restore_attributes_to_path(dest_path) # :nodoc:
+      set_extra_attributes_on_path(dest_path)
     end
 
     def to_s # :nodoc:

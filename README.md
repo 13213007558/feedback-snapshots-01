@@ -249,6 +249,33 @@ end
 
 As with `extract`, existing files at the destination will raise `Zip::DestinationExistsError` unless a block is passed to resolve the conflict (see [Existing Files](#existing-files) below). Symlink entries are always skipped (ignored, with a warning), rather than extracted.
 
+#### Transactional (all-or-nothing) extraction
+
+A normal `extract_all` writes each entry to the destination as it goes, so a failure on a later entry can leave a mix of new and old files behind. Pass `transactional: true` to stage every entry into a private directory first and only commit once the *entire* archive has been validated:
+
+```ruby
+Zip::File.open('foo.zip') do |zip_file|
+  zip_file.extract_all('/path/to/destination', transactional: true)
+end
+```
+
+In this mode each entry is decompressed into a hidden staging directory and, before anything is committed, verified against:
+
+- its CRC-32 checksum (`Zip::EntryCrcError` on mismatch),
+- its declared uncompressed size (`Zip::EntrySizeError`),
+- its compression method (`Zip::CompressionMethodError` if unsupported), and
+- the destination-exists and path-safety policies.
+
+Only when every entry passes are the staged files moved into place one at a time using atomic `rename(2)`. If any entry fails, or the run is cancelled, the staging directory is removed and the destination — including pre-existing files — is left completely untouched. The staging directory lives inside the destination by default; a custom location can be given with `staging_directory:`, but it must be on the same filesystem or `Zip::CrossFilesystemError` is raised before any work begins. Pass `cancel_if: ->(entry) { ... }` to abort mid-staging with `Zip::TransactionCancelled`.
+
+If an I/O error occurs during the commit phase, the validated staging area and a JSON manifest are kept and a `Zip::TransactionCommitError` (which exposes `manifest_path`) is raised. Finish the interrupted commit later with:
+
+```ruby
+Zip::TransactionalExtractor.resume(manifest_path)
+```
+
+Pass `ledger_path:` to record the staging directory created by a run in a file of your choosing, so cleanup tooling can identify and remove that run's temporary resources without touching anything else. A runnable demonstration lives in `samples/transactional_extract_demo.rb`, with a ledger-aware cleanup helper in `samples/transactional_extract_cleanup.rb`.
+
 ### Reading a Zip file with `Zip::InputStream`
 
 `Zip::InputStream` can be used for faster reading of zip file content because it does not read the Central directory up front.
