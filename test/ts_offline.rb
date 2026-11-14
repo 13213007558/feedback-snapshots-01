@@ -63,6 +63,7 @@ TESTS = %w(
     ptrin
     question
     query_control
+    recur_glue
     res_config
     res_file
     res_opt

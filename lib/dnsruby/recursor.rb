@@ -681,6 +681,11 @@ module Dnsruby
             return packet
           elsif (authority.length > 0)
             auth = Hash.new
+            #  Nameserver names which are in-bailiwick of the delegated zone -
+            #  only additional address records for these may be trusted as glue.
+            glue_bailiwick = Hash.new
+            qname = name.to_s.downcase
+            qname = qname.sub(/\.*$/, ".")
             # 	 foreach my $rr (@authority) {
             authority.each do |rr|
               if (rr.type.to_s =~ /^(NS|SOA)$/)
@@ -694,11 +699,24 @@ module Dnsruby
                   next
                 # elsif (of =~ /#{known_zone}/)
                 elsif (of == known_zone || known_zone.length == 1 || of.end_with?(".#{known_zone}"))
+                  if (!(qname == of || qname.end_with?(".#{of}")))
+                    #  The referral is for a zone which cannot lead to the name
+                    #  we are resolving - do not cache or follow it.
+                    TheLog.debug(";; _dorecursion() Ignoring irrelevant referral to [#{of}] while resolving [#{qname}]")
+                    next
+                  end
                   TheLog.debug(";; _dorecursion() FOUND closer authority for [#{of}] at [#{server}].")
                   auth[server] ||= AddressCache.new #[] @TODO@ If there is no additional record for this, then we want to use the authority!
+                  #  Only nameservers at or below the delegated zone actually
+                  #  need glue from this response. Addresses for any other
+                  #  nameserver are unrelated additional data, and the
+                  #  nameserver must be resolved independently instead.
+                  in_bailiwick = (server == of || server.end_with?(".#{of}"))
+                  glue_bailiwick[server] = true if in_bailiwick
                   if (rr.type == Types.NS)
-                      if ((packet.additional.rrset(rr.nsdname, Types::A).length == 0) &&
-                            (packet.additional.rrset(rr.nsdname, Types::AAAA).length == 0))
+                      if (!in_bailiwick ||
+                            ((packet.additional.rrset(rr.nsdname, Types::A).length == 0) &&
+                              (packet.additional.rrset(rr.nsdname, Types::AAAA).length == 0)))
                         auth[server].push([rr.nsdname, rr.ttl])
                       end
                   end
@@ -731,7 +749,7 @@ module Dnsruby
                 server = rr.name.to_s.downcase
                 if (server)
                   server.sub!(/\.*$/, ".")
-                  if (auth[server]!=nil)
+                  if (auth[server]!=nil && glue_bailiwick[server])
                     if (rr.type == Types::A)
                       TheLog.debug(";; _dorecursion() STORING: #{server} IN A    " + rr.address.to_s)
                     end
