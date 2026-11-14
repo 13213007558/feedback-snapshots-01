@@ -3,6 +3,14 @@
 Breaking changes:
 * Mail::Field::FIELDS_MAP now contains class names, not Class instances (c960657)
 
+Features:
+
+* Detect MIME boundary collisions against the final transfer bytes when
+  serializing a message and regenerate colliding boundaries (including
+  nested multipart levels and caller-specified boundaries). Substitutions
+  are reported via Mail::Message#boundary_changes and the
+  Mail::Message#ready_to_send! return value.
+
 Compatibility:
 
 * Update MIME-Version to have correct case per RFC 2045 @mikel

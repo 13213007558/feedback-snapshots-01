@@ -47,7 +47,16 @@ module Mail
   #   this standard. The body is simply a sequence of characters that
   #   follows the header and is separated from the header by an empty line
   #   (i.e., a line with nothing preceding the CRLF).
+
+  # Raised when a collision-free MIME boundary cannot be found after
+  # Mail::Message::MAX_BOUNDARY_ATTEMPTS regeneration attempts.
+  class BoundaryCollisionError < StandardError; end
+
   class Message
+    # Maximum number of times a colliding MIME boundary is regenerated
+    # before Mail::BoundaryCollisionError is raised.
+    MAX_BOUNDARY_ATTEMPTS = 100
+
     # ==Making an email
     #
     # You can make an new mail object via a block, passing a string, file or direct assignment.
@@ -1795,6 +1804,12 @@ module Mail
 
     # Encodes the message, calls encode on all its parts, gets an email message
     # ready to send
+    #
+    # Returns an Array of boundary change descriptors, one Hash per MIME
+    # boundary that had to be replaced because it collided with the message
+    # content (see #resolve_boundary_collisions!). Returns an empty Array
+    # when every boundary, including any caller-specified one, could be
+    # kept as-is.
     def ready_to_send!
       identify_and_set_transfer_encoding
       parts.each do |part|
@@ -1802,6 +1817,74 @@ module Mail
         part.ready_to_send!
       end
       add_required_fields
+      @boundary_changes = []
+      parts.each do |part|
+        part.boundary_changes.each do |change|
+          @boundary_changes << change.merge(:level => change[:level] + 1)
+        end
+      end
+      @boundary_changes.concat(resolve_boundary_collisions!)
+      @boundary_changes
+    end
+
+    # Boundary substitutions applied by the most recent #ready_to_send!
+    # (and therefore #encoded / #to_s / #deliver) call, innermost MIME
+    # level first. Each entry is a Hash:
+    #
+    #  {
+    #    :level        => 0,                  # 0 is this message, 1 its direct parts, etc.
+    #    :old_boundary => "boundary-that-collided",
+    #    :new_boundary => "--==_mimepart_...", # generated replacement
+    #    :line         => "--boundary-that-collided" # offending content line
+    #  }
+    #
+    # An empty Array means every boundary, including caller-specified ones,
+    # was preserved. A non-empty Array means the boundary named in
+    # :old_boundary could NOT be preserved and was replaced with
+    # :new_boundary; the Content-Type header and serialized output already
+    # reflect the replacement. The message on which #ready_to_send! was
+    # called last carries the aggregated report for its whole subtree.
+    attr_reader :boundary_changes
+
+    # Detects whether this message's MIME boundary collides with the final
+    # serialized bytes of its content (preamble, encoded parts and epilogue)
+    # and, if so, regenerates the boundary until the serialized output is
+    # unambiguous. Nested multipart parts are checked against their own
+    # boundary first (via #ready_to_send!), then this message's boundary is
+    # verified against their encoded output, so collisions at every nesting
+    # level are resolved.
+    #
+    # A collision is any content line beginning with "--boundary", which
+    # covers the part delimiter ("--boundary"), the closing delimiter
+    # ("--boundary--"), delimiters with transport padding ("--boundary ")
+    # and near-boundaries ("--boundaryXYZ") that lenient parsers may still
+    # treat as delimiters. The check runs against the transfer-encoded
+    # bytes that will actually be transmitted, not the decoded source.
+    #
+    # Regenerated boundaries are re-checked after each attempt, so a
+    # replacement is never assumed safe without verification. Raises
+    # Mail::BoundaryCollisionError if no collision-free boundary is found
+    # within MAX_BOUNDARY_ATTEMPTS attempts.
+    #
+    # Returns an Array of change descriptors (see #boundary_changes) for
+    # this MIME level only; empty if the current boundary was kept.
+    def resolve_boundary_collisions!
+      changes = []
+      return changes unless body && body.multipart? && boundary
+
+      while (line = boundary_collision_line)
+        if changes.length >= MAX_BOUNDARY_ATTEMPTS
+          raise Mail::BoundaryCollisionError,
+            "could not find a collision-free MIME boundary after #{MAX_BOUNDARY_ATTEMPTS} attempts"
+        end
+        old_boundary = boundary
+        new_boundary = ContentTypeField.generate_boundary
+        header['content-type'].parameters[:boundary] = new_boundary
+        body.boundary = new_boundary
+        changes << { :level => 0, :old_boundary => old_boundary,
+                     :new_boundary => new_boundary, :line => line }
+      end
+      changes
     end
 
     # Outputs an encoded string representation of the mail message including
@@ -1975,6 +2058,30 @@ module Mail
   private
 
     HEADER_SEPARATOR = /#{Constants::LAX_CRLF}#{Constants::LAX_CRLF}/
+
+    # Returns the first content line that would be ambiguous with this
+    # message's MIME boundary delimiter, or nil if the boundary is safe.
+    # Any line starting with "--boundary" is treated as a collision: this
+    # matches the part delimiter, the "--boundary--" closing delimiter,
+    # delimiters with transport padding, and near-boundaries that lenient
+    # parsers may split on.
+    def boundary_collision_line
+      delimiter = "--#{boundary}"
+      boundary_scoped_content.each_line do |line|
+        return line.chomp if line.start_with?(delimiter)
+      end
+      nil
+    end
+
+    # The transfer-encoded bytes that will appear between this message's
+    # boundary delimiters: preamble, encoded parts and epilogue, joined
+    # exactly as Mail::Body#encoded will join them.
+    def boundary_scoped_content
+      content = [body.preamble.to_s]
+      body.parts.each { |part| content << part.encoded }
+      content << body.epilogue.to_s
+      content.join("\r\n")
+    end
 
     #  2.1. General Description
     #   A message consists of header fields (collectively called "the header
