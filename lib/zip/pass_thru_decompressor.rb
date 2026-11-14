@@ -2,8 +2,8 @@
 
 module Zip
   class PassThruDecompressor < Decompressor # :nodoc:all
-    def initialize(*args)
-      super
+    def initialize(*args, **kwargs)
+      super(*args, **kwargs)
       @read_so_far = 0
     end
 

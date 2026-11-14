@@ -27,10 +27,15 @@ module Zip
 
     def_delegators :@cdir, :comment, :comment=
 
+    # The immutable policy captured when this stream was opened.
+    attr_reader :policy
+
     # Opens the indicated zip file. If a file with that name already
     # exists it will be overwritten.
-    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false, **opts)
+    def initialize(file_name, stream: false, encrypter: nil, suppress_extra_fields: false,
+                   policy: nil, **opts)
       super(**opts)
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
       @file_name = file_name
       @output_stream = if stream
                          iostream = Zip::RUNNING_ON_WINDOWS ? @file_name : @file_name.dup
@@ -40,7 +45,7 @@ module Zip
                        else
                          ::File.new(@file_name, 'wb')
                        end
-      @cdir = ::Zip::CentralDirectory.new
+      @cdir = ::Zip::CentralDirectory.new(policy: @policy)
       @compressor = ::Zip::NullCompressor.instance
       @encrypter = encrypter || ::Zip::NullEncrypter.new
       @suppress_extra_fields = suppress_extra_fields
@@ -52,28 +57,32 @@ module Zip
       # Same as #initialize but if a block is passed the opened
       # stream is passed to the block and closed when the block
       # returns.
-      def open(file_name, encrypter: nil, suppress_extra_fields: false, **opts)
+      def open(file_name, encrypter: nil, suppress_extra_fields: false, policy: nil, **opts)
         unless block_given?
           return new(
             file_name,
             encrypter:             encrypter,
             suppress_extra_fields: suppress_extra_fields,
+            policy:                policy,
             **opts
           )
         end
 
         zos = new(file_name, stream: false, encrypter: encrypter,
-                  suppress_extra_fields: suppress_extra_fields, **opts)
+                  suppress_extra_fields: suppress_extra_fields,
+                  policy: policy, **opts)
         yield zos
       ensure
         zos.close if zos
       end
 
       # Same as #open but writes to a filestream instead
-      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false, **opts)
+      def write_buffer(io = ::StringIO.new, encrypter: nil, suppress_extra_fields: false,
+                       policy: nil, **opts)
         io.binmode if io.respond_to?(:binmode)
         zos = new(io, stream: true, encrypter: encrypter,
-                  suppress_extra_fields: suppress_extra_fields, **opts)
+                  suppress_extra_fields: suppress_extra_fields,
+                  policy: policy, **opts)
         yield zos
         zos.close_buffer
       end
@@ -110,7 +119,7 @@ module Zip
     # Zip.allow_duplicate_entry_names is on.
     def put_next_entry(
       entry_name, comment = '', extra = ExtraField.new,
-      compression_method = Entry::DEFLATED, level = Zip.default_compression
+      compression_method = Entry::DEFLATED, level = @policy.default_compression
     )
       raise Error, 'zip stream is closed' if @closed
 
@@ -120,16 +129,19 @@ module Zip
         else
           Entry.new(
             @file_name, entry_name.to_s, comment: comment, extra: extra,
-            compression_method: compression_method, compression_level: level
+            compression_method: compression_method, compression_level: level,
+            policy: @policy
           )
         end
 
+      new_entry.policy = @policy
       init_next_entry(new_entry)
       @current_entry = new_entry
     end
 
     def copy_raw_entry(entry) # :nodoc:
       entry = entry.dup
+      entry.policy = @policy
       raise Error, 'zip stream is closed' if @closed
       raise Error, 'entry is not a ZipEntry' unless entry.kind_of?(Entry)
 
@@ -182,7 +194,7 @@ module Zip
     end
 
     def check_duplicate_name(entry, proc_name)
-      return if Zip.allow_duplicate_entry_names
+      return if @policy.allow_duplicate_entry_names
       return unless @cdir.include?(entry.name)
 
       raise EntryExistsError.new(proc_name, entry.name)

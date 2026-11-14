@@ -526,6 +526,43 @@ You can set multiple settings at the same time by using a block:
   end
 ```
 
+### Per-Archive Policies
+
+The settings in this section (`on_exists_proc`, `continue_on_exists_proc`, `unicode_names`, `default_compression`, `warn_invalid_date`, `validate_declared_number_of_entries`, `validate_entry_sizes`, `allow_duplicate_entry_names`, `case_insensitive_match`, `sort_entries`, `force_entry_names_encoding`, `inflater_chunk_size`, and `write_zip64_support`) are process-wide defaults. They are snapshotted into an immutable `Zip::ArchivePolicy` when an archive is opened, and the archive keeps using that policy for its whole lifetime. Changing a `Zip` global afterwards does not affect archives that are already open.
+
+This matters when one process handles archives of different trust levels. Giving an archive its own policy means a permissive setting used for a trusted internal archive can never relax checks on an untrusted upload, and no global lock is needed to keep the two apart:
+
+```ruby
+strict = Zip::ArchivePolicy.strict       # validate sizes, no duplicate names, case-sensitive,
+                                         # no permission/ownership/time restoration
+compatible = Zip::ArchivePolicy.compatible # tolerates size mismatches and duplicate names,
+                                           # case-insensitive lookups, restores permissions/times
+
+Zip::File.open('internal.zip', policy: compatible) do |zip|
+  # ...
+end
+
+Zip::File.open('upload.zip', policy: strict) do |zip|
+  # ...
+end
+```
+
+`policy:` accepts a `Zip::ArchivePolicy`, a `Hash` of overrides (which is applied on top of the current globals), or `nil`/omitted to snapshot the globals. Available overrides are the `ArchivePolicy::ATTRIBUTES` listed above. A policy is frozen; derive a modified copy with `policy.merge(...)` (or `policy.with(...)`). The same `policy:` argument is accepted by `Zip::File.open`, `Zip::File.open_buffer`, `Zip::File.foreach`, `Zip::File.extract_all`, `Zip::File.add_recursive`, `Zip::File.count_entries`, `Zip::InputStream.open` and `Zip::OutputStream.open`. `Zip::File` also exposes `#policy`, and its `restore_ownership`/`restore_permissions`/`restore_times` writers derive a new policy for that archive.
+
+Because the existing constructor keywords are still honoured, `Zip::File.open('x.zip', restore_permissions: false)` produces the same result as before and affects only that archive.
+
+#### Migrating from the global switches
+
+Existing code that sets `Zip` globals at start-up continues to work unchanged: new archives take their initial policy from those globals. Review call sites that change a global *while* archives are open (or between opening an archive and reading from it) — that no longer affects the already-open archive:
+
+- Replace `Zip.validate_entry_sizes = false` followed by extracting a particular archive with `Zip::File.open(..., policy: { validate_entry_sizes: false })` (or `policy: Zip::ArchivePolicy.compatible`).
+- Replace `Zip.allow_duplicate_entry_names = true` / `Zip.case_insensitive_match = true` set just before reading one archive with the same keys passed via `policy:` to that archive.
+- Replace `Zip.on_exists_proc` / `Zip.continue_on_exists_proc` toggles around a single extraction or add call with the corresponding policy override, or keep passing the block/proc per call.
+- Replace `Zip.validate_declared_number_of_entries = true` around a specific `count_entries`/open with `policy: { validate_declared_number_of_entries: true }`.
+- Replace `Zip.inflater_chunk_size = ...` and `Zip.write_zip64_support = ...` changes intended for one archive with the same keys in that archive's `policy:`.
+
+If a caller passes a `Zip::Entry` object into `Zip::File` (for example to `add`, `extract` or `OutputStream#put_next_entry`), the target archive adopts it and re-points its policy at the archive's own policy; the entry's previous policy is not used to weaken the archive.
+
 ## Compatibility
 
 Rubyzip is known to run on a number of platforms and under a number of different Ruby versions.

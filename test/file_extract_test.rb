@@ -131,18 +131,22 @@ class ZipFileExtractTest < Minitest::Test
       File.binwrite(fake_zip, data)
 
       Dir.chdir tmp do
-        ::Zip::File.open(fake_zip) do |zf|
+        # The policy is captured when the archive is opened, so two archives
+        # with different policies can be used here without touching the
+        # process-wide settings.
+        ::Zip::File.open(fake_zip, policy: { validate_entry_sizes: false }) do |zf|
           a_entry = zf.find_entry(file_name)
           assert_equal fake_size, a_entry.size
 
-          ::Zip.validate_entry_sizes = false
           assert_output('', /.+'a'.+1B.+/) do
             a_entry.extract
           end
           assert_equal true_size, File.size(file_name)
           FileUtils.rm file_name
+        end
 
-          ::Zip.validate_entry_sizes = true
+        ::Zip::File.open(fake_zip, policy: { validate_entry_sizes: true }) do |zf|
+          a_entry = zf.find_entry(file_name)
           error = assert_raises ::Zip::EntrySizeError do
             a_entry.extract
           end
@@ -193,18 +197,22 @@ class ZipFileExtractTest < Minitest::Test
       File.binwrite(fake_zip, data)
 
       Dir.chdir tmp do
-        ::Zip::File.open(fake_zip) do |zf|
+        # The policy is captured when the archive is opened, so two archives
+        # with different policies can be used here without touching the
+        # process-wide settings.
+        ::Zip::File.open(fake_zip, policy: { validate_entry_sizes: false }) do |zf|
           a_entry = zf.find_entry(file_name)
           assert_equal fake_size, a_entry.size
 
-          ::Zip.validate_entry_sizes = false
           assert_output('', /.+'a'.+1B.+/) do
             a_entry.extract
           end
           assert_equal true_size, File.size(file_name)
           FileUtils.rm file_name
+        end
 
-          ::Zip.validate_entry_sizes = true
+        ::Zip::File.open(fake_zip, policy: { validate_entry_sizes: true }) do |zf|
+          a_entry = zf.find_entry(file_name)
           error = assert_raises ::Zip::EntrySizeError do
             a_entry.extract
           end

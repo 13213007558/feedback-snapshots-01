@@ -96,23 +96,31 @@ class ZipEntrySetTest < Minitest::Test
   end
 
   def test_entries_with_sort
+    # The policy is captured when the set is created; later global changes
+    # deliberately don't affect it.
     ::Zip.sort_entries = true
-    assert_equal(ZIP_ENTRIES.sort, @zip_entry_set.entries)
+    sorted_set = ::Zip::EntrySet.new(ZIP_ENTRIES)
     ::Zip.sort_entries = false
-    assert_equal(ZIP_ENTRIES, @zip_entry_set.entries)
+    assert_equal(ZIP_ENTRIES.sort, sorted_set.entries)
+
+    unsorted_set = ::Zip::EntrySet.new(ZIP_ENTRIES)
+    assert_equal(ZIP_ENTRIES, unsorted_set.entries)
   end
 
   # In this test we really are testing `#each`, hence the need to disable the cop.
   def test_entries_sorted_in_each
+    # The policy is captured when the set is created; later global changes
+    # deliberately don't affect it.
     ::Zip.sort_entries = true
+    sorted_set = ::Zip::EntrySet.new(ZIP_ENTRIES)
+    ::Zip.sort_entries = false
     arr = []
-    @zip_entry_set.each do |entry| # rubocop:disable Style/MapIntoArray
+    sorted_set.each do |entry| # rubocop:disable Style/MapIntoArray
       arr << entry
     end
     assert_equal(ZIP_ENTRIES.sort, arr)
 
     # Ensure `each` above hasn't permanently altered the ordering.
-    ::Zip.sort_entries = false
     arr = []
     @zip_entry_set.each do |entry| # rubocop:disable Style/MapIntoArray
       arr << entry

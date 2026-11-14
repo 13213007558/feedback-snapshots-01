@@ -22,21 +22,39 @@ module Zip
 
     attr_accessor :comment
 
+    # The immutable policy used for this directory's entries and lookups.
+    attr_reader :policy
+
     def_delegators :@entry_set,
                    :<<, :delete, :each, :entries, :find_entry, :glob,
                    :include?, :size
 
     mark_dirty :<<, :comment=, :delete
 
-    def initialize(entries = EntrySet.new, comment = '') # :nodoc:
+    def initialize(entries = EntrySet.new, comment = '', policy: nil) # :nodoc:
       super(dirty_on_create: false)
-      @entry_set = entries.kind_of?(EntrySet) ? entries : EntrySet.new(entries)
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
+      @entry_set =
+        if entries.kind_of?(EntrySet) && entries.policy == @policy
+          entries
+        else
+          EntrySet.new(entries, policy: @policy)
+        end
       @comment   = comment
     end
 
-    def read_from_stream(io)
+    def read_from_stream(io, policy: @policy)
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
+      @entry_set = @entry_set.with_policy(@policy) if @entry_set.policy != @policy
       read_eocds(io)
       read_central_directory_entries(io)
+    end
+
+    # Returns a new, unrelated directory whose entry set uses the same
+    # policy. Callers that only want to count entries (such as
+    # `Zip::File.count_entries`) use this to avoid inheriting parsed state.
+    def with_policy(policy = @policy) # :nodoc:
+      self.class.new(policy: ::Zip::ArchivePolicy.coerce(policy))
     end
 
     def write_to_stream(io, suppress_extra_fields: false) # :nodoc:
@@ -46,7 +64,7 @@ module Zip
       end
       eocd_offset = io.tell
       cdir_size = eocd_offset - cdir_offset
-      if Zip.write_zip64_support &&
+      if policy.write_zip64_support &&
          (cdir_offset > 0xFFFFFFFF || cdir_size > 0xFFFFFFFF || @entry_set.size > 0xFFFF)
         write_64_e_o_c_d(io, cdir_offset, cdir_size)
         write_64_eocd_locator(io, eocd_offset)
@@ -58,7 +76,8 @@ module Zip
     # needs be) and returns the number of entries in the archive. This is a
     # convenience method that avoids reading in all of the entry data to get a
     # very quick entry count.
-    def count_entries(io)
+    def count_entries(io, policy: @policy)
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
       read_eocds(io)
       @size
     end
@@ -183,9 +202,9 @@ module Zip
       end
       raise Error, 'Zip consistency problem while reading central directory entry' if eof || io.eof?
 
-      @entry_set = EntrySet.new
+      @entry_set = EntrySet.new(policy: @policy)
       @size.times do
-        entry = Entry.read_c_dir_entry(io)
+        entry = Entry.read_c_dir_entry(io, policy: @policy)
         break unless entry
 
         offset = if entry.zip64?
@@ -269,7 +288,7 @@ module Zip
       return if size * CDIR_ENTRY_STATIC_HEADER_LENGTH <= size_in_bytes
 
       error = EntryNumberMismatchError.new(size, size_in_bytes)
-      raise error if Zip.validate_declared_number_of_entries
+      raise error if @policy.validate_declared_number_of_entries
 
       warn error.message
     end

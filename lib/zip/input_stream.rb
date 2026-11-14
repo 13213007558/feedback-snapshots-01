@@ -51,10 +51,15 @@ module Zip
     #
     # @param context [String||IO||StringIO] file path or IO/StringIO object
     # @param offset [Integer] offset in the IO/StringIO
+    # @param policy [Zip::ArchivePolicy, Hash, nil] the archive policy to use.
+    #   Entries read through this stream inherit it, and it stays fixed for
+    #   the lifetime of the stream even if the process-wide +Zip+ settings
+    #   change. Defaults to a snapshot of those settings at open time.
     # This method also accepts the standard IO encoding options:
     # `external_encoding:`, `internal_encoding:` and `encoding:`.
-    def initialize(context, offset: 0, decrypter: nil, **opts)
+    def initialize(context, offset: 0, decrypter: nil, policy: nil, **opts)
       super(**opts)
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
       @archive_io = get_io(context, offset)
       @decompressor = ::Zip::NullDecompressor
       @decrypter = decrypter
@@ -127,8 +132,9 @@ module Zip
       # Same as #initialize but if a block is passed the opened
       # stream is passed to the block and closed when the block
       # returns.
-      def open(filename_or_io, offset: 0, decrypter: nil, **opts)
-        zio = new(filename_or_io, offset: offset, decrypter: decrypter, **opts)
+      def open(filename_or_io, offset: 0, decrypter: nil, policy: nil, **opts)
+        zio = new(filename_or_io, offset: offset, decrypter: decrypter,
+                  policy: policy, **opts)
         return zio unless block_given?
 
         begin
@@ -154,7 +160,7 @@ module Zip
     end
 
     def open_entry # :nodoc:
-      @current_entry = ::Zip::Entry.read_local_entry(@archive_io)
+      @current_entry = ::Zip::Entry.read_local_entry(@archive_io, policy: @policy)
       return if @current_entry.nil?
 
       if @current_entry.incomplete? && @current_entry.compressed_size == 0 && !@complete_entry
@@ -216,7 +222,7 @@ module Zip
         raise ::Zip::CompressionMethodError, @current_entry.compression_method
       end
 
-      decompressor_class.new(io, decompressed_size)
+      decompressor_class.new(io, decompressed_size, policy: @policy)
     end
 
     def produce_input(maxlen = CHUNK_SIZE) # :nodoc:

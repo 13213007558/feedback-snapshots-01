@@ -60,55 +60,76 @@ module Zip
     # The name of this zip archive.
     attr_reader :name
 
-    # default -> false.
-    attr_accessor :restore_ownership
-
-    # default -> true.
-    attr_accessor :restore_permissions
-
-    # default -> true.
-    attr_accessor :restore_times
+    # Whether extraction applies ownership, permissions and timestamps
+    # from the archive. These delegate to the archive's policy; assigning
+    # them derives a new policy used for subsequent reads and extraction.
+    #
+    # Defaults: ownership false, permissions true, times true.
+    %i[restore_ownership restore_permissions restore_times].each do |name|
+      define_method(name) { @policy.public_send(name) }
+      define_method("#{name}=") { |value| @policy = @policy.merge(name => value) }
+    end
 
     def_delegators :@cdir, :comment, :comment=, :each, :entries, :glob, :size
 
+    # The immutable policy captured when this archive was opened. See
+    # ArchivePolicy for the settings it covers.
+    attr_reader :policy
+
     # Opens a zip archive. Pass create: true to create
     # a new archive if it doesn't exist already.
+    #
+    # `policy:` sets the immutable security/extraction policy for this
+    # archive; it is captured now and unaffected by later changes to the
+    # process-wide +Zip+ settings. Pass a Zip::ArchivePolicy, a Hash of
+    # policy overrides, or omit it to snapshot the globals. The
+    # `restore_ownership:`, `restore_permissions:`, `restore_times:` and
+    # `compression_level:` keywords are shorthand for the equivalent policy
+    # overrides and only affect this archive.
     def initialize(path_or_io, create: false, buffer: false,
-                   restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
-                   restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
-                   restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-                   compression_level: ::Zip.default_compression,
-                   suppress_extra_fields: false)
+                   restore_ownership: nil,
+                   restore_permissions: nil,
+                   restore_times: nil,
+                   compression_level: nil,
+                   suppress_extra_fields: false,
+                   policy: nil)
       super()
+
+      overrides = {}
+      overrides[:restore_ownership] = restore_ownership unless restore_ownership.nil?
+      overrides[:restore_permissions] = restore_permissions unless restore_permissions.nil?
+      overrides[:restore_times] = restore_times unless restore_times.nil?
+      overrides[:default_compression] = compression_level unless compression_level.nil?
+      @policy = ::Zip::ArchivePolicy.coerce(policy).merge(overrides)
 
       @name    = path_or_io.respond_to?(:path) ? path_or_io.path : path_or_io
       @create  = create ? true : false # allow any truthy value to mean true
 
       initialize_cdir(path_or_io, buffer: buffer)
 
-      @restore_ownership     = restore_ownership
-      @restore_permissions   = restore_permissions
-      @restore_times         = restore_times
-      @compression_level     = compression_level
       @suppress_extra_fields = suppress_extra_fields
+      @compression_level     = @policy.default_compression
     end
 
     class << self
       # Similar to ::new. If a block is passed the Zip::File object is passed
       # to the block and is automatically closed afterwards, just as with
-      # ruby's builtin File::open method.
+      # ruby's builtin File::open method. Accepts the same `policy:` argument
+      # as ::new.
       def open(file_name, create: false,
-               restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
-               restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
-               restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-               compression_level: ::Zip.default_compression,
-               suppress_extra_fields: false)
+               restore_ownership: nil,
+               restore_permissions: nil,
+               restore_times: nil,
+               compression_level: nil,
+               suppress_extra_fields: false,
+               policy: nil)
         zf = ::Zip::File.new(file_name, create:                create,
                                         restore_ownership:     restore_ownership,
                                         restore_permissions:   restore_permissions,
                                         restore_times:         restore_times,
                                         compression_level:     compression_level,
-                                        suppress_extra_fields: suppress_extra_fields)
+                                        suppress_extra_fields: suppress_extra_fields,
+                                        policy:                policy)
 
         return zf unless block_given?
 
@@ -120,15 +141,17 @@ module Zip
       end
 
       # Like #open, but reads zip archive contents from a String or open IO
-      # stream, and outputs data to a buffer.
+      # stream, and outputs data to a buffer. Accepts the same `policy:`
+      # argument as ::new.
       # (This can be used to extract data from a
       # downloaded zip archive without first saving it to disk.)
       def open_buffer(io = ::StringIO.new, create: false,
-                      restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
-                      restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
-                      restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times],
-                      compression_level: ::Zip.default_compression,
-                      suppress_extra_fields: false)
+                      restore_ownership: nil,
+                      restore_permissions: nil,
+                      restore_times: nil,
+                      compression_level: nil,
+                      suppress_extra_fields: false,
+                      policy: nil)
         unless IO_METHODS.map { |method| io.respond_to?(method) }.all? || io.kind_of?(String)
           raise 'Zip::File.open_buffer expects a String or IO-like argument' \
                 "(responds to #{IO_METHODS.join(', ')}). Found: #{io.class}"
@@ -141,7 +164,8 @@ module Zip
                                  restore_permissions:   restore_permissions,
                                  restore_times:         restore_times,
                                  compression_level:     compression_level,
-                                 suppress_extra_fields: suppress_extra_fields)
+                                 suppress_extra_fields: suppress_extra_fields,
+                                 policy:                policy)
 
         return zf unless block_given?
 
@@ -160,23 +184,28 @@ module Zip
       # whereas ZipInputStream jumps through the entire archive accessing the
       # local entry headers (which contain the same information as the
       # central directory).
-      def foreach(zip_file_name, &block)
-        ::Zip::File.open(zip_file_name) do |zip_file|
+      def foreach(zip_file_name, policy: nil, &block)
+        ::Zip::File.open(zip_file_name, policy: policy) do |zip_file|
           zip_file.each(&block)
         end
       end
 
       # Count the entries in a zip archive without reading the whole set of
       # entry data into memory.
-      def count_entries(path_or_io)
-        cdir = ::Zip::CentralDirectory.new
+      #
+      # Accepts the same `policy:` argument as #open; the count is checked
+      # against that policy rather than whatever the process-wide settings
+      # happen to be.
+      def count_entries(path_or_io, policy: nil)
+        policy = ::Zip::ArchivePolicy.coerce(policy)
+        cdir = ::Zip::CentralDirectory.new(policy: policy)
 
         if path_or_io.kind_of?(String)
           ::File.open(path_or_io, 'rb') do |f|
-            cdir.count_entries(f)
+            cdir.count_entries(f, policy: policy)
           end
         else
-          cdir.count_entries(path_or_io)
+          cdir.count_entries(path_or_io, policy: policy)
         end
       end
 
@@ -188,16 +217,17 @@ module Zip
       # or added, to avoid the security issues they can pose. `max_depth`
       # limits how many directory levels below `src_dir` are walked; anything
       # deeper is skipped, also with a warning (default: 16).
-      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16, &continue_on_exists_proc)
-        Zip::File.open(zip_file_name, create: true) do |zf|
+      def add_recursive(zip_file_name, src_dir, prefix: '', max_depth: 16,
+                        policy: nil, &continue_on_exists_proc)
+        Zip::File.open(zip_file_name, create: true, policy: policy) do |zf|
           zf.add_recursive(src_dir, prefix: prefix, max_depth: max_depth, &continue_on_exists_proc)
         end
       end
 
       # Extracts every entry in the zip archive `zip_file_name` into
       # `destination_directory`, preserving the archive's directory structure.
-      def extract_all(zip_file_name, destination_directory = '.', &block)
-        Zip::File.open(zip_file_name) do |zf|
+      def extract_all(zip_file_name, destination_directory = '.', policy: nil, &block)
+        Zip::File.open(zip_file_name, policy: policy) do |zf|
           zf.extract_all(destination_directory, &block)
         end
       end
@@ -237,7 +267,8 @@ module Zip
             @name, entry.to_s, comment: comment, extra: extra,
             compressed_size: compressed_size, crc: crc, size: size,
             compression_method: compression_method,
-            compression_level: compression_level, time: time
+            compression_level: compression_level, time: time,
+            policy: @policy
           )
         end
       if new_entry.directory?
@@ -250,6 +281,7 @@ module Zip
       # Zip.allow_duplicate_entry_names.
       remove(new_entry.name) if @cdir.include?(new_entry.name)
       new_entry.unix_perms = permissions
+      new_entry.policy = @policy
       zip_streamable_entry = StreamableStream.new(new_entry)
       @cdir << zip_streamable_entry
       zip_streamable_entry.get_output_stream(&a_proc)
@@ -267,16 +299,18 @@ module Zip
 
     # Convenience method for adding the contents of a file to the archive
     def add(entry, src_path, &continue_on_exists_proc)
-      continue_on_exists_proc ||= proc { ::Zip.continue_on_exists_proc }
+      continue_on_exists_proc ||= proc { @policy.continue_on_exists_proc }
       check_entry_exists(entry, continue_on_exists_proc, 'add')
       new_entry = if entry.kind_of?(::Zip::Entry)
                     entry
                   else
                     ::Zip::Entry.new(
                       @name, entry.to_s,
-                      compression_level: @compression_level
+                      compression_level: @compression_level,
+                      policy: @policy
                     )
                   end
+      new_entry.policy = @policy
       new_entry.gather_fileinfo_from_srcpath(src_path)
       @cdir << new_entry
     end
@@ -285,7 +319,8 @@ module Zip
     # in Stored format (uncompressed)
     def add_stored(entry, src_path, &continue_on_exists_proc)
       entry = ::Zip::Entry.new(
-        @name, entry.to_s, compression_method: ::Zip::Entry::STORED
+        @name, entry.to_s, compression_method: ::Zip::Entry::STORED,
+                                 policy: @policy
       )
       add(entry, src_path, &continue_on_exists_proc)
     end
@@ -316,7 +351,7 @@ module Zip
     def remove(entry)
       if entry.kind_of?(Entry)
         @cdir.delete(entry)
-      elsif Zip.allow_duplicate_entry_names
+      elsif @policy.allow_duplicate_entry_names
         get_entry(entry).each { |e| @cdir.delete(e) }
       else
         @cdir.delete(get_entry(entry))
@@ -357,7 +392,7 @@ module Zip
     # can't represent more than one entry's content). Pass the specific
     # Zip::Entry to target a particular duplicate.
     def extract(entry, entry_path = nil, destination_directory: '.', &block)
-      block ||= proc { Zip.on_exists_proc }
+      block ||= proc { @policy.on_exists_proc }
       found_entry = entry.kind_of?(Entry) ? entry : get_entry(entry)
       found_entry = found_entry.first if found_entry.kind_of?(Array)
       apply_restore_options(found_entry)
@@ -399,7 +434,8 @@ module Zip
       return if name.kind_of?(StringIO) || !commit_required?
 
       on_success_replace do |tmp_file|
-        ::Zip::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields) do |zos|
+        ::Zip::OutputStream.open(tmp_file, suppress_extra_fields: @suppress_extra_fields,
+                                           policy: @policy) do |zos|
           @cdir.each do |e|
             e.write_to_zip_output_stream(zos)
             e.clean_up
@@ -415,7 +451,8 @@ module Zip
     def write_buffer(io = ::StringIO.new)
       return io unless commit_required?
 
-      ::Zip::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields) do |zos|
+      ::Zip::OutputStream.write_buffer(io, suppress_extra_fields: @suppress_extra_fields,
+                                            policy: @policy) do |zos|
         @cdir.each { |e| e.write_to_zip_output_stream(zos) }
         zos.comment = comment
       end
@@ -444,7 +481,7 @@ module Zip
     # are none). See also get_entry
     def find_entry(entry_name)
       selected_entry = @cdir.find_entry(entry_name)
-      if Zip.allow_duplicate_entry_names
+      if @policy.allow_duplicate_entry_names
         selected_entry.each { |e| apply_restore_options(e) }
       else
         return if selected_entry.nil?
@@ -458,8 +495,8 @@ module Zip
     # if no entry is found.
     def get_entry(entry)
       selected_entry = find_entry(entry)
-      not_found = Zip.allow_duplicate_entry_names ? selected_entry.empty? : selected_entry.nil?
-      raise Errno::ENOENT, entry if not_found
+      not_found = @policy.allow_duplicate_entry_names ? selected_entry.empty? : selected_entry.nil?
+      raise Errno::ENOENT, entry.to_s if not_found
 
       selected_entry
     end
@@ -470,15 +507,14 @@ module Zip
 
       entry_name = entry_name.dup.to_s
       entry_name << '/' unless entry_name.end_with?('/')
-      @cdir << ::Zip::StreamableDirectory.new(@name, entry_name, nil, permission)
+      @cdir << ::Zip::StreamableDirectory.new(@name, entry_name, nil, permission,
+                                            policy: @policy)
     end
 
     private
 
     def apply_restore_options(entry)
-      entry.restore_ownership   = @restore_ownership
-      entry.restore_permissions = @restore_permissions
-      entry.restore_times       = @restore_times
+      entry.policy = @policy
     end
 
     # Resolves +entry+ to an Array of the Zip::Entry objects it refers to:
@@ -515,7 +551,7 @@ module Zip
     end
 
     def initialize_cdir(path_or_io, buffer: false)
-      @cdir = ::Zip::CentralDirectory.new
+      @cdir = ::Zip::CentralDirectory.new(policy: @policy)
 
       if ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.
@@ -549,13 +585,13 @@ module Zip
     def check_entry_exists(entry_name, continue_on_exists_proc, proc_name)
       return unless @cdir.include?(entry_name)
 
-      continue_on_exists_proc ||= proc { Zip.continue_on_exists_proc }
+      continue_on_exists_proc ||= proc { @policy.continue_on_exists_proc }
       raise ::Zip::EntryExistsError.new proc_name, entry_name unless continue_on_exists_proc.call
 
       # When duplicate entry names are allowed, a truthy continue_on_exists_proc
       # means "let the new entry coexist", so the pre-existing one(s) are left
       # alone rather than being replaced.
-      remove(entry_name) unless Zip.allow_duplicate_entry_names
+      remove(entry_name) unless @policy.allow_duplicate_entry_names
     end
 
     def check_file(path)

@@ -2,8 +2,8 @@
 
 module Zip
   class Inflater < Decompressor # :nodoc:all
-    def initialize(*args)
-      super
+    def initialize(*args, **kwargs)
+      super(*args, **kwargs)
 
       @buffer = +''.b
       @zlib_inflater = ::Zlib::Inflate.new(-Zlib::MAX_WBITS)
@@ -33,7 +33,7 @@ module Zip
     def produce_input
       retried = 0
       begin
-        @zlib_inflater.inflate(input_stream.read(Zip.inflater_chunk_size))
+        @zlib_inflater.inflate(input_stream.read(policy.inflater_chunk_size))
       rescue Zlib::BufError
         raise if retried >= 5 # how many times should we retry?
 

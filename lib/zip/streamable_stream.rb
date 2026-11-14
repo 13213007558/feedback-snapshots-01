@@ -8,6 +8,14 @@ module Zip
       @temp_file.binmode
     end
 
+    # DelegateClass only forwards methods that existed when the wrapper was
+    # generated, so make sure the mutable policy (which carries restore
+    # options) reaches the wrapped entry rather than being set on the
+    # delegator.
+    def policy=(policy)
+      __getobj__.policy = policy
+    end
+
     def get_output_stream
       if block_given?
         begin

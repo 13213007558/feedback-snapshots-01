@@ -28,6 +28,11 @@ module Zip
                   :restore_ownership, :restore_permissions, :restore_times,
                   :unix_gid, :unix_perms, :unix_uid
 
+    # The immutable policy in force for this entry. Entries read from an
+    # archive inherit that archive's policy; entries created standalone
+    # snapshot the process-wide defaults.
+    attr_reader :policy
+
     attr_accessor :crc, :external_file_attributes, :fstype, :gp_flags,
                   :internal_file_attributes, :local_header_offset # :nodoc:
 
@@ -38,6 +43,16 @@ module Zip
     mark_dirty :comment=, :compressed_size=, :external_file_attributes=,
                :fstype=, :gp_flags=, :name=, :size=,
                :unix_gid=, :unix_perms=, :unix_uid=
+
+    # Set the immutable policy for this entry. Also re-seeds the restore
+    # flags from it, but explicit assignments to those flags afterwards are
+    # still honoured for that entry.
+    def policy=(policy) # :nodoc:
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
+      @restore_ownership   = @policy.restore_ownership
+      @restore_permissions = @policy.restore_permissions
+      @restore_times       = @policy.restore_times
+    end
 
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
@@ -52,15 +67,13 @@ module Zip
       @ftype           = nil          # unspecified or unknown
       @filepath        = nil
       @gp_flags        = 0
-      if ::Zip.unicode_names
+      if @policy.unicode_names
         @gp_flags |= EFS
         @version = 63
       end
       @follow_symlinks = false
 
-      @restore_times       = DEFAULT_RESTORE_OPTIONS[:restore_times]
-      @restore_permissions = DEFAULT_RESTORE_OPTIONS[:restore_permissions]
-      @restore_ownership   = DEFAULT_RESTORE_OPTIONS[:restore_ownership]
+      self.policy = @policy
       # BUG: need an extra field to support uid/gid's
       @unix_uid            = nil
       @unix_gid            = nil
@@ -77,10 +90,12 @@ module Zip
       zipfile = '', name = '',
       comment: '', size: nil, compressed_size: 0, crc: 0,
       compression_method: DEFLATED,
-      compression_level: ::Zip.default_compression,
-      time: ::Zip::DOSTime.now, extra: ::Zip::ExtraField.new
+      compression_level: nil,
+      time: ::Zip::DOSTime.now, extra: ::Zip::ExtraField.new,
+      policy: nil
     )
       super()
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
       @name = name
       check_name(@name)
 
@@ -90,7 +105,7 @@ module Zip
       @zipfile            = zipfile
       @comment            = comment || ''
       @compression_method = compression_method || DEFLATED
-      @compression_level  = compression_level || ::Zip.default_compression
+      @compression_level  = compression_level || @policy.default_compression
       @compressed_size    = compressed_size || 0
       @crc                = crc || 0
       @size               = size
@@ -319,7 +334,7 @@ module Zip
         return self
       end
 
-      block ||= proc { ::Zip.on_exists_proc }
+      block ||= proc { @policy.on_exists_proc }
 
       raise "unknown file type #{inspect}" unless directory? || file? || symlink?
 
@@ -334,21 +349,21 @@ module Zip
     end
 
     class << self
-      def read_c_dir_entry(io) # :nodoc:
+      def read_c_dir_entry(io, policy: nil) # :nodoc:
         path = if io.respond_to?(:path)
                  io.path
                else
                  io
                end
-        entry = new(path)
+        entry = new(path, policy: policy)
         entry.read_c_dir_entry(io)
         entry
       rescue Error
         nil
       end
 
-      def read_local_entry(io) # :nodoc:
-        entry = new(io)
+      def read_local_entry(io, policy: nil) # :nodoc:
+        entry = new(io, policy: policy)
         entry.read_local_entry(io)
         entry
       rescue SplitArchiveError
@@ -397,8 +412,8 @@ module Zip
       set_time(@last_mod_date, @last_mod_time)
 
       @name = io.read(@name_length)
-      if ::Zip.force_entry_names_encoding
-        @name.force_encoding(::Zip.force_entry_names_encoding)
+      if @policy.force_entry_names_encoding
+        @name.force_encoding(@policy.force_entry_names_encoding)
       end
       @name.tr!('\\', '/') # Normalise filepath separators after encoding set.
 
@@ -538,8 +553,8 @@ module Zip
       set_time(@last_mod_date, @last_mod_time)
 
       @name = io.read(@name_length)
-      if ::Zip.force_entry_names_encoding
-        @name.force_encoding(::Zip.force_entry_names_encoding)
+      if @policy.force_entry_names_encoding
+        @name.force_encoding(@policy.force_entry_names_encoding)
       end
       @name.tr!('\\', '/') # Normalise filepath separators after encoding set.
 
@@ -683,7 +698,9 @@ module Zip
           raise "unknown @file_type #{ftype}"
         end
       else
-        zis = ::Zip::InputStream.new(@zipfile, offset: local_header_offset, decrypter: decrypter)
+        zis = ::Zip::InputStream.new(
+          @zipfile, offset: local_header_offset, decrypter: decrypter, policy: @policy
+        )
         zis.instance_variable_set(:@complete_entry, self)
         zis.get_next_entry
         if block
@@ -773,10 +790,10 @@ module Zip
     def set_time(binary_dos_date, binary_dos_time)
       @time = ::Zip::DOSTime.parse_binary_dos_format(binary_dos_date, binary_dos_time)
     rescue ArgumentError
-      warn 'WARNING: invalid date/time in zip entry.' if ::Zip.warn_invalid_date
+      warn 'WARNING: invalid date/time in zip entry.' if @policy.warn_invalid_date
     end
 
-    def create_file(dest_path, _continue_on_exists_proc = proc { Zip.continue_on_exists_proc })
+    def create_file(dest_path, _continue_on_exists_proc = proc { @policy.continue_on_exists_proc })
       if ::File.exist?(dest_path) && !yield(self, dest_path)
         raise DestinationExistsError, dest_path
       end
@@ -791,7 +808,7 @@ module Zip
             next unless bytes_written > size && !warned
 
             error = EntrySizeError.new(self)
-            raise error if Zip.validate_entry_sizes
+            raise error if @policy.validate_entry_sizes
 
             warn "WARNING: #{error.message}"
             warned = true
@@ -880,7 +897,7 @@ module Zip
 
     # rubocop:disable Style/GuardClause
     def prep_local_zip64_extra
-      return unless ::Zip.write_zip64_support
+      return unless @policy.write_zip64_support
       return if (!zip64? && @size && @size < 0xFFFFFFFF) || !file?
 
       # Might not know size here, so need ZIP64 just in case.
@@ -897,7 +914,7 @@ module Zip
     end
 
     def prep_cdir_zip64_extra
-      return unless ::Zip.write_zip64_support
+      return unless @policy.write_zip64_support
 
       if (@size && @size >= 0xFFFFFFFF) || @compressed_size >= 0xFFFFFFFF ||
          @local_header_offset >= 0xFFFFFFFF

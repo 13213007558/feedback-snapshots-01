@@ -7,8 +7,12 @@ module Zip
     attr_reader :entry_set
     protected   :entry_set
 
-    def initialize(an_enumerable = [])
+    # The immutable policy governing name lookup and ordering for this set.
+    attr_reader :policy
+
+    def initialize(an_enumerable = [], policy: nil)
       super()
+      @policy = ::Zip::ArchivePolicy.coerce(policy)
       @entry_set = {}
       an_enumerable.each { |o| push(o) }
     end
@@ -18,12 +22,12 @@ module Zip
     end
 
     # Returns the single entry matching `entry` (or `nil` if there isn't
-    # one) when `Zip.allow_duplicate_entry_names` is off. When it's on,
-    # returns an Array of every entry matching `entry` (empty if there are
-    # none).
+    # one) when duplicate entry names are not allowed by the policy. When
+    # they are, returns an Array of every entry matching `entry` (empty if
+    # there are none).
     def find_entry(entry)
       bucket = @entry_set[to_key(entry)]
-      return bucket&.first unless ::Zip.allow_duplicate_entry_names
+      return bucket&.first unless @policy.allow_duplicate_entry_names
 
       # Return a copy, not the live bucket, so callers iterating the result
       # (e.g. to delete entries one by one) aren't mutating storage they're
@@ -35,7 +39,7 @@ module Zip
       return unless entry
 
       key = to_key(entry)
-      if ::Zip.allow_duplicate_entry_names
+      if @policy.allow_duplicate_entry_names
         (@entry_set[key] ||= []) << entry
       else
         @entry_set[key] = [entry]
@@ -63,7 +67,7 @@ module Zip
       # matches `entry` itself - the argument doesn't have to be the exact
       # stored object, just something that resolves to the same key.
       idx =
-        if ::Zip.allow_duplicate_entry_names
+        if @policy.allow_duplicate_entry_names
           bucket.index { |e| e.equal?(entry) } || bucket.index(entry)
         else
           0
@@ -83,13 +87,18 @@ module Zip
       sorted_entries.values.flatten(1)
     end
 
+    # Returns a new entry set with the same entries and a different policy.
+    def with_policy(policy)
+      EntrySet.new(@entry_set.values.flatten(1), policy: policy)
+    end
+
     # deep clone
     def dup
       # Use raw insertion order (@entry_set.values), not the
-      # Zip.sort_entries-dependent #entries, so the copy's internal storage
-      # order doesn't end up depending on the sort flag's value at the
-      # moment of duping.
-      EntrySet.new(@entry_set.values.flatten(1).map(&:dup))
+      # policy's sort_entries-dependent #entries, so the copy's internal
+      # storage order doesn't end up depending on the sort flag's value at
+      # the moment of duping.
+      EntrySet.new(@entry_set.values.flatten(1).map(&:dup), policy: @policy)
     end
 
     def ==(other)
@@ -100,7 +109,7 @@ module Zip
 
     def parent(entry)
       bucket = @entry_set[to_key(entry.parent_as_string)]
-      return bucket&.first unless ::Zip.allow_duplicate_entry_names
+      return bucket&.first unless @policy.allow_duplicate_entry_names
 
       bucket ? bucket.dup : []
     end
@@ -117,14 +126,14 @@ module Zip
     protected
 
     def sorted_entries
-      ::Zip.sort_entries ? @entry_set.sort.to_h : @entry_set
+      @policy.sort_entries ? @entry_set.sort.to_h : @entry_set
     end
 
     private
 
     def to_key(entry)
       k = entry.to_s.chomp('/')
-      k.downcase! if ::Zip.case_insensitive_match
+      k.downcase! if @policy.case_insensitive_match
       k
     end
   end

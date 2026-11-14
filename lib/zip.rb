@@ -12,6 +12,7 @@ require 'zip/constants'
 require 'zip/dos_time'
 require 'zip/ioextras'
 require 'rbconfig'
+require 'zip/archive_policy'
 require 'zip/entry'
 require 'zip/extra_field'
 require 'zip/entry_set'
@@ -42,6 +43,14 @@ require 'zip/errors'
 # The main entry points are File, InputStream and OutputStream. For a
 # file/directory interface in the style of the standard ruby ::File and
 # ::Dir APIs then `require 'zip/filesystem'` and see FileSystem.
+#
+# The settings below are process-wide defaults. They are snapshotted into an
+# immutable ArchivePolicy when an archive is opened; later changes do not
+# affect archives that are already open. To give one archive a different
+# policy (for example, to read an untrusted upload with stricter checks),
+# pass `policy: Zip::ArchivePolicy.strict` (or a Hash of overrides) to
+# `Zip::File.open`, `Zip::File.open_buffer`, `Zip::InputStream.open` or
+# `Zip::OutputStream.open`. See ArchivePolicy for details.
 module Zip
   extend self
 
@@ -59,11 +68,27 @@ module Zip
                 :validate_declared_number_of_entries,
                 :inflater_chunk_size
 
-  DEFAULT_RESTORE_OPTIONS = {
-    restore_ownership:   false,
-    restore_permissions: true,
-    restore_times:       true
-  }.freeze # :nodoc:
+  # Settings that are captured per archive when it is opened. Changing any
+  # of these only affects archives opened afterwards.
+  PER_ARCHIVE_SETTINGS = %i[
+    unicode_names
+    on_exists_proc
+    continue_on_exists_proc
+    sort_entries
+    default_compression
+    write_zip64_support
+    warn_invalid_date
+    case_insensitive_match
+    allow_duplicate_entry_names
+    force_entry_names_encoding
+    validate_entry_sizes
+    validate_declared_number_of_entries
+    inflater_chunk_size
+  ].freeze # :nodoc:
+
+  # Retained for backwards compatibility; ArchivePolicy holds the defaults
+  # used when opening a new archive.
+  DEFAULT_RESTORE_OPTIONS = ::Zip::ArchivePolicy::DEFAULT_RESTORE_OPTIONS
 
   # :nodoc:
   # Remove this when JRuby#3962 is fixed.

@@ -2,8 +2,8 @@
 
 module Zip
   class StreamableDirectory < Entry # :nodoc:
-    def initialize(zipfile, entry, src_path = nil, permission = nil)
-      super(zipfile, entry)
+    def initialize(zipfile, entry, src_path = nil, permission = nil, policy: nil)
+      super(zipfile, entry, policy: policy)
 
       @ftype = :directory
       entry.get_extra_attributes_from_path(src_path) if src_path
