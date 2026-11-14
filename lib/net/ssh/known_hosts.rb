@@ -1,6 +1,7 @@
 require 'strscan'
 require 'openssl'
 require 'net/ssh/buffer'
+require 'net/ssh/errors'
 require 'net/ssh/authentication/ed25519_loader'
 
 module Net
@@ -140,9 +141,29 @@ module Net
         @revoked_keys.any? { |entry| entry.matches_key?(key) }
       end
 
+      # Adds the key to the known hosts and returns true only if it was
+      # persisted, or if it already matches an entry for this host. A custom
+      # known_hosts object must return true, :added or :matched to confirm
+      # that; false, nil or any other value is treated as a failed
+      # registration, so a key is never trusted only in memory. Registration
+      # errors are not hidden either: they propagate, and the in-memory
+      # collection is only updated after a successful registration.
       def add_host_key(key)
-        @known_hosts.add(@host, key, @options)
-        @host_keys.push(key)
+        result = @known_hosts.add(@host, key, @options)
+
+        unless [true, :added, :matched].include?(result)
+          raise HostKeyWriteFailed, "could not add the host key for #{@host.inspect} to known_hosts"
+        end
+
+        @host_keys.push(key) unless @host_keys.any? do |known|
+          if known.respond_to?(:matches_key?)
+            known.matches_key?(key)
+          else
+            known.ssh_type == key.ssh_type && known.to_blob == key.to_blob
+          end
+        end
+
+        true
       end
 
       def each(&block)
@@ -216,16 +237,349 @@ module Net
           return files
         end
 
-        # Looks in all user known host files (see KnownHosts.hostfiles) and tries to
-        # add an entry for the given host and key to the first file it is able
-        # to.
+        # Registers +key+ for +host+ in the user known-hosts files (see
+        # KnownHosts.hostfiles), first time only, and returns how it was
+        # trusted:
+        #
+        #   :added   the key was appended and read back from the file
+        #   :matched the host already had exactly this key in a configured file
+        #
+        # The comparison and the append happen while holding exclusive locks on
+        # the files involved, so two connections racing to register the same
+        # new host cannot both write a key. If a configured file already has a
+        # different key for the host, HostKeyMismatch is raised and no file is
+        # modified; a key marked @revoked raises HostKeyRevoked. Failures to
+        # write, flush or read the key back raise too, so the caller must only
+        # treat the key as trusted after :added or :matched.
+        #
+        # When several known-hosts files are configured, an entry for the host
+        # in any of them counts, as during verification: a file with this key
+        # makes the result :matched, and a different key in any file is a
+        # conflict and raises HostKeyMismatch. A host with no entry anywhere is
+        # registered in the first configured user file that can be written, as
+        # OpenSSH does; if that file can't be written, the next one is tried.
+        # Global files are read but never written. Files are appended to, never
+        # rewritten, so comments and entries for other hosts are preserved.
+        #
+        # Returns false when the caller passed no files at all, e.g. a custom
+        # :known_hosts object that can't persist anything. When none of the
+        # configured files can be written, HostKeyWriteFailed is raised.
         def add(host, key, options = {})
-          hostfiles(options, :user).each do |file|
-            KnownHosts.new(file).add(host, key)
-            return
-          rescue SystemCallError
-            # try the next hostfile
+          read_paths = hostfiles(options, :all).map { |path| File.expand_path(path) }.uniq
+          write_paths = hostfiles(options, :user).map { |path| File.expand_path(path) }.uniq
+          return false if read_paths.empty?
+
+          attempts = 0
+
+          loop do
+            attempts += 1
+            locks = {}
+            retry_needed = false
+            last_error = nil
+
+            begin
+              # Lock existing user files in a stable (absolute path) order, so
+              # processes with overlapping lists can't deadlock.
+              write_paths.sort.each do |path|
+                next unless File.file?(path)
+
+                locks[path] = lock_file(path)
+              end
+
+              # A file may have appeared between our checks; if it did, its
+              # entries aren't covered by the comparison below, so start over.
+              retry_needed = pending_paths(write_paths, locks).any? { |path| File.file?(path) }
+
+              unless retry_needed
+                # Configured global files are read but never written; a key
+                # registered there is as good as one registered in a user file.
+                state = registration_state(read_paths, locks, host, key, options)
+                return :matched if state == :matched
+
+                write_paths.each do |path|
+                  lock = locks[path]
+
+                  unless lock
+                    begin
+                      # Non-blocking: if another process is creating or locking
+                      # this path, retry with it included rather than risk a
+                      # lock-order inversion.
+                      lock = lock_file(path, create: true, nonblock: true)
+                    rescue Errno::EWOULDBLOCK
+                      retry_needed = true
+                      break
+                    rescue SystemCallError => error
+                      last_error = error
+                      next
+                    end
+
+                    locks[path] = lock
+                  end
+
+                  next unless lock[:writable]
+
+                  # Another connection may have registered a key for this host
+                  # while we waited for a lock, so compare again under them.
+                  return :matched if registration_state(read_paths, locks, host, key, options) == :matched
+
+                  begin
+                    append_key(lock[:io], host, key, options)
+                    return :added
+                  rescue SystemCallError, IOError => error
+                    last_error = error
+                  end
+                end
+              end
+            ensure
+              locks.each_value { |lock| unlock_file(lock) }
+            end
+
+            if retry_needed
+              if attempts >= 10
+                raise HostKeyWriteFailed, "unable to lock a known hosts file to register the key for #{host.inspect}"
+              end
+
+              sleep(0.002 * attempts)
+              next
+            end
+
+            if last_error
+              raise HostKeyWriteFailed, "unable to write the host key for #{host.inspect} to a known hosts file: #{last_error.message}"
+            end
+
+            raise HostKeyWriteFailed,
+                  "no writable known hosts file to register the host key for #{host.inspect}"
           end
+        end
+
+        private
+
+        def pending_paths(paths, locks)
+          paths.reject { |path| locks.key?(path) }
+        end
+
+        # Opens and exclusively locks a known-hosts file, creating it when
+        # +create+ is set. A file that exists but can't be opened read-write is
+        # still locked read-only, so its entries take part in the comparison,
+        # but it is never chosen for the append.
+        def lock_file(path, create: false, nonblock: false)
+          writable = true
+          io =
+            if create
+              File.open(path, File::RDWR | File::CREAT | File::APPEND)
+            else
+              begin
+                File.open(path, File::RDWR)
+              rescue Errno::EACCES, Errno::EPERM, Errno::EROFS
+                writable = false
+                File.open(path, File::RDONLY)
+              end
+            end
+
+          locked = io.flock(File::LOCK_EX | (nonblock ? File::LOCK_NB : 0))
+          raise Errno::EWOULDBLOCK, path if locked == false
+
+          io.binmode
+          { io: io, writable: writable }
+        rescue SystemCallError
+          io&.close
+          raise
+        end
+
+        def unlock_file(lock)
+          lock[:io].flock(File::LOCK_UN)
+        rescue SystemCallError
+          # Closing the file releases the lock anyway.
+        ensure
+          lock[:io].close
+        end
+
+        # Compares the key with the host's entries in the configured files.
+        # Returns :matched, :none, or raises HostKeyRevoked / HostKeyMismatch.
+        # A matching entry wins over a conflicting one in another file, as it
+        # does during verification.
+        def registration_state(paths, locks, host, key, options)
+          entries = host.split(',')
+          same_key = false
+          other_key = false
+
+          paths.each do |path|
+            content =
+              if locks.key?(path)
+                read_locked(locks[path][:io])
+              elsif File.file?(path) && File.readable?(path)
+                File.binread(path)
+              else
+                ''
+              end
+
+            each_known_host_entry(content) do |marker, hostlist, key_content, _comment|
+              known = parse_entry_key(key_content)
+              # Match keys_for and revoked_keys_for: an entry of a key type
+              # verification can't use, such as a host certificate, is neither
+              # a pin nor a revocation here.
+              next unless known && SUPPORTED_TYPE.include?(known.ssh_type)
+
+              if marker == '@revoked'
+                next unless revoked_entry_matches?(hostlist, entries)
+                raise HostKeyRevoked, "host key for #{host.inspect} is revoked" if HostKeyEntries::Revoked.new(known).matches_key?(key)
+
+                next
+              end
+
+              # @cert-authority entries trust a CA, so they neither pin this
+              # host to one concrete key nor conflict with an issued
+              # certificate or a plain key.
+              next if marker == '@cert-authority'
+              next unless key_entry_matches?(hostlist, entries, options)
+
+              if same_key_as?(known, key)
+                same_key = true
+              else
+                other_key = true
+              end
+            end
+          end
+
+          return :matched if same_key
+
+          raise HostKeyMismatch, "host key for #{host.inspect} does not match the key already registered" if other_key
+
+          :none
+        end
+
+        def read_locked(io)
+          io.rewind
+          io.read || ''
+        end
+
+        # Yields the marker, host patterns, key content and comment of every
+        # usable line of the given known-hosts content. Unlike each_entry, key
+        # types outside SUPPORTED_TYPE are yielded too, so registration can
+        # compare and read back a key type that verification can't use yet.
+        def each_known_host_entry(content)
+          content.each_line do |line|
+            fields = line.split(' ')
+            marker = fields.shift if fields.first&.start_with?('@')
+            hosts, type, key_content, comment = fields
+
+            # Skip empty line or one that is commented
+            next if hosts.nil? || hosts.start_with?('#')
+            next if type.nil? || key_content.nil?
+
+            yield marker, hosts.split(','), key_content, comment
+          end
+        end
+
+        def parse_entry_key(key_content)
+          entry_key(key_content)
+        rescue Net::SSH::UnsupportedKeyType, ArgumentError, TypeError
+          nil
+        end
+
+        def entry_key(key_content)
+          Net::SSH::Buffer.new(key_content.unpack('m*').first).read_key
+        end
+
+        def same_key_as?(known, key)
+          known.ssh_type == key.ssh_type && known.to_blob == key.to_blob
+        end
+
+        def key_entry_matches?(hostlist, entries, options)
+          found = hostlist.any? { |pattern| blank.match(entries.first, pattern) } ||
+                  blank.known_host_hash?(hostlist, entries)
+          return false unless found
+
+          if options[:check_host_ip] && entries.size > 1 && hostlist.size > 1
+            found = hostlist.include?(entries[1])
+          end
+
+          found
+        end
+
+        def revoked_entry_matches?(hostlist, entries)
+          entries.any? { |entry| hostlist.any? { |pattern| blank.match(entry, pattern) } } ||
+            blank.known_host_hash?(hostlist, entries)
+        end
+
+        # A host-less instance used for its matching helpers.
+        def blank
+          @blank ||= new('')
+        end
+
+        # Appends one entry and reads it back from the file before reporting
+        # success. On failure only the bytes of this attempt are rolled back,
+        # so a line another process appended after our offset is not lost.
+        def append_key(io, host, key, options)
+          io.seek(0, IO::SEEK_END)
+          offset = io.pos
+          separator = ''
+          if offset.positive?
+            io.seek(-1, IO::SEEK_END)
+            separator = "\n" unless io.read(1) == "\n"
+          end
+
+          line = "#{separator}#{host} #{key.ssh_type} #{[Net::SSH::Buffer.from(:key, key).to_s].pack('m*').gsub(/\s/, '')}\n"
+
+          begin
+            written = io.write(line)
+            raise IOError, "short write to #{io.path}" unless written == line.bytesize
+
+            io.flush
+            sync_file(io)
+
+            # What matters is that the exact line was read back, even for a key
+            # type keys_for does not consume yet, such as a host certificate.
+            if io.stat.file? && !written_line_present?(File.binread(io.path), host, key)
+              raise IOError, "could not read back the key written to #{io.path}"
+            end
+          rescue StandardError
+            roll_back(io, offset, line)
+            raise
+          end
+        end
+
+        # Removes only the bytes this attempt appended. If another writer added
+        # anything beyond them (i.e. the tail is not our line), the file is left
+        # alone: it holds evidence this connection can't claim.
+        def roll_back(io, offset, line)
+          begin
+            io.flush
+            io.rewind
+            tail = io.read.to_s
+            appended = tail.byteslice(offset..)
+            if appended && line.start_with?(appended)
+              io.truncate(offset)
+              io.flush
+            end
+          rescue SystemCallError, IOError
+            # The original failure is more useful than a failed cleanup.
+          end
+        end
+
+        def sync_file(io)
+          io.fsync
+        rescue Errno::EINVAL, NotImplementedError
+          # Some filesystems and special files don't support fsync; the
+          # read-back still verifies what was written.
+        end
+
+        # Reads the file back to confirm the exact entry that was written is
+        # there for this host. The host part is compared exactly, not as a
+        # pattern, so a wildcard entry that merely matches is not mistaken for
+        # this registration.
+        def written_line_present?(content, host, key)
+          entries = host.split(',')
+
+          each_known_host_entry(content) do |marker, hostlist, key_content, _comment|
+            next unless marker.nil?
+            next unless hostlist == entries
+
+            known = parse_entry_key(key_content)
+            return true if known && same_key_as?(known, key)
+          end
+
+          false
         end
       end
 
@@ -335,15 +689,12 @@ module Net
 
       # Tries to append an entry to the current source file for the given host
       # and key. If it is unable to (because the file is not writable, for
-      # instance), an exception will be raised.
+      # instance), an exception will be raised. The file is only appended to;
+      # comments and entries for other hosts are left untouched. Returns
+      # :added or :matched like KnownHosts.add.
       def add(host, key)
-        File.open(source, "a") do |file|
-          blob = [Net::SSH::Buffer.from(:key, key).to_s].pack("m*").gsub(/\s/, "")
-          file.puts "#{host} #{key.ssh_type} #{blob}"
-        end
+        KnownHosts.add(host, key, user_known_hosts_file: source, global_known_hosts_file: [])
       end
-
-      private
 
       # Yields the marker, host patterns, key and comment of each usable line.
       def each_entry

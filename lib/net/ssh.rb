@@ -190,6 +190,10 @@ module Net
     #   :control_master).
     # * :known_hosts => a custom object holding known hosts records.
     #   It must implement #search_for and `add` in a similiar manner as KnownHosts.
+    #   `add` must return true only after persisting the key or finding it
+    #   already registered for the host; returning false, raising, or returning
+    #   an unexpected value makes host key registration fail closed (the
+    #   connection is refused rather than trusting the key).
     # * :global_known_hosts_file => the location of the global known hosts
     #   file. Set to an array if you want to specify multiple global known
     #   hosts files. Defaults to %w(/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2).
@@ -317,6 +321,10 @@ module Net
     #   * :accept_new_or_local_tunnel (insecure) ::Net::SSH::Verifiers::AcceptNewOrLocalTunnel
     #   * :accept_new (insecure) ::Net::SSH::Verifiers::AcceptNew
     #   * :always (secure) ::Net::SSH::Verifiers::Always
+    #   With :accept_new, a new host key is registered in a user known hosts
+    #   file under an exclusive lock before it is accepted, so concurrent
+    #   connections can't register different keys, and a key that can't be
+    #   written is refused (Net::SSH::HostKeyWriteFailed) rather than trusted.
     #   You can also provide an own Object which responds to +verify+ and
     #   +verify_signature+. The argument given to +verify+ is a hash consisting
     #   of the +:key+, the +:key_blob+, the +:fingerprint+ and the +:session+.

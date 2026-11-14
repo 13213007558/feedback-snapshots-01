@@ -1,4 +1,6 @@
 require_relative './common'
+require 'tmpdir'
+require_relative 'verifiers/test_cert_authority_checks'
 
 class TestKnownHosts < NetSSHTest
   def perform_test(source)
@@ -177,12 +179,137 @@ class TestKnownHosts < NetSSHTest
     end
   end
 
+  def test_add_registers_a_new_host_once_and_reports_matched_afterwards
+    with_config_file(lines: ["# keep me", "other.test #{line_for(rsa_key)}"]) do |path|
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      assert_equal :added, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+      assert_equal ["# keep me", "other.test #{line_for(rsa_key)}"],
+                   File.readlines(path, chomp: true).first(2)
+      assert_equal 3, File.readlines(path).count
+      assert_equal :matched, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+      assert_equal 3, File.readlines(path).count
+    end
+  end
+
+  def test_add_refuses_a_different_key_for_a_registered_host
+    with_config_file(lines: ["new.test #{line_for(rsa_key)}"]) do |path|
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      error = assert_raises(Net::SSH::HostKeyMismatch) { Net::SSH::KnownHosts.add("new.test", third_key, options) }
+      assert_match(/does not match/, error.message)
+      assert_equal ["new.test #{line_for(rsa_key)}"], File.readlines(path, chomp: true)
+    end
+  end
+
+  def test_add_refuses_a_revoked_key
+    revoked_line = line_for(rsa_key)
+    with_config_file(lines: ["@revoked new.test #{revoked_line}"]) do |path|
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      assert_raises(Net::SSH::HostKeyRevoked) { Net::SSH::KnownHosts.add("new.test", rsa_key, options) }
+      assert_equal ["@revoked new.test #{revoked_line}"], File.readlines(path, chomp: true)
+    end
+  end
+
+  def test_add_treats_a_cert_authority_entry_as_no_pin
+    with_config_file(lines: ["@cert-authority new.test #{sample_key}"]) do |path|
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      assert_equal :added, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+      assert_equal 2, File.readlines(path).count
+    end
+  end
+
+  def test_add_registers_and_reads_back_a_host_certificate
+    cert = Net::SSH::Buffer.new(CertAuthorityCheckFixtures::SIGNED_CERT).read_key
+    with_config_file(lines: []) do |path|
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      assert_equal :added, Net::SSH::KnownHosts.add("new.test", cert, options)
+      assert_match(/new\.test ssh-rsa-cert-v01@openssh\.com /, File.read(path))
+
+      # A certificate is not a plain pin, so a later connection with a
+      # different key isn't rejected by this entry; keys_for ignores it as
+      # before.
+      assert_equal :added, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+      assert_equal [rsa_key.to_blob], Net::SSH::KnownHosts.new(path).keys_for("new.test").map(&:to_blob)
+    end
+  end
+
+  def test_add_compares_against_every_configured_file
+    with_config_file(lines: ["new.test #{line_for(rsa_key)}"]) do |first|
+      with_config_file(lines: []) do |second|
+        options = { user_known_hosts_file: [first, second], global_known_hosts_file: [] }
+
+        assert_equal :matched, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+        assert_empty File.read(second)
+      end
+    end
+  end
+
+  def test_add_detects_a_conflict_in_a_later_configured_file
+    with_config_file(lines: []) do |first|
+      with_config_file(lines: ["new.test #{line_for(rsa_key)}"]) do |second|
+        options = { user_known_hosts_file: [first, second], global_known_hosts_file: [] }
+
+        assert_raises(Net::SSH::HostKeyMismatch) { Net::SSH::KnownHosts.add("new.test", third_key, options) }
+        assert_empty File.read(first)
+      end
+    end
+  end
+
+  def test_add_matches_a_key_registered_in_a_global_file_without_writing
+    with_config_file(lines: ["new.test #{line_for(rsa_key)}"]) do |global|
+      with_config_file(lines: []) do |user|
+        options = { user_known_hosts_file: user, global_known_hosts_file: global }
+
+        assert_equal :matched, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+        assert_empty File.read(user)
+      end
+    end
+  end
+
+  def test_add_falls_back_to_the_next_user_file_when_the_first_is_read_only
+    with_config_file(lines: ["# first"]) do |first|
+      with_config_file(lines: ["# second"]) do |second|
+        File.chmod(0o400, first)
+        options = { user_known_hosts_file: [first, second], global_known_hosts_file: [] }
+
+        assert_equal :added, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+        assert_equal ["# first"], File.readlines(first, chomp: true)
+        assert_equal "# second", File.readlines(second, chomp: true).first
+        assert_equal [rsa_key.to_blob], Net::SSH::KnownHosts.new(second).keys_for("new.test").map(&:to_blob)
+      ensure
+        File.chmod(0o600, first)
+      end
+    end
+  end
+
+  def test_add_creates_a_missing_user_file
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "known_hosts")
+      options = { user_known_hosts_file: path, global_known_hosts_file: [] }
+
+      assert_equal :added, Net::SSH::KnownHosts.add("new.test", rsa_key, options)
+      assert_equal [rsa_key.to_blob], Net::SSH::KnownHosts.new(path).keys_for("new.test").map(&:to_blob)
+    end
+  end
+
   def path(relative_path)
     File.join(File.dirname(__FILE__), relative_path)
   end
 
   def sample_key
     "ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ=="
+  end
+
+  def line_for(key)
+    "#{key.ssh_type} #{[key.to_blob].pack('m0')}"
+  end
+
+  def third_key
+    @third_key ||= OpenSSL::PKey::RSA.new(2048).public_key
   end
 
   def with_config_file(lines: [], &block)

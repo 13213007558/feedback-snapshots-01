@@ -95,7 +95,9 @@ module Net
       end
 
       # Tell Net::SSH to record this host and key in the known hosts file, so
-      # that subsequent connections will remember them.
+      # that subsequent connections will remember them. The key is only
+      # remembered once it was persisted (or found already registered);
+      # otherwise the write error propagates.
       def remember_host!
         @callback.call
       end
@@ -126,6 +128,16 @@ module Net
     # never be accepted, so unlike the other host key errors this one can't be
     # overridden: #remember_host! just raises it again.
     class HostKeyRevoked < HostKeyError
+      def remember_host!
+        raise self
+      end
+    end
+
+    # Raised when a new host key could not be persisted to a known hosts file,
+    # e.g. because no configured file is writable. The key was not trusted, so
+    # unlike the other host key errors this one can't be overridden:
+    # #remember_host! just raises it again.
+    class HostKeyWriteFailed < HostKeyError
       def remember_host!
         raise self
       end
