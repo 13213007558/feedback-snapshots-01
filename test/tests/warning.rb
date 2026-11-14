@@ -52,4 +52,28 @@ class WarningTests < Minitest::Test
 
     output_processor.verify
   end
+
+  def test_renderable_hash_is_nil_without_classification
+    warning = Brakeman::Warning.new(confidence: :high)
+
+    assert_nil warning.renderable_hash
+  end
+
+  def test_renderable_hash_serializes_classification
+    classification = Brakeman::RenderableClassifier::Classification.new(
+      status: :unknown,
+      class_name: :MissingComponent,
+      evidence: "cyclic inheritance chain at MissingComponent"
+    )
+    warning = Brakeman::Warning.new(confidence: :high, renderable: classification)
+
+    assert_equal(
+      {
+        :status => "unknown",
+        :class_name => :MissingComponent,
+        :evidence => "cyclic inheritance chain at MissingComponent"
+      },
+      warning.renderable_hash
+    )
+  end
 end

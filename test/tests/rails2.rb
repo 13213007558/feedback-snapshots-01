@@ -13,7 +13,7 @@ class Rails2Tests < Minitest::Test
     @expected ||= {
       :controller => 1,
       :model => 4,
-      :template => 47,
+      :template => 48,
       :generic => 61 }
   end
 
@@ -174,6 +174,22 @@ class Rails2Tests < Minitest::Test
       relative_path: "app/views/home/test_render.html.erb",
       code: s(:render, :file, s(:dstr, "/tmp/", s(:evstr, s(:call, s(:call, nil, :params), :[], s(:lit, :file)))), s(:hash)),
       user_input: s(:call, s(:call, nil, :params), :[], s(:lit, :file))
+  end
+
+  # A non-builder call on a constant (e.g. a model finder) is not a confirmed
+  # renderable, so the dynamic render path warning must not be suppressed.
+  def test_dynamic_render_path_unconfirmed_object
+    assert_warning check_name: "Render",
+      type: :template,
+      warning_code: 15,
+      fingerprint: "f8e746002a6e604876fe2946d7b8b940e347da7ffdccd2e8e125dd3cdd615d4b",
+      warning_type: "Dynamic Render Path",
+      line: 5,
+      message: /not a confirmed renderable: dynamic construction via #find/,
+      confidence: 0,
+      relative_path: "app/views/home/test_render.html.erb",
+      code: s(:render, :partial, s(:call, s(:const, :User), :find, s(:call, s(:call, s(:call, nil, :params), :[], s(:lit, :user)), :[], s(:lit, :id))), s(:hash)),
+      user_input: s(:call, s(:call, s(:call, nil, :params), :[], s(:lit, :user)), :[], s(:lit, :id))
   end
 
   def test_file_access
@@ -1547,7 +1563,7 @@ class Rails2WithOptionsTests < Minitest::Test
     @expected ||= {
       :controller => 1,
       :model => 4,
-      :template => 47,
+      :template => 48,
       :generic => 61 }
   end
 

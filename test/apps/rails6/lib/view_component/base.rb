@@ -1,5 +1,5 @@
 module ViewComponent
   class Base
-    # For testing 'known_renderable_class?' in CheckRender
+    # Stub for testing renderable ancestor matching in RenderableClassifier
   end
 end

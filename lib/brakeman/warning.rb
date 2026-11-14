@@ -6,7 +6,7 @@ require 'brakeman/messages'
 #The Warning class stores information about warnings
 class Brakeman::Warning
   attr_reader :called_from, :check, :class, :confidence, :controller, :cwe_id,
-    :line, :method, :model, :template, :user_input, :user_input_type,
+    :line, :method, :model, :renderable, :template, :user_input, :user_input_type,
     :warning_code, :warning_set, :warning_type
 
   attr_accessor :code, :context, :file, :message
@@ -40,6 +40,7 @@ class Brakeman::Warning
     :message => :@message,
     :method => :@method,
     :model => :@model,
+    :renderable => :@renderable,
     :template => :@template,
     :user_input => :@user_input,
     :warning_set => :@warning_set,
@@ -305,7 +306,20 @@ class Brakeman::Warning
       :location => self.location(false),
       :user_input => (@user_input && self.format_user_input(false)),
       :confidence => self.confidence_name,
-      :cwe_id => cwe_id
+      :cwe_id => cwe_id,
+      :renderable => renderable_hash
+    }
+  end
+
+  # Structured reason why the render argument was, or was not, treated as a
+  # renderable component. Absent for ordinary template name warnings.
+  def renderable_hash
+    return nil unless @renderable
+
+    {
+      :status => @renderable.status.to_s,
+      :class_name => @renderable.class_name,
+      :evidence => @renderable.evidence
     }
   end
 

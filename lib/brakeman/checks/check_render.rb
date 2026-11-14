@@ -1,4 +1,5 @@
 require 'brakeman/checks/base_check'
+require 'brakeman/checks/renderable_classifier'
 
 #Check calls to +render()+ for dangerous values
 class Brakeman::CheckRender < Brakeman::BaseCheck
@@ -32,9 +33,22 @@ class Brakeman::CheckRender < Brakeman::BaseCheck
     view = result[:call][2]
 
     if sexp? view and original? result
-      return if renderable?(view)
+      # A value shaped like an object render is classified separately from an
+      # ordinary template name. Only a confirmed renderable component is
+      # exempt; an unresolvable object keeps the warning and records why.
+      classification = renderable_classifier.classify(view)
+      return if classification&.confirmed?
 
-      if input = has_immediate_user_input?(view)
+      input = if classification&.unknown?
+        # The user input reaches the render through the constructor arguments
+        # (e.g. UnknownComponent.new(params[:x])), which has_immediate_user_input?
+        # does not descend into for method-call arguments.
+        user_input_in_renderable_arguments(view)
+      else
+        has_immediate_user_input?(view)
+      end
+
+      if input
         if string_interp? view
           confidence = :medium
         else
@@ -49,13 +63,40 @@ class Brakeman::CheckRender < Brakeman::BaseCheck
 
       message = msg("Render path contains ", msg_input(input))
 
+      if classification&.unknown?
+        label = classification.class_name || "value"
+        message << msg("; ", msg_code(label),
+          " is not a confirmed renderable: #{classification.evidence}")
+      end
+
       warn :result => result,
         :warning_type => "Dynamic Render Path",
         :warning_code => :dynamic_render_path,
         :message => message,
         :user_input => input,
         :confidence => confidence,
-        :cwe_id => [22]
+        :cwe_id => [22],
+        :renderable => classification
+    end
+  end
+
+  # Finds immediate user input passed into the renderable object construction,
+  # including nested builder calls such as +with_content+.
+  def user_input_in_renderable_arguments exp
+    return false unless call? exp
+
+    exp.each_arg do |arg|
+      next unless sexp? arg
+
+      if input = has_immediate_user_input?(arg)
+        return input
+      end
+    end
+
+    if call?(exp.target)
+      user_input_in_renderable_arguments(exp.target)
+    else
+      false
     end
   end
 
@@ -72,26 +113,7 @@ class Brakeman::CheckRender < Brakeman::BaseCheck
     end
   end
 
-  def renderable? exp
-    return false unless call?(exp) and constant?(exp.target)
-
-    if exp.method == :with_content
-      exp = exp.target
-    end
-
-    return false unless constant?(exp.target)
-    target_class_name = class_name(exp.target)
-    known_renderable_class?(target_class_name) or tracker.find_method(:render_in, target_class_name)
-  end
-
-  def known_renderable_class? class_name
-    klass = tracker.find_class(class_name)
-    return false if klass.nil?
-    knowns = [
-      :"ViewComponent::Base",
-      :"ViewComponentContrib::Base",
-      :"Phlex::HTML"
-    ]
-    knowns.any? { |k| klass.ancestor? k }
+  def renderable_classifier
+    @renderable_classifier ||= Brakeman::RenderableClassifier.new(tracker)
   end
 end

@@ -13,7 +13,7 @@ class Rails6Tests < Minitest::Test
       :controller => 0,
       :model => 0,
       :template => 4,
-      :generic => 37
+      :generic => 44
     }
   end
 
@@ -846,5 +846,129 @@ class Rails6Tests < Minitest::Test
       message: /^Support\ for\ Ruby\ 2\.5\.3\ ended\ on\ 2021\-03\-/,
       confidence: 0,
       relative_path: "Gemfile"
+  end
+
+  # Category 1: confirmed renderable components stay exempt from the dynamic
+  # render path warning, whether confirmed by known ancestor or a render_in
+  # definition located in the source.
+  def test_confirmed_renderable_ancestor
+    assert_no_warning :type => :warning,
+      :warning_code => 15,
+      :warning_type => "Dynamic Render Path",
+      :line => 4,
+      :relative_path => "app/controllers/render_classification_controller.rb",
+      :code => s(:render, :action, s(:call, s(:const, :TestViewComponent), :new, s(:call, s(:params), :require, s(:lit, :name))), s(:hash)),
+      :user_input => s(:call, s(:params), :require, s(:lit, :name))
+  end
+
+  def test_confirmed_renderable_render_in
+    assert_no_warning :type => :warning,
+      :warning_code => 15,
+      :warning_type => "Dynamic Render Path",
+      :line => 8,
+      :relative_path => "app/controllers/render_classification_controller.rb",
+      :code => s(:render, :action, s(:call, s(:const, :RawRenderableComponent), :new, s(:call, s(:params), :require, s(:lit, :name))), s(:hash)),
+      :user_input => s(:call, s(:params), :require, s(:lit, :name))
+  end
+
+  # A confirmed renderable is not assumed safe internally: any XSS in what it
+  # renders belongs to the XSS checks. The render path check still exempts it.
+  def test_confirmed_renderable_with_unsafe_output_stays_exempt
+    assert_no_warning :type => :warning,
+      :warning_code => 15,
+      :warning_type => "Dynamic Render Path",
+      :line => 14,
+      :relative_path => "app/controllers/render_classification_controller.rb",
+      :code => s(:render, :action, s(:call, s(:const, :UnsafeOutputComponent), :new, s(:call, s(:params), :require, s(:lit, :name))), s(:hash)),
+      :user_input => s(:call, s(:params), :require, s(:lit, :name))
+  end
+
+  # Category 2: ordinary template names are still flagged as dangerous render
+  # paths, independently of the renderable object classification.
+  def test_dangerous_template_name_still_warns
+    assert_warning :type => :warning,
+      :warning_code => 15,
+      :fingerprint => "c4e298505ebd0f3e0f263b35198a153ef702639181aef32700fe19755b04143f",
+      :warning_type => "Dynamic Render Path",
+      :line => 19,
+      :message => /^Render\ path\ contains\ parameter\ value/,
+      :confidence => 0,
+      :relative_path => "app/controllers/render_classification_controller.rb",
+      :code => s(:render, :action, s(:call, s(:params), :[], s(:lit, :template)), s(:hash)),
+      :user_input => s(:call, s(:params), :[], s(:lit, :template))
+  end
+
+  def test_dangerous_interpolated_template_still_warns
+    assert_warning :type => :warning,
+      :warning_code => 15,
+      :fingerprint => "f3a9212751690b2a49c2dcbac5f8865fca629d5bb645ebc38740e203991f33d7",
+      :warning_type => "Dynamic Render Path",
+      :line => 23,
+      :message => /^Render\ path\ contains\ parameter\ value/,
+      :confidence => 1,
+      :relative_path => "app/controllers/render_classification_controller.rb",
+      :code => s(:render, :action, s(:dstr, "groups/", s(:evstr, s(:call, s(:params), :[], s(:lit, :template)))), s(:hash)),
+      :user_input => s(:call, s(:params), :[], s(:lit, :template))
+  end
+
+  # Category 3: objects that cannot be resolved to a confirmed renderable keep
+  # the warning, and the warning carries the classification evidence.
+  def test_undefined_class_keeps_warning_with_evidence
+    w = single_render_classification_warning(28)
+    assert_match(/not a confirmed renderable: class UndefinedComponent is not defined/, w.message.to_s)
+    assert_equal "unknown", w.renderable_hash[:status]
+    assert_equal :UndefinedComponent, w.renderable_hash[:class_name]
+  end
+
+  def test_missing_parent_class_keeps_warning_with_evidence
+    w = single_render_classification_warning(32)
+    assert_match(/not a confirmed renderable: ancestor UndefinedRenderableParent is not defined/, w.message.to_s)
+    assert_equal "unknown", w.renderable_hash[:status]
+    assert_equal :MissingParentComponent, w.renderable_hash[:class_name]
+  end
+
+  def test_cyclic_inheritance_keeps_warning_with_evidence
+    w = single_render_classification_warning(36)
+    assert_match(/not a confirmed renderable: cyclic inheritance chain/, w.message.to_s)
+    assert_equal "unknown", w.renderable_hash[:status]
+    assert_equal :CyclicComponentA, w.renderable_hash[:class_name]
+  end
+
+  def test_dynamic_factory_keeps_warning_with_evidence
+    w = single_render_classification_warning(40)
+    assert_match(/not a confirmed renderable: dynamic construction via #build/, w.message.to_s)
+    assert_equal "unknown", w.renderable_hash[:status]
+    assert_nil w.renderable_hash[:class_name]
+  end
+
+  def test_non_builder_call_keeps_warning_with_evidence
+    w = single_render_classification_warning(50)
+    assert_match(/not a confirmed renderable: dynamic construction via #dup_for/, w.message.to_s)
+    assert_equal "unknown", w.renderable_hash[:status]
+  end
+
+  # An unknown object built only from hardcoded values has no user input, so
+  # being unclassified does not by itself produce a dynamic render warning.
+  def test_static_unknown_object_without_user_input_does_not_warn
+    matches = report[:generic_warnings].select do |w|
+      w.warning_type == "Dynamic Render Path" &&
+        w.file.relative == "app/controllers/render_classification_controller.rb" &&
+        w.line == 46
+    end
+
+    assert_empty matches
+  end
+
+  private
+
+  def single_render_classification_warning line
+    matches = report[:generic_warnings].select do |w|
+      w.warning_type == "Dynamic Render Path" &&
+        w.file.relative == "app/controllers/render_classification_controller.rb" &&
+        w.line == line
+    end
+
+    assert_equal 1, matches.length, "Expected exactly one warning on line #{line}"
+    matches.first
   end
 end
