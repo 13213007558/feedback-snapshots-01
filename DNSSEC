@@ -18,3 +18,19 @@ Resolver#do_validation defaults to false; set it to true to enable local DNSSEC 
 Dnsruby maintains a cache of responses, and a cache of trusted keys. Once the initial keys have been downloaded, and a set of trusted keys built up, very little overhead is required to enjoy the benefits of DNSSEC. There is, however, some initial cost (to build up the caches).
 
 Dnsruby::Dnssec.clear_trusted_keys clears learned DNSKEYs and all DS/DLV anchors, including the built-in root DS anchors; configured DNSKEY anchors are retained. To remove local anchors and built-in root trust, call clear_trust_anchors followed by clear_trusted_keys. Use remove_trust_anchor or clear_trust_anchors to remove local anchors explicitly. Dnsruby::Dnssec.reset restores the built-in root anchors, clears local anchors and cached keys, and resets the validation policy and resolver settings to their defaults.
+
+Negative trust anchors
+-----------------------
+
+When one zone is mis-signed, operators sometimes need to keep serving that zone without disabling the validator for everyone. Dnsruby supports negative trust anchors (NTAs): scoped, time-limited permissions to tolerate a DNSSEC failure for one name and everything beneath it. NTAs are opt-in and the registry is empty by default, so validation is unchanged until an application configures one.
+
+  Dnsruby::Dnssec.add_negative_trust_anchor('broken.example.', Time.now + 3600)
+  Dnsruby::Dnssec.remove_negative_trust_anchor('broken.example.')
+  Dnsruby::Dnssec.clear_negative_trust_anchors
+
+An NTA only changes the outcome of a response that genuinely fails validation. A response that validates SECURE stays SECURE, and a provably unsigned (INSECURE) response is not relabelled. When an NTA does apply, the message is marked Message::SecurityLevel::UNVERIFIEDEXCEPTION ("unverified by exception") rather than SECURE, its security_error is cleared, and no key observed while chasing the failed chain is retained as trusted. The unverified response is not written to the response cache, so it cannot be served after the exception ends.
+
+Scope is limited to the NTA owner name and its descendants. Sibling zones are unaffected, and if a CNAME in the answer points outside the configured scope, the out-of-scope target still fails normal validation and the whole response remains BOGUS.
+
+Every NTA carries an absolute expiration (a Time or integer epoch) and stops applying at that instant. Removing an NTA or clearing the registry takes effect immediately. Each validation snapshots the NTA policy generation when it starts; an NTA added, removed, or expired while a validation is in flight cannot extend the exception to that operation, and a delayed result that finishes after expiry is still treated as BOGUS.
+

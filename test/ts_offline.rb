@@ -108,6 +108,7 @@ if have_open_ssl?
   require_relative 'tc_svcb_signed_target.rb'
   require_relative 'tc_dnssec_trust_anchors.rb'
   require_relative 'tc_dnssec_trust_races.rb'
+  require_relative 'tc_dnssec_negative_trust_anchors.rb'
   require_relative 'tc_key_cache_identity.rb'
   require_relative 'tc_dnssec_budget.rb'
 else

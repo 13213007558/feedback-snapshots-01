@@ -30,6 +30,10 @@ module Dnsruby
 
     def PacketSender.cache(query, response)
       return if response.cached
+      # A negative trust anchor tolerates, but never authenticates, a failure.
+      # The exception is time-limited, so caching the unverified answer would
+      # keep serving it after the NTA expires or is revoked.
+      return if response.security_level == Message::SecurityLevel::UNVERIFIEDEXCEPTION
       # TSIG authentication belongs to this transaction. Verification removes
       # the response's TSIG record, so its absence does not make it cacheable.
       return if query.tsig || query.signed? || response.signed?

@@ -258,6 +258,14 @@ module Dnsruby
       end
     end
 
+    # Drop keys learned through chain discovery while retaining configured
+    # trust anchors and root DS records. Used when a negative trust anchor
+    # tolerates a failure, so data seen during the failed validation can never
+    # remain cached as trusted. Bumps the trust generation like any revocation.
+    def discard_learned_keys
+      @trust_mutex.synchronize { clear_learned_keys }
+    end
+
     # Caller holds @trust_mutex, also used by every learned-trust publication.
     def clear_learned_keys
       @trust_generation += 1

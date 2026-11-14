@@ -16,6 +16,7 @@
 require 'digest/sha2'
 require 'dnsruby/key_cache'
 require 'dnsruby/validation_budget'
+require 'dnsruby/negative_trust_anchor'
 require 'dnsruby/single_verifier'
 module Dnsruby
 
@@ -105,6 +106,10 @@ module Dnsruby
     #  @TODO@ Could add a new one of these for each anchor.
     @@anchor_verifier = SingleVerifier.new(SingleVerifier::VerifierType::ANCHOR)
 
+    # Negative trust anchors are opt-in: the registry starts empty and only
+    # changes when an application explicitly configures an exception.
+    @@negative_trust_anchors = NegativeTrustAnchorRegistry.new
+
 
     #  Add a trusted Key Signing Key for the ISC DLV registry.
     def Dnssec.add_dlv_key(dlv_key)
@@ -134,6 +139,35 @@ module Dnsruby
       return @@anchor_verifier.trust_anchors
     end
 
+    # The registry of scoped, time-limited negative trust anchors. It is empty
+    # by default, so DNSSEC validation behaves exactly as before an NTA is
+    # explicitly configured.
+    def self.negative_trust_anchors
+      @@negative_trust_anchors
+    end
+
+    # Configure a negative trust anchor covering +name+ and every name beneath
+    # it until +expiration+ (a Time or an integer epoch). A failed validation
+    # within scope is delivered with the UNVERIFIEDEXCEPTION security level,
+    # never SECURE, and no key learned during the failed validation becomes
+    # trusted. Re-adding an existing scope replaces its expiration and
+    # interrupts in-flight uses.
+    def self.add_negative_trust_anchor(name, expiration)
+      @@negative_trust_anchors.add(name, expiration)
+    end
+
+    # Revoke the negative trust anchor configured for an exact name scope.
+    # Revocation is immediate and bumps the policy generation, so validations
+    # already in progress cannot finish under the removed exception.
+    def self.remove_negative_trust_anchor(name)
+      @@negative_trust_anchors.remove(name)
+    end
+
+    # Revoke every negative trust anchor and bump the policy generation.
+    def self.clear_negative_trust_anchors
+      @@negative_trust_anchors.clear
+    end
+
     #  Clear learned keys and all DS/DLV anchors, including the built-in root DS
     #  anchors. Configured DNSKEY anchors are retained.
     def self.clear_trusted_keys
@@ -151,6 +185,7 @@ module Dnsruby
 
       #  @TODO@ Could add a new one of these for each anchor.
       @@anchor_verifier = SingleVerifier.new(SingleVerifier::VerifierType::ANCHOR)
+      @@negative_trust_anchors = NegativeTrustAnchorRegistry.new
       @@do_validation_with_recursor = true # Many nameservers don't handle DNSSEC correctly yet
       @@default_resolver = Resolver.new
     end
@@ -206,8 +241,43 @@ module Dnsruby
     end
 
     def self.validate_with_query(query, msg)
-      ValidationBudget.with { validate_with_query_internal(query, msg) }
+      ValidationBudget.with do
+        @@negative_trust_anchors.with_generation do
+          begin
+            validate_with_query_internal(query, msg)
+          rescue VerifyError => error
+            apply_negative_trust_anchor(msg, error)
+          else
+            apply_negative_trust_anchor(msg) if bogus?(msg)
+          end
+        end
+      end
     end
+
+    # An NTA only downgrades a genuine validation failure within its scope.
+    # SECURE and INSECURE results are returned unchanged, and a BOGUS result
+    # outside every active scope keeps failing as before.
+    def self.apply_negative_trust_anchor(msg, error = nil)
+      anchor = @@negative_trust_anchors.exception_for(msg)
+      unless anchor
+        msg.security_level = Message::SecurityLevel.BOGUS
+        raise error || VerifyError.new("Bogus record")
+      end
+      # Keys collected while chasing a failed chain are unauthenticated. Drop
+      # learned trust from every verifier so an exception can never be learned
+      # as a trusted key; configured anchors and root DS are retained.
+      [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each(&:discard_learned_keys)
+      msg.security_level = Message::SecurityLevel.UNVERIFIEDEXCEPTION
+      msg.security_error = nil
+      TheLog.info("DNSSEC validation bypassed by negative trust anchor #{anchor}")
+      true
+    end
+    private_class_method :apply_negative_trust_anchor
+
+    def self.bogus?(msg)
+      msg.security_level == Message::SecurityLevel.BOGUS
+    end
+    private_class_method :bogus?
 
     private_class_method def self.validate_with_query_internal(query, msg)
       if (!msg)

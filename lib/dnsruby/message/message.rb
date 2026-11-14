@@ -70,6 +70,11 @@ module Dnsruby
 
     #  The security level (see RFC 4035 section 4.3)
     class SecurityLevel < CodeMapper
+      #  A negative trust anchor overrode a BOGUS result for this response.
+      #  The answer was never cryptographically verified and must never be
+      #  presented as SECURE. It is only delivered because an operator
+      #  configured a scoped, time-limited exception.
+      UNVERIFIEDEXCEPTION = -3
       INDETERMINATE = -2
       BOGUS = -1
       UNCHECKED = 0
