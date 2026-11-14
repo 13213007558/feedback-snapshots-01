@@ -6,11 +6,13 @@ module Liquid
       :render_score_limit,
       :assign_score_limit,
       :cumulative_render_score_limit,
-      :cumulative_assign_score_limit
+      :cumulative_assign_score_limit,
+      :filter_work_score_limit
     attr_reader :render_score,
       :assign_score,
       :cumulative_render_score,
-      :cumulative_assign_score
+      :cumulative_assign_score,
+      :filter_work_score
 
     def initialize(limits)
       @render_length_limit           = limits[:render_length_limit]
@@ -18,9 +20,18 @@ module Liquid
       @assign_score_limit            = limits[:assign_score_limit]
       @cumulative_render_score_limit = limits[:cumulative_render_score_limit]
       @cumulative_assign_score_limit = limits[:cumulative_assign_score_limit]
+      @filter_work_score_limit       = limits[:filter_work_score_limit]
       @cumulative_render_score = 0
       @cumulative_assign_score = 0
       reset
+    end
+
+    # Filters share one budget for the whole render. The counter is only reset
+    # when the render restarts, so chaining many filters cannot give each stage
+    # a fresh allowance, and the check happens before the billed work is buffered.
+    def increment_filter_work_score(amount)
+      @filter_work_score += amount
+      raise_limits_reached if @filter_work_score_limit && @filter_work_score > @filter_work_score_limit
     end
 
     def increment_render_score(amount)
@@ -62,6 +73,7 @@ module Liquid
       @reached_limit = false
       @last_capture_length = nil
       @render_score = @assign_score = 0
+      @filter_work_score = 0
       raise_limits_reached if @cumulative_render_score_limit && @cumulative_render_score > @cumulative_render_score_limit
       raise_limits_reached if @cumulative_assign_score_limit && @cumulative_assign_score > @cumulative_assign_score_limit
     end

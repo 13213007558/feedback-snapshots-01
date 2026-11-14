@@ -299,7 +299,7 @@ module Liquid
     def split(input, pattern)
       pattern = Utils.to_s(pattern)
       input = Utils.to_s(input)
-      input.split(pattern)
+      bounded_split(input, pattern)
     end
 
     # @liquid_public_docs
@@ -705,7 +705,9 @@ module Liquid
       unless array.respond_to?(:to_ary)
         raise ArgumentError, "concat filter requires an array argument"
       end
-      InputIterator.new(input, context).concat(array)
+      iterator = InputIterator.new(input, context)
+      iterator.charge_concat(array)
+      iterator.concat(array)
     end
 
     # @liquid_public_docs
@@ -1031,6 +1033,66 @@ module Liquid
       result.is_a?(BigDecimal) ? result.to_f : result
     end
 
+    # Streams the segments instead of calling String#split up front, so the work
+    # budget is checked before every segment is buffered and an oversized input
+    # raises before a large intermediate array exists.
+    def bounded_split(input, pattern)
+      limits = context.resource_limits
+      return [] if input.empty?
+
+      if pattern.empty?
+        result = []
+        input.each_char do |char|
+          limits.increment_filter_work_score(1)
+          result << char
+        end
+        return result
+      end
+
+      # A literal single space uses awk-style whitespace splitting: runs of
+      # whitespace are one delimiter and leading/trailing whitespace are ignored.
+      return awk_split(input, limits) if pattern == ' '
+
+      result = []
+      cursor = 0
+      pattern_length = pattern.length
+      while (match_index = input.index(pattern, cursor))
+        # Bill every delimiter before its segment is buffered, so a long run of
+        # trailing delimiters is rejected before a large intermediate array exists.
+        limits.increment_filter_work_score(1)
+        result << input[cursor...match_index]
+        cursor = match_index + pattern_length
+      end
+
+      if cursor < input.length
+        limits.increment_filter_work_score(1)
+        result << input[cursor..]
+      end
+
+      # String#split drops every trailing empty segment, but keeps internal and
+      # leading empty segments.
+      result.pop while result.last == ''
+      result
+    end
+
+    def awk_split(input, limits)
+      result = []
+      cursor = 0
+      while (match_index = input.index(/\s+/, cursor))
+        next cursor = match_index + Regexp.last_match(0).length if match_index == cursor
+
+        limits.increment_filter_work_score(1)
+        result << input[cursor...match_index]
+        cursor = match_index + Regexp.last_match(0).length
+      end
+
+      if cursor < input.length
+        limits.increment_filter_work_score(1)
+        result << input[cursor..]
+      end
+      result
+    end
+
     def nil_safe_compare(a, b)
       result = a <=> b
 
@@ -1060,8 +1122,10 @@ module Liquid
 
       def initialize(input, context)
         @context = context
+        @resource_limits = context.resource_limits
+        @flatten_arrays = input.is_a?(Array)
         @input   = if input.is_a?(Array)
-          input.flatten
+          input
         elsif input.is_a?(Hash)
           [input]
         elsif input.is_a?(Enumerable)
@@ -1084,6 +1148,14 @@ module Liquid
           output << Liquid::Utils.to_s(item)
         end
         output
+      end
+
+      # The input collection is billed lazily while to_a builds the result, so only
+      # the appended argument needs to be charged up front, before it is buffered.
+      # concat appends the argument as-is (it is not flattened), so its length is
+      # the number of elements that will be added.
+      def charge_concat(array)
+        @resource_limits.increment_filter_work_score(array.length)
       end
 
       def concat(args)
@@ -1110,12 +1182,39 @@ module Liquid
         true
       end
 
-      def each
-        @input.each do |e|
-          e = e.respond_to?(:to_liquid) ? e.to_liquid : e
-          e.context = @context if e.respond_to?(:context=)
-          yield(e)
+      def each(&block)
+        return enum_for(:each) unless block_given?
+
+        if @flatten_arrays
+          visit_flattened(@input, [], &block)
+        else
+          @input.each { |element| yield_liquid(element, &block) }
         end
+        self
+      end
+
+      private
+
+      def visit_flattened(collection, ancestors, &block)
+        collection.each do |element|
+          if element.respond_to?(:to_ary)
+            array = element.to_ary
+            raise ArgumentError, 'tried to flatten recursive array' if ancestors.include?(array.object_id)
+
+            visit_flattened(array, ancestors + [array.object_id], &block)
+          else
+            yield_liquid(element, &block)
+          end
+        end
+      end
+
+      def yield_liquid(element)
+        # Bill each visited element before handing it to the filter operation or
+        # buffering it, so traversal and intermediate arrays stay within budget.
+        @resource_limits.increment_filter_work_score(1)
+        element = element.respond_to?(:to_liquid) ? element.to_liquid : element
+        element.context = @context if element.respond_to?(:context=)
+        yield(element)
       end
     end
   end

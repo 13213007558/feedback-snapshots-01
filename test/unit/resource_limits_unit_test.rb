@@ -88,4 +88,42 @@ class ResourceLimitsUnitTest < Minitest::Test
       limits.increment_render_score(51)
     end
   end
+
+  def test_filter_work_score_defaults_to_zero_and_is_not_limited
+    limits = Liquid::ResourceLimits.new({})
+    assert_nil(limits.filter_work_score_limit)
+    assert_equal(0, limits.filter_work_score)
+
+    limits.increment_filter_work_score(1_000_000)
+    assert_equal(1_000_000, limits.filter_work_score)
+    refute(limits.reached?)
+  end
+
+  def test_filter_work_score_limit_is_configurable
+    limits = Liquid::ResourceLimits.new(filter_work_score_limit: 10)
+    assert_equal(10, limits.filter_work_score_limit)
+
+    limits.filter_work_score_limit = 3
+    limits.increment_filter_work_score(3)
+    assert_equal(3, limits.filter_work_score)
+
+    assert_raises(Liquid::MemoryError) do
+      limits.increment_filter_work_score(1)
+    end
+    assert(limits.reached?)
+  end
+
+  def test_filter_work_score_resets_between_renders_but_cumulative_scores_do_not
+    limits = Liquid::ResourceLimits.new(filter_work_score_limit: 5)
+    limits.increment_filter_work_score(5)
+    limits.increment_render_score(7)
+
+    limits.reset
+
+    assert_equal(0, limits.filter_work_score)
+    assert_equal(7, limits.cumulative_render_score)
+
+    limits.increment_filter_work_score(5)
+    assert_equal(5, limits.filter_work_score)
+  end
 end

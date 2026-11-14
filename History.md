@@ -1,5 +1,9 @@
 # Liquid Change Log
 
+## Unreleased
+
+* Add optional `filter_work_score_limit` resource limit that bounds intermediate work in the standard filters before large arrays are allocated, sharing one budget across a filter chain.
+
 ## 5.14.0
 
 * Avoid materializing integer ranges in `for` and `tablerow` loops, and account for each visited range item [Ian Ker-Seymer]

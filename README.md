@@ -156,6 +156,22 @@ integer-range `for` and `tablerow` loops, including loops with empty bodies. Thi
 iteration work when a score limit is configured; `render_length_limit` only bounds generated
 output and does not by itself limit CPU work for output-free loops.
 
+`filter_work_score_limit` bounds the intermediate work performed by the standard array and
+string filters (`split`, `concat`, `join`, `map`, `sort`, `where`, `uniq`, and so on). The
+filters share one budget for the whole render, and each unit of work is charged before the
+corresponding object is buffered, so a chain of filters cannot give each stage a fresh allowance
+and an oversized input raises `Liquid::MemoryError` before a large intermediate array exists:
+
+* Existing arrays are charged one unit per element after flattening, counted without building
+  the flattened array.
+* Lazy enumerable inputs (including integer ranges) are charged one unit per element as it is
+  visited, so they are never materialized up front.
+* `split` is charged per emitted segment (and per delimiter), streaming segments instead of
+  calling `String#split`, while preserving its exact output including trailing-empty handling.
+
+Work done inside a user-defined Ruby filter's own method body cannot be metered by Liquid; only
+the work driven through the standard filters is covered.
+
 ### Usage tracking
 
 To help track usages of a feature or code path in production, we have released opt-in usage tracking. To enable this, we provide an empty `Liquid:: Usage.increment` method which you can customize to your needs. The feature is well suited to https://github.com/Shopify/statsd-instrument. However, the choice of implementation is up to you.
