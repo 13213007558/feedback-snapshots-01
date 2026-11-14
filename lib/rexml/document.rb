@@ -1,5 +1,6 @@
 # frozen_string_literal: false
 require_relative "security"
+require_relative "entity_expansion_ledger"
 require_relative "element"
 require_relative "xmldecl"
 require_relative "source"
@@ -90,6 +91,9 @@ module REXML
     #   d.context # => {:raw=>:all, :compress_whitespace=>:all}
     #
     def initialize( source = nil, context = {} )
+      # Snapshot of the expansions charged by the most recent read
+      # operation. The running budget itself lives in the per-read
+      # EntityExpansionLedger objects minted by #new_entity_expansion_ledger.
       @entity_expansion_count = 0
       @entity_expansion_limit = Security.entity_expansion_limit
       @entity_expansion_text_limit = Security.entity_expansion_text_limit
@@ -436,11 +440,22 @@ module REXML
     attr_writer :entity_expansion_limit
     attr_accessor :entity_expansion_text_limit
 
-    def record_entity_expansion
-      @entity_expansion_count += 1
-      if @entity_expansion_count > @entity_expansion_limit
-        raise "number of entity expansions exceeded, processing aborted."
-      end
+    # Mints a fresh resource ledger for one read operation.
+    #
+    # Text and attribute value reads call this when they actually have to
+    # expand entities; cached values are returned without ever touching a
+    # ledger. The ledger carries this document's own limits, so two
+    # documents never share expansion cost.
+    def new_entity_expansion_ledger
+      EntityExpansionLedger.new(expansion_limit: @entity_expansion_limit,
+                                text_limit: @entity_expansion_text_limit)
+    end
+
+    # Publishes the expansion cost of a finished read as the
+    # #entity_expansion_count snapshot. Only the read's own ledger is
+    # recorded, which keeps repeated reads stable instead of accumulating.
+    def record_entity_expansion_read(ledger)
+      @entity_expansion_count = ledger.expansion_count
     end
 
     def document

@@ -1,5 +1,24 @@
 # News
 
+## Unreleased
+
+### Fixes
+
+  * Account entity expansion cost per read operation instead of
+    accumulating it for the whole document lifetime.
+    * A new `REXML::EntityExpansionLedger` is minted for each lazy text or
+      attribute read, shared by every nested expansion that read triggers,
+      and discarded when the read finishes. Repeated legitimate reads of
+      the same document therefore stay usable instead of exhausting a
+      document-wide counter, while a genuinely excessive expansion is still
+      aborted when that single read exceeds
+      `entity_expansion_limit` or `entity_expansion_text_limit`.
+    * Cache hits return without creating a ledger, so they are never
+      charged again. A failed read raises before caching any partial
+      result, so it cannot spend budget on a later read's behalf.
+    * Each document mints ledgers with its own limits, so the expansion
+      cost of one document is never charged against another.
+
 ## 3.4.4 - 2025-09-10 {#version-3-4-4}
 
 ### Improvement

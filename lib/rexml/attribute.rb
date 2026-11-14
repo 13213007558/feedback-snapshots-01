@@ -143,11 +143,23 @@ module REXML
 
     # Returns the UNNORMALIZED value of this attribute.  That is, entities
     # have been expanded to their values
+    #
+    # The first call that actually expands entities runs against a fresh
+    # read ledger; later calls return the cached value without charging
+    # anything again.
     def value
       return @unnormalized if @unnormalized
 
-      @unnormalized = Text::unnormalize(@normalized, doctype,
-                                        entity_expansion_text_limit: @element&.document&.entity_expansion_text_limit)
+      document = @element&.document
+      ledger = document&.new_entity_expansion_ledger ||
+               EntityExpansionLedger.new
+      begin
+        @unnormalized = ledger.read do
+          Text::unnormalize(@normalized, doctype, ledger: ledger)
+        end
+      ensure
+        document&.record_entity_expansion_read(ledger)
+      end
     end
 
     # The normalized value of this attribute.  That is, the attribute with

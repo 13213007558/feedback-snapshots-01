@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require_relative 'security'
+require_relative 'entity_expansion_ledger'
 require_relative 'entity'
 require_relative 'doctype'
 require_relative 'child'
@@ -240,8 +241,16 @@ module REXML
     #   u = Text.new( "sean russell", false, nil, true )
     #   u.value   #-> "sean russell"
     def value
-      @unnormalized ||= Text::unnormalize(@string, doctype,
-                                          entity_expansion_text_limit: document&.entity_expansion_text_limit)
+      return @unnormalized if @unnormalized
+
+      ledger = document&.new_entity_expansion_ledger || EntityExpansionLedger.new
+      begin
+        @unnormalized = ledger.read do
+          Text::unnormalize(@string, doctype, ledger: ledger)
+        end
+      ensure
+        document&.record_entity_expansion_read(ledger)
+      end
     end
 
     # Sets the contents of this text node.  This expects the text to be
@@ -373,16 +382,18 @@ module REXML
     end
 
     # Unescapes all possible entities
-    def Text::unnormalize( string, doctype=nil, filter=nil, illegal=nil, entity_expansion_text_limit: nil, expanding: nil )
-      entity_expansion_text_limit ||= Security.entity_expansion_text_limit
-      sum = 0
+    #
+    # Each invocation resolves one scan (the outermost read or an entity's
+    # nested value) and settles the bytes that scan produces against the
+    # shared ledger's text limit; the ledger keeps that accounting scoped
+    # per scan so a deep chain is caught as soon as one level overshoots.
+    def Text::unnormalize( string, doctype=nil, filter=nil, illegal=nil, ledger: nil, expanding: nil, entity_expansion_text_limit: nil )
+      ledger ||= EntityExpansionLedger.new(
+        text_limit: entity_expansion_text_limit || Security.entity_expansion_text_limit)
       string.gsub( /\r\n?/, "\n" ).gsub( REFERENCE ) {
-        s = Text.expand($&, doctype, filter, expanding: expanding)
-        if sum + s.bytesize > entity_expansion_text_limit
-          raise "entity expansion has grown too large"
-        else
-          sum += s.bytesize
-        end
+        s = Text.expand($&, doctype, filter,
+                        ledger: ledger, expanding: expanding)
+        ledger.charge_text!(s.bytesize)
         s
       }
     end
@@ -401,7 +412,7 @@ module REXML
       end
     end
 
-    def Text.expand(ref, doctype, filter, expanding: nil)
+    def Text.expand(ref, doctype, filter, ledger: nil, expanding: nil)
       if ref[1] == ?#
         if ref[2] == ?x
           expand_character_reference(ref[3...-1].to_i(16), ref)
@@ -413,7 +424,8 @@ module REXML
       elsif filter and filter.include?( ref[1...-1] )
         ref
       elsif doctype
-        doctype.entity( ref[1...-1], expanding: expanding ) or ref
+        doctype.entity( ref[1...-1],
+                        ledger: ledger, expanding: expanding ) or ref
       else
         entity_value = DocType::DEFAULT_ENTITIES[ ref[1...-1] ]
         entity_value ? entity_value.value : ref

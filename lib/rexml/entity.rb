@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require 'set'
 require_relative 'child'
+require_relative 'entity_expansion_ledger'
 require_relative 'parseexception'
 require_relative 'source'
 require_relative 'xmltokens'
@@ -72,20 +73,44 @@ module REXML
 
     # Evaluates to the unnormalized value of this entity; that is, replacing
     # &ent; entities.
-    def unnormalized(expanding: nil)
-      document&.record_entity_expansion
+    #
+    # The +ledger+ is the resource ledger of the read that triggered this
+    # expansion. Billing is per reference entry under the ledger's scan
+    # rules, so every named entity reached through a top-level reference or
+    # a nested chain is counted; an entity that re-enters while already on
+    # the active expansion chain is a circular reference and is rejected
+    # before billing. Each scan settles the bytes it produces against the
+    # same ledger. When no ledger is supplied (for example an Entity read
+    # outside a Document), a temporary one with the default limits is used
+    # and discarded with the read.
+    def unnormalized(expanding: nil, ledger: nil)
+      ledger ||= document&.new_entity_expansion_ledger ||
+                 EntityExpansionLedger.new
 
       return nil if @value.nil?
 
-      expanding ||= Set.new
+      expanding ||= ledger.expanding
       raise REXML::ParseException.new("Detected an entity reference loop: #{@name}") if expanding.include?(@name)
 
       expanding.add(@name)
-      result = Text::unnormalize(@value, parent,
-                                 entity_expansion_text_limit: document&.entity_expansion_text_limit,
-                                 expanding: expanding)
-      expanding.delete(@name)
-      result
+      begin
+        # This entity is one reference entry on the enclosing scan.
+        ledger.charge_expansion!(@name)
+        # Its value is a nested scan where every fresh reference is
+        # counted, while this entity itself stays marked as already paid.
+        ledger.begin_entity_scan!(@name)
+        begin
+          # The ledger stays shared so expansion entries across the chain
+          # are counted against one read budget, cycles are detected, and
+          # each scan settles its own produced bytes against the limit.
+          Text::unnormalize(@value, parent,
+                            ledger: ledger, expanding: expanding)
+        ensure
+          ledger.end_entity_scan!
+        end
+      ensure
+        expanding.delete(@name)
+      end
     end
 
     #once :unnormalized
