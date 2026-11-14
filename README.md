@@ -198,6 +198,34 @@ quickly and without doing the same web stuff all over:
   file buffer.
 * `Rack::URLMap` to route to multiple applications inside the same process.
 
+#### Isolating applications in `Rack::Cascade`
+
+Every application in a cascade normally shares the same request `env`. An
+application that rejects the request (returns a cascading status such as 404 or
+405) can therefore leave state behind that a later application trusts, for
+example by setting `REMOTE_USER` or by populating a parsed parameter cache
+(`rack.request.query_hash` / `rack.request.form_hash`). Pass `isolate: true` to
+give each application a private, deep-copied environment and roll it back when
+the application rejects:
+
+```ruby
+Rack::Cascade.new([first_app, second_app], [404, 405], isolate: true)
+```
+
+With isolation enabled:
+
+* Scalar keys and nested Hash/Array values are restored after a rejection, and
+  keys a rejecting application introduced are removed. Nested containers are
+  deep duplicated, never shared through a shallow `env.dup`.
+* The accepting application's environment changes are committed back to the
+  shared `env`.
+* `rack.input` is shared by reference and rewound after a rejection when the
+  stream supports `rewind` (wrap it in `Rack::RewindableInput` otherwise); it is
+  never closed or replaced.
+* Tempfiles a rejecting application adds to `rack.tempfiles` are reaped, and
+  its response body is closed; the final response body stays open for the
+  server.
+
 ## Configuration
 
 Rack exposes several configuration parameters to control various features of the
