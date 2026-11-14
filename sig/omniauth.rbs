@@ -22,6 +22,11 @@ module OmniAuth
   class NoSessionError < StandardError
   end
 
+  # Raised when an auth intent's context is not something the library can
+  # record safely, such as a non-Hash, a missing binding, or a nested value.
+  class AuthIntentError < Error
+  end
+
   class AuthenticityError < StandardError
   end
 
@@ -268,6 +273,7 @@ module OmniAuth
 
   # The mixin every OmniAuth strategy includes.
   module Strategy
+    include AuthIntents
     include Fetchers
     include Hosts
     include Paths
@@ -297,6 +303,8 @@ module OmniAuth
       def store_origin: () -> void
       def omniauth_params: () -> Hash[String, untyped]
       def request_call?: () -> boolish
+      # Defined in AuthIntents.
+      def auth_intent_enabled?: () -> bool
     end
 
     module ClassMethods
@@ -369,6 +377,8 @@ module OmniAuth
       def skip_info?: () -> bool
       def fields: () -> Array[Symbol]
       def uid_field: () -> Symbol
+      # A Hash, a proc taking the env, false, or nil. See AuthIntents.
+      def auth_intent: () -> untyped
     end
 
     # Builds the auth hash from the uid, info, credentials, and extra
@@ -455,6 +465,48 @@ module OmniAuth
       def invalid_host!: () -> rack_response
     end
 
+    # Binds a sign-in to the authentication intent the application started it
+    # for, so a callback meant to link a provider can be told apart from an
+    # ordinary login and checked against the local user and session generation
+    # that started it.
+    module AuthIntents : _Core
+      LINK_INTENT: String
+      LOGIN_INTENT: String
+      BINDING_FIELDS: Array[String]
+      MAX_AUTH_INTENT_VALUE_LENGTH: Integer
+
+      # Ends the transaction for key in session, without affecting others.
+      def self.cancel_sign_in: (untyped session, String key) -> bool
+
+      private
+
+      def auth_intent_enabled?: () -> bool
+
+      def capture_auth_intent: () -> Hash[String, untyped]
+
+      def configured_auth_intent_context: () -> untyped
+
+      def auth_intent_failure: (Hash[String, untyped] sign_in) -> Symbol?
+
+      def validate_auth_intent_type!: (Hash[String, untyped] intent) -> void
+
+      def current_auth_intent_context: () -> Hash[String, untyped]
+
+      def verified_auth_intent: (Hash[String, untyped] intent) -> Hash[String, untyped]
+
+      def auth_intent_binding_matches?: (Hash[String, untyped] intent, Hash[String, untyped] current) -> bool
+
+      def binding_type_valid?: (Hash[String, untyped] intent) -> bool
+
+      def normalize_auth_intent: (untyped context) -> Hash[String, untyped]
+
+      def normalize_auth_intent_value: (untyped value) -> untyped
+
+      def require_bound_identity!: (Hash[String, untyped] context, String field) -> void
+
+      def bound_identity?: (untyped value) -> bool
+    end
+
     # Keeps the origin and params of several sign-ins in progress at once.
     # A strategy opts in by calling remember_sign_in in its request phase
     # and overriding callback_sign_in_key.
@@ -462,7 +514,8 @@ module OmniAuth
       MAX_REMEMBERED_SIGN_INS: Integer
 
       # Remembers the current request phase's origin and params under key,
-      # which the provider sends back to the callback.
+      # which the provider sends back to the callback. With an auth intent
+      # configured, the record also carries it.
       def remember_sign_in: (String key) -> void
 
       # The key the callback sends back, or nil for a strategy that doesn't
@@ -474,6 +527,14 @@ module OmniAuth
       # The "origin" and "params" for this callback, removed from the
       # session.
       def recall_sign_in: () -> Hash[String, untyped]
+
+      def recall_legacy_sign_in: (String? key) -> Hash[String, untyped]
+
+      def recall_bound_sign_in: (String? key) -> Hash[String, untyped]
+
+      def find_sign_in_key: (Hash[String, Hash[String, untyped]] sign_ins, String? key) -> String?
+
+      def find_bound_sign_in_key: (Hash[String, Hash[String, untyped]] sign_ins, String? key) -> String?
 
       def remembered_sign_ins: () -> Hash[String, Hash[String, untyped]]
     end
@@ -535,6 +596,8 @@ module OmniAuth
     def store_origin: () -> void
 
     def callback_call: () -> rack_response
+
+    def verify_auth_intent: (Hash[String, untyped] sign_in) -> rack_response?
 
     def options_request?: () -> bool
 

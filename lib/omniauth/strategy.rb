@@ -1,5 +1,6 @@
 require 'cgi/escape'
 require 'omniauth/key_store'
+require 'omniauth/strategy/auth_intents'
 require 'omniauth/strategy/class_methods'
 require 'omniauth/strategy/fetchers'
 require 'omniauth/strategy/hosts'
@@ -10,11 +11,16 @@ require 'omniauth/strategy/test_mode'
 module OmniAuth
   class NoSessionError < StandardError; end
 
+  # Raised when an auth intent is configured with a context the strategy
+  # cannot record safely, such as a nested Hash or a missing binding.
+  class AuthIntentError < Error; end
+
   # The Strategy is the base unit of OmniAuth's ability to
   # wrangle multiple providers. Each strategy provided by
   # OmniAuth includes this mixin to gain the default functionality
   # necessary to be compatible with the OmniAuth library.
   module Strategy # rubocop:disable Metrics/ModuleLength
+    include AuthIntents
     include Fetchers
     include Hosts
     include Paths
@@ -177,6 +183,8 @@ module OmniAuth
       request_response.tap { run_hook(:after_request_phase) }
     rescue OmniAuth::AuthenticityError => e
       fail!(:authenticity_error, e)
+    rescue OmniAuth::AuthIntentError => e
+      fail!(:auth_intent_invalid, e)
     end
 
     # Renders the login form (from a Rack endpoint or the app itself) if
@@ -230,8 +238,21 @@ module OmniAuth
       origin = sign_in.fetch('origin')
       env['omniauth.origin'] = (origin unless origin.eql?(''))
       env['omniauth.params'] = sign_in.fetch('params') || {}
+      failure = verify_auth_intent(sign_in) if auth_intent_enabled?
+      return failure if failure
+
       run_hook(:before_callback_phase)
       callback_phase
+    end
+
+    # Verifies the callback still belongs to its transaction and exposes the
+    # intent to the app, or returns the failure response.
+    def verify_auth_intent(sign_in)
+      failure = auth_intent_failure(sign_in)
+      return fail!(failure.to_s) if failure
+
+      env['omniauth.auth_intent'] = verified_auth_intent(sign_in['auth_intent'])
+      nil
     end
 
     def options_request?

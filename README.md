@@ -319,6 +319,7 @@ On the callback request (`/auth/:provider/callback`):
 | `omniauth.auth` | The [Authentication Hash](https://github.com/omniauth/omniauth/wiki/Auth-Hash-Schema) for the user who just signed in. |
 | `omniauth.origin` | Where the user came from, if known (see [Origin Param](#origin-param)). |
 | `omniauth.params` | The params sent to the request phase (`/auth/:provider`), from both the query string and the form, except `authenticity_token`. An empty hash if there were none. |
+| `omniauth.auth_intent` | The verified authentication intent, when the strategy has one configured (see [Authentication Intents](#authentication-intents)). A `'type'` of `'link'` also carries the `'user_id'` and `'session_generation'` the callback was bound to. |
 | `omniauth.strategy` | The strategy instance handling the request. Also set on the request phase and on the setup path. |
 
 When authentication fails, OmniAuth calls `OmniAuth.config.on_failure`
@@ -384,6 +385,99 @@ their keys in `session['omniauth.sign_ins']`, and gives each callback its
 own. It still sets `omniauth.origin` and `omniauth.params` in the session
 for the latest sign-in, and falls back to them when a callback's key isn't
 remembered.
+
+## Authentication Intents
+A provider callback only says that the provider authenticated someone. When
+a signed-in user is adding a second provider to their account, that is not
+the same as signing in, and a callback started as a login must not be
+treated as permission to attach an identity. A strategy can opt into an
+authentication intent so the application can tell the two apart and can
+check that the account it started the link for is still the one handling the
+callback:
+
+```ruby
+class MyOAuthStrategy
+  include OmniAuth::Strategy
+
+  # The local user and auth-session generation, read from your own session
+  # in both phases. Return nil for a normal login.
+  option :auth_intent, lambda { |env|
+    session = env['rack.session']
+    next unless session['user_id']
+
+    {
+      'type' => 'link',
+      'user_id' => session['user_id'],
+      'session_generation' => session['session_generation']
+    }
+  }
+
+  def request_phase
+    state = SecureRandom.hex(24)
+    remember_sign_in(state)
+    redirect authorize_url(state)
+  end
+
+  def callback_sign_in_key
+    request.params['state']
+  end
+end
+```
+
+The option may also be a Hash instead of a proc. A nil context is an
+ordinary login. A `'link'` context must contain a non-empty `'user_id'` and
+`'session_generation'`; those are the two binding fields. Any other scalar
+keys are passed through to the application for its own use.
+
+At the callback, OmniAuth compares the recorded intent with the context the
+option returns for the current session, and sets `omniauth.auth_intent` only
+if they match:
+
+- The `'type'` must match, so a login cannot become a link or the reverse.
+- A `'link'` callback must still have the same `'user_id'` and
+  `'session_generation'`. If the user signed out, switched accounts, or
+  started a new auth session while the provider had them, the callback fails
+  with `auth_intent_mismatch` and your app is not called.
+- A login compares the binding fields it recorded, so a login started while
+  signed out cannot finish after someone signed in.
+
+These checks use only what was recorded at the request phase. The auth hash
+returned by the provider, including its email, is never part of the
+decision, so a matching email does not stand in for an account that has
+already been confirmed.
+
+The transaction is consumed by its callback, so a repeated callback fails
+with `auth_intent_missing` and cannot link the identity again. Other
+sign-ins in progress keep their own records and are unaffected. When the
+application gives up on a provider round trip, for example because the user
+cancelled, it can end just that transaction:
+
+```ruby
+OmniAuth::Strategy::AuthIntents.cancel_sign_in(session, state)
+```
+
+A later callback for that state then fails with `auth_intent_missing`. The
+library only removes the local transaction record. It does not create,
+update, or link accounts; your callback performs the binding after checking
+`omniauth.auth_intent`.
+
+Intents are checked before the `before_callback_phase` hook, so a hook that
+signs the user in does not run for a callback that no longer belongs to its
+transaction. Enable intents on a strategy whose provider sends a value from
+the request phase back to the callback, as described in [Several Sign-Ins at
+Once](#several-sign-ins-at-once). A strategy without `auth_intent` keeps the
+existing behaviour, including the fallback to the latest sign-in's origin
+and params.
+
+`OmniAuth.config.test_mode` bypasses provider round trips and therefore does
+not verify intents; a test should drive a fake provider through its own
+request and callback paths, as the intent specs do. The checks compare the
+callback's session with the recorded transaction. With a cookie-backed
+session, two requests that write the session concurrently can overwrite one
+another, so a lost update can make a transaction unavailable. Use a
+server-side session store with atomic updates when that race matters, and
+treat the library's guarantee as "a transaction that is still present in the
+session is never used for a different intent, user, or generation".
 
 ## Resources
 The [OmniAuth Wiki](https://github.com/omniauth/omniauth/wiki) has

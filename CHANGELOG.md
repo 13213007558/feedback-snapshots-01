@@ -13,6 +13,9 @@ versioned together, so those entries cover all of them.
 
 ## [Unreleased]
 
+### Added
+- Add an optional authentication intent to sign-in transactions, so an application can tell a callback started to link a second identity provider from an ordinary login, and can bind it to the local user and auth-session generation that started it. A strategy opts in with the `:auth_intent` option (a Hash or a proc taking the env); `remember_sign_in` records the intent bound to the provider's key and the strategy's name, and a successful callback exposes the verified intent as `env['omniauth.auth_intent']`. A callback whose type, local user, or session generation no longer matches fails with `auth_intent_mismatch`; a consumed or cancelled transaction fails with `auth_intent_missing`, and an invalid configured context fails with `auth_intent_invalid`. `OmniAuth::Strategy::AuthIntents.cancel_sign_in(session, key)` ends a single transaction without affecting other sign-ins. The provider's auth hash, including its email, never participates in the decision. See [the README](README.md#authentication-intents).
+
 ### Fixed
 - `Strategy#redirect` no longer raises `Encoding::CompatibilityError` for a URI in an encoding that isn't ASCII-compatible, such as UTF-16 or UTF-32. The URI is transcoded to UTF-8 first, with invalid or unmappable characters replaced, so both the `:iframe` script and the 302 work.
 
