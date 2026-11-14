@@ -1,0 +1,9 @@
+source 'https://rubygems.org'
+gem 'rack-attack', path: '..', require: false
+gem 'minitest', '~> 5.25', require: false
+gem 'minitest-stub-const', '~> 0.6', require: false
+gem 'rack-test', '~> 2.0', require: false
+gem 'activesupport', '~> 8.1', require: false
+gem 'byebug', require: false
+gem 'timecop', '~> 0.9', require: false
+gem 'connection_pool', '~> 2.5', require: false
