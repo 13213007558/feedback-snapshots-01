@@ -1,6 +1,8 @@
 autoload :OpenSSL, 'openssl'
 autoload :URI, 'uri'
 
+require 'mqtt/client/packet_id_space'
+
 # Client class for talking to an MQTT server
 module MQTT
   class Client
@@ -62,8 +64,23 @@ module MQTT
     # Last ping response time
     attr_reader :last_ping_response
 
+    # The shared, ownership-tracked space of in-flight packet identifiers.
+    # PUBLISH (QoS > 0), SUBSCRIBE and UNSUBSCRIBE all allocate from it.
+    attr_reader :packet_id_space
+
+    # Replace the identifier space. Intended for testing with a smaller
+    # identifier range so wrap-around and exhaustion can be exercised quickly.
+    attr_writer :packet_id_space
+
     # Timeout between select polls (in seconds)
     SELECT_TIMEOUT = 0.5
+
+    # Acknowledgement packets that can complete an in-flight request.
+    ACK_PACKET_CLASSES = [
+      MQTT::Packet::Puback,
+      MQTT::Packet::Suback,
+      MQTT::Packet::Unsuback
+    ].freeze
 
     # Default attribute values
     ATTR_DEFAULTS = {
@@ -176,10 +193,9 @@ module MQTT
       @last_ping_response = current_time
       @socket = nil
       @read_queue = Queue.new
-      @pubacks = {}
       @read_thread = nil
       @write_semaphore = Mutex.new
-      @pubacks_semaphore = Mutex.new
+      @packet_id_space = PacketIdSpace.new
     end
 
     # Get the OpenSSL context, that is used if SSL/TLS is enabled
@@ -281,6 +297,10 @@ module MQTT
         # Receive response
         receive_connack
 
+        # Every connection gets a fresh identifier generation: identifiers
+        # (and late acknowledgements) from the previous connection are invalid.
+        @packet_id_space.reset
+
         # Start packet reading thread
         @read_thread = Thread.new(Thread.current) do |parent|
           Thread.current[:parent] = parent
@@ -327,38 +347,39 @@ module MQTT
       raise ArgumentError, 'Topic name cannot be nil' if topic.nil?
       raise ArgumentError, 'Topic name cannot be empty' if topic.empty?
 
+      # QoS 0 messages are not acknowledged and never own an identifier.
+      if qos.zero?
+        packet = MQTT::Packet::Publish.new(
+          :id => 0,
+          :qos => qos,
+          :retain => retain,
+          :topic => topic,
+          :payload => payload
+        )
+        return send_packet(packet)
+      end
+
+      # Reserve the identifier before constructing the packet so that an
+      # exhausted space raises instead of reusing an in-flight identifier.
+      id, entry = @packet_id_space.reserve(:publish)
       packet = MQTT::Packet::Publish.new(
-        :id => next_packet_id,
+        :id => id,
         :qos => qos,
         :retain => retain,
         :topic => topic,
         :payload => payload
       )
 
-      queue = qos.zero? ? nil : wait_for_puback(packet.id)
-
-      res = send_packet(packet)
-
-      return unless queue
-
-      deadline = current_time + @ack_timeout
-
-      loop do
-        response = queue.pop
-        case response
-        when :read_timeout
-          return -1 if current_time > deadline
-        when :close
-          return -1
-        else
-          @pubacks_semaphore.synchronize do
-            @pubacks.delete packet.id
-          end
-          break
-        end
+      begin
+        result = send_packet(packet)
+      rescue ::Exception
+        # The packet never left (or may not have left): free the identifier
+        # so it is reusable instead of leaking it for the whole timeout.
+        @packet_id_space.release(id)
+        raise
       end
 
-      res
+      wait_for_ack(id, entry) ? result : -1
     end
 
     # Send a subscribe message for one or more topics on the MQTT server.
@@ -374,11 +395,12 @@ module MQTT
     #   client.subscribe( 'a/b' => 0, 'c/d' => 1 )
     #
     def subscribe(*topics)
+      id, entry = @packet_id_space.reserve(:subscribe)
       packet = MQTT::Packet::Subscribe.new(
-        :id => next_packet_id,
+        :id => id,
         :topics => topics
       )
-      send_packet(packet)
+      send_packet_and_wait(packet, id, entry)
     end
 
     # Return the next message received from the MQTT server.
@@ -457,11 +479,12 @@ module MQTT
     def unsubscribe(*topics)
       topics = topics.first if topics.is_a?(Enumerable) && topics.count == 1
 
+      id, entry = @packet_id_space.reserve(:unsubscribe)
       packet = MQTT::Packet::Unsubscribe.new(
         :topics => topics,
-        :id => next_packet_id
+        :id => id
       )
-      send_packet(packet)
+      send_packet_and_wait(packet, id, entry)
     end
 
     private
@@ -471,7 +494,6 @@ module MQTT
     def receive_packet
       # Poll socket - is there data waiting?
       result = IO.select([@socket], [], [], SELECT_TIMEOUT)
-      handle_timeouts
       unless result.nil?
         # Yes - read in the packet
         packet = MQTT::Packet.read(@socket)
@@ -488,10 +510,64 @@ module MQTT
       Thread.current[:parent].raise(exp)
     end
 
-    def wait_for_puback(id)
-      @pubacks_semaphore.synchronize do
-        @pubacks[id] = Queue.new
+    # Send a packet that owns an identifier, then wait for its acknowledgement.
+    # The identifier is released back to the pool if the write fails so it can
+    # never become unallocatable.
+    def send_packet_and_wait(packet, id, entry)
+      begin
+        send_packet(packet)
+      rescue ::Exception
+        @packet_id_space.release(id)
+        raise
       end
+      wait_for_ack(id, entry)
+    end
+
+    # Block on an in-flight entry until its acknowledgement arrives or the
+    # acknowledgement timeout elapses. A connection close is delivered as a
+    # :close event. Timeout and close release the identifier back to the pool;
+    # a matching acknowledgement returns true, any other outcome returns false.
+    def wait_for_ack(id, entry)
+      deadline = current_time + @ack_timeout
+
+      loop do
+        remaining = deadline - current_time
+        return fail_ack(id) if remaining <= 0
+
+        response = pop_with_timeout(entry.queue, remaining)
+
+        if response.nil? || response == :timed_out
+          # The acknowledgement deadline was reached before any event arrived.
+          return fail_ack(id)
+        elsif response == :close
+          # handle_close already released every identifier.
+          return false
+        else
+          return true
+        end
+      end
+    end
+
+    if Queue.instance_method(:pop).parameters.include?([:key, :timeout])
+      # Ruby 4+ takes the timeout as a keyword and returns nil (or raises
+      # ThreadError) when the deadline passes with nothing in the queue.
+      def pop_with_timeout(queue, seconds)
+        queue.pop(:timeout => seconds)
+      rescue ThreadError
+        :timed_out
+      end
+    else
+      # Older Rubies take the timeout positionally and return nil on expiry.
+      def pop_with_timeout(queue, seconds)
+        queue.pop(seconds) || :timed_out
+      end
+    end
+
+    # Release an identifier whose acknowledgement never arrived and report the
+    # request as failed rather than successful.
+    def fail_ack(id)
+      @packet_id_space.release(id)
+      false
     end
 
     def handle_packet(packet)
@@ -500,25 +576,17 @@ module MQTT
         @read_queue.push(packet)
       elsif packet.class == MQTT::Packet::Pingresp
         @last_ping_response = current_time
-      elsif packet.class == MQTT::Packet::Puback
-        @pubacks_semaphore.synchronize do
-          @pubacks[packet.id] << packet if @pubacks[packet.id]
-        end
+      elsif ACK_PACKET_CLASSES.include?(packet.class)
+        # Only a packet whose identifier, operation and connection match the
+        # current owner completes its wait; anything else is discarded.
+        @packet_id_space.acknowledge(packet)
       end
       # Ignore all other packets
       # FIXME: implement responses for QoS  2
     end
 
-    def handle_timeouts
-      @pubacks_semaphore.synchronize do
-        @pubacks.each_value { |q| q << :read_timeout }
-      end
-    end
-
     def handle_close
-      @pubacks_semaphore.synchronize do
-        @pubacks.each_value { |q| q << :close }
-      end
+      @packet_id_space.fail_all(:close)
     end
 
     if Process.const_defined? :CLOCK_MONOTONIC
@@ -595,12 +663,6 @@ module MQTT
         :password => uri.password ? URI::DEFAULT_PARSER.unescape(uri.password) : nil,
         :ssl => ssl
       }
-    end
-
-    def next_packet_id
-      @last_packet_id = (@last_packet_id || 0).next
-      @last_packet_id = 1 if @last_packet_id > 0xffff
-      @last_packet_id
     end
 
     def open_tcp_socket

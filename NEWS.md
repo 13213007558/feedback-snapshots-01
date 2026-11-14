@@ -1,6 +1,21 @@
 Ruby MQTT NEWS
 ==============
 
+Unreleased
+----------
+
+* Manage QoS > 0 PUBLISH, SUBSCRIBE and UNSUBSCRIBE packet identifiers through
+  one ownership-tracked `PacketIdSpace` so wrap-around can never reuse an
+  in-flight identifier
+* Only an acknowledgement matching the identifier, operation and connection
+  completes a waiting request; late or mismatched PUBACK/SUBACK/UNSUBACK
+  packets are discarded and cannot confirm a different request
+* Timeouts, send failures and disconnects release and quarantine identifiers,
+  and raise `PacketIdExhausted` instead of overwriting a request when the
+  space is exhausted
+* `subscribe` and `unsubscribe` now wait for their SUBACK/UNSUBACK and return
+  whether the acknowledgement arrived
+
 Ruby MQTT Version 0.7.0 (2025-10-29)
 ------------------------------------
 

@@ -631,25 +631,29 @@ describe MQTT::Client do
   end
 
   describe "when calling the 'publish' method" do
-    class ClientWithPubackInjection < MQTT::Client
+    # Client that feeds pre-arranged acknowledgements through the real
+    # #handle_packet path as soon as the owning packet is written. This
+    # exercises the ownership matching in PacketIdSpace end to end.
+    class ClientWithAckInjection < MQTT::Client
       def initialize
         super(:host => 'localhost')
-        @injected_pubacks = {}
+        @injected_acks = Hash.new { |hash, key| hash[key] = [] }
       end
 
-      def inject_puback(packet)
-        @injected_pubacks[packet.id] = packet
+      def inject_ack(packet)
+        @injected_acks[packet.id] << packet
       end
 
-      def wait_for_puback(id)
-        packet = @injected_pubacks.fetch(id) {
-          return super
-        }
-        Queue.new << packet
+      def send_packet(packet)
+        result = super
+        Array(@injected_acks[packet.id]).each do |ack|
+          handle_packet(ack)
+        end
+        result
       end
     end
 
-    let(:client) { ClientWithPubackInjection.new }
+    let(:client) { ClientWithAckInjection.new }
 
     before(:each) do
       client.instance_variable_set('@socket', socket)
@@ -671,18 +675,23 @@ describe MQTT::Client do
     it "should respect timeouts" do
       require "socket"
       rd, wr = UNIXSocket.pair
-      client = MQTT::Client.new(:host => 'localhost', :ack_timeout => 1.0)
+      client = MQTT::Client.new(:host => 'localhost', :ack_timeout => 1.0, :keep_alive => 0)
       client.instance_variable_set('@socket', rd)
-      t = Thread.new {
+      reading = true
+      reader = Thread.new {
         Thread.current[:parent] = Thread.main
         loop do
+          break unless reading
           client.send :receive_packet
         end
       }
       start = now
       expect(client.publish('topic','payload', false, 1)).to eq(-1)
       elapsed = now - start
-      t.kill
+      reading = false
+      reader.join(2)
+      wr.close
+      rd.close
       expect(elapsed).to be_within(0.1).of(1.0)
     end
 
@@ -707,7 +716,7 @@ describe MQTT::Client do
         inject_puback(n + 1)
         client.publish('topic','payload', false, 1)
       end
-      expect(client.instance_variable_get(:@last_packet_id)).to eq(0xffff)
+      expect(client.packet_id_space.in_flight_count).to eq(0)
 
       socket.string = ""
       inject_puback(1)
@@ -750,13 +759,19 @@ describe MQTT::Client do
     end
 
     it "correctly assigns consecutive ids to packets with QoS 1" do
-      inject_puback(1)
-      inject_puback(2)
+      expect(client).to receive(:send_packet) do |packet|
+        expect(packet.id).to eq(1)
+        client.send(:handle_packet, MQTT::Packet::Puback.new(:id => 1))
+      end
+      client.publish "topic", "message", false, 1
 
-      expect(client).to receive(:send_packet) { |packet| expect(packet.id).to eq(1) }
+      expect(client).to receive(:send_packet) do |packet|
+        expect(packet.id).to eq(2)
+        client.send(:handle_packet, MQTT::Packet::Puback.new(:id => 2))
+      end
       client.publish "topic", "message", false, 1
-      expect(client).to receive(:send_packet) { |packet| expect(packet.id).to eq(2) }
-      client.publish "topic", "message", false, 1
+
+      expect(client.packet_id_space.in_flight_count).to eq(0)
     end
 
     it "does not crash when receiving a PUBACK for a packet it never sent" do
@@ -775,8 +790,11 @@ describe MQTT::Client do
   end
 
   describe "when calling the 'subscribe' method" do
+    let(:client) { ClientWithAckInjection.new }
+
     before(:each) do
       client.instance_variable_set('@socket', socket)
+      client.inject_ack(MQTT::Packet::Suback.new(:id => 1, :return_codes => 0))
     end
 
     it "should write a valid SUBSCRIBE packet to the socket if given a single topic String" do
@@ -956,8 +974,11 @@ describe MQTT::Client do
   end
 
   describe "when calling the 'unsubscribe' method" do
+    let(:client) { ClientWithAckInjection.new }
+
     before(:each) do
       client.instance_variable_set('@socket', socket)
+      client.inject_ack(MQTT::Packet::Unsuback.new(:id => 1))
     end
 
     it "should write a valid UNSUBSCRIBE packet to the socket if given a single topic String" do
@@ -1112,7 +1133,7 @@ describe MQTT::Client do
 
   def inject_puback(packet_id)
     packet = MQTT::Packet::Puback.new(:id => packet_id)
-    client.inject_puback packet
+    client.inject_ack packet
   end
 
 end
