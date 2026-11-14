@@ -31,8 +31,112 @@ module Net
         end
       end
 
-      assert_kind_of Net::SMTP::Response, smtp.send(:critical),
-                     '[Bug #9125]'
+      # After a critical error the session state is unknown, so further
+      # commands must re-raise the original error instead of returning
+      # a dummy success response ([Bug #9125]).
+      err = assert_raise(RuntimeError) { smtp.send(:critical) }
+      assert_equal 'fail on purpose', err.message
+    end
+
+    def test_no_success_reported_after_transport_error
+      server = FakeServer.new
+      def server.mail(_)
+        # Drop the connection without replying: a transport-level failure
+        @sock.close
+        @servers.each(&:close)
+      end
+      server.start
+      smtp = Net::SMTP.start('localhost', server.port)
+
+      assert_raise(EOFError) { smtp.mailfrom('foo@example.com') }
+
+      # The session state is now unknown: every public command must fail
+      # instead of reporting a dummy success for a response that was
+      # never received.
+      assert_raise(EOFError) { smtp.rcptto('bar@example.com') }
+      assert_raise(EOFError) { smtp.data('message') }
+      assert_raise(EOFError) { smtp.rset }
+      assert_raise(EOFError) { smtp.quit }
+      assert_raise(EOFError) do
+        smtp.send_message('message', 'foo@example.com', 'bar@example.com')
+      end
+
+      # Cleanup still works, and it must not send QUIT on the broken session.
+      assert_nothing_raised { smtp.finish }
+      assert_not smtp.started?
+      assert_not_include server.commands, "QUIT\r\n"
+    end
+
+    def test_session_usable_after_server_refusal
+      server = FakeServer.new
+      def server.rcpt(arg)
+        if arg.include?('unknown@')
+          @sock.puts "550 5.1.1 User unknown\r\n"
+        else
+          @sock.puts "250 2.1.0 Ok\r\n"
+        end
+      end
+      server.start
+      smtp = Net::SMTP.start('localhost', server.port)
+
+      smtp.mailfrom('foo@example.com')
+      err = assert_raise(Net::SMTPFatalError) { smtp.rcptto('unknown@example.com') }
+      assert_equal '550', err.response.status
+
+      # A server refusal leaves the session in a known state: RSET and a
+      # new transaction still work, and each success corresponds to a
+      # response actually received from the server.
+      assert smtp.rset.success?
+      assert_equal "RSET\r\n", server.commands.last
+
+      smtp.send_message('message', 'foo@example.com', 'bar@example.com')
+      assert_equal "DATA\r\n", server.commands.last
+      smtp.finish
+    end
+
+    def test_session_usable_after_data_refused
+      server = FakeServer.new
+      def server.data
+        @sock.puts "451 4.3.0 Try again later\r\n"
+      end
+      server.start
+      smtp = Net::SMTP.start('localhost', server.port)
+
+      assert_raise(Net::SMTPUnknownError) do
+        smtp.send_message('message', 'foo@example.com', 'bar@example.com')
+      end
+
+      # The server sent a real reply to DATA, so the session is still usable.
+      assert smtp.rset.success?
+      assert_equal "RSET\r\n", server.commands.last
+      smtp.finish
+    end
+
+    def test_cleanup_error_does_not_mask_block_exception
+      server = FakeServer.new
+      def server.quit
+        @sock.puts "502 5.5.2 Error: command not recognized\r\n"
+      end
+      server.start
+
+      err = assert_raise(RuntimeError) do
+        Net::SMTP.start('localhost', server.port) do |smtp|
+          raise 'original failure'
+        end
+      end
+      assert_equal 'original failure', err.message
+    end
+
+    def test_finish_reports_quit_error_without_prior_failure
+      server = FakeServer.new
+      def server.quit
+        @sock.puts "502 5.5.2 Error: command not recognized\r\n"
+      end
+      server.start
+      smtp = Net::SMTP.start('localhost', server.port)
+
+      assert_raise(Net::SMTPSyntaxError) { smtp.finish }
+      assert_not smtp.started?
     end
 
     def test_esmtp

@@ -726,7 +726,14 @@ module Net
     end
 
     def do_finish
-      quit if @socket and not @socket.closed? and not @error_occurred
+      previous_error = $!
+      begin
+        quit if @socket and not @socket.closed? and not @error_occurred
+      rescue StandardError
+        # A failing QUIT during cleanup must not hide an exception that
+        # is already propagating (e.g. from the block given to .start).
+        raise unless previous_error
+      end
     ensure
       @started = false
       @error_occurred = false
@@ -959,8 +966,8 @@ module Net
       unless msgstr or block
         raise ArgumentError, "message or block is required"
       end
+      check_continue get_response('DATA')
       res = critical {
-        check_continue get_response('DATA')
         socket_sync_bak = @socket.io.sync
         begin
           @socket.io.sync = false
@@ -985,8 +992,10 @@ module Net
 
     def get_response(reqline)
       validate_line reqline
-      @socket.writeline reqline
-      recv_response()
+      critical {
+        @socket.writeline reqline
+        recv_response()
+      }
     end
 
     private
@@ -1019,11 +1028,14 @@ module Net
     end
 
     def critical
-      return Response.parse('200 dummy reply code') if @error_occurred
+      # After a transport-level error the session state is unknown, so
+      # no further command may be sent.  Re-raise the original error
+      # instead of returning a dummy success response ([Bug #9125]).
+      raise @error_occurred if @error_occurred
       begin
         return yield()
-      rescue Exception
-        @error_occurred = true
+      rescue Exception => err
+        @error_occurred = err
         raise
       end
     end
