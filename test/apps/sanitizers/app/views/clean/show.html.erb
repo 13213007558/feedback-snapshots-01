@@ -1,0 +1,5 @@
+<%= raw(clean_text(params[:html])) %>
+<%= raw(clean_text("static", params[:other])) %>
+<%= raw(clean_text(params[:a]) + params[:b]) %>
+<%= raw(clean_sql(params[:sql_in_html])) %>
+<%= raw(clean_filename(params[:path_in_html])) %>

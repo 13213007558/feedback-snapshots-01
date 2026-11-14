@@ -637,6 +637,7 @@ class Brakeman::CheckSQL < Brakeman::BaseCheck
     return unless call? exp
 
     ignore_methods_in_sql.include? exp.method or
+      custom_sanitized?(exp, :sql) or
       quote_call? exp or
       arel? exp or
       exp.method.to_s.end_with? "_id" or

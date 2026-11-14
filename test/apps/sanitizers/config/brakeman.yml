@@ -1,0 +1,22 @@
+# Custom sanitizer descriptions.
+#
+# Each description binds a method's cleaning effect to a single input
+# argument, the return value, and the dangerous contexts it applies to
+# (html, sql, path). A description for one context never applies to
+# another context.
+sanitizers:
+  - method: clean_text
+    argument: 0
+    returns: true
+    for:
+      - html
+  - method: clean_sql
+    argument: 0
+    returns: true
+    for:
+      - sql
+  - method: clean_filename
+    argument: 0
+    returns: true
+    for:
+      - path

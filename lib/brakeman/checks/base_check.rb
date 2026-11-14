@@ -160,6 +160,43 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     TEMP_FILE_PATH.include? exp
   end
 
+  #Checks if _exp_ is a call to a custom sanitizer (described in the scan
+  #configuration) for the given _context_ (:html, :sql, or :path).
+  #
+  #A description only applies when the cleaning actually covers the
+  #dangerous input: user input outside the sanitized argument (the target
+  #or any other argument) keeps its risk, and a description never applies
+  #to a context it was not configured for.
+  def custom_sanitized? exp, context
+    return false unless call? exp
+
+    sanitizers = tracker.sanitizers
+    return false if sanitizers.empty?
+
+    description = sanitizers.find(exp.method, context)
+    return false unless description
+
+    if description.target
+      return false unless description.target == class_name(exp.target)
+    end
+
+    #The return value is only clean for _context_ if no user input
+    #appears outside the sanitized argument.
+    if sexp? exp.target and immediate_input? exp.target
+      return false
+    end
+
+    exp.args.each_with_index do |arg, index|
+      next if index == description.argument
+
+      if sexp? arg and immediate_input? arg
+        return false
+      end
+    end
+
+    true
+  end
+
   #Report a warning
   def warn options
     extra_opts = { :check => self.class.to_s }
@@ -371,6 +408,12 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
         false
       end
     end
+  end
+
+  #Checks if _exp_ includes immediately reachable user input
+  #(parameters, cookies, request headers) or a model attribute.
+  def immediate_input? exp
+    !!(has_immediate_user_input?(exp) or has_immediate_model?(exp))
   end
 
   #Checks for a model attribute at the top level of the

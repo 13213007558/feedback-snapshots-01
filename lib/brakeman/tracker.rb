@@ -6,6 +6,7 @@ require 'brakeman/processors/lib/find_call'
 require 'brakeman/processors/lib/find_all_calls'
 require 'brakeman/tracker/config'
 require 'brakeman/tracker/constants'
+require 'brakeman/sanitizers'
 
 #The Tracker keeps track of all the processed information.
 class Brakeman::Tracker
@@ -54,6 +55,7 @@ class Brakeman::Tracker
     @filter_cache = {}
     @call_index = nil
     @config = Brakeman::Config.new(self)
+    @sanitizers = nil
     @start_time = Time.now
     @end_time = nil
     @duration = nil
@@ -61,6 +63,12 @@ class Brakeman::Tracker
 
   def save_file_cache!
     @pristine_file_cache = @file_cache.dup
+  end
+
+  #Custom sanitizer descriptions from the scan configuration.
+  #See Brakeman::Sanitizers.
+  def sanitizers
+    @sanitizers ||= Brakeman::Sanitizers.new(options[:sanitizers])
   end
 
   #Add an error to the list. If no backtrace is given,

@@ -225,6 +225,8 @@ class Brakeman::CheckCrossSiteScripting < Brakeman::BaseCheck
     #Ignore safe items
     if ignore_call? target, method
       @matched = false
+    elsif custom_sanitized? exp, :html
+      @matched = false
     elsif sexp? target and model_name? target[1] #TODO: use method call?
       @matched = Match.new(:model, exp)
     elsif cookies? exp

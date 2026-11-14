@@ -32,7 +32,7 @@ class Brakeman::CheckFileAccess < Brakeman::BaseCheck
 
     file_name = call.first_arg
 
-    return if called_on_tempfile?(file_name) || sanitized?(file_name)
+    return if called_on_tempfile?(file_name) || sanitized?(file_name) || custom_sanitized?(file_name, :path)
 
     if match = has_immediate_user_input?(file_name)
       confidence = :high
