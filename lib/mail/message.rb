@@ -1410,6 +1410,38 @@ module Mail
       header.has_message_id?
     end
 
+    # Parses this message's one-click unsubscribe (RFC 8058) metadata into a
+    # pending Mail::Unsubscribe::Action.
+    #
+    # +dkim_evidence+ must be the signed-header coverage produced by the
+    # caller's trusted DKIM verifier, not a boolean.  See
+    # Mail::Unsubscribe::Evidence for the accepted forms.  Returns nil when
+    # the message does not qualify, for example when no verified signature
+    # covers both the List-Unsubscribe and List-Unsubscribe-Post instances
+    # that would be used.
+    #
+    # No request is made here.  Confirming the returned action with
+    # Action#confirm! is the explicit user-triggered step that hands a POST
+    # request to a transport adapter.
+    #
+    #  action = mail.unsubscribe_action(dkim_evidence: verifier.evidence)
+    #  action&.pending? #=> true
+    def unsubscribe_action(dkim_evidence = nil, **options)
+      Mail::Unsubscribe.parse(self, dkim_evidence, **options)
+    end
+
+    # Like #unsubscribe_action, but raises
+    # Mail::Unsubscribe::NotEligibleError instead of returning nil.
+    def unsubscribe_action!(dkim_evidence = nil, **options)
+      Mail::Unsubscribe.parse!(self, dkim_evidence, **options)
+    end
+
+    # Returns the Mail::Unsubscribe::Parser::Result for this message,
+    # including the refusal reason when no action is produced.
+    def unsubscribe_analysis(dkim_evidence = nil, **options)
+      Mail::Unsubscribe.analyze(self, dkim_evidence, **options)
+    end
+
     # Returns true if the message has a Date field, the field may or may
     # not have a value, but the field exists or not.
     def has_date?

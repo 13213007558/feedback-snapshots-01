@@ -42,6 +42,7 @@ our documentation, add new features—up to you! Thank you for pitching in.
 * [Encodings](#encodings)
 * [Contributing](#contributing)
 * [Usage](#usage)
+  * [One-click unsubscribe (RFC 8058)](#one-click-unsubscribe-rfc-8058)
 * [Excerpts from TREC Spam Corpus 2005](#excerpts-from-trec-spam-corpus-2005)
 * [License](#license)
 
@@ -624,6 +625,75 @@ end
 @round_tripped_mail.attachments.first.filename #=> 'myfile.pdf'
 ```
 See "Testing and extracting attachments" above for more details.
+
+### One-click unsubscribe (RFC 8058)
+
+A `List-Unsubscribe` header is untrusted message content. Requesting its
+URI while parsing a message lets a malicious sender trigger requests from
+your backend. Mail therefore separates parsing from acting: it only turns
+a message into a pending action when your own trusted DKIM verifier proves
+that one valid signature covers both the `List-Unsubscribe` and
+`List-Unsubscribe-Post` header instances that would be used.
+
+```ruby
+mail = Mail.read('message.eml')
+
+# coverage comes from your DKIM verifier, not from Mail
+evidence = Mail::Unsubscribe::Evidence.new(
+  ['List-Unsubscribe', 'List-Unsubscribe-Post'],
+  valid: true,
+  signature: 'example.com'
+)
+
+action = mail.unsubscribe_action(evidence)
+
+if action
+  action                       #=> #<Mail::Unsubscribe::Action pending https://example.com/u>
+  action.request.method        #=> :post
+  action.request.body          #=> "List-Unsubscribe=One-Click"
+
+  # only after the user explicitly confirms:
+  action.confirm!(MyHttpTransport.new)
+end
+```
+
+Parsing performs no network I/O and never represents a GET request. The
+only operation handed to a transport is the POST from
+`Mail::Unsubscribe::Action#request`, and only from `confirm!`.
+
+`List-Unsubscribe` may contain a `mailto:` candidate alongside the HTTPS
+one; `action.candidates` exposes all of them, while `action.target` is the
+single HTTPS URI required for one-click. A message with several HTTPS
+candidates, an `http:` only list, a malformed angle-bracket list, a URI with
+a fragment or userinfo, or a `List-Unsubscribe-Post` value other than
+`List-Unsubscribe=One-Click` produces no action.
+
+DKIM `h=` tags are matched against actual header instances. A name listed
+once protects the bottom-most instance of that name, exactly as DKIM
+selects repeated fields; it never implies that every same-name header was
+signed. If the message contains duplicate `List-Unsubscribe` fields, the
+evidence must select the intended instance explicitly:
+
+```ruby
+Mail::Unsubscribe::Evidence.new(
+  ['List-Unsubscribe:1', 'List-Unsubscribe-Post:0'],
+  valid: true
+)
+```
+
+Occurrence indexes count from the bottom of the header block: `:0` is the
+last instance. An entry may also carry the exact signed value:
+
+```ruby
+Mail::Unsubscribe::Evidence.new([
+  { name: 'List-Unsubscribe', value: '<https://example.com/u>' },
+  { name: 'List-Unsubscribe-Post', value: 'List-Unsubscribe=One-Click' }
+], valid: true)
+```
+
+`mail.unsubscribe_analysis(evidence)` returns both the action and a
+`:reason` when the message does not qualify. `unsubscribe_action!` raises
+`Mail::Unsubscribe::NotEligibleError` instead.
 
 ## Using Mail with Testing or Spec'ing Libraries
 

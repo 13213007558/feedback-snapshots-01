@@ -9,6 +9,10 @@ Compatibility:
 
 Features:
 
+* Add `Mail::Unsubscribe` RFC 8058 one-click unsubscribe parsing. Actions are
+  produced only from caller-supplied, trusted DKIM coverage of the actual
+  `List-Unsubscribe` and `List-Unsubscribe-Post` header instances, and only
+  POST is exposed to a transport after explicit confirmation.
 * Updated README to improve around sending multipart mail @kapfenho
 * Add delivery_interceptors method to Mail class to fetch registered interceptors @ghousemohamed
 

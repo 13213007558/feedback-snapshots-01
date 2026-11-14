@@ -48,6 +48,8 @@ module Mail # :doc:
   require 'mail/field'
   require 'mail/field_list'
 
+  require 'mail/unsubscribe'
+
   register_autoload :Envelope, 'mail/envelope'
 
   # Autoload header field elements and transfer encodings.
