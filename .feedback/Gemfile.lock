@@ -1,0 +1,53 @@
+PATH
+  remote: ..
+  specs:
+    net-imap (0.6.8)
+      date
+      net-protocol
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    base64 (0.3.0)
+    date (3.6.0)
+    net-protocol (0.4.0)
+      timeout
+    power_assert (3.1.0)
+    psych (5.5.0)
+      date
+      stringio
+    stringio (3.2.0)
+    strscan (3.1.8)
+    test-unit (3.7.8)
+      power_assert
+    test-unit-ruby-core (1.0.16)
+      test-unit (>= 3.7.2)
+    timeout (0.6.1)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  base64
+  net-imap!
+  psych (>= 5.3.0)
+  strscan
+  test-unit
+  test-unit-ruby-core
+
+CHECKSUMS
+  base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
+  date (3.6.0) sha256=18ac945c4e24ebd93534f8eab8c2fd8c5604b3e977105b3798d62a1e8d27b580
+  net-imap (0.6.8)
+  net-protocol (0.4.0) sha256=f9f90c8c6f64794a45160bf422177a336db12809de3beeeaa26b88fcd2e8c853
+  power_assert (3.1.0) sha256=fefe98ed5d3140628138f3f9f9194d6ece01f1320e69700d3c928adca7518251
+  psych (5.5.0) sha256=4b245bbbd0f3238df8ccee766ebc1a6b062b10e4ee1d3284eb588739ba156a0a
+  stringio (3.2.0) sha256=c37cb2e58b4ffbd33fe5cd948c05934af997b36e0b6ca6fdf43afa234cf222e1
+  strscan (3.1.8) sha256=aae2db611a225559f21ffbb71765c9a4e60fd262534a9ea84f4f11c7f32f679e
+  test-unit (3.7.8) sha256=689d1ca53f4d46f678b4e5d68d8e4294f87fc5e8b9238cc4de7c5727e8d65943
+  test-unit-ruby-core (1.0.16) sha256=2f8bd142ef69a1a29637bc56804163ef9a0a398fd349bf9d4a3c67c4dfa82557
+  timeout (0.6.1) sha256=78f57368a7e7bbadec56971f78a3f5ecbcfb59b7fcbb0a3ed6ddc08a5094accb
+
+BUNDLED WITH
+  4.0.20

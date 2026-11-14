@@ -1,0 +1,7 @@
+source 'https://rubygems.org'
+gem 'net-imap', path: '..', require: false
+gem 'test-unit', require: false
+gem 'test-unit-ruby-core', require: false
+gem 'base64', require: false
+gem 'strscan', require: false
+gem 'psych', '>= 5.3.0', require: false
