@@ -6,6 +6,7 @@ module OAuth
   module Signature
     class PLAINTEXT < Base
       implements "plaintext"
+      key_type :shared_secret
 
       def signature
         signature_base_string

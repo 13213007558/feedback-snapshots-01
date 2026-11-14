@@ -48,6 +48,14 @@ module OAuth
         end
       end
 
+      # Every +oauth_signature_method+ value carried by the request. Unlike
+      # +#oauth_signature_method+ this does not silently collapse a duplicated
+      # parameter down to a single value, so a verifier can reject a request
+      # that tries to select more than one implementation.
+      def oauth_signature_methods
+        Array(parameters["oauth_signature_method"]).map(&:to_s)
+      end
+
       def oauth_timestamp
         parameters["oauth_timestamp"]
       end

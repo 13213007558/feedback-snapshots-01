@@ -7,6 +7,7 @@ module OAuth
     module HMAC
       class SHA1 < OAuth::Signature::Base
         implements "hmac-sha1"
+        key_type :shared_secret
 
         def body_hash
           Base64.encode64(OpenSSL::Digest.digest("SHA1", request.body || "")).chomp.delete("\n")

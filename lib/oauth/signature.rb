@@ -1,10 +1,27 @@
 # frozen_string_literal: true
 
+require "oauth/errors/policy"
+
 module OAuth
   module Signature
     # Returns a list of available signature methods
     def self.available_methods
       @available_methods ||= {}
+    end
+
+    # Build a {Verifier} restricted to an explicit allow list of methods.
+    #
+    # Use this on the verification side to pin an endpoint to specific
+    # signature methods, independent of how many signature plugins are loaded
+    # globally. Signing continues to use {.sign} and is unaffected.
+    #
+    #   verifier = OAuth::Signature.verifier("hmac-sha1", "rsa-sha1")
+    #   verifier.verify(request) { |token, consumer_key, nonce, timestamp| ... }
+    def self.verifier(*allowed_methods)
+      # Lazy require keeps the verifier (which depends on the request proxy)
+      # out of the load-time path and avoids a circular require.
+      require "oauth/signature/verifier"
+      OAuth::Signature::Verifier.new_with_methods(*allowed_methods)
     end
 
     # Build a signature from a +request+.

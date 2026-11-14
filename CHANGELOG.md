@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* Verifier-level signature method policy (`OAuth::Signature::Policy` and
+  `OAuth::Signature::Verifier`, plus the `OAuth::Signature.verifier` factory)
+  so an endpoint accepts an explicit allow list of methods instead of every
+  globally registered plugin
+  * Exact method-name matching; a request must carry exactly one
+    `oauth_signature_method` (duplicates raise `OAuth::AmbiguousSignatureMethod`)
+  * Forbidden/ambiguous/unimplemented methods fail before the credential
+    resolver block is invoked (`OAuth::UnauthorizedSignatureMethod`)
+  * Credential/method compatibility checks: an HMAC shared secret cannot be
+    used as an RSA key and vice versa (`OAuth::IncompatibleCredential`)
+  * `PLAINTEXT` is accepted only when explicitly allowed
+  * Plugin errors propagate without falling back to another method
+  * New error hierarchy under `OAuth::SignaturePolicyError`
+  * `OAuth::Signature::Base.key_type` declares each method's credential family
+  * `OAuth::RequestProxy::Base#oauth_signature_methods` exposes every declared
+    method so duplicates can be detected
 
 ### Changed
 

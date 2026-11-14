@@ -4,11 +4,21 @@ require "oauth/signature"
 require "oauth/helper"
 require "oauth/request_proxy/base"
 require "base64"
+require "openssl"
 
 module OAuth
   module Signature
     class Base
       include OAuth::Helper
+
+      # Credential families a signature method consumes. A verifier policy
+      # uses this to ensure a resolved credential matches the declared method
+      # (an HMAC shared secret can never be treated as an RSA key and vice
+      # versa).
+      #
+      # * +:shared_secret+ - a symmetric secret string (HMAC, PLAINTEXT)
+      # * +:rsa_key+       - an asymmetric RSA key or X.509 certificate
+      KEY_TYPES = %i[shared_secret rsa_key].freeze
 
       attr_accessor :options
       attr_reader :token_secret, :consumer_secret, :request
@@ -18,6 +28,51 @@ module OAuth
 
         @implements = signature_method
         OAuth::Signature.available_methods[@implements] = self
+      end
+
+      # Declare (or read) the kind of credential this method requires.
+      # Defaults to +:shared_secret+ so existing third-party methods built on
+      # the HMAC/PLAINTEXT secret model keep working without modification.
+      def self.key_type(key_type = nil)
+        return @key_type || :shared_secret if key_type.nil?
+
+        raise ArgumentError, "Unknown key type #{key_type.inspect}" unless KEY_TYPES.include?(key_type)
+
+        @key_type = key_type
+      end
+
+      # Whether a resolved +consumer_secret+ is usable with this method.
+      def self.compatible_credential?(consumer_secret)
+        case key_type
+        when :shared_secret
+          shared_secret?(consumer_secret)
+        when :rsa_key
+          rsa_key?(consumer_secret)
+        else
+          false
+        end
+      end
+
+      # A shared secret is a plain String (the token/consumer secret). RSA key
+      # objects are never acceptable symmetric secrets.
+      def self.shared_secret?(value)
+        value.nil? || value.is_a?(String)
+      end
+
+      def self.rsa_key?(value)
+        return true if value.is_a?(OpenSSL::PKey::PKey) || value.is_a?(OpenSSL::X509::Certificate)
+        return false unless value.is_a?(String)
+
+        # A PEM/DER key or certificate parses; a bare HMAC secret does not.
+        OpenSSL::PKey.read(value)
+        true
+      rescue OpenSSL::PKey::PKeyError, ArgumentError
+        begin
+          OpenSSL::X509::Certificate.new(value)
+          true
+        rescue OpenSSL::X509::CertificateError, ArgumentError
+          false
+        end
       end
 
       def initialize(request, options = {}, &block)

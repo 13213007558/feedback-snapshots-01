@@ -7,6 +7,7 @@ module OAuth
     module RSA
       class SHA1 < OAuth::Signature::Base
         implements "rsa-sha1"
+        key_type :rsa_key
 
         def ==(other)
           public_key.verify(OpenSSL::Digest.new("SHA1"),

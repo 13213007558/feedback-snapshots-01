@@ -302,6 +302,70 @@ hydra.run
 @response = req.response
 ```
 
+## Verifying inbound requests: signature method policy
+
+Every loaded signature extension registers itself in the global
+`OAuth::Signature.available_methods` table. The global helper accepts *any*
+registered method, so installing a new plugin (for example `PLAINTEXT`)
+silently widens the methods every endpoint will accept. To pin a single
+endpoint to an explicit, small set of methods, verify it through a
+`OAuth::Signature::Verifier` backed by an `OAuth::Signature::Policy`.
+
+```ruby
+# This endpoint accepts HMAC-SHA1 only, no matter how many plugins are loaded.
+verifier = OAuth::Signature.verifier("hmac-sha1")
+
+verifier.verify(request) do |token, consumer_key, nonce, timestamp|
+  secret = lookup_consumer_secret(consumer_key) # credential resolver
+  [nil, secret]                                  # => [token_secret, consumer_secret]
+end
+```
+
+Behavior guarantees:
+
+* Method names are matched exactly (case-insensitively) against the allow list.
+  Registering an extra plugin never expands what the verifier accepts.
+* A request must carry exactly one `oauth_signature_method`; a duplicated
+  parameter is rejected with `OAuth::AmbiguousSignatureMethod`.
+* The credential resolver block is **not called** for a forbidden, ambiguous,
+  or unimplemented method — the request fails first with
+  `OAuth::UnauthorizedSignatureMethod`.
+* The resolved credential must match the method family. An HMAC shared secret
+  cannot be treated as an RSA key and vice versa; mismatches raise
+  `OAuth::IncompatibleCredential`.
+* `PLAINTEXT` is opt-in: it is only accepted when explicitly listed in the
+  policy, for legacy/compatibility scenarios.
+* A plugin that raises propagates its error; verification never falls back to
+  another allowed method.
+
+Two endpoints can therefore load the same plugin set but enforce different
+policies:
+
+```ruby
+hmac_endpoint = OAuth::Signature.verifier("hmac-sha1")
+rsa_endpoint  = OAuth::Signature.verifier("rsa-sha1")
+```
+
+### Migrating from the global verification API
+
+The signing API is unchanged — keep using `OAuth::Signature.sign`. Only the
+verification side gains the strict, policy-bound entry point.
+
+```ruby
+# Before: accepts any method present in the global registry
+OAuth::Signature.verify(request, options) { |token, consumer_key, nonce, timestamp| ... }
+
+# After: declare exactly which methods this endpoint accepts
+verifier = OAuth::Signature.verifier("hmac-sha1", "rsa-sha1")
+verifier.verify(request, options) { |token, consumer_key, nonce, timestamp| ... }
+```
+
+`OAuth::Signature.verify` still works for backward compatibility, but new code
+should prefer an explicit policy so adding a plugin cannot change an endpoint's
+accepted methods. The resolver block signature and the `options` hash
+(`consumer`, `token`, `consumer_secret`, `token_secret`, `private_key`, …) are
+identical between the two forms.
+
 ## More Information
 
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]
