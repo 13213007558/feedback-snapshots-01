@@ -1,3 +1,7 @@
+## Unreleased
+
+- CSP: Support multiple independent, intersecting policies via `config.csp_policy`. Each policy keeps its own enforced and report-only header values (emitted with Rack's multi-value header representation instead of merged source lists); per-request overrides, appends and nonces take an explicit policy/mode target, the middleware preserves upstream CSP headers rather than overwriting them, and report-only policies are never emitted as enforced constraints.
+
 ## 6.5.0
 
 - CSP: Remove source expression deduplication. (@lgarron) https://github.com/github/secure_headers/pull/499

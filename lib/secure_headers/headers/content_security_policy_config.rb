@@ -117,4 +117,86 @@ module SecureHeaders
       self
     end
   end
+
+  # Public: pairs one enforced Content-Security-Policy with its optional
+  # report-only counterpart. A pair represents a single, independent policy:
+  # the browser enforces the policy under the
+  # `content-security-policy` header and (when present) only reports violations
+  # of the policy under `content-security-policy-report-only`.
+  #
+  # Multiple entries are emitted as separate header values rather than having
+  # their source lists concatenated. Browsers intersect every delivered CSP, so
+  # keeping policies independent can only tighten, never widen, the effective
+  # restriction.
+  class CspPolicyEntry
+    ENFORCED_HEADER_NAME = ContentSecurityPolicyConfig::HEADER_NAME
+    REPORT_ONLY_HEADER_NAME = ContentSecurityPolicyReportOnlyConfig::HEADER_NAME
+
+    attr_reader :enforced, :report_only
+
+    def initialize(enforced, report_only = OPT_OUT)
+      self.enforced = enforced
+      self.report_only = report_only
+    end
+
+    def report_only=(config)
+      @report_only =
+        case config
+        when OPT_OUT, nil
+          OPT_OUT
+        when ContentSecurityPolicyReportOnlyConfig
+          config
+        when ContentSecurityPolicyConfig
+          config.make_report_only
+        when Hash
+          ContentSecurityPolicyReportOnlyConfig.new(config)
+        else
+          raise ArgumentError, "Must provide a CSP config, a config hash, or OPT_OUT"
+        end
+    end
+
+    def enforced=(config)
+      @enforced =
+        case config
+        when OPT_OUT
+          OPT_OUT
+        when ContentSecurityPolicyConfig
+          config
+        when Hash
+          ContentSecurityPolicyConfig.new(config)
+        else
+          raise ArgumentError, "Must provide either an existing CSP config or a CSP config hash"
+        end
+    end
+
+    def opt_out?
+      enforced.opt_out? && report_only.opt_out?
+    end
+
+    def to_h
+      { enforced: enforced, report_only: report_only }
+    end
+
+    def dup
+      self.class.new(
+        enforced.opt_out? ? OPT_OUT : enforced.dup,
+        report_only.opt_out? ? OPT_OUT : report_only.dup
+      )
+    end
+
+    def ==(other)
+      other.is_a?(CspPolicyEntry) &&
+        enforced == other.enforced &&
+        report_only == other.report_only
+    end
+
+    # Returns [header_name, value] for the requested mode, or nil when opted out.
+    def header(mode)
+      config = mode == :report_only ? report_only : enforced
+      return if config.nil? || config == OPT_OUT
+
+      header = ContentSecurityPolicy.new(config)
+      [header.name, header.value]
+    end
+  end
 end

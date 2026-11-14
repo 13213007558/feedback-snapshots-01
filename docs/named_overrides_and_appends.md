@@ -102,3 +102,90 @@ class MyController < ApplicationController
   end
 end
 ```
+
+## Multiple independent CSP policies
+
+Sometimes two parts of an application (for example, a gateway and a business
+service) each own a Content Security Policy. The browser must enforce **both**
+policies rather than treating the combined source lists as one widened policy.
+When more than one `Content-Security-Policy` header is delivered, the browser
+intersects them: a resource is allowed only when it satisfies **every** policy,
+so adding a second policy can only tighten the result.
+
+Register additional policies with `config.csp_policy`. Each entry produces its
+own header value and can carry an independent report-only counterpart. The
+policies are emitted as separate values (an array in Rack's multi-value header
+representation) instead of being concatenated.
+
+```ruby
+SecureHeaders::Configuration.default do |config|
+  # The primary policy (the existing csp / csp_report_only interface).
+  config.csp = {
+    default_src: %w('self'),
+    script_src: %w(gateway.example)
+  }
+
+  # An independently enforced policy owned by another team.
+  config.csp_policy(:business) do |policy|
+    policy.enforced = {
+      default_src: %w('self'),
+      script_src: %w(business.example)
+    }
+    policy.report_only = {
+      default_src: %w('self'),
+      script_src: %w(report.example),
+      report_uri: %w(/csp-report)
+    }
+  end
+end
+```
+
+This response carries two enforced header values and one report-only value:
+
+```
+content-security-policy: default-src 'self'; script-src gateway.example
+content-security-policy: default-src 'self'; script-src business.example
+content-security-policy-report-only: default-src 'self'; script-src report.example; report-uri /csp-report
+```
+
+A `<script src="https://gateway.example/app.js">` matches the first policy but
+not the second, so the browser blocks it. Each policy keeps its own
+`script-src`; the lists are never merged.
+
+### Targeting a specific policy per request
+
+Per-request overrides, appends and nonces accept a target so it is always clear
+which policy changes. A bare policy name addresses that policy's **enforced**
+mode; pass a `[name, mode]` pair to reach another mode.
+
+```ruby
+# append only to the enforced :business policy
+SecureHeaders.append_content_security_policy_directives(
+  request, { script_src: %w(extra.business.example) }, :business
+)
+
+# append to its report-only counterpart instead
+SecureHeaders.append_content_security_policy_directives(
+  request, { script_src: %w(shadow.example) }, [:business, :report_only]
+)
+
+# a nonce is added to one policy only and never relaxes the others
+SecureHeaders.content_security_policy_script_nonce(request, :business)
+
+# named appends accept the same target argument
+SecureHeaders.use_content_security_policy_named_append(request, :widget, :business)
+```
+
+Without a target, the primary policy behaves exactly as the single-policy
+interface always did (`:both`, `:enforced` and `:report_only` continue to refer
+to that primary policy). Appending to an opted-out policy does not create a new
+one; only an explicit override can introduce a policy.
+
+### Upstream headers are preserved
+
+If the upstream application already sets a `Content-Security-Policy` header, the
+middleware keeps it and appends the configured policy/policies rather than
+silently overwriting it. The same multi-value handling keeps report-only
+policies on `Content-Security-Policy-Report-Only`, so a report-only policy is
+never mistaken for an additional enforced constraint.
+

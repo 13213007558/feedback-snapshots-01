@@ -207,5 +207,97 @@ module SecureHeaders
         expect(Configuration.overrides(:test_override)).to_not be_nil
       end
     end
+
+    describe "multiple independent CSP policies" do
+      def configure_two_policies
+        Configuration.default do |config|
+          config.csp = {
+            default_src: %w('self'),
+            script_src: %w(gateway.example)
+          }
+          config.csp_policy(:business) do |policy|
+            policy.enforced = {
+              default_src: %w('self'),
+              script_src: %w(business.example)
+            }
+            policy.report_only = {
+              default_src: %w('self'),
+              script_src: %w(report.example),
+              report_uri: %w(/csp-report)
+            }
+          end
+        end
+      end
+
+      it "registers additional policies without changing the primary config" do
+        configure_two_policies
+        config = Configuration.dup
+        expect(config.csp_policies.keys).to eq([:business])
+        expect(config.csp_policy_named(:business)).to be_a(CspPolicyEntry)
+      end
+
+      it "emits independent enforced policies as a multi-value header" do
+        configure_two_policies
+        headers = Configuration.dup.generate_headers
+        expect(headers["content-security-policy"]).to eq([
+          "default-src 'self'; script-src gateway.example",
+          "default-src 'self'; script-src business.example"
+        ])
+      end
+
+      it "keeps the report-only policy on its own header, never as an enforced value" do
+        configure_two_policies
+        headers = Configuration.dup.generate_headers
+        expect(headers["content-security-policy-report-only"]).to eq(
+          "default-src 'self'; script-src report.example; report-uri /csp-report"
+        )
+      end
+
+      it "keeps a single policy as a scalar string for backwards compatibility" do
+        Configuration.default do |config|
+          config.csp = { default_src: %w('self'), script_src: %w('self') }
+        end
+        headers = Configuration.dup.generate_headers
+        expect(headers["content-security-policy"]).to eq("default-src 'self'; script-src 'self'")
+        expect(headers["content-security-policy"]).not_to be_a(Array)
+      end
+
+      it "deep dups additional policies so the frozen default is never mutated" do
+        configure_two_policies
+        default_config = Configuration.send(:default_config)
+        copy = Configuration.dup
+        copy.csp_policy_named(:business).enforced.update_directive(:script_src, %w(mutated.example))
+
+        default_business = default_config.csp_policy_named(:business).enforced
+        expect(default_business.directive_value(:script_src)).to eq(%w(business.example))
+        expect(copy.csp_policy_named(:business).enforced.directive_value(:script_src)).to eq(%w(mutated.example))
+      end
+
+      it "validates additional policies and names the offending policy" do
+        invalid_config = Configuration.new do |c|
+          c.csp_policy(:broken) do |policy|
+            policy.enforced = { default_src: %w('self') } # missing script_src
+          end
+        end
+
+        expect { invalid_config.validate_config! }.to raise_error(
+          ContentSecurityPolicyConfigError, /CSP policy :broken is invalid/
+        )
+      end
+
+      it "rejects reserved policy names" do
+        expect do
+          Configuration.default do |config|
+            config.csp_policy(:enforced) { }
+          end
+        end.to raise_error(ArgumentError, /reserved/)
+      end
+
+      it "lists every entry starting with the primary policy" do
+        configure_two_policies
+        names = Configuration.dup.csp_entries.map(&:first)
+        expect(names).to eq([:default, :business])
+      end
+    end
   end
 end

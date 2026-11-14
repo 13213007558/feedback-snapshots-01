@@ -132,6 +132,10 @@ config.reporting_endpoints = {
 
 **Recommendation:** Use both `report-uri` and `report-to` for maximum compatibility while transitioning to the modern approach.
 
+### Multiple independent CSP policies
+
+When two parts of an application (e.g. a gateway and a business service) each own a policy, `config.csp_policy` registers additional policies that are delivered as separate `Content-Security-Policy` header values instead of being merged. Browsers intersect every delivered policy, so each additional policy can only tighten the effective restrictions; per-request appends, overrides and nonces take a target so they affect one policy only, and upstream CSP headers are preserved. See [Multiple independent CSP policies](docs/named_overrides_and_appends.md#multiple-independent-csp-policies) for details and examples.
+
 ### Deprecated Configuration Values
 * `block_all_mixed_content` - this value is deprecated in favor of `upgrade_insecure_requests`. See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/block-all-mixed-content for more information.
 

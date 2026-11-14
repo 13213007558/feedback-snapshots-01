@@ -504,6 +504,185 @@ module SecureHeaders
           hash = SecureHeaders.header_hash_for(https_request)
           expect(hash[ContentSecurityPolicyReportOnlyConfig::HEADER_NAME]).to eq("default-src 'self'; script-src 'self'; upgrade-insecure-requests")
         end
+
+        context "multiple independent enforced policies" do
+          # Two teams own two policies. The gateway policy only trusts
+          # gateway.example for scripts; the business policy only trusts
+          # business.example. They are delivered as two separate
+          # Content-Security-Policy header values and are never concatenated.
+          def configure_gateway_and_business
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w(gateway.example)
+              }
+              config.csp_policy(:business) do |policy|
+                policy.enforced = {
+                  default_src: %w('self'),
+                  script_src: %w(business.example)
+                }
+                policy.report_only = {
+                  default_src: %w('self'),
+                  script_src: %w(report.example),
+                  report_uri: %w(/csp-report)
+                }
+              end
+            end
+          end
+
+          it "emits each enforced policy as a separate value and keeps report-only separate" do
+            configure_gateway_and_business
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash["content-security-policy"]).to eq([
+              "default-src 'self'; script-src gateway.example",
+              "default-src 'self'; script-src business.example"
+            ])
+            expect(hash["content-security-policy-report-only"]).to eq(
+              "default-src 'self'; script-src report.example; report-uri /csp-report"
+            )
+          end
+
+          it "does not widen either policy by merging their source lists" do
+            configure_gateway_and_business
+            hash = SecureHeaders.header_hash_for(request)
+            gateway, business = hash["content-security-policy"]
+
+            expect(gateway).not_to include("business.example")
+            expect(business).not_to include("gateway.example")
+          end
+
+          it "appends a directive to one named enforced policy only" do
+            configure_gateway_and_business
+            SecureHeaders.append_content_security_policy_directives(
+              request, { script_src: %w(extra.business.example) }, :business
+            )
+            hash = SecureHeaders.header_hash_for(request)
+            gateway, business = hash["content-security-policy"]
+
+            expect(gateway).to eq("default-src 'self'; script-src gateway.example")
+            expect(business).to eq("default-src 'self'; script-src business.example extra.business.example")
+            # report-only is a different mode and must not receive the append
+            expect(hash["content-security-policy-report-only"]).not_to include("extra.business.example")
+          end
+
+          it "targets the report-only mode of a named policy explicitly" do
+            configure_gateway_and_business
+            SecureHeaders.append_content_security_policy_directives(
+              request, { script_src: %w(shadow.example) }, [:business, :report_only]
+            )
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash["content-security-policy-report-only"]).to include("shadow.example")
+            hash["content-security-policy"].each do |enforced|
+              expect(enforced).not_to include("shadow.example")
+            end
+          end
+
+          it "supports named appends against a specific policy" do
+            configure_gateway_and_business
+            Configuration.named_append(:widget) { |_request| { script_src: %w(widget.example) } }
+            SecureHeaders.use_content_security_policy_named_append(request, :widget, :business)
+
+            hash = SecureHeaders.header_hash_for(request)
+            gateway, business = hash["content-security-policy"]
+            expect(gateway).not_to include("widget.example")
+            expect(business).to include("widget.example")
+          end
+
+          it "overrides a directive on a named policy" do
+            configure_gateway_and_business
+            SecureHeaders.override_content_security_policy_directives(
+              request, { script_src: %w(replaced.example) }, :business
+            )
+            business = SecureHeaders.header_hash_for(request)["content-security-policy"].last
+            expect(business).to eq("default-src 'self'; script-src replaced.example")
+          end
+
+          it "adds a nonce only to the policy the caller names" do
+            configure_gateway_and_business
+            nonce = SecureHeaders.content_security_policy_script_nonce(request, :business)
+            hash = SecureHeaders.header_hash_for(request)
+            gateway, business = hash["content-security-policy"]
+
+            expect(business).to include("'nonce-#{nonce}'")
+            expect(gateway).not_to include("nonce")
+            expect(hash["content-security-policy-report-only"]).not_to include("nonce")
+          end
+
+          it "still scopes the default nonce to the primary policy" do
+            configure_gateway_and_business
+            nonce = SecureHeaders.content_security_policy_script_nonce(request)
+            gateway, business = SecureHeaders.header_hash_for(request)["content-security-policy"]
+
+            expect(gateway).to include("'nonce-#{nonce}'")
+            expect(business).not_to include("nonce")
+          end
+
+          it "raises when targeting a policy that does not exist" do
+            configure_gateway_and_business
+            expect do
+              SecureHeaders.append_content_security_policy_directives(request, { script_src: %w(x) }, :unknown)
+            end.to raise_error(ArgumentError, /no additional CSP policy named :unknown/)
+          end
+
+          it "lets a named override adjust an additional policy for that request only" do
+            configure_gateway_and_business
+            Configuration.override(:widget_mode) do |config|
+              config.csp_policy(:business) do |policy|
+                policy.enforced.append(script_src: %w(widget.example))
+              end
+            end
+
+            SecureHeaders.use_secure_headers_override(request, :widget_mode)
+            overridden = SecureHeaders.header_hash_for(request)["content-security-policy"]
+            expect(overridden.last).to include("widget.example")
+
+            fresh_request = Rack::Request.new("HTTPS" => "on")
+            fresh = SecureHeaders.header_hash_for(fresh_request)["content-security-policy"]
+            expect(fresh.last).not_to include("widget.example")
+          end
+
+          it "does not invent a policy when appending to an opted-out named mode" do
+            Configuration.default do |config|
+              config.csp = { default_src: %w('self'), script_src: %w(primary.example) }
+              config.csp_policy(:business) do |policy|
+                policy.enforced = { default_src: %w('self'), script_src: %w(business.example) }
+                # report-only intentionally left as OPT_OUT
+              end
+            end
+
+            SecureHeaders.append_content_security_policy_directives(
+              request, { script_src: %w(ghost.example) }, [:business, :report_only]
+            )
+            hash = SecureHeaders.header_hash_for(request)
+            expect(hash["content-security-policy-report-only"]).to be_nil
+          end
+
+          it "demonstrates why a script allowed by one policy is still rejected by the intersection" do
+            configure_gateway_and_business
+            hash = SecureHeaders.header_hash_for(request)
+            gateway, business = hash["content-security-policy"]
+
+            # A browser enforces BOTH headers. A resource is allowed only when
+            # it satisfies every delivered policy (an intersection), so the
+            # effective script-src is the intersection of the two lists.
+            gateway_sources = gateway[/script-src (.*)/, 1].split
+            business_sources = business[/script-src (.*)/, 1].split
+            effective_sources = gateway_sources & business_sources
+
+            expect(gateway_sources).to include("gateway.example")
+            expect(business_sources).to include("business.example")
+            expect(effective_sources).not_to include("gateway.example")
+            expect(effective_sources).not_to include("business.example")
+
+            # Therefore a <script src="https://gateway.example/app.js"> passes
+            # the gateway header but violates the business header and is blocked.
+            allowed_by_gateway = gateway_sources.include?("gateway.example")
+            allowed_by_business = business_sources.include?("gateway.example")
+            expect(allowed_by_gateway && allowed_by_business).to be false
+          end
+        end
       end
     end
 

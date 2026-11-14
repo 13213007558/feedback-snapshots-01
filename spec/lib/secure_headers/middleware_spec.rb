@@ -57,6 +57,78 @@ module SecureHeaders
       end
     end
 
+    context "multiple independent CSP policies" do
+      def configure_two_policies
+        reset_config
+        Configuration.default do |config|
+          config.csp = {
+            default_src: %w('self'),
+            script_src: %w(gateway.example)
+          }
+          config.csp_policy(:business) do |policy|
+            policy.enforced = {
+              default_src: %w('self'),
+              script_src: %w(business.example)
+            }
+          end
+        end
+      end
+
+      it "delivers the two enforced policies using Rack's multi-value representation" do
+        configure_two_policies
+        app = lambda { |env| [200, {}, "app"] }
+        _, headers, = Middleware.new(app).call(Rack::MockRequest.env_for("https://localhost"))
+
+        expect(headers["content-security-policy"]).to eq([
+          "default-src 'self'; script-src gateway.example",
+          "default-src 'self'; script-src business.example"
+        ])
+      end
+
+      it "preserves an upstream CSP instead of silently overwriting it" do
+        configure_two_policies
+        upstream_app = lambda do |env|
+          [200, { "content-security-policy" => "default-src upstream.example" }, "app"]
+        end
+        _, headers, = Middleware.new(upstream_app).call(Rack::MockRequest.env_for("https://localhost"))
+
+        expect(headers["content-security-policy"]).to eq([
+          "default-src upstream.example",
+          "default-src 'self'; script-src gateway.example",
+          "default-src 'self'; script-src business.example"
+        ])
+      end
+
+      it "appends to an upstream multi-value CSP header" do
+        configure_two_policies
+        upstream_app = lambda do |env|
+          [200, { "content-security-policy" => ["default-src one.example", "default-src two.example"] }, "app"]
+        end
+        _, headers, = Middleware.new(upstream_app).call(Rack::MockRequest.env_for("https://localhost"))
+
+        expect(headers["content-security-policy"]).to eq([
+          "default-src one.example",
+          "default-src two.example",
+          "default-src 'self'; script-src gateway.example",
+          "default-src 'self'; script-src business.example"
+        ])
+      end
+
+      it "keeps a single configured policy as a scalar header value" do
+        app = lambda { |env| [200, {}, "app"] }
+        _, headers, = Middleware.new(app).call(Rack::MockRequest.env_for("https://localhost"))
+        expect(headers["content-security-policy"]).to be_a(String)
+      end
+
+      it "does not treat a report-only policy as an extra enforced header" do
+        configure_two_policies
+        app = lambda { |env| [200, {}, "app"] }
+        _, headers, = Middleware.new(app).call(Rack::MockRequest.env_for("https://localhost"))
+
+        expect(headers["content-security-policy"].length).to eq(2)
+      end
+    end
+
     context "cookies" do
       before(:each) do
         reset_config

@@ -16,6 +16,7 @@ require "secure_headers/middleware"
 require "secure_headers/railtie"
 require "secure_headers/view_helper"
 require "singleton"
+require "securerandom"
 require "secure_headers/configuration"
 
 # Provide SecureHeaders::OPT_OUT as a config value to disable a given header
@@ -58,23 +59,18 @@ module SecureHeaders
     #
     # additions - a hash containing directives. e.g.
     #    script_src: %w(another-host.com)
+    # target - which policy/mode to modify. Accepts:
+    #    :both, :enforced, :report_only (applied to the primary policy), or the
+    #    name of an additional policy registered with `config.csp_policy`. A
+    #    two-element array [policy_name, mode] targets one mode of a named
+    #    policy. Defaults to :both when both modes of a policy are configured.
     def override_content_security_policy_directives(request, additions, target = nil)
-      config, target = config_and_target(request, target)
+      config, policy_name, mode = resolve_csp_target(request, target)
 
-      if [:both, :enforced].include?(target)
-        if config.csp.opt_out?
-          config.csp = ContentSecurityPolicyConfig.new({})
-        end
-
-        config.csp.merge!(additions)
-      end
-
-      if [:both, :report_only].include?(target)
-        if config.csp_report_only.opt_out?
-          config.csp_report_only = ContentSecurityPolicyReportOnlyConfig.new({})
-        end
-
-        config.csp_report_only.merge!(additions)
+      each_targeted_csp(config, policy_name, mode) do |csp|
+        csp = blank_csp_for(csp) if csp.opt_out?
+        csp.merge!(additions)
+        csp
       end
 
       override_secure_headers_request_config(request, config)
@@ -86,23 +82,23 @@ module SecureHeaders
     #
     # additions - a hash containing directives. e.g.
     #    script_src: %w(another-host.com)
+    # target - see #override_content_security_policy_directives. Appending never
+    # creates a new policy: an opted-out target is left untouched so that calls
+    # cannot silently introduce additional enforced constraints.
     def append_content_security_policy_directives(request, additions, target = nil)
-      config, target = config_and_target(request, target)
+      config, policy_name, mode = resolve_csp_target(request, target)
 
-      if [:both, :enforced].include?(target) && !config.csp.opt_out?
-        config.csp.append(additions)
-      end
-
-      if [:both, :report_only].include?(target) && !config.csp_report_only.opt_out?
-        config.csp_report_only.append(additions)
+      each_targeted_csp(config, policy_name, mode) do |csp|
+        csp.append(additions) unless csp.opt_out?
+        csp
       end
 
       override_secure_headers_request_config(request, config)
     end
 
-    def use_content_security_policy_named_append(request, name)
+    def use_content_security_policy_named_append(request, name, target = nil)
       additions = SecureHeaders::Configuration.named_appends(name).call(request)
-      append_content_security_policy_directives(request, additions)
+      append_content_security_policy_directives(request, additions, target)
     end
 
     # Public: override X-Frame-Options settings for this request.
@@ -151,8 +147,8 @@ module SecureHeaders
 
         # Remove upgrade_insecure_requests from CSP headers for HTTP requests
         # as it doesn't make sense to upgrade requests when the page itself is served over HTTP
-        remove_upgrade_insecure_requests_from_csp!(headers, config.csp)
-        remove_upgrade_insecure_requests_from_csp!(headers, config.csp_report_only)
+        remove_upgrade_insecure_requests_from_csp!(headers, config.all_csp_configs(:enforced))
+        remove_upgrade_insecure_requests_from_csp!(headers, config.all_csp_configs(:report_only))
       end
       headers
     end
@@ -169,20 +165,22 @@ module SecureHeaders
 
     # Public: gets or creates a nonce for CSP.
     #
-    # The nonce will be added to script_src
+    # The nonce will be added to script_src of the targeted policy only. Pass a
+    # policy name (or [name, mode]) to scope it to an additional policy; when
+    # omitted it applies to the primary policy exactly as before.
     #
     # Returns the nonce
-    def content_security_policy_script_nonce(request)
-      content_security_policy_nonce(request, ContentSecurityPolicy::SCRIPT_SRC)
+    def content_security_policy_script_nonce(request, target = nil)
+      content_security_policy_nonce(request, ContentSecurityPolicy::SCRIPT_SRC, target)
     end
 
     # Public: gets or creates a nonce for CSP.
     #
-    # The nonce will be added to style_src
+    # The nonce will be added to style_src of the targeted policy only.
     #
     # Returns the nonce
-    def content_security_policy_style_nonce(request)
-      content_security_policy_nonce(request, ContentSecurityPolicy::STYLE_SRC)
+    def content_security_policy_style_nonce(request, target = nil)
+      content_security_policy_nonce(request, ContentSecurityPolicy::STYLE_SRC, target)
     end
 
     # Public: Retrieves the config for a given header type:
@@ -213,11 +211,74 @@ module SecureHeaders
       end
     end
 
-    def config_and_target(request, target)
+    # Resolves a public target argument into [config, policy_name, mode].
+    #
+    # policy_name - :default for the primary policy, or the name of a policy
+    #               registered through Configuration#csp_policy.
+    # mode - :both, :enforced, or :report_only.
+    def resolve_csp_target(request, target)
       config = config_for(request)
-      target ||= guess_target(config)
-      raise_on_unknown_target(target)
-      [config, target]
+
+      case target
+      when nil
+        [config, Configuration::DEFAULT_CSP_POLICY_NAME, guess_target(config)]
+      when Array
+        policy_name, mode = target
+        mode ||= :enforced
+        validate_named_policy!(config, policy_name)
+        raise_on_unknown_target(mode)
+        [config, policy_name.to_sym, mode]
+      when *Configuration::CSP_MODE_TARGETS
+        [config, Configuration::DEFAULT_CSP_POLICY_NAME, target]
+      when Symbol, String
+        policy_name = target.to_sym
+        validate_named_policy!(config, policy_name)
+        # A bare policy name addresses that policy's enforced constraints; use
+        # [:name, :report_only] or [:name, :both] to touch its other modes.
+        [config, policy_name, :enforced]
+      else
+        raise ArgumentError, "Unrecognized CSP target: #{target.inspect}"
+      end
+    end
+
+    def validate_named_policy!(config, name)
+      return if name.to_sym == Configuration::DEFAULT_CSP_POLICY_NAME
+      unless config.csp_policy_named(name)
+        raise ArgumentError, "no additional CSP policy named :#{name} has been configured"
+      end
+    end
+
+    # Builds a blank config of the same kind as `csp`, preserving whether the
+    # target is enforced or report-only.
+    def blank_csp_for(csp)
+      if csp.respond_to?(:report_only?) && csp.report_only?
+        ContentSecurityPolicyReportOnlyConfig.new({})
+      else
+        ContentSecurityPolicyConfig.new({})
+      end
+    end
+
+    # Yields each concrete CSP config object selected by the resolved target.
+    # The block may return the (possibly new) config object; for the primary
+    # policy the result is written back through its setter so OPT_OUT handling
+    # keeps working exactly as the single-policy interface expects.
+    def each_targeted_csp(config, policy_name, mode)
+      if policy_name == Configuration::DEFAULT_CSP_POLICY_NAME
+        if [:both, :enforced].include?(mode)
+          config.csp = yield(config.csp)
+        end
+        if [:both, :report_only].include?(mode)
+          config.csp_report_only = yield(config.csp_report_only)
+        end
+      else
+        entry = config.csp_policy_named(policy_name)
+        if [:both, :enforced].include?(mode)
+          entry.enforced = yield(entry.enforced)
+        end
+        if [:both, :report_only].include?(mode)
+          entry.report_only = yield(entry.report_only)
+        end
+      end
     end
 
     def guess_target(config)
@@ -234,11 +295,15 @@ module SecureHeaders
 
     # Private: gets or creates a nonce for CSP.
     #
+    # The nonce is added only to the policy selected by `target`. It is never
+    # copied into another independent policy, so requesting a nonce for one
+    # policy cannot relax the constraints enforced by the other policy.
+    #
     # Returns the nonce
-    def content_security_policy_nonce(request, script_or_style)
-      request.env[NONCE_KEY] ||= SecureRandom.base64(32).chomp
+    def content_security_policy_nonce(request, script_or_style, target = nil)
       nonce_key = script_or_style == ContentSecurityPolicy::SCRIPT_SRC ? :script_nonce : :style_nonce
-      append_content_security_policy_directives(request, nonce_key => request.env[NONCE_KEY])
+      request.env[NONCE_KEY] ||= SecureRandom.base64(32).chomp
+      append_content_security_policy_directives(request, { nonce_key => request.env[NONCE_KEY] }, target)
       request.env[NONCE_KEY]
     end
 
@@ -253,18 +318,29 @@ module SecureHeaders
     # Private: removes upgrade_insecure_requests directive from a CSP config
     # if it's present, and updates the headers hash with the modified CSP.
     #
+    # Handles both single-valued (String) and multi-valued (Array) CSP headers,
+    # rewriting every independent policy without merging them together.
+    #
     # headers - the headers hash to update
-    # csp_config - the CSP config to check and potentially modify
+    # csp_configs - the CSP configs backing the header
     #
     # Returns nothing (modifies headers in place)
-    def remove_upgrade_insecure_requests_from_csp!(headers, csp_config)
-      return if csp_config.opt_out?
-      return unless csp_config.directive_value(ContentSecurityPolicy::UPGRADE_INSECURE_REQUESTS)
+    def remove_upgrade_insecure_requests_from_csp!(headers, csp_configs)
+      header_name = nil
+      values = Array(csp_configs).map do |csp_config|
+        next if csp_config.opt_out?
+        next unless csp_config.directive_value(ContentSecurityPolicy::UPGRADE_INSECURE_REQUESTS)
 
-      modified_config = csp_config.dup
-      modified_config.update_directive(ContentSecurityPolicy::UPGRADE_INSECURE_REQUESTS, false)
-      header_name, value = ContentSecurityPolicy.make_header(modified_config)
-      headers[header_name] = value if header_name && value
+        modified_config = csp_config.dup
+        modified_config.update_directive(ContentSecurityPolicy::UPGRADE_INSECURE_REQUESTS, false)
+        name, value = ContentSecurityPolicy.make_header(modified_config)
+        header_name = name
+        value
+      end.compact
+
+      return if values.empty?
+
+      headers[header_name] = values.length == 1 ? values.first : values
     end
   end
 

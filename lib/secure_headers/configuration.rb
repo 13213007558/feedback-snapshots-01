@@ -183,8 +183,23 @@ module SecureHeaders
     # The list of attributes that must respond to a `validate_config!` method
     VALIDATABLE_ATTRIBUTES = CONFIG_ATTRIBUTES
 
+    # CSP is produced as potentially multi-valued headers (one value per
+    # independent policy) and is handled separately from scalar headers.
+    CSP_ATTRIBUTES = [:csp, :csp_report_only].freeze
+
     # The list of attributes that must respond to a `make_header` method
     HEADERABLE_ATTRIBUTES = (CONFIG_ATTRIBUTES - [:cookies]).freeze
+
+    # Scalar, single-valued headers. The CSP pair is generated on its own so
+    # that multiple independent policies survive as separate header values.
+    SCALAR_HEADERABLE_ATTRIBUTES = (HEADERABLE_ATTRIBUTES - CSP_ATTRIBUTES).freeze
+
+    # The primary policy always answers to this name. The legacy single-policy
+    # `csp` / `csp_report_only` configuration maps onto this entry.
+    DEFAULT_CSP_POLICY_NAME = :default
+    # Built-in selectors that describe which mode of a policy to modify. Any
+    # other symbol is interpreted as the name of an additional CSP policy.
+    CSP_MODE_TARGETS = [:both, :enforced, :report_only].freeze
 
     attr_writer(*(CONFIG_ATTRIBUTES_TO_HEADER_CLASSES.reject { |key| [:csp, :csp_report_only].include?(key) }.keys))
 
@@ -205,6 +220,7 @@ module SecureHeaders
       @clear_site_data = nil
       @csp = nil
       @csp_report_only = nil
+      @csp_policies = {}
       @hsts = nil
       @x_content_type_options = nil
       @x_download_options = nil
@@ -229,6 +245,7 @@ module SecureHeaders
       copy.cookies = self.class.send(:deep_copy_if_hash, @cookies)
       copy.csp = @csp.dup if @csp
       copy.csp_report_only = @csp_report_only.dup if @csp_report_only
+      copy.instance_variable_set(:@csp_policies, duplicate_csp_policies)
       copy.x_content_type_options = @x_content_type_options
       copy.hsts = @hsts
       copy.x_frame_options = @x_frame_options
@@ -240,6 +257,48 @@ module SecureHeaders
       copy.referrer_policy = @referrer_policy
       copy.reporting_endpoints = self.class.send(:deep_copy_if_hash, @reporting_endpoints)
       copy
+    end
+
+    # Public: register an additional, independently enforced CSP.
+    #
+    # name - a symbol uniquely identifying this policy. `:default`, `:both`,
+    #        `:enforced` and `:report_only` are reserved.
+    # block - receives a CspPolicyEntry so the enforced and report-only
+    #         configs can be configured together.
+    #
+    # Returns the configured CspPolicyEntry.
+    def csp_policy(name, &block)
+      name = name.to_sym
+      if name == DEFAULT_CSP_POLICY_NAME || CSP_MODE_TARGETS.include?(name)
+        raise ArgumentError, ":#{name} is reserved and cannot name an additional CSP policy"
+      end
+
+      default_config = ContentSecurityPolicyConfig.new(ContentSecurityPolicyConfig::DEFAULT)
+      entry = (@csp_policies[name] ||= CspPolicyEntry.new(default_config))
+      block.call(entry) if block_given?
+      entry
+    end
+
+    def csp_policies
+      @csp_policies.dup
+    end
+
+    def csp_policy_named(name)
+      @csp_policies[name.to_sym]
+    end
+
+    # Public: every independent CSP entry, starting with the primary policy and
+    # followed by the additionally registered policies in registration order.
+    def csp_entries
+      entries = [[DEFAULT_CSP_POLICY_NAME, primary_csp_entry]]
+      @csp_policies.each { |name, entry| entries << [name, entry] }
+      entries
+    end
+
+    # Public: the concrete CSP config objects for one mode across every
+    # independent policy, in the same order the headers are emitted.
+    def all_csp_configs(mode)
+      csp_entries.map { |_name, entry| mode == :report_only ? entry.report_only : entry.enforced }
     end
 
     # Public: Apply a named override to the current config
@@ -256,14 +315,37 @@ module SecureHeaders
 
     def generate_headers
       headers = {}
-      HEADERABLE_ATTRIBUTES.each do |attr|
+      SCALAR_HEADERABLE_ATTRIBUTES.each do |attr|
         klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
         header_name, value = klass.make_header(instance_variable_get("@#{attr}"))
         if header_name && value
           headers[header_name] = value
         end
       end
+      append_csp_headers(headers)
       headers
+    end
+
+    # Builds the CSP headers for every independent policy. Each policy keeps its
+    # own enforced and report-only value. When more than one value targets the
+    # same header name, the values are returned as an array (Rack's multi-value
+    # representation) instead of being joined into one widened policy.
+    #
+    # Returns a hash whose CSP values are either a String (single policy) or an
+    # Array of Strings (multiple independent policies).
+    def csp_header_hash
+      headers = Hash.new { |hash, key| hash[key] = [] }
+      csp_entries.each do |_name, entry|
+        [[:enforced, CspPolicyEntry::ENFORCED_HEADER_NAME],
+         [:report_only, CspPolicyEntry::REPORT_ONLY_HEADER_NAME]].each do |mode, header_name|
+          pair = entry.header(mode)
+          headers[header_name] << pair.last if pair
+        end
+      end
+
+      headers.each_with_object({}) do |(header_name, values), result|
+        result[header_name] = values.length == 1 ? values.first : values
+      end
     end
 
     def opt_out(header)
@@ -283,6 +365,10 @@ module SecureHeaders
       VALIDATABLE_ATTRIBUTES.each do |attr|
         klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
         klass.validate_config!(instance_variable_get("@#{attr}"))
+      end
+
+      @csp_policies.each do |name, entry|
+        validate_csp_entry!(name, entry)
       end
     end
 
@@ -321,6 +407,42 @@ module SecureHeaders
         @csp_report_only = ContentSecurityPolicyReportOnlyConfig.new(new_csp)
       else
         raise ArgumentError, "Must provide either an existing CSP config or a CSP config hash"
+      end
+    end
+
+    private
+
+    # The primary policy entry backed by the legacy `csp` / `csp_report_only`
+    # attributes so that the single-policy interface stays unchanged.
+    def primary_csp_entry
+      CspPolicyEntry.new(
+        @csp.respond_to?(:opt_out?) && @csp.opt_out? ? OPT_OUT : @csp,
+        @csp_report_only.respond_to?(:opt_out?) && @csp_report_only.opt_out? ? OPT_OUT : @csp_report_only
+      )
+    end
+
+    def duplicate_csp_policies
+      @csp_policies.each_with_object({}) do |(name, entry), result|
+        result[name] = entry.dup
+      end
+    end
+
+    def validate_csp_entry!(name, entry)
+      unless entry.enforced.opt_out?
+        ContentSecurityPolicy.validate_config!(entry.enforced)
+      end
+      unless entry.report_only.opt_out?
+        ContentSecurityPolicy.validate_config!(entry.report_only)
+      end
+    rescue ContentSecurityPolicyConfigError => error
+      raise ContentSecurityPolicyConfigError, "CSP policy :#{name} is invalid: #{error.message}"
+    end
+
+    # Merges the (potentially multi-valued) CSP headers into the scalar header
+    # hash produced for the other headers.
+    def append_csp_headers(headers)
+      csp_header_hash.each do |header_name, value|
+        headers[header_name] = value
       end
     end
   end
