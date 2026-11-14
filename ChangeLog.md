@@ -1,3 +1,19 @@
+### Unreleased
+
+* Preserve the platform (`ruby`, `x86_64-linux`, `arm64-darwin`, ...) and
+  supply-source (rubygems, git, path) identity of every locked gem instance
+  during vulnerability matching, so same-named variants are audited and
+  reported separately instead of being collapsed.
+* Added optional `affected_platforms` and `affected_sources` advisory fields.
+  When present they only narrow which locked instances are affected and the
+  remaining locked variants are reported as explicitly unaffected; advisories
+  without these fields keep their previous, unrestricted meaning.
+* Git- and path-sourced gems that match an advisory by name and version are
+  now reported as inconclusive when their contents cannot be proven identical
+  to the published package, instead of being treated as vulnerable or clear.
+* Added `unaffected_gem` and `inconclusive_gem` result types (with per-instance
+  evidence) to the machine-readable report.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.

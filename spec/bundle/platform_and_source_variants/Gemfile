@@ -1,0 +1,8 @@
+source 'https://rubygems.org'
+
+gem 'platform-gem', '1.2.3'
+gem 'source-gem', '1.2.3'
+gem 'legacy-gem', '1.2.3'
+
+gem 'source-gem', '1.2.3', git: 'https://github.com/example/source-gem.git'
+gem 'source-gem', '1.2.3', path: 'vendor/internal-gem'

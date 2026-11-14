@@ -36,7 +36,9 @@ module Bundler
                                 :osvdb,
                                 :ghsa,
                                 :unaffected_versions,
-                                :patched_versions)
+                                :patched_versions,
+                                :affected_platforms,
+                                :affected_sources)
 
       #
       # Loads the advisory from a YAML file.
@@ -69,6 +71,16 @@ module Bundler
           end
         }
 
+        parse_platforms = lambda { |platforms|
+          Array(platforms).map { |platform| platform.to_s }
+        }
+
+        parse_sources = lambda { |sources|
+          Array(sources).map do |source|
+            source.kind_of?(Hash) ? source.transform_keys(&:to_s) : source.to_s
+          end
+        }
+
         return new(
           path,
           id,
@@ -83,7 +95,9 @@ module Bundler
           data['osvdb'],
           data['ghsa'],
           parse_versions[data['unaffected_versions']],
-          parse_versions[data['patched_versions']]
+          parse_versions[data['patched_versions']],
+          parse_platforms[data['affected_platforms']],
+          parse_sources[data['affected_sources']]
         )
       end
 
@@ -203,6 +217,100 @@ module Bundler
       end
 
       #
+      # Specifies whether the advisory explicitly restricts the platforms it
+      # affects.
+      #
+      # @return [Boolean]
+      #
+      def platform_restricted?
+        Array(affected_platforms).any?
+      end
+
+      #
+      # Specifies whether the advisory explicitly restricts the supply sources
+      # it affects.
+      #
+      # @return [Boolean]
+      #
+      def source_restricted?
+        Array(affected_sources).any?
+      end
+
+      #
+      # Determines whether the locked gem's platform is within the advisory's
+      # affected platform scope. When the advisory does not declare any
+      # platform restriction every platform is in scope, preserving the meaning
+      # of advisories that predate platform metadata.
+      #
+      # @param [LockedGem] locked_gem
+      #
+      # @return [Boolean]
+      #
+      def affects_platform?(locked_gem)
+        return true unless platform_restricted?
+
+        affected_platforms.include?(locked_gem.platform)
+      end
+
+      #
+      # Determines whether the locked gem's supply source is within the
+      # advisory's affected source scope. When the advisory does not declare
+      # any source restriction every source is in scope, preserving the
+      # meaning of advisories that predate source metadata.
+      #
+      # @param [LockedGem] locked_gem
+      #
+      # @return [Boolean]
+      #
+      def affects_source?(locked_gem)
+        return true unless source_restricted?
+
+        affected_sources.any? do |restriction|
+          source_restriction_matches?(restriction, locked_gem)
+        end
+      end
+
+      #
+      # Determines whether the platform/source scope of the advisory applies to
+      # the locked gem instance. Restrictions only narrow the applicable
+      # instances; they never widen them.
+      #
+      # @param [LockedGem] locked_gem
+      #
+      # @return [Boolean]
+      #
+      def applies_to?(locked_gem)
+        affects_platform?(locked_gem) && affects_source?(locked_gem)
+      end
+
+      #
+      # Classifies a locked gem instance against the advisory while preserving
+      # its platform and supply-source identity.
+      #
+      # Git and path sources cannot be proven identical to the published public
+      # package the advisory describes, so a matching name and version only
+      # ever yields `:unknown` for them rather than a positive or a negative
+      # security conclusion.
+      #
+      # @param [LockedGem] locked_gem
+      #
+      # @return [:affected, :unaffected, :unknown]
+      #
+      # @see Scanner
+      #
+      def verdict_for(locked_gem)
+        unless vulnerable?(locked_gem.version)
+          return :unaffected
+        end
+
+        if locked_gem.unverifiable_source?
+          return :unknown
+        end
+
+        applies_to?(locked_gem) ? :affected : :unaffected
+      end
+
+      #
       # Compares two advisories.
       #
       # @param [Advisory] other
@@ -220,11 +328,53 @@ module Bundler
       #
       def to_h
         super.merge({
-          criticality: criticality
+          criticality: criticality,
+          affected_platforms: affected_platforms,
+          affected_sources: affected_sources
         })
       end
 
       alias to_s id
+
+      private
+
+      #
+      # Determines whether a single affected-sources restriction matches a
+      # locked gem's supply source.
+      #
+      # A plain string restriction (for example `rubygems`, `git`, `path`)
+      # matches every instance of that source type. A Hash restriction may add
+      # a `uri` for git sources or a `path` for path sources to scope the
+      # restriction to a specific origin.
+      #
+      # @param [String, Hash] restriction
+      # @param [LockedGem] locked_gem
+      #
+      # @return [Boolean]
+      #
+      def source_restriction_matches?(restriction,locked_gem)
+        if restriction.kind_of?(Hash)
+          type = restriction['type'].to_s
+
+          return false unless locked_gem.source_type.to_s == type
+
+          if restriction.key?('uri')
+            return false unless locked_gem.source['uri'].to_s == restriction['uri'].to_s
+          end
+
+          if restriction.key?('path')
+            return false unless locked_gem.source['path'].to_s == restriction['path'].to_s
+          end
+
+          if restriction.key?('remote')
+            return false unless Array(locked_gem.source['remotes']).include?(restriction['remote'].to_s)
+          end
+
+          true
+        else
+          locked_gem.source_type.to_s == restriction.to_s
+        end
+      end
 
     end
   end

@@ -16,6 +16,7 @@
 #
 
 require 'bundler/audit/results/result'
+require 'bundler/audit/locked_gem'
 
 require 'uri'
 
@@ -30,7 +31,7 @@ module Bundler
 
         # The specification of the vulnerable gem.
         #
-        # @return [Gem::Specification]
+        # @return [LockedGem, Gem::Specification]
         attr_reader :gem
 
         # The advisory documenting the vulnerability.
@@ -41,8 +42,9 @@ module Bundler
         #
         # Initializes the unpatched gem result.
         #
-        # @param [Gem::Specification] gem
-        #   The specification of the vulnerable gem.
+        # @param [LockedGem, Gem::Specification] gem
+        #   The locked gem instance (or a raw specification) of the vulnerable
+        #   gem.
         #
         # @param [Advisory] advisory
         #   The advisory documenting the vulnerability.
@@ -50,6 +52,18 @@ module Bundler
         def initialize(gem,advisory)
           @gem      = gem
           @advisory = advisory
+        end
+
+        #
+        # The locked gem identity, wrapping a raw specification when needed.
+        #
+        # @return [LockedGem]
+        #
+        def locked_gem
+          @locked_gem ||=
+            if @gem.kind_of?(LockedGem) then @gem
+            else                            LockedGem.from_spec(@gem)
+            end
         end
 
         #
@@ -84,10 +98,7 @@ module Bundler
         def to_h
           {
             type: :unpatched_gem,
-            gem:  {
-              name: @gem.name,
-              version: @gem.version
-            },
+            gem:  locked_gem.to_h,
             advisory: @advisory.to_h
           }
         end

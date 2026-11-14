@@ -43,7 +43,11 @@ module Bundler
               when Results::InsecureSource
                 print_warning "Insecure Source URI found: #{result.source}"
               when Results::UnpatchedGem
-                print_advisory result.gem, result.advisory
+                print_advisory result.locked_gem, result.advisory
+              when Results::InconclusiveGem
+                print_inconclusive result.gem, result.advisory, result.evidence
+              when Results::UnaffectedGem
+                print_unaffected result.gem, result.advisory, result.reason
               end
             end
 
@@ -62,13 +66,43 @@ module Bundler
             say message, :yellow
           end
 
-          def print_advisory(gem, advisory)
+          def print_identity(gem)
             say "Name: ", :red
             say gem.name
 
             say "Version: ", :red
             say gem.version
 
+            say "Platform: ", :red
+            say gem.platform
+
+            say "Source: ", :red
+            say gem.source_type
+            say "  #{gem.source.inspect}"
+          end
+
+          def print_inconclusive(gem, advisory, evidence)
+            say "Inconclusive: ", :yellow
+            say "vulnerability cannot be confirmed for this locked instance"
+
+            print_identity gem
+
+            say "Advisory: ", :yellow
+            say advisory.id
+
+            say "Reason: ", :yellow
+            say evidence[:message]
+
+            say
+          end
+
+          def print_unaffected(gem, advisory, reason)
+            say "Not affected: ", :green
+            say "#{gem.name} #{gem.version} (#{gem.platform}, #{gem.source_type}) is outside the scope of #{advisory.id} (#{reason})"
+          end
+
+          def print_advisory(gem, advisory)
+            print_identity gem
             if advisory.cve
               say "CVE: ", :red
               say advisory.cve_id

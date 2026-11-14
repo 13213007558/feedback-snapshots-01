@@ -18,9 +18,13 @@
 require 'bundler'
 require 'bundler/audit/configuration'
 require 'bundler/audit/database'
+require 'bundler/audit/locked_gem'
+require 'bundler/audit/lockfile'
 require 'bundler/audit/report'
 require 'bundler/audit/results/insecure_source'
 require 'bundler/audit/results/unpatched_gem'
+require 'bundler/audit/results/unaffected_gem'
+require 'bundler/audit/results/inconclusive_gem'
 require 'bundler/lockfile_parser'
 
 require 'ipaddr'
@@ -48,6 +52,12 @@ module Bundler
       #
       # @return [Bundler::LockfileParser]
       attr_reader :lockfile
+
+      # The audit-specific lockfile reader that preserves every platform and
+      # supply-source variant.
+      #
+      # @return [Lockfile]
+      attr_reader :audit_lockfile
 
       # The configuration loaded from the `.bundler-audit.yml` file from the
       # project.
@@ -85,6 +95,8 @@ module Bundler
         end
 
         @lockfile = LockfileParser.new(File.read(gemfile_lock_path))
+
+        @audit_lockfile = Audit::Lockfile.parse(File.read(gemfile_lock_path))
 
         config_dot_file_full_path = File.absolute_path(config_dot_file, @root)
 
@@ -224,17 +236,65 @@ module Bundler
                    config.ignore
                  end
 
-        @lockfile.specs.each do |gem|
-          @database.check_gem(gem) do |advisory|
-            is_ignored = ignore.intersect?(advisory.identifiers.to_set)
-            next if is_ignored
+        @audit_lockfile.gems.each do |locked_gem|
+          @database.advisories_for(locked_gem.name) do |advisory|
+            next if ignore.intersect?(advisory.identifiers.to_set)
 
-            yield Results::UnpatchedGem.new(gem,advisory)
+            classify(locked_gem,advisory).each do |result|
+              yield result
+            end
           end
         end
       end
 
       private
+
+      #
+      # Classifies a single locked gem instance against an advisory, preserving
+      # the platform and supply-source identity of every locked variant.
+      #
+      # @param [LockedGem] locked_gem
+      # @param [Advisory] advisory
+      #
+      # @return [Array<Results::Result>]
+      #
+      def classify(locked_gem,advisory)
+        case advisory.verdict_for(locked_gem)
+        when :affected
+          [Results::UnpatchedGem.new(locked_gem,advisory)]
+        when :unknown
+          [Results::InconclusiveGem.new(locked_gem,advisory)]
+        when :unaffected
+          unaffected_result(locked_gem,advisory)
+        else
+          []
+        end
+      end
+
+      #
+      # Builds the explicitly unaffected result(s) for an instance. Version
+      # exclusions keep the historical behavior (no result), while platform and
+      # supply-source exclusions are reported so the other locked variants of
+      # the gem remain visible with their own evidence.
+      #
+      # @param [LockedGem] locked_gem
+      # @param [Advisory] advisory
+      #
+      # @return [Array<Results::Result>]
+      #
+      def unaffected_result(locked_gem,advisory)
+        unless advisory.vulnerable?(locked_gem.version)
+          return []
+        end
+
+        reason = if advisory.affects_platform?(locked_gem)
+                   :source
+                 else
+                   :platform
+                 end
+
+        [Results::UnaffectedGem.new(locked_gem,advisory,reason)]
+      end
 
       #
       # Determines whether a source is internal.

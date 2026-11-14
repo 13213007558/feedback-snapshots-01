@@ -17,3 +17,5 @@
 
 require 'bundler/audit/results/insecure_source'
 require 'bundler/audit/results/unpatched_gem'
+require 'bundler/audit/results/unaffected_gem'
+require 'bundler/audit/results/inconclusive_gem'

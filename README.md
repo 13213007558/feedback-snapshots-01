@@ -14,6 +14,14 @@ Patch-level verification for [bundler].
 ## Features
 
 * Checks for vulnerable versions of gems in `Gemfile.lock`.
+* Preserves the platform (`ruby`, `x86_64-linux`, `arm64-darwin`, ...) and
+  supply-source (rubygems, git, path) identity of every locked gem instance,
+  so same-named variants are audited separately instead of being collapsed.
+* Honors advisories that restrict the affected platforms or supply sources;
+  such restrictions only narrow which instances are affected and never remove
+  the other locked variants from the report.
+* Reports git- and path-sourced gems as inconclusive when their contents
+  cannot be proven identical to the published package the advisory describes.
 * Checks for insecure gem sources (`http://` and `git://`).
 * Allows ignoring certain advisories that have been manually worked around.
 * Prints advisory information.

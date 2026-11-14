@@ -52,10 +52,12 @@ module Bundler
           end
 
           def print_xml_testsuite(report)
+            failure_count = report.insecure_sources.size + report.unpatched_gems.size
+
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
               %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{failure_count}">}
             )
 
             yield
@@ -79,17 +81,47 @@ module Bundler
                 %{    </testcase>}
               )
             when Results::UnpatchedGem
+              gem = result.locked_gem
               say_xml(
-                %{    <testcase id="#{xml(result.gem.name)}" name="#{xml(bundle_title(result))}">},
+                %{    <testcase id="#{xml(gem.name)}" name="#{xml(bundle_title(result))}">},
                 %{      <failure message="#{xml(result.advisory.title)}" type="#{xml(result.advisory.criticality)}">},
-                %{        Name: #{xml(result.gem.name)}},
-                %{        Version: #{xml(result.gem.version)}},
+                %{        Name: #{xml(gem.name)}},
+                %{        Version: #{xml(gem.version)}},
+                %{        Platform: #{xml(gem.platform)}},
+                %{        Source: #{xml(gem.source_type)}},
                 %{        Advisory: #{xml(advisory_ref(result.advisory))}},
                 %{        Criticality: #{xml(advisory_criticality(result.advisory))}},
                 %{        URL: #{xml(result.advisory.url)}},
                 %{        Title: #{xml(result.advisory.title)}},
                 %{        Solution: #{xml(advisory_solution(result.advisory))}},
                 %{      </failure>},
+                %{    </testcase>}
+              )
+            when Results::InconclusiveGem
+              gem = result.gem
+              say_xml(
+                %{    <testcase id="#{xml(gem.name)}" name="#{xml(bundle_title(result))}">},
+                %{      <skipped message="#{xml(result.evidence[:message])}">},
+                %{        Name: #{xml(gem.name)}},
+                %{        Version: #{xml(gem.version)}},
+                %{        Platform: #{xml(gem.platform)}},
+                %{        Source: #{xml(gem.source_type)}},
+                %{        Advisory: #{xml(advisory_ref(result.advisory))}},
+                %{      </skipped>},
+                %{    </testcase>}
+              )
+            when Results::UnaffectedGem
+              gem = result.gem
+              say_xml(
+                %{    <testcase id="#{xml(gem.name)}" name="#{xml(bundle_title(result))}">},
+                %{      <system-out>},
+                %{        Name: #{xml(gem.name)}},
+                %{        Version: #{xml(gem.version)}},
+                %{        Platform: #{xml(gem.platform)}},
+                %{        Source: #{xml(gem.source_type)}},
+                %{        Advisory: #{xml(advisory_ref(result.advisory))}},
+                %{        Not affected: #{xml(result.reason)}},
+                %{      </system-out>},
                 %{    </testcase>}
               )
             end

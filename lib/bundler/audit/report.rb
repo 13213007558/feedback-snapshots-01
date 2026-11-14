@@ -37,6 +37,16 @@ module Bundler
       # @return [Array<Results::UnpatchedGems>]
       attr_reader :unpatched_gems
 
+      # The explicitly unaffected gems results.
+      #
+      # @return [Array<Results::UnaffectedGem>]
+      attr_reader :unaffected_gems
+
+      # The gems whose vulnerability could not be proven either way.
+      #
+      # @return [Array<Results::InconclusiveGem>]
+      attr_reader :inconclusive_gems
+
       #
       # Initializes the report.
       #
@@ -49,6 +59,8 @@ module Bundler
         @results = []
         @insecure_sources = []
         @unpatched_gems = []
+        @unaffected_gems = []
+        @inconclusive_gems = []
 
         results.each { |result| self << result }
       end
@@ -79,6 +91,10 @@ module Bundler
           @insecure_sources << result
         when Results::UnpatchedGem
           @unpatched_gems << result
+        when Results::UnaffectedGem
+          @unaffected_gems << result
+        when Results::InconclusiveGem
+          @inconclusive_gems << result
         end
 
         return self
@@ -87,10 +103,13 @@ module Bundler
       #
       # Determines if there were vulnerabilities found.
       #
+      # Explicitly unaffected instances and inconclusive (unverifiable source)
+      # instances do not by themselves count as confirmed vulnerabilities.
+      #
       # @return [Boolean]
       #
       def vulnerable?
-        !@results.empty?
+        !(@insecure_sources.empty? && @unpatched_gems.empty?)
       end
 
       #
