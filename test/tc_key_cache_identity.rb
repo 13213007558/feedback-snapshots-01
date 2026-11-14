@@ -127,7 +127,7 @@ class KeyCacheIdentityTest < Minitest::Test
     malformed = Dnsruby::RR.create(@a.to_s)
     # These bytes have the same key tag but are not a valid P-256 point. Decode
     # from wire to exercise lazy public-key parsing without an OpenSSL cache.
-    malformed.key = Base64.strict_encode64("\0" * 62 + [@a.key_tag - 1038].pack('n'))
+    malformed.instance_variable_set(:@key, "\0" * 62 + [@a.key_tag - 1038].pack('n'))
     message = Dnsruby::Message.new
     message.add_answer(malformed)
     malformed = Dnsruby::Message.decode(message.encode).answer.first
@@ -296,6 +296,97 @@ class KeyCacheIdentityTest < Minitest::Test
       assert_empty(@verifier.trusted_keys)
       assert_raises(Dnsruby::VerifyError) { @verifier.verify(records) }
     end
+  end
+
+  def test_cached_keys_are_isolated_from_caller_and_reader_mutation
+    @cache.add_key_with_expiration(@a, @now.to_i + 120)
+    trusted = Dnsruby::KeyCache.key_identity(@a)
+    tampered = @cache.keys.first
+    tampered.name = 'unrelated.invalid.'
+    tampered.key = Base64.strict_encode64(@b.key)
+    tampered.algorithm = 8
+    assert_equal([trusted], @cache.keys.map { |key| Dnsruby::KeyCache.key_identity(key) })
+
+    @cache.add(signed(@record, @a, 0))
+    assert_equal([Dnsruby::KeyCache.key_identity(@a)],
+      @cache.keys.map { |key| Dnsruby::KeyCache.key_identity(key) })
+  end
+
+  def test_caller_mutation_cannot_make_second_key_inherit_anchor_trust
+    records_a, records_b = signed(@a, @a, 0), signed(@b, @b, 1)
+    @verifier.add_trust_anchor(@a)
+    assert_equal([@a], @verifier.trust_anchors)
+    exposed = @verifier.trust_anchors.first
+    exposed.name = 'unrelated.invalid.'
+    exposed.key = Base64.strict_encode64(@b.key)
+    exposed.algorithm = 8
+    assert_equal([@a], @verifier.trust_anchors)
+    assert_equal([Dnsruby::KeyCache.key_identity(@a)],
+      @verifier.get_keys_to_check.map { |key| Dnsruby::KeyCache.key_identity(key) })
+
+    # The caller keeps editing the very record it configured as the anchor.
+    expected = Dnsruby::KeyCache.key_identity(@a)
+    @a.name = 'unrelated.invalid.'
+    @a.key = Base64.strict_encode64(@b.key)
+    @a.algorithm = 8
+    assert_equal([expected],
+      @verifier.get_keys_to_check.map { |key| Dnsruby::KeyCache.key_identity(key) })
+    assert_raises(Dnsruby::VerifyError) { @verifier.verify(records_b) }
+    assert(@verifier.verify(records_a))
+  end
+
+  def test_normal_update_and_removal_still_use_the_configured_key_identity
+    @verifier.add_trust_anchor(@a)
+    [signed(@record, @a, 0), signed(@a, @a, 0)].each do |records|
+      assert(@verifier.verify(records))
+    end
+    assert(@verifier.verify(signed(@record, @a, 0)))
+
+    equivalent = Dnsruby::RR.create(@a.to_s)
+    equivalent.ttl += 1
+    refute_same(@a, @verifier.trust_anchors.first)
+    assert_equal(@a, @verifier.remove_trust_anchor(equivalent))
+    assert_empty(@verifier.trust_anchors)
+    assert_empty(@verifier.trusted_keys)
+    assert_raises(Dnsruby::VerifyError) { @verifier.verify(signed(@a, @a, 0)) }
+  end
+
+  def test_caller_record_remains_editable_after_storage_and_reads
+    @verifier.add_trust_anchor(@a)
+    assert_equal(@a, @verifier.trust_anchors.first)
+    @a.ttl = 900
+    assert_equal(900, @a.ttl)
+    assert_equal(300, @verifier.trust_anchors.first.ttl)
+    assert(@verifier.verify(signed(@record, @a, 0)))
+
+    ds = Dnsruby::RR::DS.from_key(@b, 2)
+    @verifier.add_trust_anchor(ds)
+    ds.key_tag = 1
+    ds.digest = '00'
+    assert_equal(@b.key_tag, @verifier.trust_anchors.find { |anchor| anchor.type == Dnsruby::Types.DS }.key_tag)
+    assert_equal([Dnsruby::KeyCache.key_identity(@a)],
+      @verifier.get_keys_to_check.map { |key| Dnsruby::KeyCache.key_identity(key) })
+  end
+
+  def test_rewriting_key_bytes_or_algorithm_discards_derived_crypto_state
+    key = Dnsruby::RR.create(@a.to_s)
+    original = key.public_key
+    key.key = Base64.strict_encode64(@b.key)
+    refute_same(original, key.public_key)
+    refute_equal(original.to_der, key.public_key.to_der)
+
+    ec_key = Dnsruby::RR.create(@a.to_s)
+    stale = ec_key.public_key
+    ec_key.algorithm = Dnsruby::Algorithms.ECDSAP384SHA384
+    assert_raises(OpenSSL::PKey::EC::Point::Error) { ec_key.public_key }
+    refute_same(stale, ec_key.instance_variable_get(:@public_key))
+
+    rsa = OpenSSL::PKey::RSA.generate(1024)
+    rsa_key = Dnsruby::RR.create("rsa.invalid. 300 IN DNSKEY 257 3 8 #{Base64.strict_encode64([rsa.e.to_s(2).bytesize].pack('C') + rsa.e.to_s(2) + rsa.n.to_s(2))}")
+    rsa_public = rsa_key.public_key
+    rsa_key.algorithm = Dnsruby::Algorithms.DSA
+    assert_raises(OpenSSL::PKey::PKeyError, Dnsruby::DecodeError) { rsa_key.public_key }
+    refute_same(rsa_public, rsa_key.instance_variable_get(:@public_key))
   end
 
   private

@@ -56,8 +56,26 @@ module Dnsruby
         self.flags=ZONE_KEY
         @algorithm=Algorithms.RSASHA1
         @public_key = nil
+        @key_length = nil
         @key_tag = nil
         @make_new_key_tag = true
+      end
+
+      # Compare DNSKEY identity, not lazily derived OpenSSL objects. Two records
+      # parsed from the same DNSKEY must remain equal regardless of whether
+      # either caller has already asked for its public key.
+      def ==(other)
+        return false unless other.instance_of?(self.class)
+        name.canonical == other.name.canonical &&
+          klass == other.klass && type == other.type &&
+          flags == other.flags && protocol == other.protocol &&
+          algorithm == other.algorithm && key == other.key
+      end
+      alias eql? ==
+
+      def hash # :nodoc:
+        [name.canonical, klass.code, type.code, flags, protocol,
+         algorithm.code, key].hash
       end
 
       def protocol=(p)
@@ -80,6 +98,7 @@ module Dnsruby
         rescue ArgumentError => e
           raise DecodeError.new(e)
         end
+        invalidate_public_key
         get_new_key_tag
       end
 
@@ -292,9 +311,10 @@ module Dnsruby
 
       def key=(key_text)
         begin
-          key_text.gsub!(/\n/, "")
-          key_text.gsub!(/ /, "")
+          key_text = key_text.gsub(/\n/, "")
+          key_text = key_text.gsub(/ /, "")
           @key=Base64.decode64(key_text)
+          invalidate_public_key
           public_key
           get_new_key_tag
         rescue Exception => e
@@ -302,6 +322,15 @@ module Dnsruby
           raise ArgumentError.new("Key #{key_text} invalid")
         end
       end
+
+      # The OpenSSL object and key length are derived from +key+ and
+      # +algorithm+. Drop them whenever either input changes so a verifier
+      # cannot keep treating a rewritten record as the key it authenticated.
+      def invalidate_public_key #:nodoc: all
+        @public_key = nil
+        @key_length = nil
+      end
+      private :invalidate_public_key
 
       def public_key
         if (!@public_key)

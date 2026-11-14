@@ -65,7 +65,12 @@ class DnssecTrustRacesTest < Minitest::Test
       assert(verifier.verify(@ds_set)) if discovered
       # Stop after a real digest match, while check_ds_stores still owns its old
       # snapshot; removal must not block on cryptographic or network work.
-      pause_after(discovered ? @ds_set.rrs.first : @ds, :check_key, -> { revoke(operation, anchor) }) do
+      stored_ds = if discovered
+        verifier.instance_variable_get(:@discovered_ds_store).first.rrs.first
+      else
+        verifier.instance_variable_get(:@configured_ds_store).first
+      end
+      pause_after(stored_ds, :check_key, -> { revoke(operation, anchor) }) do
         verifier.check_ds_stores(@child_keys)
       end
       assert_empty(verifier.trusted_keys)

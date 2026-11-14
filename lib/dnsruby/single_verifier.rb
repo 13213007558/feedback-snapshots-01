@@ -135,12 +135,13 @@ module Dnsruby
     def add_trust_anchor_with_expiration(k, expiration)
       @trust_mutex.synchronize do
         if (k.type == Types.DNSKEY)
-          @trust_anchors.add_key_with_expiration(k, expiration)
-          identity = KeyCache.key_identity(k)
+          stored = KeyCache.copy_record(k)
+          @trust_anchors.add_key_with_expiration(stored, expiration)
+          identity = KeyCache.key_identity(stored)
           @configured_dnskey_identities[identity] = [@configured_dnskey_identities[identity] || expiration, expiration].max
-          TheLog.info("Adding trust anchor for #{k.name}")
+          TheLog.info("Adding trust anchor for #{stored.name}")
         elsif ((k.type == Types.DS) || ((k.type == Types.DLV) && (@verifier_type == VerifierType::DLV)))
-          @configured_ds_store.push(k)
+          @configured_ds_store.push(KeyCache.copy_record(k))
         end
       end
     end
@@ -172,7 +173,7 @@ module Dnsruby
     def trust_anchors
       @trust_mutex.synchronize do
         expire_trust_anchors
-        @trust_anchors.keys + @configured_ds_store
+        @trust_anchors.keys + @configured_ds_store.map { |ds| KeyCache.copy_record(ds) }
       end
     end
 
@@ -247,7 +248,7 @@ module Dnsruby
     end
 
     def add_root_ds(ds)
-      @trust_mutex.synchronize { @configured_ds_store.push(ds) }
+      @trust_mutex.synchronize { @configured_ds_store.push(KeyCache.copy_record(ds)) }
     end
 
     #  Clear learned trust and configured DS/DLV anchors, retaining DNSKEY anchors.
@@ -270,7 +271,8 @@ module Dnsruby
     def trusted_keys
       @trust_mutex.synchronize do
         expire_trust_anchors
-        @trusted_keys.keys + @configured_ds_store + @discovered_ds_store.flat_map(&:rrs)
+        @trusted_keys.keys + @configured_ds_store.map { |ds| KeyCache.copy_record(ds) } +
+          @discovered_ds_store.flat_map { |rrset| KeyCache.copy_rrset(rrset).rrs }
       end
     end
 
@@ -720,7 +722,7 @@ module Dnsruby
           #  If it is, then we should add it to the trusted_keys and remove the
           #  DS from the discovered_ds_store
           if (!found)
-            publish_trust { @discovered_ds_store.push(ds_rrset) }
+            publish_trust { @discovered_ds_store.push(KeyCache.copy_rrset(ds_rrset)) }
           end
           #             end
           return true
@@ -1115,7 +1117,9 @@ module Dnsruby
       root = Name.create(".")
       anchors = @trust_mutex.synchronize do
         expire_trust_anchors
-        @trust_anchors.keys + @trusted_keys.keys + @configured_ds_store + @discovered_ds_store
+        @trust_anchors.keys + @trusted_keys.keys +
+          @configured_ds_store.map { |ds| KeyCache.copy_record(ds) } +
+          @discovered_ds_store.map { |rrset| KeyCache.copy_rrset(rrset) }
       end
       while (true) # n != root)
         #  Try the trusted keys first, then the DS set

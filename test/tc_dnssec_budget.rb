@@ -166,15 +166,18 @@ class KeyCacheIdentityTest
     records = signed(@a, @a, 0)
     @verifier.add_trust_anchor(@a)
     budget = Dnsruby::ValidationBudget.new
-    key = @a.public_key
-    verify = key.method(:dsa_verify_asn1)
-    key.define_singleton_method(:dsa_verify_asn1) do |*args|
-      result = verify.call(*args)
+    # Verification works on internal snapshots, so hook the completing
+    # cryptographic step rather than the caller's mutable record.
+    original = @verifier.method(:verify_rrset_with_key)
+    verify = lambda do |*args|
+      result = original.call(*args)
       budget.cancel
       result
     end
-    assert_raises(Dnsruby::ValidationCancelled) do
-      Dnsruby::ValidationBudget.with(budget) { @verifier.verify(records) }
+    @verifier.stub(:verify_rrset_with_key, verify) do
+      assert_raises(Dnsruby::ValidationCancelled) do
+        Dnsruby::ValidationBudget.with(budget) { @verifier.verify(records) }
+      end
     end
     assert_empty(@verifier.trusted_keys)
   end

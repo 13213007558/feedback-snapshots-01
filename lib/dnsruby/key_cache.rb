@@ -30,6 +30,53 @@ module Dnsruby
       [key.name.canonical.freeze, key.klass.code, key.type.code,
        key.flags, key.protocol, key.algorithm.code, key.key.dup.freeze].freeze
     end
+
+    # Records in this cache are immutable snapshots. Callers may keep editing
+    # the records they supplied or the records they read back; neither can
+    # change an authenticated key or the index it is stored under.
+    def self.copy_record(record)
+      copy = record.dup
+      record.instance_variables.each do |ivar|
+        copy.instance_variable_set(ivar, copy_value(record.instance_variable_get(ivar)))
+      end
+      # Derived OpenSSL state is rebuilt lazily from the copied key bytes and
+      # algorithm. Never carry a public-key object across the boundary.
+      if copy.instance_of?(RR::DNSKEY)
+        copy.instance_variable_set(:@public_key, nil)
+        copy.instance_variable_set(:@key_length, nil)
+      end
+      copy
+    end
+
+    def self.copy_value(value)
+      case value
+      when Name
+        copy_name(value)
+      when String
+        value.dup
+      when Array
+        value.map { |item| copy_value(item) }
+      when Hash
+        value.each_with_object({}) { |(key, item), result| result[copy_value(key)] = copy_value(item) }
+      when CodeMapper
+        value.class.new(value)
+      else
+        value
+      end
+    end
+    private_class_method :copy_value
+
+    def self.copy_name(name)
+      Name.new(name.labels.map { |label| Name::Label.new(label.string.dup) }, name.absolute?)
+    end
+    private_class_method :copy_name
+
+    def self.copy_rrset(rrset)
+      copy = RRSet.new
+      rrset.rrs.each { |rr| copy.add(copy_record(rr), false) }
+      rrset.sigs.each { |sig| copy.add(copy_record(sig), false) }
+      copy
+    end
     def add_key_with_expiration(k, expiration)
       priv_add_key(k, expiration)
     end
@@ -71,30 +118,30 @@ module Dnsruby
       #  Check that the key does not already exist with a longer expiration!
       identity = self.class.key_identity(k)
       if !@keys[identity] || @keys[identity][0] < exp
-        @keys[identity] = [exp, k]
+        @keys[identity] = [exp, self.class.copy_record(k)]
       end
     end
 
     def each
       #  Only offer currently-valid keys here
       remove_expired_keys
-      @keys.values.each {|v| yield v[1]}
+      @keys.values.each {|v| yield self.class.copy_record(v[1])}
     end
     def delete(key)
       cached = @keys.delete(self.class.key_identity(key))
-      cached && cached[1]
+      cached && self.class.copy_record(cached[1])
     end
     def keys
       #  Only offer currently-valid keys here
       remove_expired_keys
       ks = []
-      @keys.values.each {|a| ks.push(a[1])}
+      @keys.values.each {|a| ks.push(self.class.copy_record(a[1]))}
       return ks
       #         return @keys.keys
     end
     def keys_and_expirations
       remove_expired_keys
-      @keys.values.map(&:dup)
+      @keys.values.map {|expiration, key| [expiration, self.class.copy_record(key)]}
     end
     def remove_expired_keys
       @keys.delete_if {|k,v|
