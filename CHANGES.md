@@ -1,3 +1,7 @@
+# Unreleased
+
+* Warn on open redirect when a literal `:host` hash is overridden by a user-controlled `merge`/`merge!` argument
+
 # 8.1.0 - 2026-09-30
 
 * Better help and error message for `--ensure-latest`

@@ -169,6 +169,13 @@ class Brakeman::CheckRedirect < Brakeman::BaseCheck
       target = arg.target
 
       if hash? target and value = hash_access(target, :host)
+        # A literal host only pins the destination when it cannot be
+        # overridden by the merged-in argument. For `safe_hash.merge(other)`,
+        # `other` wins, so a user-controlled `other` can replace `:host`.
+        if host_overridden_by_merge?(arg)
+          return false
+        end
+
         return !has_immediate_user_input?(value)
       elsif call? arg
         return explicit_host? target
@@ -176,6 +183,25 @@ class Brakeman::CheckRedirect < Brakeman::BaseCheck
     end
 
     false
+  end
+
+  # Detects `{ ... }.merge(other)` / `.merge!(other)` where the hash on the
+  # left is the base and `other` may override its keys (including `:host`).
+  # `reverse_merge` is excluded because the receiver keeps precedence.
+  def host_overridden_by_merge? call
+    return false unless call? call
+    return false unless call.method == :merge or call.method == :merge!
+    return false unless hash? call.target
+
+    arg = call.first_arg
+    return false unless sexp? arg
+
+    # A literal hash argument cannot inject a user-controlled `:host`.
+    if hash? arg
+      return false
+    end
+
+    true
   end
 
   #+url_for+ is only_path => true by default. This checks to see if it is

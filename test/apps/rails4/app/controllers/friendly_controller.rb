@@ -90,4 +90,16 @@ class FriendlyController
       whitelisted_class_name.constantize
     end
   end
+
+  def redirect_with_host_overridden_by_merge
+    redirect_to({ :host => "example.com" }.merge(params[:x])) # Should warn
+  end
+
+  def redirect_with_host_overridden_by_merge_bang
+    redirect_to({ :host => "example.com" }.merge!(params[:x])) # Should warn
+  end
+
+  def redirect_with_reverse_merge_host
+    redirect_to({ :host => "example.com" }.reverse_merge(params[:x])) # Should not warn
+  end
 end

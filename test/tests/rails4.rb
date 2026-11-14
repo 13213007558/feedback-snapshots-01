@@ -21,7 +21,7 @@ class Rails4Tests < Minitest::Test
       :controller => 0,
       :model => 5,
       :template => 8,
-      :generic => 92
+      :generic => 94
     }
   end
 
@@ -77,6 +77,40 @@ class Rails4Tests < Minitest::Test
       :confidence => 0,
       :relative_path => "app/controllers/friendly_controller.rb",
       :user_input => s(:params, s(:lit, :host), s(:call, s(:params), :[], s(:lit, :host)))
+  end
+
+  def test_redirect_warns_when_host_hash_is_overridden_by_user_merge
+    # `safe_hash.merge(user_input)` lets user_input override :host, so the
+    # literal host on the receiver must not be treated as protection.
+    assert_warning :type => :warning,
+      :warning_code => 18,
+      :fingerprint => "e7e26d41a5c63534caecd41354fb032768ca7243a4ddfb807d3e99d77b43d70a",
+      :warning_type => "Redirect",
+      :line => 95,
+      :message => /^Possible\ unprotected\ redirect/,
+      :confidence => 2,
+      :relative_path => "app/controllers/friendly_controller.rb",
+      :user_input => s(:call, s(:params), :[], s(:lit, :x))
+
+    assert_warning :type => :warning,
+      :warning_code => 18,
+      :fingerprint => "cb4dd13793f828d943c4a4121b15bddc90c35bb64d7503ef5c80376d47daf0c1",
+      :warning_type => "Redirect",
+      :line => 99,
+      :message => /^Possible\ unprotected\ redirect/,
+      :confidence => 2,
+      :relative_path => "app/controllers/friendly_controller.rb",
+      :user_input => s(:call, s(:params), :[], s(:lit, :x))
+  end
+
+  def test_redirect_reverse_merge_keeps_literal_host_safe
+    # reverse_merge keeps the receiver's keys, so :host cannot be overridden.
+    assert_no_warning :type => :warning,
+      :warning_code => 18,
+      :warning_type => "Redirect",
+      :line => 103,
+      :message => /^Possible\ unprotected\ redirect/,
+      :relative_path => "app/controllers/friendly_controller.rb"
   end
 
   def test_redirect_with_only_path_in_wrong_method
