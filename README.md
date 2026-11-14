@@ -148,6 +148,63 @@ Output the audit's results in JSON, to a file:
 $ bundle-audit check --format json --output bundle-audit.json
 ```
 
+### Exit Status
+
+`bundle-audit check` distinguishes three outcomes:
+
+* `0` - the scan completed and no vulnerabilities were found.
+* `1` - the scan completed and vulnerabilities were found.
+* `2` - the scan could not be completed. One or more advisories were rejected
+  as untrustworthy (duplicate YAML keys, malformed or overly broad version
+  ranges, unexpected field types, etc.), or a gem/source could not be checked.
+  Findings from the parts of the scan which did complete are still reported,
+  but an incomplete scan is never reported as a clean scan.
+
+Advisories are treated as untrusted input. The JSON format reports the same
+information via a top-level `complete` boolean and an `errors` array; the
+JUnit format marks the suite with `complete="false"` and emits an `<error>`
+testcase for each unchecked scope. The text format prints
+`Scan incomplete; cannot confirm that no vulnerabilities exist` and writes the
+unchecked scopes to stderr.
+
+The library equivalent is `Report#complete?` / `Report#incomplete?` and
+`Report#errors` (an array of `Bundler::Audit::ScanError`).
+
+#### Integrity Criteria
+
+The advisory database is treated as possibly-corrupted input. An advisory is
+rejected, rather than silently trusted, when it contains:
+
+* duplicate YAML mapping keys (which would otherwise overwrite an earlier
+  `patched_versions` or `unaffected_versions` range),
+* more than one YAML document, YAML aliases, merge keys, or explicit tags,
+* a non-Array `patched_versions`/`unaffected_versions`, or a non-String entry,
+* a malformed version requirement, or one which matches every version
+  (e.g. `>= 0`, `""`),
+* non-String values in `url`, `title`, or `description`, a non-date `date`,
+  an out-of-range CVSS score, or identifier values with unsafe characters.
+
+Database enumeration refuses gem names containing path separators or `..`
+segments, and refuses advisory paths (including symlink targets) which resolve
+outside the selected database.
+
+A scan is complete (`Report#complete?` returns `true`) only if every advisory
+for every gem in the lockfile was loaded and evaluated. A rejected advisory
+adds a `ScanError` (with `scope`, `path`, and `code`) to the report, keeps all
+findings from the parts of the scan which did complete, and forces the CLI to
+exit with status `2` instead of `0`.
+
+The negative-sample regression suite lives in
+`spec/security/corrupted_database_spec.rb`; a standalone, self-verifying
+demonstration can be run with:
+
+```shell
+$ ruby spec/security/demo_corrupted_database.rb
+```
+
+Both use only temporary directories and harmless payloads, and perform no
+network requests.
+
 ## Rake Tasks
 
 Bundler-audit provides `rake` tasks for checking the code and for updating

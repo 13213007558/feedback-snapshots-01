@@ -85,7 +85,12 @@ module Bundler
 
         output.close if options[:output]
 
-        exit(1) if report.vulnerable?
+        if report.vulnerable?
+          exit 1
+        elsif report.incomplete?
+          # An incomplete scan must never be reported as a clean scan.
+          exit 2
+        end
       end
 
       desc 'stats', 'Prints ruby-advisory-db stats'

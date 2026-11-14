@@ -1,4 +1,5 @@
 require 'bundler/audit/results'
+require 'bundler/audit/scan_error'
 require 'bundler/audit/version'
 
 require 'time'
@@ -37,6 +38,13 @@ module Bundler
       # @return [Array<Results::UnpatchedGems>]
       attr_reader :unpatched_gems
 
+      # The parts of the scan which could not be completed.
+      #
+      # @return [Array<ScanError>]
+      #
+      # @since 0.9.4
+      attr_reader :errors
+
       #
       # Initializes the report.
       #
@@ -49,6 +57,7 @@ module Bundler
         @results = []
         @insecure_sources = []
         @unpatched_gems = []
+        @errors = []
 
         results.each { |result| self << result }
       end
@@ -67,18 +76,29 @@ module Bundler
       end
 
       #
-      # Appends a result to the report.
+      # Records a result or a part of the scan which could not be completed.
       #
-      # @param [InsecureSource, UnpatchedGem] result
+      # {ScanError}s are tracked separately from findings so that
+      # {#results} continues to contain only concrete findings.
+      #
+      # @param [InsecureSource, UnpatchedGem, ScanError] result
+      #
+      # @return [Report]
+      #
+      # @since 0.8.0
       #
       def <<(result)
-        @results << result
-
         case result
         when Results::InsecureSource
+          @results << result
           @insecure_sources << result
         when Results::UnpatchedGem
+          @results << result
           @unpatched_gems << result
+        when ScanError
+          @errors << result
+        else
+          @results << result
         end
 
         return self
@@ -90,7 +110,33 @@ module Bundler
       # @return [Boolean]
       #
       def vulnerable?
-        !@results.empty?
+        !@unpatched_gems.empty? || !@insecure_sources.empty?
+      end
+
+      #
+      # Determines if every check in the scan was completed.
+      #
+      # A report may be empty because the bundle is secure, or because the
+      # advisory database could not be read. Callers must consult this
+      # predicate before treating {#vulnerable?} being false as a success.
+      #
+      # @return [Boolean]
+      #
+      # @since 0.9.4
+      #
+      def complete?
+        @errors.empty?
+      end
+
+      #
+      # Determines if any part of the scan could not be completed.
+      #
+      # @return [Boolean]
+      #
+      # @since 0.9.4
+      #
+      def incomplete?
+        !complete?
       end
 
       #
@@ -140,7 +186,9 @@ module Bundler
         {
           version:    @version,
           created_at: @created_at,
-          results:    @results.map(&:to_h)
+          complete:   complete?,
+          results:    @results.map(&:to_h),
+          errors:     @errors.map(&:to_h)
         }
       end
 

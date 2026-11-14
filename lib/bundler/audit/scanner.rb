@@ -19,6 +19,7 @@ require 'bundler'
 require 'bundler/audit/configuration'
 require 'bundler/audit/database'
 require 'bundler/audit/report'
+require 'bundler/audit/scan_error'
 require 'bundler/audit/results/insecure_source'
 require 'bundler/audit/results/unpatched_gem'
 require 'bundler/lockfile_parser'
@@ -128,6 +129,11 @@ module Bundler
       #
       # Scans the project for issues.
       #
+      # An incomplete scan is not a clean scan. When an advisory cannot be
+      # loaded, the error is collected (see {#scan}), and the remaining
+      # advisories and gems are still checked. Callers must consult
+      # {Report#complete?} before treating an empty report as a success.
+      #
       # @param [Hash] options
       #   Additional options.
       #
@@ -174,22 +180,32 @@ module Bundler
       def scan_sources(options={})
         return enum_for(__method__,options) unless block_given?
 
-        @lockfile.sources.map do |source|
-          case source
-          when Source::Git
-            case source.uri
-            when /^git:/, /^http:/
-              unless internal_source?(source.uri)
-                yield Results::InsecureSource.new(source.uri)
-              end
-            end
-          when Source::Rubygems
-            source.remotes.each do |uri|
-              if (uri.scheme == 'http' && !internal_source?(uri))
-                yield Results::InsecureSource.new(uri.to_s)
-              end
-            end
-          end
+        @lockfile.sources.each do |source|
+          result = begin
+                     case source
+                     when Source::Git
+                       case source.uri
+                       when /^git:/, /^http:/
+                         unless internal_source?(source.uri)
+                           Results::InsecureSource.new(source.uri)
+                         end
+                       end
+                     when Source::Rubygems
+                       source.remotes.each_with_object([]) do |uri,insecure|
+                         if (uri.scheme == 'http' && !internal_source?(uri))
+                           insecure << Results::InsecureSource.new(uri.to_s)
+                         end
+                       end
+                     end
+                   rescue StandardError => error
+                     yield ScanError.new("source #{source.inspect} could not be checked: #{error.message}",
+                                         code: :unchecked_source,
+                                         scope: :sources,
+                                         cause: error)
+                     next
+                   end
+
+          Array(result).each { |finding| yield finding }
         end
       end
 
@@ -225,11 +241,35 @@ module Bundler
                  end
 
         @lockfile.specs.each do |gem|
-          @database.check_gem(gem) do |advisory|
-            is_ignored = ignore.intersect?(advisory.identifiers.to_set)
-            next if is_ignored
+          findings = []
+          errors   = []
 
-            yield Results::UnpatchedGem.new(gem,advisory)
+          begin
+            @database.check_gem(gem,on_error: ->(error) { errors << error }) do |advisory|
+              is_ignored = ignore.intersect?(advisory.identifiers.to_set)
+              next if is_ignored
+
+              findings << Results::UnpatchedGem.new(gem,advisory)
+            end
+          rescue Database::AdvisoryError => error
+            errors << error
+          rescue StandardError => error
+            yield ScanError.new("gem #{gem.name} (#{gem.version}) could not be checked: #{error.message}",
+                                code: :unchecked_gem,
+                                scope: gem.name,
+                                path: error.respond_to?(:path) ? error.path : nil,
+                                cause: error)
+            next
+          end
+
+          findings.each { |finding| yield finding }
+
+          errors.each do |error|
+            yield ScanError.new("advisory could not be checked, so #{gem.name} (#{gem.version}) is only partially checked",
+                                code: error.code,
+                                scope: gem.name,
+                                path: error.advisory_path,
+                                cause: error)
           end
         end
       end

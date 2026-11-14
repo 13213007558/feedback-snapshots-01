@@ -40,6 +40,10 @@ module Bundler
               report.each do |result|
                 print_xml_testcase(result)
               end
+
+              report.errors.each do |error|
+                print_xml_error_testcase(error)
+              end
             end
 
             $stdout = original_stdout
@@ -52,10 +56,15 @@ module Bundler
           end
 
           def print_xml_testsuite(report)
+            failure_count = report.results.count
+            testsuite_attrs = %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{failure_count}"}
+            testsuite_attrs << %{ errors="#{report.errors.count}"} unless report.errors.empty?
+            testsuite_attrs << %{>}
+
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
-              %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit" complete="#{report.complete?}">},
+              testsuite_attrs
             )
 
             yield
@@ -93,6 +102,15 @@ module Bundler
                 %{    </testcase>}
               )
             end
+          end
+
+          def print_xml_error_testcase(error)
+            scope = error.scope ? error.scope.to_s : "advisory-db"
+            say_xml(
+              %{    <testcase id="#{xml(scope)}" name="NOT CHECKED: #{xml(scope)}">},
+              %{      <error message="#{xml(error.message)}" type="IncompleteScan">#{xml(error)}</error>},
+              %{    </testcase>}
+            )
           end
 
           def bundle_title(result)

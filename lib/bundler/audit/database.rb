@@ -34,6 +34,46 @@ module Bundler
       class UpdateFailed < RuntimeError
       end
 
+      #
+      # Indicates that an advisory in the database could not be trusted.
+      #
+      # Wraps the underlying {Advisory::Invalid} with the offending path, so
+      # that callers can report which parts of the database were skipped.
+      #
+      class AdvisoryError < RuntimeError
+
+        # The path of the advisory which could not be loaded.
+        #
+        # @return [String]
+        attr_reader :advisory_path
+
+        #
+        # Initializes the advisory error.
+        #
+        # @param [String] advisory_path
+        #
+        # @param [Exception, nil] cause
+        #
+        # @param [Symbol] code
+        #   Either `:invalid_advisory` or `:path_escape`.
+        #
+        def initialize(advisory_path,cause=nil,code: :invalid_advisory)
+          @advisory_path = advisory_path
+          @code          = code
+
+          message = "could not load advisory #{advisory_path.dump}"
+          message << ": #{cause.message}" if cause
+
+          super(message)
+        end
+
+        #
+        # The classification of the failure.
+        #
+        # @return [Symbol]
+        attr_reader :code
+      end
+
       # Git URL of the ruby-advisory-db.
       URL = 'https://github.com/rubysec/ruby-advisory-db.git'
 
@@ -253,20 +293,29 @@ module Bundler
       #
       # Enumerates over every advisory in the database.
       #
+      # Advisories which fail validation are not silently skipped: they are
+      # reported via the `:on_error` callback, and the enumeration continues
+      # so that other trustworthy advisories are still reported.
+      #
       # @yield [advisory]
       #   If a block is given, it will be passed each advisory.
       #
       # @yieldparam [Advisory] advisory
       #   An advisory from the database.
       #
+      # @option options [Proc] :on_error
+      #   Callback invoked with each {AdvisoryError} instead of aborting the
+      #   enumeration.
+      #
       # @return [Enumerator]
       #   If no block is given, an Enumerator will be returned.
       #
-      def advisories(&block)
-        return enum_for(__method__) unless block_given?
+      def advisories(options={},&block)
+        return enum_for(__method__,options) unless block
 
         each_advisory_path do |path|
-          yield Advisory.load(path)
+          advisory = load_advisory(path,options[:on_error])
+          yield advisory if advisory
         end
       end
 
@@ -282,14 +331,19 @@ module Bundler
       # @yieldparam [Advisory] advisory
       #   An advisory for the given gem.
       #
+      # @option options [Proc] :on_error
+      #   Callback invoked with each {AdvisoryError} instead of aborting the
+      #   enumeration.
+      #
       # @return [Enumerator]
       #   If no block is given, an Enumerator will be returned.
       #
-      def advisories_for(name)
-        return enum_for(__method__,name) unless block_given?
+      def advisories_for(name,options={},&block)
+        return enum_for(__method__,name,options) unless block
 
         each_advisory_path_for(name) do |path|
-          yield Advisory.load(path)
+          advisory = load_advisory(path,options[:on_error])
+          yield advisory if advisory
         end
       end
 
@@ -306,13 +360,17 @@ module Bundler
       # @yieldparam [Advisory] advisory
       #   An advisory that effects the specific version of the gem.
       #
+      # @option options [Proc] :on_error
+      #   Callback invoked with each {AdvisoryError} instead of aborting the
+      #   enumeration.
+      #
       # @return [Enumerator]
       #   If no block is given, an Enumerator will be returned.
       #
-      def check_gem(gem)
-        return enum_for(__method__,gem) unless block_given?
+      def check_gem(gem,options={})
+        return enum_for(__method__,gem,options) unless block_given?
 
-        advisories_for(gem.name) do |advisory|
+        advisories_for(gem.name,options) do |advisory|
           if advisory.vulnerable?(gem.version)
             yield advisory
           end
@@ -352,6 +410,59 @@ module Bundler
       protected
 
       #
+      # Loads a single advisory, converting validation failures into
+      # {AdvisoryError}s.
+      #
+      # @param [String] path
+      #
+      # @param [Proc, nil] on_error
+      #   Optional callback which receives the {AdvisoryError}. When absent,
+      #   the error is raised so callers cannot mistake a partially parsed
+      #   database for a clean one.
+      #
+      # @return [Advisory, nil]
+      #
+      def load_advisory(path,on_error=nil)
+        unless contained_path?(path)
+          error = AdvisoryError.new(path,code: :path_escape)
+          raise(error) unless on_error
+
+          on_error.call(error)
+          return nil
+        end
+
+        Advisory.load(path)
+      rescue Advisory::Invalid => error
+        wrapped = AdvisoryError.new(path,error)
+        raise(wrapped,cause: error) unless on_error
+
+        on_error.call(wrapped)
+        nil
+      end
+
+      #
+      # Determines whether a path stays within the database directory.
+      #
+      # Enumeration normally yields paths from `Dir.glob`, which cannot
+      # escape the database. This check guards callers, subclasses, and
+      # crafted gem names (which may contain `..` separators) against
+      # reading a file outside of the selected database.
+      #
+      # @param [String] path
+      #
+      # @return [Boolean]
+      #
+      def contained_path?(path)
+        database_root = File.realpath(@path)
+        real_path     = File.realpath(path)
+
+        real_path == database_root ||
+          real_path.start_with?(database_root + File::SEPARATOR)
+      rescue SystemCallError
+        false
+      end
+
+      #
       # Enumerates over every advisory path in the database.
       #
       # @yield [path]
@@ -377,7 +488,34 @@ module Bundler
       #   A path to an advisory `.yml` file.
       #
       def each_advisory_path_for(name,&block)
+        unless valid_gem_name?(name)
+          raise(ArgumentError,"invalid gem name #{name.inspect}")
+        end
+
         Dir.glob(File.join(@path,'gems',name,'*.yml'),&block)
+      end
+
+      #
+      # Determines whether a gem name can be used as a single path segment.
+      #
+      # Gem names come from `Gemfile.lock` files, which are attacker
+      # controlled input when auditing untrusted projects. Restricting them
+      # to a single, non-traversing path segment prevents a name such as
+      # `"../../../etc"` from escaping the selected advisory database.
+      #
+      # @param [String] name
+      #
+      # @return [Boolean]
+      #
+      def valid_gem_name?(name)
+        return false unless name.kind_of?(String)
+        return false if name.empty? || name == '.' || name == '..'
+        return false if name.include?('/')
+        return false if name.include?('\\')
+        return false if name.include?(File::SEPARATOR)
+        return false if File::ALT_SEPARATOR && name.include?(File::ALT_SEPARATOR)
+
+        true
       end
 
     end

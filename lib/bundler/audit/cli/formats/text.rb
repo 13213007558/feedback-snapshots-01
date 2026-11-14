@@ -49,8 +49,14 @@ module Bundler
 
             if report.vulnerable?
               say "Vulnerabilities found!", :red
+            elsif report.incomplete?
+              say "Scan incomplete; cannot confirm that no vulnerabilities exist", :red
             else
               say("No vulnerabilities found", :green) unless options.quiet?
+            end
+
+            report.errors.each do |error|
+              $stderr.puts "Not checked: #{error}"
             end
 
             $stdout = original_stdout
