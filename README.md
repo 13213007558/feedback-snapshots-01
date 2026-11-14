@@ -187,6 +187,32 @@ socket << MQTT::SN::Packet::Publish.new(
 socket.close
 ~~~
 
+### Offline MQTT-SN session parsing ###
+
+`MQTT::SN::SessionParser` resolves the real topic of captured MQTT-SN packets.
+Feed it parsed packets together with the direction, gateway and client
+identifiers; it tracks REGISTER/REGACK exchanges per (gateway, client)
+session and reports where each topic name came from.
+
+~~~ ruby
+parser = MQTT::SN::SessionParser.new(
+  :predefined => { 'gw1' => { 1 => 'firmware/update' } }
+)
+
+parser.process(connect_packet, :direction => :from_client, :gateway => 'gw1', :client => 'sensor-1')
+parser.process(register_packet, :direction => :from_client, :gateway => 'gw1', :client => 'sensor-1')
+parser.process(regack_packet,   :direction => :to_client,   :gateway => 'gw1', :client => 'sensor-1')
+
+result = parser.process(publish_packet, :direction => :from_client, :gateway => 'gw1', :client => 'sensor-1')
+result.topic  # => "devices/sensor-1/temperature"
+result.source # => :register, :short, :predefined, :explicit, :unknown or :conflict
+~~~
+
+A dynamic mapping is only established by a REGISTER confirmed with a
+successful REGACK. Reconnects, rejected registrations, missing captures and
+topic id reuse across gateways or clients yield `:unknown` or `:conflict`
+rather than a name borrowed from another session.
+
 Limitations
 -----------
 

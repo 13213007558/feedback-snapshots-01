@@ -44,5 +44,6 @@ module MQTT
     end
 
     autoload :Packet, 'mqtt/sn/packet'
+    autoload :SessionParser, 'mqtt/sn/session_parser'
   end
 end
