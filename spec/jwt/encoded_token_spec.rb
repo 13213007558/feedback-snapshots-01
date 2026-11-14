@@ -151,6 +151,275 @@ RSpec.describe JWT::EncodedToken do
     end
   end
 
+  describe 'verification state transitions' do
+    let(:payload) { { 'iss' => 'issuer', 'pay' => 'load' } }
+
+    def trusted_payload_readable?(token)
+      token.payload
+      true
+    rescue JWT::TokenError
+      false
+    end
+
+    it 'only grants trusted payload access after signature and claims checks on unchanged contents' do
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      expect(token.valid_signature?(algorithm: 'HS256', key: 'wrong')).to be(false)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      expect(token.valid_claims?(iss: 'not-the-issuer')).to be(false)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      # The default exp check passes, but it does not cover the failed issuer
+      # check and must not make the payload readable.
+      expect(token.valid_claims?).to be(true)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      expect(token.valid_claims?(iss: 'issuer')).to be(true)
+      expect(trusted_payload_readable?(token)).to be(true)
+
+      # A later failing check revokes the earlier result.
+      expect(token.valid_signature?(algorithm: 'HS256', key: 'wrong')).to be(false)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      # Signature and claims both have to be established again.
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      token.verify_claims!(iss: 'issuer')
+      expect(trusted_payload_readable?(token)).to be(true)
+    end
+
+    it 'does not let a weaker claim check clear an earlier claim failure' do
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+
+      expect { token.verify_claims!(iss: 'not-the-issuer') }.to raise_error(JWT::InvalidIssuerError)
+
+      token.verify_claims!({})
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      token.verify_claims!(iss: 'issuer')
+      expect(trusted_payload_readable?(token)).to be(true)
+    end
+
+    it 'does not let a more permissive time check clear an earlier failure' do
+      expired = { 'exp' => Time.now.to_i - 10, 'iss' => 'issuer' }
+      signed = JWT::Token.new(payload: expired).tap { |t| t.sign!(algorithm: 'HS256', key: 'secret') }.jwt
+      token = described_class.new(signed)
+
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+
+      expect(token.valid_claims?(exp: {})).to be(false)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      # The token is inside the leeway window, but a check that permits a
+      # longer window is weaker than the check that failed and cannot clear it.
+      expect(token.valid_claims?(exp: { leeway: 1000 })).to be(true)
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      token.verify_claims!(exp: { leeway: 1000 })
+      expect(trusted_payload_readable?(token)).to be(false)
+    end
+
+    it 'allows claims to be checked before the signature, still gating payload access on both' do
+      token.verify_claims!(iss: 'issuer')
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+      expect(trusted_payload_readable?(token)).to be(true)
+    end
+
+    it 'does not treat diagnostic reads as verification' do
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+
+      token.header
+      token.claim_errors
+      token.unverified_payload
+
+      expect(trusted_payload_readable?(token)).to be(false)
+
+      expect(token.valid_claims?(iss: 'not-the-issuer')).to be(false)
+      token.header
+      token.claim_errors
+      token.unverified_payload
+
+      expect(trusted_payload_readable?(token)).to be(false)
+    end
+
+    it 'invalidates a verified detached payload when it is replaced and accepts it after re-verification' do
+      detached = JWT::Token.new(payload: payload).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+      other = JWT::Token.new(payload: { 'iss' => 'other', 'pay' => 'other' }).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+
+      detached_token = described_class.new(detached.jwt)
+      detached_token.encoded_payload = detached.encoded_payload
+      detached_token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      expect(trusted_payload_readable?(detached_token)).to be(true)
+
+      detached_token.encoded_payload = other.encoded_payload
+      expect(trusted_payload_readable?(detached_token)).to be(false)
+      expect { detached_token.verify_signature!(algorithm: 'HS256', key: 'secret') }.to raise_error(JWT::VerificationError, 'Signature verification failed')
+      expect(trusted_payload_readable?(detached_token)).to be(false)
+
+      detached_token.encoded_payload = detached.encoded_payload
+      detached_token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      expect(detached_token.payload).to eq(payload)
+    end
+
+    it 'discards a signature result when a key finder replaces the detached payload during verification' do
+      detached = JWT::Token.new(payload: payload).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+      replacement = JWT::Token.new(payload: { 'pay' => 'replacement' }).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+
+      detached_token = described_class.new(detached.jwt)
+      detached_token.encoded_payload = detached.encoded_payload
+
+      key_finder = lambda do |candidate|
+        candidate.encoded_payload = replacement.encoded_payload
+        'secret'
+      end
+
+      expect(detached_token.valid_signature?(algorithm: 'HS256', key_finder: key_finder)).to be(false)
+      expect(trusted_payload_readable?(detached_token)).to be(false)
+      expect(detached_token.unverified_payload).to eq({ 'pay' => 'replacement' })
+    end
+
+    it 'does not let a header read before verification change the algorithm that is verified' do
+      read_header = token.header
+      read_header['alg'] = 'none'
+
+      expect(token.valid_signature?(algorithm: 'HS256', key: 'secret')).to be(true)
+
+      token.verify_claims!(iss: 'issuer')
+      expect(token.payload).to eq(payload)
+    end
+
+    it 'does not carry a signature result across a payload change made by a key finder' do
+      detached = JWT::Token.new(payload: payload).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+
+      detached_token = described_class.new(detached.jwt)
+      detached_token.encoded_payload = detached.encoded_payload
+
+      key_finder = lambda do |candidate|
+        candidate.encoded_payload = detached.encoded_payload
+        'secret'
+      end
+
+      expect(detached_token.valid_signature?(algorithm: 'HS256', key_finder: key_finder)).to be(false)
+      expect { detached_token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+    end
+  end
+
+  describe 'object ownership' do
+    let(:payload) { { 'data' => { 'roles' => ['admin', { 'scope' => 'read' }] } } }
+
+    it 'does not let changes to a returned payload change what was verified' do
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+
+      copy = token.payload
+      copy['data']['roles'] << 'root'
+      copy['data']['roles'][1]['scope'].replace('write')
+      copy['data']['roles'][1]['scope'] = 'write'
+      copy.delete('data')
+
+      expect(token.payload).to eq(payload)
+      expect(token.unverified_payload).to eq(payload)
+    end
+
+    it 'does not let changes to the diagnostic payload change what a later verification accepts' do
+      diagnostic = token.unverified_payload
+      diagnostic['data']['roles'] << 'root'
+      diagnostic['data']['roles'][1].delete('scope')
+
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+
+      expect(token.payload).to eq(payload)
+    end
+
+    it 'does not let changes to a returned header change the decoded header' do
+      header = { 'crit' => ['b64'], 'nested' => { 'key' => ['value'] } }
+      encoded = JWT::Token.new(payload: payload, header: header).tap { |t| t.sign!(algorithm: 'HS256', key: 'secret') }.jwt
+      token = described_class.new(encoded)
+
+      copy = token.header
+      copy['crit'] << 'other'
+      copy['nested']['key'][0].replace('changed')
+      copy['nested'].delete('key')
+
+      expect(token.header).to eq(header.merge('alg' => 'HS256'))
+    end
+
+    it 'does not observe later changes to the original token string' do
+      original = encoded_token.dup
+      token = described_class.new(original)
+
+      original.replace('tampered')
+
+      expect(token.jwt).to eq(encoded_token)
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      expect(token.payload).to eq(payload)
+    end
+
+    it 'returns copies of the encoded segments' do
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      signing_input = token.signing_input
+
+      token.jwt << '.tampered'
+      token.encoded_header << '.tampered'
+      token.encoded_payload << '.tampered'
+      token.encoded_signature << '.tampered'
+      token.signature << '.tampered'
+
+      expect(token.signing_input).to eq(signing_input)
+      expect(token.payload).to eq(payload)
+    end
+
+    it 'does not share state with a copy' do
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      copy = token.dup
+      copy.encoded_payload = JWT::Token.new(payload: { 'pay' => 'other' }).tap { |t| t.sign!(algorithm: 'HS256', key: 'secret') }.encoded_payload
+
+      expect(token.payload).to eq(payload)
+      expect { copy.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
+    end
+
+    it 'does not observe later changes to an assigned detached payload' do
+      detached = JWT::Token.new(payload: payload).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+      other = JWT::Token.new(payload: { 'pay' => 'other' }).tap do |t|
+        t.detach_payload!
+        t.sign!(algorithm: 'HS256', key: 'secret')
+      end
+
+      segment = detached.encoded_payload.dup
+      token = described_class.new(detached.jwt)
+      token.encoded_payload = segment
+
+      segment.replace(other.encoded_payload)
+
+      token.verify!(signature: { algorithm: 'HS256', key: 'secret' })
+      expect(token.payload).to eq(payload)
+    end
+  end
+
   describe '#header' do
     it { expect(token.header).to eq({ 'alg' => 'HS256' }) }
 
@@ -666,8 +935,9 @@ RSpec.describe JWT::EncodedToken do
 
   describe 'integration use-cases' do
     context 'simple verify HS256 with defaults' do
+      let(:payload) { { 'pay' => 'load', 'iss' => 'issuer' } }
       let(:encoded_token) do
-        JWT::Token.new(payload: { 'pay' => 'load' })
+        JWT::Token.new(payload: payload)
                   .tap { |t| t.sign!(algorithm: 'HS256', key: 'secret_signing_key') }
                   .jwt
       end
@@ -675,7 +945,7 @@ RSpec.describe JWT::EncodedToken do
       it 'protects the user from unverified payload access' do
         token = described_class.new(encoded_token)
 
-        expect(token.unverified_payload).to eq({ 'pay' => 'load' })
+        expect(token.unverified_payload).to eq({ 'pay' => 'load', 'iss' => 'issuer' })
         expect(token.header).to eq({ 'alg' => 'HS256' })
 
         expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
@@ -686,11 +956,16 @@ RSpec.describe JWT::EncodedToken do
         expect(token.valid_signature?(algorithm: 'HS256', key: 'secret_signing_key')).to be(true)
         expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token claims before accessing the payload')
 
-        expect(token.valid_claims?(iss: 'issuer')).to be(false)
+        expect(token.valid_claims?(iss: 'not-the-issuer')).to be(false)
         expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token claims before accessing the payload')
 
+        # A weaker check that does not cover the failed issuer check cannot
+        # make the payload readable.
         expect(token.valid_claims?).to be(true)
-        expect(token.payload).to eq({ 'pay' => 'load' })
+        expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token claims before accessing the payload')
+
+        expect(token.valid_claims?(iss: 'issuer')).to be(true)
+        expect(token.payload).to eq({ 'pay' => 'load', 'iss' => 'issuer' })
 
         token = described_class.new(encoded_token)
 
@@ -698,7 +973,7 @@ RSpec.describe JWT::EncodedToken do
         expect { token.payload }.to raise_error(JWT::TokenError, 'Verify the token signature before accessing the payload')
 
         expect(token.valid?(signature: { algorithm: 'HS256', key: 'secret_signing_key' })).to be(true)
-        expect(token.payload).to eq({ 'pay' => 'load' })
+        expect(token.payload).to eq({ 'pay' => 'load', 'iss' => 'issuer' })
       end
     end
   end

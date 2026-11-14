@@ -1,22 +1,25 @@
 # frozen_string_literal: true
 
-require 'forwardable'
-
 module JWT
   # @private
   class EncodedToken
     # Allow access to the unverified payload for claim verification.
+    #
+    # The context takes one snapshot of the token's diagnostic values for the
+    # whole verification, so individual claim checks cannot observe different
+    # contents. It is only used internally and never exposes the token's own
+    # decoded objects.
     class ClaimsContext
-      extend Forwardable
-
-      def_delegators :@token, :header, :unverified_payload
-
       def initialize(token)
         @token = token
       end
 
+      def header
+        @header ||= @token.header
+      end
+
       def payload
-        unverified_payload
+        @payload ||= @token.unverified_payload
       end
     end
   end

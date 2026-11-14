@@ -1,6 +1,10 @@
 # frozen_string_literal: true
 
+require_relative 'encoded_token/claim_verification'
 require_relative 'encoded_token/claims_context'
+require_relative 'encoded_token/segments'
+require_relative 'encoded_token/signature_verification'
+require_relative 'encoded_token/verification_state'
 
 module JWT
   # Represents an encoded JWT token
@@ -12,99 +16,150 @@ module JWT
   #
   #   encoded_token = JWT::EncodedToken.new(token.jwt)
   #   encoded_token.verify_signature!(algorithm: 'HS256', key: 'secret')
+  #   encoded_token.verify_claims!
   #   encoded_token.payload # => {'pay' => 'load'}
+  #
+  # Verification results belong to the token contents that were verified.
+  # Replacing the payload, or failing a later verification, discards them.
   class EncodedToken
+    include SignatureVerification
+    include ClaimVerification
+
     DEFAULT_CLAIMS = [:exp].freeze
 
     private_constant(:DEFAULT_CLAIMS)
 
     # Returns the original token provided to the class.
+    #
+    # The returned string is a copy. Mutating it does not change the token.
+    #
     # @return [String] The JWT token.
-    attr_reader :jwt
+    def jwt
+      @jwt.dup
+    end
 
     # Initializes a new EncodedToken instance.
+    #
+    # The token takes ownership of the given string and its segments. Later
+    # changes to the caller's string are not observed by the token.
     #
     # @param jwt [String] the encoded JWT token.
     # @raise [ArgumentError] if the provided JWT is not a String.
     def initialize(jwt)
       raise ArgumentError, 'Provided JWT must be a String' unless jwt.is_a?(String)
 
-      @jwt = jwt
-      @signature_verified = false
-      @claims_verified    = false
+      @jwt      = jwt.dup.freeze
+      @segments = Segments.new(@jwt)
+      @state    = VerificationState.new
+    end
 
-      @encoded_header, @encoded_payload, @encoded_signature = jwt.split('.')
+    # A token owns its mutable state. A copy cannot change the verification
+    # result or the contents observed by the original.
+    def initialize_copy(other)
+      super
+      @segments = @segments.dup
+      @state    = @state.dup
     end
 
     # Returns the decoded signature of the JWT token.
     #
+    # The returned string is a copy.
+    #
     # @return [String] the decoded signature.
     def signature
-      @signature ||= ::JWT::Base64.url_decode(encoded_signature || '')
+      @segments.decoded_signature
     end
 
     # Returns the encoded signature of the JWT token.
     #
+    # The returned string is a copy.
+    #
     # @return [String] the encoded signature.
-    attr_reader :encoded_signature
+    def encoded_signature
+      @segments.encoded_signature
+    end
 
     # Returns the decoded header of the JWT token.
+    #
+    # Reading the header does not verify the token. The returned Hash is a deep
+    # copy, so changes to it are not visible to the token.
     #
     # @return [Hash] the header.
     # @raise [JWT::MalformedTokenError] if the header is not a JSON object.
     def header
-      @header ||= parse_and_decode(@encoded_header).tap do |decoded_header|
-        raise JWT::MalformedTokenError, 'Token header not a JSON object' unless decoded_header.is_a?(Hash)
-      end
+      @segments.header
     end
 
     # Returns the encoded header of the JWT token.
     #
+    # The returned string is a copy.
+    #
     # @return [String] the encoded header.
-    attr_reader :encoded_header
+    def encoded_header
+      @segments.encoded_header
+    end
 
-    # Returns the payload of the JWT token. Access requires the signature and claims to have been verified.
+    # Returns the payload of the JWT token. Access requires the signature and claims to have been verified,
+    # and both verifications must have been made against the current token contents.
+    #
+    # The returned Hash is a deep copy, so changes to it (including nested
+    # objects) are not visible to the token and do not affect the verified state.
     #
     # @return [Hash] the payload.
     # @raise [JWT::TokenError] if the signature has not been verified.
+    # @raise [JWT::TokenError] if the claims have not been verified.
     def payload
-      raise JWT::TokenError, 'Verify the token signature before accessing the payload' unless @signature_verified
-      raise JWT::TokenError, 'Verify the token claims before accessing the payload' unless @claims_verified
+      raise JWT::TokenError, 'Verify the token signature before accessing the payload' unless @state.signature_verified?
+      raise JWT::TokenError, 'Verify the token claims before accessing the payload' unless @state.claims_verified?
 
-      decoded_payload
+      @segments.payload
     end
 
     # Returns the payload of the JWT token without requiring the signature to have been verified.
+    #
+    # This is a diagnostic read. It does not verify anything and does not change
+    # the verification state. The returned Hash is a deep copy, so mutating it
+    # cannot make a later verification accept modified contents.
+    #
     # @return [Hash] the payload.
     def unverified_payload
-      decoded_payload
+      @segments.payload
     end
 
     # Returns the encoded payload of the JWT token.
     #
+    # The returned string is a copy.
+    #
     # @return [String] the encoded payload.
-    attr_reader :encoded_payload
+    def encoded_payload
+      @segments.encoded_payload
+    end
 
     # Sets the encoded payload of the JWT token.
     #
-    # Resets the verification state, requiring the token to be verified again.
+    # The token keeps its own copy of the value. Replacing the payload
+    # invalidates both the signature and claim verification results.
     #
     # @param encoded_payload [String] the encoded payload.
     def encoded_payload=(encoded_payload)
-      @encoded_payload = encoded_payload
-      @decoded_payload = nil
-      @signature_verified = @claims_verified = false
+      @segments.replace_payload(encoded_payload)
+      @state.advance!
+
+      encoded_payload
     end
 
     # Returns the signing input of the JWT token.
     #
     # @return [String] the signing input.
     def signing_input
-      [encoded_header, encoded_payload].join('.')
+      @segments.signing_input
     end
 
     # Verifies the token signature and claims.
-    # By default it verifies the 'exp' claim.
+    #
+    # The claims are verified only after the signature has succeeded. A failed
+    # signature verification also discards any earlier claim verification, so
+    # the two results always describe the same token contents.
     #
     # @example
     #  encoded_token.verify!(signature: { algorithm: 'HS256', key: 'secret' }, claims: [:exp])
@@ -120,8 +175,7 @@ module JWT
     end
 
     # Verifies the token signature and claims.
-    # By default it verifies the 'exp' claim.
-
+    #
     # @param signature [Hash] the parameters for signature verification (see {#verify_signature!}).
     # @param claims [Array<Symbol>, Hash] the claims to verify (see {#verify_claims!}).
     # @return [Boolean] true if the signature and claims are valid, false otherwise.
@@ -131,124 +185,6 @@ module JWT
         (claims.is_a?(Array) ? valid_claims?(*claims) : valid_claims?(claims))
     end
 
-    # Verifies the signature of the JWT token.
-    #
-    # @param algorithm [String, Array<String>, Object, Array<Object>] the algorithm(s) to use for verification.
-    # @param key [String, Array<String>] the key(s) to use for verification.
-    # @param key_finder [#call] an object responding to `call` to find the key for verification.
-    # @return [nil]
-    # @raise [JWT::VerificationError] if the signature verification fails.
-    # @raise [JWT::MalformedTokenError] if the token is structurally invalid.
-    # @raise [ArgumentError] if neither key nor key_finder is provided, or if both are provided.
-    def verify_signature!(algorithm:, key: nil, key_finder: nil)
-      return if valid_signature?(algorithm: algorithm, key: key, key_finder: key_finder)
-
-      raise JWT::VerificationError, 'Signature verification failed'
-    end
-
-    # Checks if the signature of the JWT token is valid.
-    #
-    # @param algorithm [String, Array<String>, Object, Array<Object>] the algorithm(s) to use for verification.
-    # @param key [String, Array<String>, JWT::JWK::KeyBase, Array<JWT::JWK::KeyBase>] the key(s) to use for verification.
-    # @param key_finder [#call] an object responding to `call` to find the key for verification.
-    #   Not called if the token's algorithm is not among the given algorithms, in which case the
-    #   signature is not valid. The token's alg header is not compared when a key is given directly.
-    # @return [Boolean] true if the signature is valid, false otherwise.
-    # @raise [JWT::MalformedTokenError] if the token is structurally invalid.
-    def valid_signature?(algorithm: nil, key: nil, key_finder: nil)
-      raise ArgumentError, 'Provide either key or key_finder, not both or neither' if key.nil? == key_finder.nil?
-
-      @signature_verified = false
-      validate_segment_count!
-      return false if key_finder && !algorithm_allowed?(algorithm)
-
-      keys      = Array(key || key_finder.call(self))
-      verifiers = JWA.create_verifiers(algorithms: algorithm, keys: keys, preferred_algorithm: header['alg'])
-
-      raise JWT::VerificationError, 'No algorithm provided' if verifiers.empty?
-
-      valid = verifiers.any? do |jwa|
-        jwa.verify(data: signing_input, signature: signature)
-      end
-      valid.tap { |verified| @signature_verified = verified }
-    end
-
-    # Verifies the claims of the token.
-    # @param options [Array<Symbol>, Hash] the claims to verify. By default, it checks the 'exp' claim.
-    # @raise [JWT::ClaimValidationError] if the claims are invalid.
-    # @raise [JWT::MalformedTokenError] if the payload cannot be decoded, which happens before any claim is validated.
-    def verify_claims!(*options)
-      Claims::Verifier.verify!(ClaimsContext.new(self), *claims_options(options)).tap do
-        @claims_verified = true
-      end
-    rescue StandardError
-      @claims_verified = false
-      raise
-    end
-
-    # Returns the errors of the claims of the token.
-    # @param options [Array<Symbol>, Hash] the claims to verify. By default, it checks the 'exp' claim.
-    # @return [Array<Symbol>] the errors of the claims.
-    def claim_errors(*options)
-      Claims::Verifier.errors(ClaimsContext.new(self), *claims_options(options))
-    end
-
-    # Returns whether the claims of the token are valid.
-    # @param options [Array<Symbol>, Hash] the claims to verify. By default, it checks the 'exp' claim.
-    # @return [Boolean] whether the claims are valid.
-    def valid_claims?(*options)
-      claim_errors(*claims_options(options)).empty?.tap { |verified| @claims_verified = verified }
-    end
-
     alias to_s jwt
-
-    private
-
-    def validate_segment_count!
-      raise JWT::MalformedTokenError, 'Too many segments' if jwt.count('.') > 2
-    end
-
-    # An empty list leaves the choice of algorithm to the JWKs given by the key finder.
-    # An unknown algorithm is a configuration error that the verifier reports.
-    def algorithm_allowed?(algorithms)
-      algorithms = Array(algorithms).map { |algorithm| JWA.resolve(algorithm) }
-
-      algorithms.empty? || algorithms.any? { |algorithm| algorithm == JWA::Unsupported || algorithm.valid_alg?(header['alg']) }
-    end
-
-    def claims_options(options)
-      return DEFAULT_CLAIMS if options.first.nil?
-
-      options
-    end
-
-    def decode_payload
-      raise JWT::MalformedTokenError, 'Encoded payload is empty' if encoded_payload == ''
-
-      if unencoded_payload?
-        verify_claims!(crit: ['b64'])
-        return parse(encoded_payload)
-      end
-
-      parse_and_decode(encoded_payload)
-    end
-
-    def unencoded_payload?
-      header['b64'] == false
-    end
-
-    def parse_and_decode(segment)
-      parse(::JWT::Base64.url_decode(segment || ''))
-    end
-
-    def parse(segment)
-      JWT::JSON.parse(segment)
-    rescue ::JSON::ParserError
-      raise JWT::MalformedTokenError, 'Invalid segment encoding'
-    end
-
-    def decoded_payload
-      @decoded_payload ||= decode_payload
-    end
   end
 end

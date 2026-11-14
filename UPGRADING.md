@@ -72,6 +72,22 @@ To avoid accidental use of unverified tokens, the `JWT::EncodedToken#payload` me
 
 To access the payload before verification, use the method `JWT::EncodedToken#unverified_payload`.
 
+### `JWT::EncodedToken` verification results belong to the contents that were verified
+
+`JWT::EncodedToken` can be reused for signature and claim checks of different strengths. Its verification result is now tied to the contents it was produced from:
+
+- A successful result is discarded when the payload is replaced with `#encoded_payload=` or when a later verification of the same token fails. A failed signature check discards both the signature and claim results; a failed claim check discards the claim result.
+- A successful claim check only unlocks `#payload` when it covers every claim check that previously failed for those contents. A check that verifies nothing, such as `verify_claims!({})`, cannot unlock an earlier failure.
+- `#header`, `#unverified_payload` and `#claim_errors` remain available for diagnostics and never change the verification state.
+
+#### Object ownership and compatibility cost
+
+`#payload`, `#header`, `#unverified_payload`, `#jwt`, `#encoded_header`, `#encoded_payload`, `#encoded_signature` and `#signature` return copies, and nested hashes and arrays are copied too. The token keeps its own immutable copy of every segment it is given.
+
+This is a deliberate change in ownership. Code that mutated a returned payload or header and expected the token to observe the change will no longer do so. In exchange, no caller can change bytes that have already been verified, and a token cannot hand out one payload while validating another. The cost is a copy on each read of these accessors; the decoded values are still memoized internally, so repeated reads do not reparse the token. `#payload` makes one deep copy per call so that nested objects cannot alias the verified contents.
+
+The common pattern of reading a payload and passing it to application code requires no change. Only code that relied on mutating the returned objects needs to copy the value itself before changing it.
+
 ## Stricter requirements on Base64 encoded data
 
 Base64 decoding will no longer fallback on the looser RFC 2045. The biggest difference is that the looser version was ignoring whitespaces and newlines, whereas the stricter version raises errors in such cases.

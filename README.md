@@ -242,6 +242,15 @@ encoded_token.payload # => { 'exp'=>1234, 'jti'=>'1234", 'sub'=>'my-subject' }
 encoded_token.header # {'kid'=>'hmac', 'alg'=>'HS256'}
 ```
 
+The verification result belongs to the token contents that were verified:
+
+- `#payload` requires both a successful signature check and a successful claim check, made against the current contents. A later failed signature check revokes both results; a later failed claim check revokes the claim result. Neither can be inherited from an earlier call.
+- A successful claim check only makes `#payload` readable when it covers every claim check that has failed for those contents. For example, after `verify_claims!(iss: 'not-my-issuer')` fails, `verify_claims!` (which checks only `exp`) does not make the payload readable; a success for the issuer check does.
+- Checking claims before the signature is allowed. Access to `#payload` still waits for both results.
+- `#header`, `#unverified_payload` and `#claim_errors` are diagnostic reads. They never verify anything or change the verification state.
+- `#payload`, `#header`, `#jwt` and the encoded segments return copies, including nested objects. Changing a returned value cannot change what was verified or what the token will hand out next.
+- Changing `#encoded_payload=` invalidates all earlier results. For a detached payload, verify again after assigning it.
+
 The `JWT::EncodedToken#verify!` method can be used to verify signature and claim verification in one go. The `exp` claim is verified by default.
 
 ```ruby
@@ -321,9 +330,11 @@ The `JWT::EncodedToken` class can be used to decode a token with a detached payl
 ```ruby
 encoded_token = JWT::EncodedToken.new(token.jwt)
 encoded_token.encoded_payload = "eyJwYXkiOiJsb2FkIn0"
-encoded_token.verify_signature!(algorithm: 'HS256', key: "secret")
+encoded_token.verify!(signature: { algorithm: 'HS256', key: "secret" })
 encoded_token.payload # => {"pay"=>"load"}
 ```
+
+Assigning `encoded_payload` invalidates any earlier verification, including one made for the detached payload. Verify the token again after assigning it.
 
 ## Claims
 

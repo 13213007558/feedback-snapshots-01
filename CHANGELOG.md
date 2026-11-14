@@ -10,6 +10,8 @@
 
 **Fixes and enhancements:**
 
+- Tie `JWT::EncodedToken` verification results to the token contents that were verified, so a success cannot be reused after the header, payload or original string changes, and a weaker claim check cannot clear a stronger failure
+- Return copies from `JWT::EncodedToken` accessors, so mutating a returned header or payload cannot change what was verified
 - Test that `JWT::Claims::Required` raises `JWT::MissingRequiredClaim` for a non-Hash payload [#768](https://github.com/jwt/ruby-jwt/pull/768) ([@renanmpimentel](https://github.com/renanmpimentel))
 - Ignore unsupported `kty` values when a `JWT::JWK::Set` is built from an array [#744](https://github.com/jwt/ruby-jwt/pull/744) ([@RalphBragg](https://github.com/RalphBragg))
 - Redact private JWK material from inspection [#754](https://github.com/jwt/ruby-jwt/pull/754) - [@OskarEichler](https://github.com/OskarEichler)
