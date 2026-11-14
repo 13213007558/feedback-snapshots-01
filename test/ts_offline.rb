@@ -74,6 +74,7 @@ TESTS = %w(
     rr-unknown
     rrset
     rrsig
+    rrsig_wildcard_owner
     svcb
     svcb_transport
     tcp_pipelining
