@@ -22,6 +22,21 @@ describe Rack::Attack::Configuration do
       _(subject.tracks).must_equal({})
     end
 
+    it 'exposes the account_guards attribute' do
+      _(subject.account_guards).must_equal({})
+    end
+
+    it 'registers and clears account guards' do
+      classifier = ->(result) { result.status == 401 ? :failure : :success }
+      subject.account_guard('logins', maxretry: 3, findtime: 60, bantime: 60,
+                                      classifier: classifier) { |_| 'acct' }
+      _(subject.account_guards.keys).must_equal(['logins'])
+      _(subject.account_guards['logins']).must_be_kind_of Rack::Attack::AccountGuard
+
+      subject.clear_configuration
+      _(subject.account_guards).must_equal({})
+    end
+
     it 'exposes the anonymous_blocklists attribute' do
       _(subject.anonymous_blocklists).must_equal([])
     end

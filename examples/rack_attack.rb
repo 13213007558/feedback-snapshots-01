@@ -19,6 +19,16 @@ Rack::Attack.throttle "logins/email", limit: 2, period: 60 do |req|
   req.post? && req.path == "/login" && req.params['email'].to_s.downcase.gsub(/\s+/, "")
 end
 
+# Response-based credential-stuffing protection. Unlike the entry-time throttle
+# above, this only records an attempt once the login endpoint has responded:
+# 401s accumulate per account, a 200 clears the failures that predated it, and
+# 5 failures inside 15 minutes bans the account for an hour. The classifier
+# sees only method/path/ip/agent + status/headers (never the password or body).
+Rack::Attack.account_guard "logins/account", maxretry: 5, findtime: 15 * 60, bantime: 60 * 60,
+                           classifier: ->(result) { result.status == 401 ? :failure : :success } do |req|
+  req.post? && req.path == "/login" && req.params['email'].to_s.downcase.gsub(/\s+/, "")
+end
+
 # blocklist bad IPs from accessing admin pages
 Rack::Attack.blocklist "bad_ips from logging in" do |req|
   req.path =~ /^\/admin/ && bad_ips.include?(req.ip)

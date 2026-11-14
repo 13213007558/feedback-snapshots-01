@@ -19,7 +19,8 @@ module Rack
         end
       end
 
-      attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
+      attr_reader :safelists, :blocklists, :throttles, :tracks, :account_guards,
+                  :anonymous_blocklists, :anonymous_safelists
       attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
@@ -80,6 +81,13 @@ module Rack
         @tracks[name] = Track.new(name, options, &block)
       end
 
+      # Response-based account protection. The block extracts the account
+      # discriminator from a request; `:classifier` maps a response snapshot to
+      # :failure, :success or nil.
+      def account_guard(name, options = {}, &block)
+        @account_guards[name] = AccountGuard.new(name, options, &block)
+      end
+
       def safelisted?(request)
         @anonymous_safelists.any? { |safelist| safelist.matched_by?(request) } ||
           @safelists.any? { |_name, safelist| safelist.matched_by?(request) }
@@ -113,6 +121,7 @@ module Rack
         @blocklists = {}
         @throttles = {}
         @tracks = {}
+        @account_guards = {}
         @anonymous_blocklists = []
         @anonymous_safelists = []
         @throttled_response_retry_after_header = false

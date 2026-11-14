@@ -11,6 +11,7 @@ require 'rack/attack/store_proxy/mem_cache_store_proxy'
 require 'rack/attack/store_proxy/redis_proxy'
 require 'rack/attack/store_proxy/redis_store_proxy'
 require 'rack/attack/store_proxy/redis_cache_store_proxy'
+require 'rack/attack/account_guard'
 
 require 'rack/attack/railtie' if defined?(::Rails)
 
@@ -31,6 +32,7 @@ module Rack
     autoload :Track,                'rack/attack/track'
     autoload :Fail2Ban,             'rack/attack/fail2ban'
     autoload :Allow2Ban,            'rack/attack/allow2ban'
+    autoload :AccountGuard,         'rack/attack/account_guard'
 
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
@@ -68,6 +70,7 @@ module Rack
         :safelist_ip,
         :throttle,
         :track,
+        :account_guard,
         :throttled_responder,
         :throttled_responder=,
         :blocklisted_responder,
@@ -82,7 +85,8 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
-        :tracks
+        :tracks,
+        :account_guards
       )
     end
 
@@ -126,7 +130,38 @@ module Rack
         end
       else
         configuration.tracked?(request)
-        @app.call(env)
+        run_account_guards(request)
+      end
+    end
+
+    private
+
+    # Response-based account guards wrap the application so they can settle
+    # accounts from the downstream response. Entry-time checks above (notably
+    # IP throttling) still reject traffic before the application is reached.
+    # Guards form a nested chain so the downstream application is invoked once.
+    def run_account_guards(request)
+      guards = configuration.account_guards.values
+      return @app.call(request.env) if guards.empty?
+
+      chain = guards.reverse.reduce(@app) do |downstream, guard|
+        GuardApp.new(guard, downstream)
+      end
+      chain.call(request.env)
+    end
+
+    # Adapts an AccountGuard to the Rack app interface. When the guard does not
+    # apply to a request (no discriminator), it delegates straight downstream
+    # instead of returning a response, so the app is still invoked exactly once.
+    class GuardApp
+      def initialize(guard, downstream)
+        @guard = guard
+        @downstream = downstream
+      end
+
+      def call(env)
+        request = Rack::Attack::Request.new(env)
+        @guard.wrap(request, @downstream, @downstream)
       end
     end
   end

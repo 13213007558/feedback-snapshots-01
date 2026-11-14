@@ -29,6 +29,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
     - [`blocklist(name, &block)`](#blocklistname-block)
     - [Fail2Ban](#fail2ban)
     - [Allow2Ban](#allow2ban)
+  - [Response-based account protection (`account_guard`)](#response-based-account-protection-account_guard)
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
   - [Tracks](#tracks)
@@ -236,6 +237,46 @@ Rack::Attack.blocklist('allow2ban login scrapers') do |req|
   end
 end
 ```
+
+### Response-based account protection (`account_guard`)
+
+Entry-time checks such as `throttle` and `Fail2Ban` count a request as soon as it
+enters the application, before you know whether the login succeeded. That is a
+poor fit for credential stuffing: a failed login is only knowable from the
+downstream response. `account_guard` settles the account *after* the response
+comes back.
+
+Provide an account discriminator (e.g. the submitted login) and a `:classifier`
+that maps the response to `:failure`, `:success` or `nil` (unknown / not an
+auth result). Failures accumulate per account; a success clears the failures
+that predated it; reaching `maxretry` failures within `findtime` bans the
+account for `bantime` seconds, after which requests for that account are blocked
+before reaching the application. Basic IP throttling still runs first.
+
+```ruby
+Rack::Attack.account_guard(
+  'logins/account',
+  maxretry: 5,
+  findtime: 15.minutes,
+  bantime: 1.hour,
+  # The classifier only receives method, path, ip, user agent, response status
+  # and headers — never the password or the response body.
+  classifier: ->(result) { result.status == 401 ? :failure : :success }
+) do |request|
+  # Return the account discriminator, or nil to skip this guard.
+  request.post? && request.path == '/login' ? request.params['email'].to_s.downcase : nil
+end
+```
+
+Interleaving is handled explicitly. Each request snapshots the newest failure
+visible when it *started*; a success only clears failures up to that snapshot, so
+a success that finishes after a newer failure can never erase it. If the
+downstream raises, returns a streaming body, or the body is closed early, the
+request is accounted at most once and no in-flight state is leaked. A response
+the classifier cannot categorize (`nil`) is not counted at all.
+
+A runnable, deterministic walk-through of these cases lives in
+[`examples/account_guard_interleaving_demo.rb`](examples/account_guard_interleaving_demo.rb).
 
 ### Throttling
 

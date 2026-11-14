@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Rack::Attack.account_guard`: response-based credential-stuffing protection that records failed authentications from the downstream response, clears failures that predated a success, and bans an account after `maxretry` failures within `findtime`. The classifier receives only request metadata plus the response status/headers (never the password or body); downstream exceptions, streaming bodies and early body closes are accounted at most once without leaking in-flight state.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed
