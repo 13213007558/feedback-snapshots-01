@@ -293,6 +293,14 @@ module Net
       capable?('STARTTLS')
     end
 
+    # true if server advertises the DSN (Delivery Status Notification)
+    # extension of RFC 3461. DSN parameters such as ENVID, RET, NOTIFY and
+    # ORCPT may only be sent when the server advertises this.
+    # You cannot get valid value before opening SMTP session.
+    def capable_dsn?
+      capable?('DSN')
+    end
+
     # true if the EHLO response contains +key+.
     def capable?(key)
       return nil unless @capabilities
@@ -907,6 +915,7 @@ module Net
 
     # +from_addr+ is +String+ or +Net::SMTP::Address+
     def mailfrom(from_addr)
+      ensure_dsn_capability(from_addr)
       addr = if requires_smtputf8(from_addr) && capable?("SMTPUTF8")
                Address.new(from_addr, "SMTPUTF8")
              else
@@ -917,6 +926,10 @@ module Net
 
     def rcptto_list(to_addrs)
       raise ArgumentError, 'mail destination not given' if to_addrs.empty?
+      # Validate every recipient (including DSN capability) before issuing any
+      # RCPT command, so an invalid recipient aborts before the mail
+      # transaction is partially underway.
+      to_addrs.flatten.each { |addr| ensure_dsn_capability(addr) }
       to_addrs.flatten.each do |addr|
         rcptto addr
       end
@@ -925,6 +938,7 @@ module Net
 
     # +to_addr+ is +String+ or +Net::SMTP::Address+
     def rcptto(to_addr)
+      ensure_dsn_capability(to_addr)
       addr = Address.new(to_addr)
       getok((["RCPT TO:<#{addr.address}>"] + addr.parameters).join(' '))
     end
@@ -995,6 +1009,17 @@ module Net
       # A bare CR or LF is not allowed in RFC5321.
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
+      end
+    end
+
+    # Raises before any MAIL/RCPT traffic is produced if +addr+ carries RFC
+    # 3461 DSN parameters but the connected server did not advertise DSN in
+    # its EHLO response.
+    def ensure_dsn_capability(addr)
+      return unless addr.respond_to?(:dsn?) && addr.dsn?
+      unless capable?('DSN')
+        raise SMTPUnsupportedCommand,
+              "DSN (RFC 3461) is not supported on this server"
       end
     end
 
@@ -1149,13 +1174,21 @@ module Net
       def to_s
         @address
       end
-    end
+
+      # +true+ when this address carries RFC 3461 DSN parameters. Plain
+      # addresses do not; Net::SMTP::DSN::Sender and Net::SMTP::DSN::Recipient
+      # override this to opt into the DSN capability check.
+      def dsn?
+        false
+      end
+    end   # class Address
   end   # class SMTP
 
   SMTPSession = SMTP # :nodoc:
 end
 
 require_relative 'smtp/authenticator'
+require_relative 'smtp/dsn'
 Dir.glob("#{__dir__}/smtp/auth_*.rb") do |r|
   require_relative r
 end
