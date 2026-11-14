@@ -105,7 +105,8 @@ module SecureHeaders
     def build_report_to_directive(directive)
       return unless endpoint_name = @config.directive_value(directive)
       if endpoint_name && endpoint_name.is_a?(String) && !endpoint_name.empty?
-        [symbol_to_hyphen_case(directive), scrub_directive_value(directive, endpoint_name)].join(" ")
+        value = scrub_directive_value(directive, endpoint_name, REPORT_TO_INJECTION_REGEX)
+        [symbol_to_hyphen_case(directive), value].join(" ")
       end
     end
 
@@ -115,17 +116,22 @@ module SecureHeaders
     # smuggle directives either.
     DIRECTIVE_INJECTION_REGEX = /[\n\r;]/.freeze
 
+    # report-to values are a single token, so quotes, backslashes, and
+    # remaining control characters are also scrubbed rather than being
+    # emitted into the CSP header.
+    REPORT_TO_INJECTION_REGEX = /[\x00-\x1F\x7F;"\\]/.freeze
+
     # Private: scrubs caller-controlled bytes that would let a value
     # break out of its CSP directive (CR, LF, semicolon). Shared across
     # every directive builder so sandbox / plugin-types / report-to /
     # source-list all reject the same byte set with the same warn UX.
     # Emits a single Kernel.warn per directive even when multiple
     # offending bytes are present.
-    def scrub_directive_value(directive, value)
+    def scrub_directive_value(directive, value, pattern = DIRECTIVE_INJECTION_REGEX)
       str = value.to_s
-      if str =~ DIRECTIVE_INJECTION_REGEX
+      if str =~ pattern
         Kernel.warn("#{directive} contains a #{$~[0].inspect} in #{str.inspect} which will raise an error in future versions. It has been replaced with a blank space.")
-        str.gsub(DIRECTIVE_INJECTION_REGEX, " ")
+        str.gsub(pattern, " ")
       else
         str
       end

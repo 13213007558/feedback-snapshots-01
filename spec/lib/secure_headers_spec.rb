@@ -608,7 +608,20 @@ module SecureHeaders
         end.to raise_error(ContentSecurityPolicyConfigError)
       end
 
-      it "allows report_to directive with string endpoint" do
+      it "allows report_to directive with string endpoint when it is defined" do
+        expect do
+          Configuration.default do |config|
+            config.csp = {
+              default_src: %w('self'),
+              script_src: %w('self'),
+              report_to: "csp-endpoint"
+            }
+            config.reporting_endpoints = { "csp-endpoint" => "https://example.com/reports" }
+          end
+        end.to_not raise_error
+      end
+
+      it "rejects report_to without any reporting_endpoints" do
         expect do
           Configuration.default do |config|
             config.csp = {
@@ -617,7 +630,20 @@ module SecureHeaders
               report_to: "csp-endpoint"
             }
           end
-        end.to_not raise_error
+        end.to raise_error(ReportingEndpointReferenceError, /not configured/)
+      end
+
+      it "rejects report_to naming an endpoint not present in reporting_endpoints" do
+        expect do
+          Configuration.default do |config|
+            config.csp = {
+              default_src: %w('self'),
+              script_src: %w('self'),
+              report_to: "csp-endpoint"
+            }
+            config.reporting_endpoints = { "other-endpoint" => "https://example.com/reports" }
+          end
+        end.to raise_error(ReportingEndpointReferenceError, /undefined reporting endpoint "csp-endpoint"/)
       end
     end
 
@@ -630,6 +656,10 @@ module SecureHeaders
             default_src: %w('self'),
             script_src: %w('self'),
             report_to: "endpoint-1"
+          }
+          config.reporting_endpoints = {
+            "endpoint-1" => "https://example.com/one",
+            "endpoint-2" => "https://example.com/two"
           }
         end
 
@@ -644,6 +674,9 @@ module SecureHeaders
           config.csp = {
             default_src: %w('self'),
             script_src: %w('self')
+          }
+          config.reporting_endpoints = {
+            "new-endpoint" => "https://example.com/new"
           }
         end
 
@@ -660,6 +693,9 @@ module SecureHeaders
             script_src: %w('self'),
             report_uri: %w(/csp-report),
             report_to: "reporting-endpoint"
+          }
+          config.reporting_endpoints = {
+            "reporting-endpoint" => "https://example.com/reports"
           }
         end
 

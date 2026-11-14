@@ -105,6 +105,20 @@ module SecureHeaders
       append_content_security_policy_directives(request, additions)
     end
 
+    # Public: override the Reporting-Endpoints map for this request.
+    #
+    # Use this together with a report_to override so the CSP reference and the
+    # endpoint map are resolved from the same request configuration.
+    #
+    # endpoints - a hash of endpoint names to HTTPS URLs, or OPT_OUT
+    #
+    # Returns the current config
+    def override_reporting_endpoints(request, endpoints)
+      config = config_for(request)
+      config.reporting_endpoints = endpoints
+      override_secure_headers_request_config(request, config)
+    end
+
     # Public: override X-Frame-Options settings for this request.
     #
     # value - deny, sameorigin, or allowall
@@ -296,6 +310,10 @@ module SecureHeaders
 
   def override_x_frame_options(value)
     SecureHeaders.override_x_frame_options(request, value)
+  end
+
+  def override_reporting_endpoints(endpoints)
+    SecureHeaders.override_reporting_endpoints(request, endpoints)
   end
 
   def use_content_security_policy_named_append(name)

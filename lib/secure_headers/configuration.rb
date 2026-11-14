@@ -255,6 +255,8 @@ module SecureHeaders
     end
 
     def generate_headers
+      validate_reporting_endpoint_references!
+
       headers = {}
       HEADERABLE_ATTRIBUTES.each do |attr|
         klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
@@ -284,6 +286,16 @@ module SecureHeaders
         klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
         klass.validate_config!(instance_variable_get("@#{attr}"))
       end
+      validate_reporting_endpoint_references!
+    end
+
+    # Private: validates that every report_to directive in this exact
+    # configuration resolves to a Reporting-Endpoints entry in the same
+    # configuration. This is a joint check because csp, csp_report_only and
+    # reporting_endpoints may each come from the default configuration, a
+    # named override, or a request-level override.
+    def validate_reporting_endpoint_references!
+      ReportingEndpoints.validate_references!(@reporting_endpoints, [@csp, @csp_report_only])
     end
 
     def secure_cookies=(secure_cookies)

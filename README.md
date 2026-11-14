@@ -130,6 +130,31 @@ config.reporting_endpoints = {
 }
 ```
 
+#### Endpoint names and reference integrity
+`report-to` names are resolved against `config.reporting_endpoints` in the **same request configuration**. This is checked when the default configuration is defined, when a named override is applied, and again when headers are generated. A `report-to` value with no matching endpoint raises `SecureHeaders::ReportingEndpointReferenceError`; the library will not emit a policy that references a destination the same response does not advertise. Removing an endpoint while a policy still references it is an error, so delete or replace the `report-to` directive in the same override.
+
+Endpoint names must be lowercase structured-header keys (`a-z`, `0-9`, `_`, `-`, `.`) and URLs must be absolute `https://` URLs with an ASCII host. Quotes, backslashes, whitespace, and control characters are rejected in both names and URLs. Non-ASCII path, query, and fragment characters are percent-encoded when the header is serialized.
+
+The enforced and report-only policies share the same endpoint map, so the same name always resolves to one explicit destination:
+
+```ruby
+config.csp = { default_src: %w('self'), script_src: %w('self'), report_to: "tenant-a" }
+config.csp_report_only = { default_src: %w('self'), script_src: %w('self'), report_to: "tenant-a", report_only: true }
+config.reporting_endpoints = { "tenant-a" => "https://reports.example.com/tenant-a" }
+```
+
+Per-request overrides can update the reference and the map together:
+
+```ruby
+override_content_security_policy_directives(report_to: "tenant-b")
+override_reporting_endpoints(
+  "tenant-a" => "https://reports.example.com/tenant-a",
+  "tenant-b" => "https://reports.example.com/tenant-b"
+)
+```
+
+An internationalized path such as `https://example.com/报告?q=值` is emitted as `tenant-a="https://example.com/%E6%8A%A5%E5%91%8A?q=%E5%80%BC"`.
+
 **Recommendation:** Use both `report-uri` and `report-to` for maximum compatibility while transitioning to the modern approach.
 
 ### Deprecated Configuration Values

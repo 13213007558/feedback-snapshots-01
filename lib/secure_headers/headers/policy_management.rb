@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "set"
+require_relative "reporting_endpoints"
 
 module SecureHeaders
   module PolicyManagement
@@ -408,11 +409,17 @@ module SecureHeaders
       # 1. is a string
       # 2. is not empty
       def validate_report_to_endpoint_expression!(directive, endpoint_name)
+        return if endpoint_name == OPT_OUT
         unless endpoint_name.is_a?(String)
           raise ContentSecurityPolicyConfigError.new("#{directive} must be a string. Found #{endpoint_name.class} value")
         end
         if endpoint_name.empty?
           raise ContentSecurityPolicyConfigError.new("#{directive} must not be empty")
+        end
+        unless ReportingEndpoints::ENDPOINT_NAME_PATTERN.match?(endpoint_name)
+          raise ContentSecurityPolicyConfigError.new(
+            "#{directive} must be a lowercase reporting endpoint name (letters, digits, '_', '-', '.'), got: #{endpoint_name.inspect}"
+          )
         end
       end
 
