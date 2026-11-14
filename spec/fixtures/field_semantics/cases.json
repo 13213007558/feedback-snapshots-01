@@ -1,0 +1,2272 @@
+[
+  {
+    "id": "publish-topic-valid-ascii",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "plain ASCII topic",
+    "args": {
+      "topic_hex": "612f62",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003612f62",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-valid-utf8-two-byte",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "valid two byte UTF-8",
+    "args": {
+      "topic_hex": "636166c3a9",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30070005636166c3a9",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-valid-utf8-four-byte",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "valid four byte UTF-8",
+    "args": {
+      "topic_hex": "41f0aa9b94",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "3007000541f0aa9b94",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-valid-topic-slash",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "topic consisting only of the separator is valid",
+    "args": {
+      "topic_hex": "2f",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300300012f",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-valid-empty-level",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "adjacent separators create a zero length level",
+    "args": {
+      "topic_hex": "612f2f62",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30060004612f2f62",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-valid-bom",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "leading BOM is preserved, not stripped",
+    "args": {
+      "topic_hex": "efbbbf",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003efbbbf",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-2b",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "2b",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300300012b",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-23",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "23",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "3003000123",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-612f2b",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "612f2b",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003612f2b",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-612f23",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "612f23",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003612f23",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-612f2b2f62",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "612f2b2f62",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30070005612f2b2f62",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-612f6223",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "612f6223",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30060004612f6223",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-2b61",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "2b61",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300400022b61",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-2361",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "2361",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300400022361",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-wildcard-612f232f62",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "PUBLISH Topic Name must not contain wildcard characters",
+    "args": {
+      "topic_hex": "612f232f62",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30070005612f232f62",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-80",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "lone continuation byte",
+    "args": {
+      "topic_hex": "80",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "3003000180",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-c0af",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "overlong two byte sequence",
+    "args": {
+      "topic_hex": "c0af",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30040002c0af",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-e080af",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "overlong three byte sequence",
+    "args": {
+      "topic_hex": "e080af",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003e080af",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-eda080",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "UTF-16 surrogate",
+    "args": {
+      "topic_hex": "eda080",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003eda080",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-f4908080",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "code point above U+10FFFF",
+    "args": {
+      "topic_hex": "f4908080",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30060004f4908080",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-ff",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "invalid byte 0xFF",
+    "args": {
+      "topic_hex": "ff",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30030001ff",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-e291",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "truncated multi byte sequence",
+    "args": {
+      "topic_hex": "e291",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30040002e291",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-610062",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "embedded NUL",
+    "args": {
+      "topic_hex": "610062",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30050003610062",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-invalid-utf8-00",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "only NUL",
+    "args": {
+      "topic_hex": "00",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "3003000100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-topic-empty",
+    "category": "publish-topic",
+    "packet": "publish",
+    "note": "Topic Name must be at least one character",
+    "args": {
+      "topic_hex": "",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "30020000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "publish-payload-empty",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte (empty)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300d000b62696e6172792f64617461",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-qos1-empty",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte with a packet id (empty)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "",
+      "qos": 1,
+      "id": 7
+    },
+    "wire_hex": "320f000b62696e6172792f646174610007",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-nul-0x00",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte (NUL 0x00)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "00",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300e000b62696e6172792f6461746100",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-qos1-nul-0x00",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte with a packet id (NUL 0x00)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "00",
+      "qos": 1,
+      "id": 7
+    },
+    "wire_hex": "3210000b62696e6172792f64617461000700",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-0xff",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte (0xFF)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "ff",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "300e000b62696e6172792f64617461ff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-qos1-0xff",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte with a packet id (0xFF)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "ff",
+      "qos": 1,
+      "id": 7
+    },
+    "wire_hex": "3210000b62696e6172792f646174610007ff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-invalid-utf-8-sequence",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte (invalid UTF-8 sequence)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "eda080c0afff",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "3013000b62696e6172792f64617461eda080c0afff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-qos1-invalid-utf-8-sequence",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte with a packet id (invalid UTF-8 sequence)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "eda080c0afff",
+      "qos": 1,
+      "id": 7
+    },
+    "wire_hex": "3215000b62696e6172792f646174610007eda080c0afff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-all-byte-values",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte (all byte values)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "qos": 0,
+      "id": 0
+    },
+    "wire_hex": "308d02000b62696e6172792f64617461000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "publish-payload-qos1-all-byte-values",
+    "category": "publish-payload",
+    "packet": "publish",
+    "note": "payload must survive byte-for-byte with a packet id (all byte values)",
+    "args": {
+      "topic_hex": "62696e6172792f64617461",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "qos": 1,
+      "id": 7
+    },
+    "wire_hex": "328f02000b62696e6172792f646174610007000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-valid-ascii",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "plain ASCII client identifier",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636c69656e742d31",
+      "clean_session": true
+    },
+    "wire_hex": "101400044d5154540402000f0008636c69656e742d31",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-valid-utf8",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "valid non-ASCII UTF-8 client identifier",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636166c3a9",
+      "clean_session": true
+    },
+    "wire_hex": "101100044d5154540402000f0005636166c3a9",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-valid-one-byte",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "single byte client identifier",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "63",
+      "clean_session": true
+    },
+    "wire_hex": "100d00044d5154540402000f000163",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-valid-empty-clean-session",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "zero byte ClientId allowed with CleanSession=1",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "",
+      "clean_session": true
+    },
+    "wire_hex": "100c00044d5154540402000f0000",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-valid-23-bytes",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "MQTT 3.1.0 permits exactly 23 bytes",
+    "args": {
+      "version": "3.1.0",
+      "client_id_hex": "6161616161616161616161616161616161616161616161",
+      "clean_session": true
+    },
+    "wire_hex": "102500064d51497364700302000f00176161616161616161616161616161616161616161616161",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-client-id-empty-no-clean-session",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "zero byte ClientId requires CleanSession=1",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "",
+      "clean_session": false
+    },
+    "wire_hex": "100c00044d5154540400000f0000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-too-long-3-1-0",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "MQTT 3.1.0 client identifiers are 1..23 bytes",
+    "args": {
+      "version": "3.1.0",
+      "client_id_hex": "616161616161616161616161616161616161616161616161",
+      "clean_session": true
+    },
+    "wire_hex": "102600064d51497364700302000f0018616161616161616161616161616161616161616161616161",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-80",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "lone continuation byte",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "80",
+      "clean_session": true
+    },
+    "wire_hex": "100d00044d5154540402000f000180",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-c0af",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "overlong two byte sequence",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "c0af",
+      "clean_session": true
+    },
+    "wire_hex": "100e00044d5154540402000f0002c0af",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-e080af",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "overlong three byte sequence",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "e080af",
+      "clean_session": true
+    },
+    "wire_hex": "100f00044d5154540402000f0003e080af",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-eda080",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "UTF-16 surrogate",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "eda080",
+      "clean_session": true
+    },
+    "wire_hex": "100f00044d5154540402000f0003eda080",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-f4908080",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "code point above U+10FFFF",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "f4908080",
+      "clean_session": true
+    },
+    "wire_hex": "101000044d5154540402000f0004f4908080",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-ff",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "invalid byte 0xFF",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "ff",
+      "clean_session": true
+    },
+    "wire_hex": "100d00044d5154540402000f0001ff",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-e291",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "truncated multi byte sequence",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "e291",
+      "clean_session": true
+    },
+    "wire_hex": "100e00044d5154540402000f0002e291",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-610062",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "embedded NUL",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "610062",
+      "clean_session": true
+    },
+    "wire_hex": "100f00044d5154540402000f0003610062",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-client-id-invalid-00",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "only NUL",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "00",
+      "clean_session": true
+    },
+    "wire_hex": "100d00044d5154540402000f000100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-username-invalid-utf8",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "User Name is a UTF-8 encoded string",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "ff",
+      "password_hex": "70617373"
+    },
+    "wire_hex": "101800044d51545404c2000f00036369640001ff000470617373",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-username-nul",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "User Name must not include U+0000",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "00"
+    },
+    "wire_hex": "101200044d5154540482000f0003636964000100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-will-topic-wildcard",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Topic is a Topic Name and cannot contain wildcards",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "23",
+      "will_payload_hex": ""
+    },
+    "wire_hex": "101400044d5154540406000f00036369640001230000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-will-topic-invalid-utf8",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Topic is a UTF-8 encoded string",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "ff",
+      "will_payload_hex": ""
+    },
+    "wire_hex": "101400044d5154540406000f00036369640001ff0000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "connect-will-payload-empty",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Message must survive byte-for-byte (empty)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "77696c6c2f746f706963",
+      "will_payload_hex": ""
+    },
+    "wire_hex": "101d00044d5154540406000f0003636964000a77696c6c2f746f7069630000",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-password-empty",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Password must survive byte-for-byte (empty)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "75736572",
+      "password_hex": ""
+    },
+    "wire_hex": "101700044d51545404c2000f00036369640004757365720000",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-will-payload-nul-0x00",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Message must survive byte-for-byte (NUL 0x00)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "77696c6c2f746f706963",
+      "will_payload_hex": "00"
+    },
+    "wire_hex": "101e00044d5154540406000f0003636964000a77696c6c2f746f706963000100",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-password-nul-0x00",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Password must survive byte-for-byte (NUL 0x00)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "75736572",
+      "password_hex": "00"
+    },
+    "wire_hex": "101800044d51545404c2000f0003636964000475736572000100",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-will-payload-0xff",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Message must survive byte-for-byte (0xFF)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "77696c6c2f746f706963",
+      "will_payload_hex": "ff"
+    },
+    "wire_hex": "101e00044d5154540406000f0003636964000a77696c6c2f746f7069630001ff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-password-0xff",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Password must survive byte-for-byte (0xFF)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "75736572",
+      "password_hex": "ff"
+    },
+    "wire_hex": "101800044d51545404c2000f00036369640004757365720001ff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-will-payload-invalid-utf-8-sequence",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Message must survive byte-for-byte (invalid UTF-8 sequence)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "77696c6c2f746f706963",
+      "will_payload_hex": "eda080c0afff"
+    },
+    "wire_hex": "102300044d5154540406000f0003636964000a77696c6c2f746f7069630006eda080c0afff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-password-invalid-utf-8-sequence",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Password must survive byte-for-byte (invalid UTF-8 sequence)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "75736572",
+      "password_hex": "eda080c0afff"
+    },
+    "wire_hex": "101d00044d51545404c2000f00036369640004757365720006eda080c0afff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-will-payload-all-byte-values",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Will Message must survive byte-for-byte (all byte values)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "will_topic_hex": "77696c6c2f746f706963",
+      "will_payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+    },
+    "wire_hex": "109d0200044d5154540406000f0003636964000a77696c6c2f746f7069630100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "connect-password-all-byte-values",
+    "category": "connect-identity",
+    "packet": "connect",
+    "note": "Password must survive byte-for-byte (all byte values)",
+    "args": {
+      "version": "3.1.1",
+      "client_id_hex": "636964",
+      "clean_session": true,
+      "username_hex": "75736572",
+      "password_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+    },
+    "wire_hex": "10970200044d51545404c2000f00036369640004757365720100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-23",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "23",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "8206000100012301",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-23",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "23",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a2050001000123",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-2b",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "8206000100012b01",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-2b",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a205000100012b",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-612f23",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f23",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820800010003612f2301",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-612f23",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f23",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20700010003612f23",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-612f2b2f62",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2b2f62",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820a00010005612f2b2f6201",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-612f2b2f62",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2b2f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20900010005612f2b2f62",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-2b2f74656e6e69732f23",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b2f74656e6e69732f23",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820f0001000a2b2f74656e6e69732f2301",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-2b2f74656e6e69732f23",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b2f74656e6e69732f23",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20e0001000a2b2f74656e6e69732f23",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-73706f72742f74656e6e69732f2b",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e69732f2b",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "82130001000e73706f72742f74656e6e69732f2b01",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-73706f72742f74656e6e69732f2b",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e69732f2b",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a2120001000e73706f72742f74656e6e69732f2b",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-73706f72742f2b",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f2b",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820c0001000773706f72742f2b01",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-73706f72742f2b",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f2b",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20b0001000773706f72742f2b",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-2f66696e616e6365",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2f66696e616e6365",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820d000100082f66696e616e636501",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-2f66696e616e6365",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2f66696e616e6365",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20c000100082f66696e616e6365",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-73706f72742f",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820b0001000673706f72742f01",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-73706f72742f",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20a0001000673706f72742f",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-2f",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2f",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "8206000100012f01",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-2f",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2f",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a205000100012f",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-612f2f62",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2f62",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820900010004612f2f6201",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-612f2f62",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20800010004612f2f62",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-245359532f23",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "245359532f23",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "820b00010006245359532f2301",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-245359532f23",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "245359532f23",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20a00010006245359532f23",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-valid-73706f72742f74656e6e69732f706c61796572312f23",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e69732f706c61796572312f23",
+          "qos": 1
+        }
+      ]
+    },
+    "wire_hex": "821b0001001673706f72742f74656e6e69732f706c61796572312f2301",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-valid-73706f72742f74656e6e69732f706c61796572312f23",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "legal wildcard filter must be accepted on both sides",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e69732f706c61796572312f23",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a21a0001001673706f72742f74656e6e69732f706c61796572312f23",
+    "expect": {
+      "encode": "accept",
+      "parse": "accept"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "82050001000000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20400010000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-612f232f62",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f232f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820a00010005612f232f6200",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-612f232f62",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f232f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20900010005612f232f62",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-612f6223",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f6223",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820900010004612f622300",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-612f6223",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f6223",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20800010004612f6223",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-612f2b62",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2b62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820900010004612f2b6200",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-612f2b62",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612f2b62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20800010004612f2b62",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-232f61",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "232f61",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820800010003232f6100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-232f61",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "232f61",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20700010003232f61",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-6123",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "6123",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820700010002612300",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-6123",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "6123",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a206000100026123",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-2361",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2361",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820700010002236100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-2361",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2361",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a206000100022361",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-2b61",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b61",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "8207000100022b6100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-2b61",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "2b61",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a206000100022b61",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-612b2f62",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612b2f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820900010004612b2f6200",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-612b2f62",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "612b2f62",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20800010004612b2f62",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-73706f72742f74656e6e697323",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e697323",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "82120001000d73706f72742f74656e6e69732300",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-73706f72742f74656e6e697323",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742f74656e6e697323",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a2110001000d73706f72742f74656e6e697323",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-73706f72742b",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742b",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820b0001000673706f72742b00",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "unsubscribe-filter-invalid-73706f72742b",
+    "category": "topic-filter",
+    "packet": "unsubscribe",
+    "note": "wildcards must occupy a whole level and # must be last",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "73706f72742b",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "a20a0001000673706f72742b",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-80",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "lone continuation byte",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "80",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "8206000100018000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-c0af",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "overlong two byte sequence",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "c0af",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820700010002c0af00",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-e080af",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "overlong three byte sequence",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "e080af",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820800010003e080af00",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-eda080",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "UTF-16 surrogate",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "eda080",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820800010003eda08000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-f4908080",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "code point above U+10FFFF",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "f4908080",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820900010004f490808000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-ff",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "invalid byte 0xFF",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "ff",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820600010001ff00",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-e291",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "truncated multi byte sequence",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "e291",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "820700010002e29100",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-610062",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "embedded NUL",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "610062",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "82080001000361006200",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-filter-invalid-utf8-00",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "only NUL",
+    "args": {
+      "id": 1,
+      "filters": [
+        {
+          "filter_hex": "00",
+          "qos": 0
+        }
+      ]
+    },
+    "wire_hex": "8206000100010000",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  },
+  {
+    "id": "subscribe-mixed-valid-and-invalid",
+    "category": "topic-filter",
+    "packet": "subscribe",
+    "note": "one invalid filter rejects the whole packet",
+    "args": {
+      "id": 9,
+      "filters": [
+        {
+          "filter_hex": "612f2b2f62",
+          "qos": 1
+        },
+        {
+          "filter_hex": "626164ff",
+          "qos": 0
+        },
+        {
+          "filter_hex": "632f23",
+          "qos": 2
+        }
+      ]
+    },
+    "wire_hex": "821700090005612f2b2f62010004626164ff000003632f2302",
+    "expect": {
+      "encode": "reject",
+      "parse": "reject"
+    }
+  }
+]

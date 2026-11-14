@@ -48,7 +48,13 @@ module MQTT
       packet.instance_variable_set('@body_length', body_length)
 
       # Read in the packet body
-      packet.parse_body(socket.read(body_length))
+      body = socket.read(body_length)
+      # A closed socket returns nil, which would otherwise crash while checking
+      # the body length instead of reporting a protocol error.
+      if body.nil?
+        raise ProtocolException, 'Packet is truncated: socket closed before the body was complete'
+      end
+      packet.parse_body(body)
 
       packet
     end
@@ -245,23 +251,93 @@ module MQTT
 
     # Encode a UTF-8 string and return it
     # (preceded by the length of the string)
-    def encode_string(str)
-      str = str.to_s.encode('UTF-8')
+    def encode_string(str, field = 'string')
+      str = validate_utf8_string!(str, field, ArgumentError)
 
       # Force to binary, when assembling the packet
-      str.force_encoding('ASCII-8BIT')
-      encode_short(str.bytesize) + str
+      encode_short(str.bytesize) + str.dup.force_encoding('ASCII-8BIT')
+    end
+
+    # Encode a length-prefixed sequence of bytes, without interpreting them as text
+    def encode_binary(data, field = 'binary data')
+      bytes = data.to_s.dup.force_encoding('ASCII-8BIT')
+      if bytes.bytesize > 0xFFFF
+        raise ArgumentError, "#{field} is longer than 65535 bytes"
+      end
+      encode_short(bytes.bytesize) + bytes
+    end
+
+    # Check that a value is a well-formed MQTT UTF-8 string.
+    #
+    # MQTT-1.5.3-1 and MQTT-1.5.3-2: the bytes must be well-formed UTF-8
+    # and must not contain U+0000. This validation is deliberately shared by
+    # encoding and parsing so that both ends agree on what a field means.
+    def validate_utf8_string!(str, field = 'string', error_class = ProtocolException)
+      str = str.to_s
+
+      str = if str.encoding == Encoding::UTF_8
+              str
+            elsif str.encoding == Encoding::ASCII_8BIT || str.encoding == Encoding::US_ASCII
+              str.dup.force_encoding(Encoding::UTF_8)
+            else
+              begin
+                str.encode(Encoding::UTF_8)
+              rescue EncodingError => exp
+                raise error_class, "Invalid UTF-8 in #{field}: #{exp.message}"
+              end
+            end
+
+      raise error_class, "Invalid UTF-8 in #{field}" unless str.valid_encoding?
+      raise error_class, "NUL character not allowed in #{field}" if str.include?("\u0000")
+      raise error_class, "#{field} is longer than 65535 bytes" if str.bytesize > 0xFFFF
+
+      str
+    end
+
+    # Topic Names are UTF-8 strings that must not be empty or contain wildcards
+    def validate_topic_name!(topic, field = 'topic name', error_class = ProtocolException)
+      name = validate_utf8_string!(topic, field, error_class)
+      raise error_class, "#{field} must not be empty" if name.empty?
+      if name.include?('+') || name.include?('#')
+        raise error_class, "#{field} must not contain wildcard characters"
+      end
+      name
+    end
+
+    # Topic Filters are UTF-8 strings that may contain correctly placed wildcards
+    def validate_topic_filter!(filter, field = 'topic filter', error_class = ProtocolException)
+      name = validate_utf8_string!(filter, field, error_class)
+      raise error_class, "#{field} must not be empty" if name.empty?
+
+      levels = name.split('/', -1)
+      levels.each_with_index do |level, index|
+        if level.include?('#') && !(level == '#' && index == levels.length - 1)
+          raise error_class, "Invalid multi-level wildcard in #{field}"
+        end
+        if level.include?('+') && level != '+'
+          raise error_class, "Invalid single-level wildcard in #{field}"
+        end
+      end
+      name
     end
 
     # Remove a 16-bit unsigned integer from the front of buffer
     def shift_short(buffer)
-      bytes = buffer.slice!(0..1)
+      if buffer.bytesize < 2
+        raise ProtocolException, 'Packet is truncated: expected a two byte length field'
+      end
+
+      bytes = buffer.slice!(0, 2)
       bytes.unpack('n').first
     end
 
     # Remove one byte from the front of the string
     def shift_byte(buffer)
-      buffer.slice!(0...1).unpack('C').first
+      if buffer.bytesize < 1
+        raise ProtocolException, 'Packet is truncated: expected a byte'
+      end
+
+      buffer.slice!(0, 1).unpack('C').first
     end
 
     # Remove 8 bits from the front of buffer
@@ -275,11 +351,24 @@ module MQTT
     end
 
     # Remove string from the front of buffer
-    def shift_string(buffer)
+    def shift_string(buffer, field = 'string')
       len = shift_short(buffer)
+      if len > buffer.bytesize
+        raise ProtocolException, "Packet is truncated: #{field} needs #{len} bytes but only #{buffer.bytesize} remain"
+      end
+
       str = shift_data(buffer, len)
-      # Strings in MQTT v3.1 are all UTF-8
-      str.force_encoding('UTF-8')
+      validate_utf8_string!(str, field)
+    end
+
+    # Remove a binary field (length-prefixed bytes) from the front of the buffer
+    def shift_binary(buffer, field = 'binary data')
+      len = shift_short(buffer)
+      if len > buffer.bytesize
+        raise ProtocolException, "Packet is truncated: #{field} needs #{len} bytes but only #{buffer.bytesize} remain"
+      end
+
+      shift_data(buffer, len).force_encoding('ASCII-8BIT')
     end
 
     ## PACKET SUBCLASSES ##
@@ -347,9 +436,9 @@ module MQTT
       def encode_body
         body = ''
         if @topic.nil? || @topic.to_s.empty?
-          raise 'Invalid topic name when serialising packet'
+          raise ArgumentError, 'Invalid topic name when serialising packet'
         end
-        body += encode_string(@topic)
+        body += encode_string(validate_topic_name!(@topic, 'topic name', ArgumentError), 'topic name')
         body += encode_short(@id) unless qos.zero?
         body += payload.to_s.dup.force_encoding('ASCII-8BIT')
         body
@@ -358,9 +447,11 @@ module MQTT
       # Parse the body (variable header and payload) of a Publish packet
       def parse_body(buffer)
         super(buffer)
-        @topic = shift_string(buffer)
+        @topic = shift_string(buffer, 'topic name')
+        validate_topic_name!(@topic)
         @id = shift_short(buffer) unless qos.zero?
-        @payload = buffer
+        # The payload is opaque application data; never interpret or transcode it
+        @payload = buffer.dup.force_encoding('ASCII-8BIT')
       end
 
       # Check that fixed header flags are valid for this packet type
@@ -461,11 +552,16 @@ module MQTT
         body = ''
 
         if @version == '3.1.0'
-          raise 'Client identifier too short while serialising packet' if @client_id.nil? || @client_id.bytesize < 1
-          raise 'Client identifier too long when serialising packet' if @client_id.bytesize > 23
+          raise ArgumentError, 'Client identifier too short while serialising packet' if @client_id.nil? || @client_id.bytesize < 1
+          raise ArgumentError, 'Client identifier too long when serialising packet' if @client_id.bytesize > 23
         end
 
-        body += encode_string(@protocol_name)
+        client_id = validate_utf8_string!(@client_id, 'client identifier', ArgumentError)
+        if client_id.empty? && !@clean_session
+          raise ArgumentError, 'Client identifier cannot be empty when clean_session is false'
+        end
+
+        body += encode_string(@protocol_name, 'protocol name')
         body += encode_bytes(@protocol_level.to_i)
 
         if @keep_alive < 0
@@ -483,21 +579,22 @@ module MQTT
         body += encode_bytes(@connect_flags)
 
         body += encode_short(@keep_alive)
-        body += encode_string(@client_id)
+        body += encode_string(client_id, 'client identifier')
         unless will_topic.nil?
-          body += encode_string(@will_topic)
-          # The MQTT v3.1 specification says that the payload is a UTF-8 string
-          body += encode_string(@will_payload)
+          body += encode_string(validate_topic_name!(@will_topic, 'will topic', ArgumentError), 'will topic')
+          # The Will Message is a length-prefixed sequence of binary bytes
+          body += encode_binary(@will_payload, 'will payload')
         end
-        body += encode_string(@username) unless @username.nil?
-        body += encode_string(@password) unless @password.nil?
+        body += encode_string(@username, 'username') unless @username.nil?
+        # The Password is a length-prefixed sequence of binary bytes
+        body += encode_binary(@password, 'password') unless @password.nil?
         body
       end
 
       # Parse the body (variable header and payload) of a Connect packet
       def parse_body(buffer)
         super(buffer)
-        @protocol_name = shift_string(buffer)
+        @protocol_name = shift_string(buffer, 'protocol name')
         @protocol_level = shift_byte(buffer).to_i
         if @protocol_name == 'MQIsdp' && @protocol_level == 3
           @version = '3.1.0'
@@ -510,20 +607,30 @@ module MQTT
         @connect_flags = shift_byte(buffer)
         @clean_session = ((@connect_flags & 0x02) >> 1) == 0x01
         @keep_alive = shift_short(buffer)
-        @client_id = shift_string(buffer)
+        @client_id = shift_string(buffer, 'client identifier')
+        if @version == '3.1.0' && (@client_id.bytesize < 1 || @client_id.bytesize > 23)
+          raise ProtocolException, 'Client identifier must be between 1 and 23 bytes for MQTT 3.1.0'
+        end
+        if @client_id.empty? && !@clean_session
+          raise ProtocolException, 'Client identifier cannot be empty when clean_session is false'
+        end
         if ((@connect_flags & 0x04) >> 2) == 0x01
           # Last Will and Testament
           @will_qos = ((@connect_flags & 0x18) >> 3)
           @will_retain = ((@connect_flags & 0x20) >> 5) == 0x01
-          @will_topic = shift_string(buffer)
-          # The MQTT v3.1 specification says that the payload is a UTF-8 string
-          @will_payload = shift_string(buffer)
+          @will_topic = shift_string(buffer, 'will topic')
+          validate_topic_name!(@will_topic, 'will topic')
+          # The Will Message is a length-prefixed sequence of binary bytes
+          @will_payload = shift_binary(buffer, 'will payload')
         end
         if ((@connect_flags & 0x80) >> 7) == 0x01 && buffer.bytesize > 0
-          @username = shift_string(buffer)
+          @username = shift_string(buffer, 'username')
         end
         if ((@connect_flags & 0x40) >> 6) == 0x01 && buffer.bytesize > 0 # rubocop: disable Style/GuardClause
-          @password = shift_string(buffer)
+          @password = shift_binary(buffer, 'password')
+        end
+        unless buffer.empty?
+          raise ProtocolException, 'Extra bytes at end of Connect packet'
         end
       end
 
@@ -787,10 +894,10 @@ module MQTT
 
       # Get serialisation of packet's body
       def encode_body
-        raise 'no topics given when serialising packet' if @topics.empty?
+        raise ArgumentError, 'no topics given when serialising packet' if @topics.empty?
         body = encode_short(@id)
         topics.each do |item|
-          body += encode_string(item[0])
+          body += encode_string(validate_topic_filter!(item[0], 'topic filter', ArgumentError), 'topic filter')
           body += encode_bytes(item[1])
         end
         body
@@ -802,7 +909,8 @@ module MQTT
         @id = shift_short(buffer)
         @topics = []
         while buffer.bytesize > 0
-          topic_name = shift_string(buffer)
+          topic_name = shift_string(buffer, 'topic filter')
+          validate_topic_filter!(topic_name)
           topic_qos = shift_byte(buffer)
           @topics << [topic_name, topic_qos]
         end
@@ -909,9 +1017,11 @@ module MQTT
 
       # Get serialisation of packet's body
       def encode_body
-        raise 'no topics given when serialising packet' if @topics.empty?
+        raise ArgumentError, 'no topics given when serialising packet' if @topics.empty?
         body = encode_short(@id)
-        topics.each { |topic| body += encode_string(topic) }
+        topics.each do |topic|
+          body += encode_string(validate_topic_filter!(topic, 'topic filter', ArgumentError), 'topic filter')
+        end
         body
       end
 
@@ -919,7 +1029,8 @@ module MQTT
       def parse_body(buffer)
         super(buffer)
         @id = shift_short(buffer)
-        @topics << shift_string(buffer) while buffer.bytesize > 0
+        @topics << shift_string(buffer, 'topic filter') while buffer.bytesize > 0
+        @topics.each { |topic| validate_topic_filter!(topic) }
       end
 
       # Check that fixed header flags are valid for this packet type

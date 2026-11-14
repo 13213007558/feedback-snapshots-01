@@ -764,7 +764,7 @@ describe MQTT::Packet::Connect do
 
     it "should set the Will payload of the packet correctly" do
       expect(packet.will_payload).to eq('hello')
-      expect(packet.will_payload.encoding.to_s).to eq('UTF-8')
+      expect(packet.will_payload.encoding.to_s).to eq('ASCII-8BIT')
     end
   end
 
@@ -815,9 +815,9 @@ describe MQTT::Packet::Connect do
       expect(packet.username.encoding.to_s).to eq('UTF-8')
     end
 
-    it "should set the Username of the packet correctly" do
+    it "should set the Password of the packet correctly" do
       expect(packet.password).to eq('password')
-      expect(packet.password.encoding.to_s).to eq('UTF-8')
+      expect(packet.password.encoding.to_s).to eq('ASCII-8BIT')
     end
   end
 
@@ -849,9 +849,9 @@ describe MQTT::Packet::Connect do
       expect(packet.username).to be_nil
     end
 
-    it "should set the Username of the packet correctly" do
+    it "should set the Password of the packet correctly" do
       expect(packet.password).to eq('password')
-      expect(packet.password.encoding.to_s).to eq('UTF-8')
+      expect(packet.password.encoding.to_s).to eq('ASCII-8BIT')
     end
   end
 
@@ -931,7 +931,7 @@ describe MQTT::Packet::Connect do
 
     it "should set the Will payload of the packet correctly" do
       expect(packet.will_payload).to eq('will_message')
-      expect(packet.will_payload.encoding.to_s).to eq('UTF-8')
+      expect(packet.will_payload.encoding.to_s).to eq('ASCII-8BIT')
     end
 
     it "should set the Username of the packet correctly" do
@@ -939,9 +939,9 @@ describe MQTT::Packet::Connect do
       expect(packet.username.encoding.to_s).to eq('UTF-8')
     end
 
-    it "should set the Username of the packet correctly" do
+    it "should set the Password of the packet correctly" do
       expect(packet.password).to eq('pass0123456789')
-      expect(packet.password.encoding.to_s).to eq('UTF-8')
+      expect(packet.password.encoding.to_s).to eq('ASCII-8BIT')
     end
   end
 
