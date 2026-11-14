@@ -1,0 +1,23 @@
+GIT
+  remote: http://shared.example.com/jquery-rails.git
+  revision: a8b003d726522cf663611c114d8f0e79abf8d200
+  specs:
+    jquery-rails (4.4.0)
+
+GEM
+  remote: http://shared.example.com/
+  remote: http://192.168.1.5/
+  remote: http://localhost:9292/
+  remote: http://[::1]/
+  specs:
+    rack (2.2.6.3)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  jquery-rails!
+  rack
+
+BUNDLED WITH
+   2.2.0
