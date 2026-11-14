@@ -17,6 +17,7 @@
 #
 
 require 'net/protocol'
+require 'stringio'
 begin
   require 'openssl'
 rescue LoadError
@@ -853,6 +854,76 @@ module Net
 
     alias ready open_message_stream   # obsolete
 
+    # Default size in bytes of the chunks used by #send_binary_message.
+    DEFAULT_BDAT_CHUNK_SIZE = 16 * 1024
+
+    #
+    # Sends the content of +io+ as a binary message using the CHUNKING
+    # extension (the BDAT command, RFC 3030).  The message bytes are sent
+    # verbatim: unlike #send_message, no CR/LF conversion and no
+    # dot-stuffing is applied, so +io+ may contain arbitrary binary data
+    # (NUL bytes, lone CR/LF, lines starting with ".", ...).
+    #
+    # The server must advertise the CHUNKING capability, otherwise
+    # Net::SMTPUnsupportedCommand is raised before anything is sent.
+    # The MAIL FROM command carries the BODY=BINARYMIME parameter;
+    # +from_addr+ must not already carry a conflicting BODY= parameter.
+    #
+    # +io+ is an IO-like object responding to +read(length)+; a String
+    # is also accepted.  The message is streamed in chunks of at most
+    # +chunk_size+ bytes.  Each BDAT command announces the exact number
+    # of bytes of its chunk (short reads from +io+ simply produce
+    # smaller chunks), and every chunk is confirmed by the server before
+    # the next one is sent.  An empty message is sent as a single
+    # <tt>BDAT 0 LAST</tt> command.
+    #
+    # If the server rejects a chunk, the transfer is aborted and the
+    # error is raised to the caller, with the list of the chunk
+    # boundaries that had already been confirmed.  The message is NOT
+    # silently re-sent with DATA.
+    #
+    # +from_addr+ is a String or Net::SMTP::Address representing the source mail address.
+    #
+    # +to_addr+ is a String or Net::SMTP::Address or Array of them, representing
+    # the destination mail address or addresses.
+    #
+    # === Example
+    #
+    #     Net::SMTP.start('smtp.example.com', 25) do |smtp|
+    #       File.open('message.eml', 'rb') do |f|
+    #         smtp.send_binary_message f, 'from@example.com', 'dest@example.com'
+    #       end
+    #     end
+    #
+    # === Errors
+    #
+    # This method may raise:
+    #
+    # * Net::SMTPUnsupportedCommand
+    # * Net::SMTPServerBusy
+    # * Net::SMTPSyntaxError
+    # * Net::SMTPFatalError
+    # * Net::SMTPUnknownError
+    # * Net::ReadTimeout
+    # * IOError
+    # * ArgumentError
+    #
+    def send_binary_message(io, from_addr, *to_addrs, chunk_size: DEFAULT_BDAT_CHUNK_SIZE)
+      to_addrs.flatten!
+      raise IOError, 'closed session' unless @socket
+      unless capable?('CHUNKING')
+        raise SMTPUnsupportedCommand, 'server does not support CHUNKING (BDAT)'
+      end
+      unless chunk_size.is_a?(Integer) and chunk_size > 0
+        raise ArgumentError, 'chunk_size must be a positive Integer'
+      end
+      io = StringIO.new(io) if io.is_a?(String)
+      from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
+      from_addr = binarymime_address(from_addr)
+      mailfrom from_addr
+      rcptto_list(to_addrs) { bdat_stream(io, chunk_size) }
+    end
+
     #
     # Authentication
     #
@@ -979,6 +1050,35 @@ module Net
       res
     end
 
+    # Sends one message chunk with the BDAT command (RFC 3030).
+    # +chunk+ is a String sent verbatim: the announced chunk length is
+    # always exactly +chunk.bytesize+, and no newline conversion or
+    # dot-stuffing is applied.  Pass <tt>last: true</tt> for the final
+    # chunk of the message.  Use #send_binary_message to stream a whole
+    # message; use this method directly only if you drive the chunking
+    # yourself after mailfrom/rcptto_list.
+    def bdat(chunk, last: false)
+      unless chunk.is_a?(String)
+        raise ArgumentError, 'chunk must be a String'
+      end
+      cmd = "BDAT #{chunk.bytesize}"
+      cmd += ' LAST' if last
+      res = critical {
+        @socket.writeline cmd
+        socket_sync_bak = @socket.io.sync
+        begin
+          @socket.io.sync = false
+          @socket.io.write chunk
+        ensure
+          @socket.io.flush
+          @socket.io.sync = socket_sync_bak
+        end
+        recv_response()
+      }
+      check_response res
+      res
+    end
+
     def quit
       getok('QUIT')
     end
@@ -990,6 +1090,43 @@ module Net
     end
 
     private
+
+    def binarymime_address(from_addr)
+      addr = Address.new(from_addr)
+      body = addr.parameters.find { |param| /\ABODY=/i.match?(param) }
+      if body && body.upcase != 'BODY=BINARYMIME'
+        raise ArgumentError, "conflicting MAIL parameter #{body.inspect}; BODY=BINARYMIME is required for BDAT"
+      end
+      Address.new(addr, 'BODY=BINARYMIME')
+    end
+
+    # Streams +io+ with BDAT commands of at most +chunk_size+ bytes.
+    # Reads one chunk ahead so that only the final chunk carries LAST.
+    # On failure the raised error lists the chunk boundaries that the
+    # server had already confirmed; the transfer is never retried with
+    # DATA.
+    def bdat_stream(io, chunk_size)
+      confirmed = []   # byte sizes of the chunks confirmed by the server
+      pending = io.read(chunk_size)
+      if pending.nil? or pending.empty?
+        bdat('', last: true)
+        return
+      end
+      loop do
+        nxt = io.read(chunk_size)
+        last = nxt.nil? or nxt.empty?
+        bdat(pending, last: last)
+        confirmed << pending.bytesize
+        break if last
+        pending = nxt
+      end
+    rescue SMTPError => err
+      boundaries = confirmed.each_with_index.map { |size, idx| "chunk ##{idx + 1} (#{size} bytes)" }
+      detail = boundaries.empty? ? 'none' : boundaries.join(', ')
+      raise err.class.new(err.response,
+                          message: "BDAT transfer failed after #{confirmed.size} confirmed chunk(s) " \
+                                   "[#{detail}]: #{err.message}")
+    end
 
     def validate_line(line)
       # A bare CR or LF is not allowed in RFC5321.

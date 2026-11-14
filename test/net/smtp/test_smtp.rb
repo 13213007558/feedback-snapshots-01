@@ -2,6 +2,7 @@
 
 require 'net/smtp'
 require 'test/unit'
+require 'digest'
 
 module Net
   class TestSMTP < Test::Unit::TestCase
@@ -251,6 +252,119 @@ module Net
       err = assert_raise(Net::SMTPUnknownError) { smtp.data('message') }
       assert_equal "could not get 3xx (250: 250 OK\n)", err.message
       assert_equal "250", err.response.status
+    end
+
+    # An IO-like reader that never returns more than +max+ bytes per
+    # read call, to exercise short reads.
+    class ShortReadIO
+      def initialize(data, max)
+        @io = StringIO.new(data)
+        @max = max
+      end
+
+      def read(length)
+        @io.read([length, @max].min)
+      end
+    end
+
+    def binary_payload
+      str = "From: sender@example.com\r\n" \
+            "To: rcpt@example.com\r\n" \
+            "Subject: binary\r\n\r\n" \
+            "lone LF\nlone CR\rdot line\r\n.\r\n..\r\n" \
+            "NUL\x00bytes\r\n"
+      str.b << [*0..255].pack('C*')
+    end
+
+    def test_send_binary_message
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      payload = binary_payload
+      smtp.send_binary_message(StringIO.new(payload), 'sender@example.com', 'rcpt@example.com', chunk_size: 1000)
+      # The receiver rebuilt the body from the BDAT command lengths;
+      # NUL bytes and dot lines survive verbatim.
+      assert_equal Digest::SHA256.hexdigest(payload), Digest::SHA256.hexdigest(server.body)
+      assert server.commands.include?("MAIL FROM:<sender@example.com> BODY=BINARYMIME\r\n")
+      assert_equal payload.bytesize, server.bdat_confirmed.sum
+      assert_equal 1000, server.bdat_confirmed.first
+      assert server.commands.include?("BDAT 1000\r\n")
+      assert server.commands.any? { |c| /\ABDAT \d+ LAST\r\n\z/.match?(c) }
+      assert_not server.commands.any? { |c| c.start_with?('DATA') }
+    end
+
+    def test_send_binary_message_with_string
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      payload = binary_payload
+      smtp.send_binary_message(payload, 'sender@example.com', 'rcpt@example.com')
+      assert_equal Digest::SHA256.hexdigest(payload), Digest::SHA256.hexdigest(server.body)
+    end
+
+    def test_send_binary_message_empty
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.send_binary_message(StringIO.new(+''), 'sender@example.com', 'rcpt@example.com')
+      assert_equal '', server.body
+      assert server.commands.include?("BDAT 0 LAST\r\n")
+      assert_equal [0], server.bdat_confirmed
+    end
+
+    def test_send_binary_message_short_reads
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      payload = binary_payload
+      smtp.send_binary_message(ShortReadIO.new(payload, 300), 'sender@example.com', 'rcpt@example.com', chunk_size: 1000)
+      # Each BDAT announces the number of bytes actually read and sent.
+      assert_equal Digest::SHA256.hexdigest(payload), Digest::SHA256.hexdigest(server.body)
+      assert_equal payload.bytesize, server.bdat_confirmed.sum
+      assert server.bdat_confirmed.all? { |size| size <= 300 }
+    end
+
+    def test_send_binary_message_without_chunking
+      server = FakeServer.start
+      smtp = Net::SMTP.start 'localhost', server.port
+      assert_raise(Net::SMTPUnsupportedCommand) do
+        smtp.send_binary_message(StringIO.new('message'), 'sender@example.com', 'rcpt@example.com')
+      end
+      assert_not server.commands.any? { |c| c.start_with?('MAIL', 'BDAT', 'DATA') }
+    end
+
+    def test_send_binary_message_conflicting_body_parameter
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      from = Net::SMTP::Address.new('sender@example.com', 'BODY=8BITMIME')
+      assert_raise(ArgumentError) do
+        smtp.send_binary_message(StringIO.new('message'), from, 'rcpt@example.com')
+      end
+      assert_not server.commands.any? { |c| c.start_with?('MAIL') }
+    end
+
+    def test_send_binary_message_chunk_failure
+      server = FakeServer.start(chunking: true)
+      server.bdat_fail_at = 3
+      smtp = Net::SMTP.start 'localhost', server.port
+      err = assert_raise(Net::SMTPFatalError) do
+        smtp.send_binary_message(StringIO.new('x' * 2500), 'sender@example.com', 'rcpt@example.com', chunk_size: 1000)
+      end
+      # The error lists the confirmation boundaries crossed before the failure.
+      assert_include err.message, '2 confirmed chunk(s)'
+      assert_include err.message, 'chunk #1 (1000 bytes)'
+      assert_include err.message, 'chunk #2 (1000 bytes)'
+      assert_equal [1000, 1000], server.bdat_confirmed
+      # The failed message is not silently re-sent with DATA.
+      assert_not server.commands.any? { |c| c.start_with?('DATA') }
+    end
+
+    def test_bdat
+      server = FakeServer.start(chunking: true)
+      smtp = Net::SMTP.start 'localhost', server.port
+      smtp.mailfrom(Net::SMTP::Address.new('sender@example.com', 'BODY=BINARYMIME'))
+      smtp.rcptto('rcpt@example.com')
+      assert smtp.bdat("abc\x00.\r\n".b).success?
+      assert smtp.bdat('def', last: true).success?
+      assert_equal "abc\x00.\r\ndef".b, server.body
+      assert server.commands.include?("BDAT 7\r\n")
+      assert server.commands.include?("BDAT 3 LAST\r\n")
     end
 
     def test_crlf_injection
@@ -650,6 +764,8 @@ module Net
     attr_reader :port
     attr_reader :commands
     attr_reader :body
+    attr_reader :bdat_confirmed
+    attr_accessor :bdat_fail_at
 
     def starttls_started?
       !!@starttls_started
@@ -657,7 +773,9 @@ module Net
 
     def start(**capabilities)
       @commands = []
-      @body = +''
+      @body = +''.b
+      @bdat_confirmed = []
+      @bdat_fail_at = nil
       @capa = capabilities
       @tls = @capa.delete(:tls)
       @servers = Socket.tcp_server_sockets('localhost', 0)
@@ -780,6 +898,20 @@ module Net
       @sock.puts "250 2.0.0 Ok: queued as ABCDEFG\r\n"
     end
 
+    # Rebuilds the message from the byte counts announced by the BDAT
+    # commands, reading exactly that many raw bytes (NUL bytes and lines
+    # starting with "." included, without any dot-unstuffing).
+    def bdat(size, last)
+      chunk = size.zero? ? +''.b : @sock.read(size)
+      if @bdat_fail_at && @bdat_confirmed.size + 1 == @bdat_fail_at
+        @sock.puts "554 5.6.0 Error: chunk rejected\r\n"
+        return
+      end
+      @body.concat chunk
+      @bdat_confirmed.push size
+      @sock.puts "250 2.0.0 Ok#{last ? ': queued as ABCDEFG' : ''}\r\n"
+    end
+
     def rset
       @sock.puts "250 2.0.0 Ok\r\n"
     end
@@ -806,6 +938,8 @@ module Net
           rcpt($')
         when "DATA"
           data
+        when /\ABDAT (\d+)( LAST)?\z/
+          bdat($1.to_i, !$2.nil?)
         when "RSET"
           rset
         when "QUIT"

@@ -62,6 +62,27 @@ Net::SMTP.start('your.smtp.server', 25) do |smtp|
 end
 ```
 
+### Sending Binary Messages
+
+If the server advertises the CHUNKING extension (RFC 3030), you can
+stream a message as raw bytes with the BDAT command.  Unlike
+`send_message`, no CR/LF conversion or dot-stuffing is applied, so the
+message may contain arbitrary binary data (BINARYMIME content):
+
+```ruby
+Net::SMTP.start('your.smtp.server', 25) do |smtp|
+  File.open('message.eml', 'rb') do |f|
+    smtp.send_binary_message f, 'from@example.com', 'to@example.com'
+  end
+end
+```
+
+The message is sent in chunks (16 KiB by default, configurable with
+`chunk_size:`), each confirmed by the server before the next one is
+sent.  If a chunk is rejected, the transfer is aborted with an error
+listing the chunks that had already been confirmed; it is not retried
+with DATA.
+
 ### Closing the Session
 
 You MUST close the SMTP session after sending messages, by calling
