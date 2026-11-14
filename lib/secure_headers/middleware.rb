@@ -17,7 +17,9 @@ module SecureHeaders
       end
 
       config = SecureHeaders.config_for(req)
-      flag_cookies!(headers, override_secure(env, config.cookies)) unless config.cookies == OPT_OUT
+      unless config.cookies == OPT_OUT
+        flag_cookies!(headers, override_secure(env, config.cookies))
+      end
       headers.merge!(SecureHeaders.header_hash_for(req))
       [status, headers, response]
     end
@@ -34,13 +36,15 @@ module SecureHeaders
       headers["Set-Cookie"] = cookies.is_a?(Array) ? secured_cookies : secured_cookies.join("\n")
     end
 
-    # disable Secure cookies for non-https requests
+    # disable Secure cookies for non-https requests. Returns a request-local
+    # copy instead of mutating the configuration's cookie hash, so interleaved
+    # http/https requests and the registered default stay untouched.
     def override_secure(env, config = {})
       if scheme(env) != "https" && config != OPT_OUT
-        config[:secure] = OPT_OUT
+        config.merge(secure: OPT_OUT)
+      else
+        config
       end
-
-      config
     end
 
     # derived from https://github.com/tobmatth/rack-ssl-enforcer/blob/6c014/lib/rack/ssl-enforcer.rb#L119

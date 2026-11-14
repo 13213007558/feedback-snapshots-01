@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require "yaml"
+require "secure_headers/utils/ownership"
 
 module SecureHeaders
   class Configuration
@@ -57,9 +58,9 @@ module SecureHeaders
         # results in no security headers being set.
         override(NOOP_OVERRIDE, &method(:create_noop_config_block))
 
-        new_config = new(&block).freeze
+        new_config = new(&block)
         new_config.validate_config!
-        @default_config = new_config
+        @default_config = new_config.freeze_registered_config!
       end
       alias_method :configure, :default
 
@@ -109,21 +110,13 @@ module SecureHeaders
           (defined?(@overrides) && @overrides.key?(name))
       end
 
-      # Public: perform a basic deep dup. The shallow copy provided by dup/clone
-      # can lead to modifying parent objects.
+      # Private: perform a basic deep dup. The shallow copy provided by dup/clone
+      # can lead to modifying parent objects. Source-list arrays are duplicated
+      # and every nested hash is rebuilt so callers can mutate the result without
+      # touching the configuration it came from.
       def deep_copy(config)
         return unless config
-        result = {}
-        config.each_pair do |key, value|
-          result[key] =
-            case value
-            when Array
-              value.dup
-            else
-              value
-            end
-        end
-        result
+        Ownership.deep_dup(config)
       end
 
       # Private: Returns the internal default configuration. This should only
@@ -136,16 +129,6 @@ module SecureHeaders
           raise NotYetConfiguredError, "Default policy not yet configured"
         end
         @default_config
-      end
-
-      # Private: convenience method purely DRY things up. The value may not be a
-      # hash (e.g. OPT_OUT, nil)
-      def deep_copy_if_hash(value)
-        if value.is_a?(Hash)
-          deep_copy(value)
-        else
-          value
-        end
       end
 
       # Private: Creates a NOOP configuration that opts out of all headers
@@ -186,7 +169,15 @@ module SecureHeaders
     # The list of attributes that must respond to a `make_header` method
     HEADERABLE_ATTRIBUTES = (CONFIG_ATTRIBUTES - [:cookies]).freeze
 
-    attr_writer(*(CONFIG_ATTRIBUTES_TO_HEADER_CLASSES.reject { |key| [:csp, :csp_report_only].include?(key) }.keys))
+    # Attributes configured with plain values (strings, booleans, nil). Their
+    # writers invalidate the memoized header hash so per-request changes win.
+    SIMPLE_WRITER_ATTRIBUTES = (CONFIG_ATTRIBUTES - [:csp, :csp_report_only, :cookies, :reporting_endpoints]).freeze
+    SIMPLE_WRITER_ATTRIBUTES.each do |attr|
+      define_method("#{attr}=") do |value|
+        mark_config_modified!
+        instance_variable_set("@#{attr}", value)
+      end
+    end
 
     attr_reader(*(CONFIG_ATTRIBUTES_TO_HEADER_CLASSES.keys))
 
@@ -201,7 +192,7 @@ module SecureHeaders
     end
 
     def initialize(&block)
-      @cookies = self.class.send(:deep_copy_if_hash, Cookie::COOKIE_DEFAULTS)
+      @cookies = Ownership.deep_dup(Cookie::COOKIE_DEFAULTS)
       @clear_site_data = nil
       @csp = nil
       @csp_report_only = nil
@@ -213,6 +204,7 @@ module SecureHeaders
       @x_xss_protection = nil
       @expect_certificate_transparency = nil
       @reporting_endpoints = nil
+      @generated_headers_cache = nil
 
       self.referrer_policy = OPT_OUT
       self.csp = ContentSecurityPolicyConfig.new(ContentSecurityPolicyConfig::DEFAULT)
@@ -223,10 +215,12 @@ module SecureHeaders
 
     # Public: copy everything
     #
-    # Returns a deep-dup'd copy of this configuration.
+    # Returns a deep-dup'd copy of this configuration. A writable request config
+    # never shares a nested hash, array or CSP config object with its source;
+    # OPT_OUT values keep their singleton identity.
     def dup
       copy = self.class.new
-      copy.cookies = self.class.send(:deep_copy_if_hash, @cookies)
+      copy.cookies = Ownership.deep_dup(@cookies)
       copy.csp = @csp.dup if @csp
       copy.csp_report_only = @csp_report_only.dup if @csp_report_only
       copy.x_content_type_options = @x_content_type_options
@@ -238,7 +232,7 @@ module SecureHeaders
       copy.clear_site_data = @clear_site_data
       copy.expect_certificate_transparency = @expect_certificate_transparency
       copy.referrer_policy = @referrer_policy
-      copy.reporting_endpoints = self.class.send(:deep_copy_if_hash, @reporting_endpoints)
+      copy.reporting_endpoints = Ownership.deep_dup(@reporting_endpoints)
       copy
     end
 
@@ -247,6 +241,7 @@ module SecureHeaders
     # Returns self
     def override(name = nil, &block)
       if override = self.class.overrides(name)
+        mark_config_modified!
         instance_eval(&override)
       else
         raise ArgumentError.new("no override by the name of #{name} has been configured")
@@ -254,16 +249,15 @@ module SecureHeaders
       self
     end
 
+    # Public: build the headers for this configuration. Results are memoized
+    # per configuration instance. Any legitimate per-request modification goes
+    # through a writer, which invalidates the cache, so a stale header is never
+    # returned. Reading an unmodified config never rebuilds the header tree.
+    # Frozen registered configs are immutable and cannot hold a memo, so they
+    # render directly; per-request copies are the cacheable, writable objects.
     def generate_headers
-      headers = {}
-      HEADERABLE_ATTRIBUTES.each do |attr|
-        klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
-        header_name, value = klass.make_header(instance_variable_get("@#{attr}"))
-        if header_name && value
-          headers[header_name] = value
-        end
-      end
-      headers
+      return build_headers if frozen?
+      @generated_headers_cache ||= build_headers
     end
 
     def opt_out(header)
@@ -271,6 +265,7 @@ module SecureHeaders
     end
 
     def update_x_frame_options(value)
+      mark_config_modified!
       @x_frame_options = value
     end
 
@@ -290,14 +285,37 @@ module SecureHeaders
       raise ArgumentError, "#{Kernel.caller.first}: `#secure_cookies=` is no longer supported. Please use `#cookies=` to configure secure cookies instead."
     end
 
+    def cookies=(new_cookies)
+      mark_config_modified!
+      @cookies =
+        if new_cookies.is_a?(Hash)
+          Ownership.deep_dup(new_cookies)
+        else
+          new_cookies
+        end
+    end
+
+    def reporting_endpoints=(new_endpoints)
+      mark_config_modified!
+      @reporting_endpoints =
+        if new_endpoints.is_a?(Hash)
+          Ownership.deep_dup(new_endpoints)
+        else
+          new_endpoints
+        end
+    end
+
     def csp=(new_csp)
+      mark_config_modified!
       case new_csp
       when OPT_OUT
         @csp = new_csp
       when ContentSecurityPolicyConfig
-        @csp = new_csp
+        @csp = new_csp.dup
+        observe_csp_mutation!(@csp)
       when Hash
         @csp = ContentSecurityPolicyConfig.new(new_csp)
+        observe_csp_mutation!(@csp)
       else
         raise ArgumentError, "Must provide either an existing CSP config or a CSP config hash"
       end
@@ -310,18 +328,67 @@ module SecureHeaders
     # configuring csp_report_only, the code will assume you mean to only use
     # report-only mode and you will be opted-out of enforce mode.
     def csp_report_only=(new_csp)
+      mark_config_modified!
       case new_csp
       when OPT_OUT
         @csp_report_only = new_csp
       when ContentSecurityPolicyReportOnlyConfig
         @csp_report_only = new_csp.dup
+        observe_csp_mutation!(@csp_report_only)
       when ContentSecurityPolicyConfig
         @csp_report_only = new_csp.make_report_only
+        observe_csp_mutation!(@csp_report_only)
       when Hash
         @csp_report_only = ContentSecurityPolicyReportOnlyConfig.new(new_csp)
+        observe_csp_mutation!(@csp_report_only)
       else
         raise ArgumentError, "Must provide either an existing CSP config or a CSP config hash"
       end
+    end
+
+    # Public: freeze the configuration and every nested object it owns. Called
+    # once when a configuration is registered, so later mutation attempts fail
+    # loudly and per-request dupes start from an immutable source.
+    def freeze_registered_config!
+      CONFIG_ATTRIBUTES.each do |attr|
+        value = instance_variable_get("@#{attr}")
+        if value.is_a?(ContentSecurityPolicyConfig)
+          value.freeze_registered_config!
+        else
+          Ownership.deep_freeze(value)
+        end
+      end
+      freeze
+    end
+
+    private
+
+    # Drop any memoized headers and mark nested CSP configs as modified so a
+    # subsequent generate_headers reflects the new configuration. Frozen
+    # registered configs never hold a memo and reject writes outright.
+    def mark_config_modified!
+      return if frozen?
+      @generated_headers_cache = nil
+      @csp&.clear_header_cache! unless @csp.equal?(OPT_OUT)
+      @csp_report_only&.clear_header_cache! unless @csp_report_only.equal?(OPT_OUT)
+    end
+
+    # Route in-place CSP mutations (merge!, append, []) up to the owning
+    # configuration so the request-level header cache is invalidated.
+    def observe_csp_mutation!(csp_config)
+      csp_config.on_mutation { @generated_headers_cache = nil }
+    end
+
+    def build_headers
+      headers = {}
+      HEADERABLE_ATTRIBUTES.each do |attr|
+        klass = CONFIG_ATTRIBUTES_TO_HEADER_CLASSES[attr]
+        header_name, value = klass.make_header(instance_variable_get("@#{attr}"))
+        if header_name && value
+          headers[header_name] = value
+        end
+      end
+      headers
     end
   end
 end

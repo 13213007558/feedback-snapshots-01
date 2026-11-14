@@ -37,7 +37,7 @@ module SecureHeaders
     def value
       @value ||=
         if @config
-          build_value
+          @config.respond_to?(:cached_header_value) ? @config.cached_header_value { build_value } : build_value
         else
           DEFAULT_VALUE
         end

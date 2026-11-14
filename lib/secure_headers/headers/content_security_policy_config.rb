@@ -3,15 +3,41 @@ module SecureHeaders
   module DynamicConfig
     def initialize(hash)
       @config = {}
+      @header_cache = nil
+      @mutation_listeners = []
 
       from_hash(hash)
     end
 
     def initialize_copy(hash)
       @config = hash.to_h
+      @header_cache = nil
+      @mutation_listeners = []
+    end
+
+    # Register a block invoked whenever this config is mutated in place. Used
+    # by the owning Configuration to invalidate its memoized header hash when
+    # callers modify a CSP directly (e.g. config.csp.merge!(...)).
+    def on_mutation(&block)
+      @mutation_listeners << block
+    end
+
+    def clear_header_cache!
+      @header_cache = nil unless frozen?
+    end
+
+    # Memoize the rendered header value per config object. Any mutation goes
+    # through update_directive/merge!/append, which clears the cache, so the
+    # rendered header always matches the current directives. Frozen registered
+    # configs cannot store the memo, so they render directly.
+    def cached_header_value
+      return yield if frozen?
+      @header_cache ||= yield
     end
 
     def update_directive(directive, value)
+      clear_header_cache!
+      notify_mutation!
       @config[directive] = value
     end
 
@@ -27,10 +53,14 @@ module SecureHeaders
     end
 
     def merge!(new_hash)
+      clear_header_cache!
+      notify_mutation!
       from_hash(new_hash)
     end
 
     def append(new_hash)
+      clear_header_cache!
+      notify_mutation!
       from_hash(ContentSecurityPolicy.combine_policies(self.to_h, new_hash))
     end
 
@@ -44,6 +74,19 @@ module SecureHeaders
 
     def opt_out?
       false
+    end
+
+    # Freeze the internal directive store in addition to the object itself so
+    # that a registered CSP cannot be mutated through its nested arrays.
+    def freeze_registered_config!
+      Ownership.deep_freeze(@config)
+      freeze
+    end
+
+    # A CSP is only fully immutable when both the wrapper and its internal
+    # directive store (including source-list arrays) are frozen.
+    def deep_frozen?
+      frozen? && Ownership.deep_frozen?(@config)
     end
 
     def ==(o)
@@ -73,6 +116,10 @@ module SecureHeaders
       else
         @config[attr] = value
       end
+    end
+
+    def notify_mutation!
+      @mutation_listeners.each(&:call)
     end
   end
 
