@@ -324,16 +324,58 @@ module Psych
     result = parse(yaml, filename: filename)
     return fallback unless result
 
-    class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
-                                               permitted_symbols.map(&:to_s))
-    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
-    visitor = if aliases
-                Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
-              else
-                Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
-              end
-    result = visitor.accept result
-    result
+    safe_load_document result,
+                       permitted_classes: permitted_classes,
+                       permitted_symbols: permitted_symbols,
+                       aliases: aliases,
+                       symbolize_names: symbolize_names,
+                       freeze: freeze,
+                       strict_integer: strict_integer,
+                       parse_symbols: parse_symbols
+  end
+
+  ###
+  # Safely load the yaml string in +yaml+, requiring the input to contain
+  # exactly one YAML document.  Unlike safe_load, which stops parsing after
+  # the first document and ignores the rest of the input, this method parses
+  # the entire input first and raises a Psych::Exception if anything other
+  # than a single document is found.  A Psych::SyntaxError is raised if any
+  # part of the input, including content after the first document, is not
+  # valid YAML.
+  #
+  # No Ruby objects are constructed until the whole input has been parsed
+  # successfully, so permitted classes are never instantiated when the input
+  # is rejected.  Document boundaries are determined by the YAML parser
+  # itself, so comments, explicit document end markers (<tt>...</tt>), and
+  # <tt>---</tt> sequences inside scalars are all handled according to the
+  # YAML grammar.
+  #
+  # If the input contains no document at all, the specified +fallback+
+  # return value is returned, which defaults to +nil+.
+  #
+  # Accepts the same keyword arguments as safe_load and applies the same
+  # deserialization policy to the single document.
+  #
+  #   Psych.strict_safe_load("---\n foo: bar")                    # => {"foo"=>"bar"}
+  #   Psych.strict_safe_load("--- a\n--- b")                      # => raises Psych::Exception
+  #   Psych.strict_safe_load("--- a\ngarbage: [")                 # => raises Psych::SyntaxError
+  #
+  def self.strict_safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+    documents = parse_stream(yaml, filename: filename).children
+    return fallback if documents.empty?
+
+    unless documents.one?
+      raise Exception, "expected a single YAML document, but the input contains #{documents.length} documents"
+    end
+
+    safe_load_document documents.first,
+                       permitted_classes: permitted_classes,
+                       permitted_symbols: permitted_symbols,
+                       aliases: aliases,
+                       symbolize_names: symbolize_names,
+                       freeze: freeze,
+                       strict_integer: strict_integer,
+                       parse_symbols: parse_symbols
   end
 
   ###
@@ -720,6 +762,19 @@ module Psych
   end
 
   # :stopdoc:
+  def self.safe_load_document document, permitted_classes: [], permitted_symbols: [], aliases: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+    class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
+                                               permitted_symbols.map(&:to_s))
+    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
+    visitor = if aliases
+                Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+              else
+                Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+              end
+    visitor.accept document
+  end
+  private_class_method :safe_load_document
+
   def self.add_domain_type domain, type_tag, &block
     key = ['tag', domain, type_tag].join ':'
     domain_types[key] = [key, block]
