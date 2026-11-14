@@ -1,0 +1,60 @@
+#!/usr/bin/env ruby
+# encoding: BINARY
+#
+# Offline MQTT session analysis from raw client/broker byte fragments.
+# Never opens a network connection.
+#
+# Usage:
+#   mqtt-forensics --format text|json  FRAGMENTS.json [FRAGMENTS.jsonl ...]
+#   mqtt-forensics --demo [--format json]
+#
+# See lib/mqtt/forensics/loader.rb for the fragment file format.
+
+$LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
+
+require 'optparse'
+require 'mqtt'
+require 'mqtt/forensics'
+require 'mqtt/forensics/loader'
+
+options = { :format => 'text' }
+OptionParser.new do |opts|
+  opts.banner = 'Usage: mqtt-forensics [options] FRAGMENTS_FILE...'
+  opts.on('--format FORMAT', 'Output format: text (default) or json') { |v| options[:format] = v }
+  opts.on('--demo', 'Analyse a built-in synthetic, partially-captured session') { options[:demo] = true }
+  opts.on('-h', '--help', 'Show this help') { puts opts; exit }
+end.parse!
+
+unless %w[text json].include?(options[:format])
+  warn "Unknown --format #{options[:format].inspect}; use 'text' or 'json'."
+  exit 2
+end
+
+def fail_usage(message)
+  warn "mqtt-forensics: #{message}"
+  exit 2
+end
+
+begin
+  capture =
+    if options[:demo]
+      MQTT::Forensics::Demo.build_capture
+    else
+      fail_usage('provide at least one fragments file (or use --demo)') if ARGV.empty?
+
+      combined = MQTT::Forensics::Capture.new
+      ARGV.each do |path|
+        MQTT::Forensics::Loader.load(path).fragments.each { |f| combined.add_fragment(f) }
+      end
+      combined
+    end
+
+  report = MQTT::Forensics::Analyzer.new(capture).analyze
+  puts options[:format] == 'json' ? report.to_json : report.to_text
+rescue SystemExit
+  raise
+rescue Errno::ENOENT => e
+  fail_usage("cannot read fragments file: #{e.message}")
+rescue JSON::ParserError, ArgumentError => e
+  fail_usage("invalid fragment input: #{e.message}")
+end
