@@ -16,6 +16,17 @@ compatibility notes below for the changes from 1.74.0.
   zone files, including relative target names, numeric `keyNNNNN` values and
   escaped text. IPv6 hints use RFC 5952 formatting.
   [PR #222](https://github.com/alexdalitz/dnsruby/pull/222).
+* **Service binding selection.** `Dnsruby::ServiceBindingSelector` turns an
+  already-authenticated SVCB/HTTPS answer chain into an ordered connection plan
+  for a caller's supported ALPN, SvcParamKeys and ECH policy (RFC 9460 section
+  3). It follows AliasMode redirects with loop and chain-length limits, orders
+  ServiceMode candidates by `SvcPriority`, keeps same-priority candidates in
+  chain order, and rejects candidates whose mandatory keys are unsupported or
+  whose ALPN set has no overlap, recording a reason for each. Address hints and
+  alias targets never replace the origin used for SNI and certificate
+  validation. When the caller requires ECH and no candidate offers it, the
+  result forbids falling back to a bare A/AAAA connection instead of silently
+  downgrading.
 * **TCP queries.** Pipelined queries handle concurrent sends, immediate replies,
   partial writes and disconnected servers. Connects and writes respect their
   deadlines, and cancellation releases the sender worker promptly. Matching

@@ -76,6 +76,7 @@ TESTS = %w(
     rrsig
     svcb
     svcb_transport
+    svcb_service_binding_selector
     tcp_pipelining
     tkey
     tsig_api

@@ -758,3 +758,5 @@ module Dnsruby
     end
   end
 end
+
+require 'dnsruby/service_binding_selector'
