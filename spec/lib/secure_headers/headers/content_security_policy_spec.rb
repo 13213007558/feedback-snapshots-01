@@ -194,6 +194,86 @@ module SecureHeaders
         expect(csp.value).to eq("script-src 'self'; script-src-attr 'self'")
       end
 
+      context "routing the script nonce across element/attribute directives" do
+        it "keeps the legacy behavior of populating script-src when no *-src-elem directive is configured" do
+          csp = ContentSecurityPolicy.new({ default_src: %w('self'), script_src: %w('self'), script_nonce: "abc123" })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123' 'unsafe-inline'")
+        end
+
+        it "populates every configured element-level directive (script-src-elem and script-src) so either browser fallback path matches" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_elem: %w('self'),
+            script_nonce: "abc123"
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123' 'unsafe-inline'; script-src-elem 'self' 'nonce-abc123' 'unsafe-inline'")
+        end
+
+        it "never populates script-src-attr even when it is the only specialized directive" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_attr: %w('none'),
+            script_nonce: "abc123"
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123' 'unsafe-inline'; script-src-attr 'none'")
+        end
+
+        it "routes the nonce to script-src-elem while leaving an explicit script-src-attr deny untouched" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_elem: %w('self'),
+            script_src_attr: %w('none'),
+            script_nonce: "abc123"
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123' 'unsafe-inline'; script-src-attr 'none'; script-src-elem 'self' 'nonce-abc123' 'unsafe-inline'")
+        end
+
+        it "does not reopen an explicit script-src-elem deny when a nonce is requested" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_elem: %w('none'),
+            script_nonce: "abc123"
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123' 'unsafe-inline'; script-src-elem 'none'")
+        end
+
+        it "does not reopen an explicit legacy script-src deny when a nonce is requested" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('none'),
+            script_nonce: "abc123"
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'none'")
+        end
+
+        it "does not let the nonce backwards-compatibility option alter the attribute-level directive" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_elem: %w('self'),
+            script_src_attr: %w('none'),
+            script_nonce: "abc123",
+            disable_nonce_backwards_compatibility: true
+          })
+          expect(csp.value).to eq("default-src 'self'; script-src 'self' 'nonce-abc123'; script-src-attr 'none'; script-src-elem 'self' 'nonce-abc123'")
+        end
+
+        it "still routes the style nonce to style-src-elem and never to style-src-attr" do
+          csp = ContentSecurityPolicy.new({
+            default_src: %w('self'),
+            style_src: %w('self'),
+            style_src_elem: %w('self'),
+            style_src_attr: %w('none'),
+            style_nonce: "xyz"
+          })
+          expect(csp.value).to eq("default-src 'self'; style-src 'self' 'nonce-xyz' 'unsafe-inline'; style-src-attr 'none'; style-src-elem 'self' 'nonce-xyz' 'unsafe-inline'")
+        end
+      end
+
       it "supports style-src-elem directive" do
         csp = ContentSecurityPolicy.new({ style_src: %w('self'), style_src_elem: %w('self') })
         expect(csp.value).to eq("style-src 'self'; style-src-elem 'self'")

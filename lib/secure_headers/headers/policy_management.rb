@@ -165,6 +165,35 @@ module SecureHeaders
       REPORT_URI,
     ]
 
+    # CSP3 splits script-src/style-src into element-level (*-src-elem) and
+    # attribute-level (*-src-attr) directives. The browser resolves a check
+    # against the most specific directive that is present, falling back in the
+    # order listed here, and finally to default-src:
+    #   *-src-elem / *-src-attr -> *-src -> default-src
+    # A nonce only ever authorizes an element (a <script>/<style> tag), so it
+    # is routed down the element-level chain only, never through the
+    # attribute-level directive. These groups are ordered most-to-least
+    # specific so the first configured, non-deny directive receives the nonce.
+    SCRIPT_FETCH_FALLBACK = [SCRIPT_SRC_ELEM, SCRIPT_SRC].freeze
+    STYLE_FETCH_FALLBACK = [STYLE_SRC_ELEM, STYLE_SRC].freeze
+
+    NONCE_TARGET_DIRECTIVES = {
+      :script_nonce => SCRIPT_FETCH_FALLBACK,
+      :style_nonce => STYLE_FETCH_FALLBACK,
+    }.freeze
+
+    # Reverse lookup: which nonce config key (if any) can populate a given
+    # element-level directive. Attribute-level directives are intentionally
+    # absent so they never receive a nonce.
+    NONCE_KEY_FOR_DIRECTIVE = NONCE_TARGET_DIRECTIVES.each_with_object({}) do |(nonce_key, directives), mapping|
+      directives.each { |directive| mapping[directive] = nonce_key }
+    end.freeze
+
+    # Attribute-level directives govern inline event handlers / style
+    # attributes. A nonce can never authorize them (per CSP3, nonce/hashes are
+    # ignored in *-src-attr), so automatic nonce population must skip them.
+    ATTRIBUTE_LEVEL_DIRECTIVES = [SCRIPT_SRC_ATTR, STYLE_SRC_ATTR].freeze
+
     FETCH_SOURCES = ALL_DIRECTIVES - NON_FETCH_SOURCES - NON_SOURCE_LIST_SOURCES
 
     STAR_REGEXP = Regexp.new(Regexp.escape(STAR))

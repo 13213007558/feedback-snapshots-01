@@ -112,6 +112,49 @@ content-security-policy: ...
 </script>
 ```
 
+#### Element-level vs. attribute-level script directives
+
+CSP3 splits `script-src` into `script-src-elem` (controls `<script>` elements)
+and `script-src-attr` (controls inline event-handler attributes such as
+`onclick`). The browser checks the most specific directive that is present and
+falls back in this order:
+
+```
+script-src-elem / script-src-attr  ->  script-src  ->  default-src
+```
+
+A nonce only ever authorizes an element, so `content_security_policy_script_nonce`
+populates the configured element-level directives (`script-src-elem` when
+present, and `script-src` so older browsers that ignore `*-src-elem` still
+match). It is never added to `script-src-attr`, which lets you keep inline event
+handlers disabled without the auto-generated nonce reopening them:
+
+```ruby
+config.csp = {
+  default_src: %w('self'),
+  script_src: %w('self'),
+  script_src_elem: %w('self'),
+  script_src_attr: %w('none') # inline event handlers stay blocked
+}
+```
+
+produces (after a nonce is requested):
+
+```
+content-security-policy: default-src 'self';
+  script-src 'self' 'nonce-...' 'unsafe-inline';
+  script-src-attr 'none';
+  script-src-elem 'self' 'nonce-...' 'unsafe-inline'
+```
+
+An explicit deny — a directive whose only value is `'none'` — always wins. The
+nonce is not appended to such a directive and `'none'` is not dropped. The same
+rules apply to `style-src-elem` / `style-src-attr` and the style nonce.
+
+`disable_nonce_backwards_compatibility` only suppresses the companion
+`'unsafe-inline'` token on the element-level directives; it never changes the
+attribute-level directive.
+
 ## Clearing browser cache
 
 You can clear the browser cache after the logout request by using the following.

@@ -21,8 +21,6 @@ module SecureHeaders
         end
 
       @preserve_schemes = @config[:preserve_schemes]
-      @script_nonce = @config[:script_nonce]
-      @style_nonce = @config[:style_nonce]
     end
 
     ##
@@ -198,17 +196,29 @@ module SecureHeaders
       end
     end
 
-    # Private: append a nonce to the script/style directories if script_nonce
-    # or style_nonce are provided.
+    # Private: append a nonce to the script/style directive that actually
+    # authorizes the element being rendered.
+    #
+    # CSP3 splits *-src into *-src-elem (elements) and *-src-attr (event
+    # handler / style attributes). A nonce only ever authorizes an element, so
+    # it is routed to the most specific configured element-level directive
+    # (*-src-elem, otherwise the legacy *-src) and never to *-src-attr. An
+    # explicit deny (a directive whose only source is 'none') is left intact
+    # rather than being reopened by the auto-generated nonce.
     def populate_nonces(directive, source_list)
-      case directive
-      when SCRIPT_SRC
-        append_nonce(source_list, @script_nonce)
-      when STYLE_SRC
-        append_nonce(source_list, @style_nonce)
-      else
-        source_list
-      end
+      nonce_key = NONCE_KEY_FOR_DIRECTIVE[directive]
+      nonce = nonce_key && @config[nonce_key]
+      return source_list unless nonce
+      return source_list if explicit_deny?(source_list)
+
+      append_nonce(source_list, nonce)
+    end
+
+    # Private: an explicit deny is a source list containing only 'none'. Such
+    # a policy must win over automatic nonce injection; appending anything else
+    # would otherwise cause 'none' to be dropped and the directive to reopen.
+    def explicit_deny?(source_list)
+      source_list.respond_to?(:length) && source_list.length == 1 && source_list.first == NONE
     end
 
     # Private: adds a nonce or 'unsafe-inline' depending on browser support.

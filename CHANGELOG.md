@@ -1,3 +1,7 @@
+## Unreleased
+
+- CSP: Route request nonces through the element-level fallback chain (`script-src-elem`/`style-src-elem`, then `script-src`/`style-src`) and never into `script-src-attr`/`style-src-attr`. An explicit `'none'` deny is no longer reopened by automatic nonce injection. Applies consistently to appends, overrides, and enforced/report-only policies.
+
 ## 6.5.0
 
 - CSP: Remove source expression deduplication. (@lgarron) https://github.com/github/secure_headers/pull/499

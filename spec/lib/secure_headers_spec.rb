@@ -265,6 +265,230 @@ module SecureHeaders
           expect(hash["content-security-policy"]).to eq("default-src 'self'; script-src mycdn.com 'nonce-#{nonce}' 'unsafe-inline'; style-src 'self'")
         end
 
+        context "element-level and attribute-level script policies" do
+          let(:nonce) { "abc123" }
+
+          before(:each) do
+            allow(SecureRandom).to receive(:base64).and_return(nonce)
+          end
+
+          # Group 1: only the legacy script-src/default-src config exists. The
+          # request nonce must keep landing on script-src (its CSP3 fallback
+          # chain is script-src -> default-src, no elem/attr directives present).
+          it "generates the legacy-only policy with the nonce on script-src" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self')
+              }
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+          end
+
+          # Group 2: attribute handlers are explicitly denied while element
+          # scripts keep working via a nonce. script-src-attr stays 'none'; the
+          # nonce is routed to the element-level chain only.
+          it "keeps an explicit script-src-attr deny when the nonce is auto-populated" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w('self'),
+                script_src_attr: %w('none')
+              }
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+            header = hash[ContentSecurityPolicyConfig::HEADER_NAME]
+
+            expect(header).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem 'self' 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+            expect(header).to_not match(/script-src-attr[^;]*nonce/)
+          end
+
+          it "does not reopen an explicit element-level deny through the auto nonce" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w('none'),
+                script_src_attr: %w('none')
+              }
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem 'none'"
+            )
+          end
+
+          # Group 3: element and attribute directives are each overridden with
+          # distinct values. Appending combines lists, overriding replaces them,
+          # and the nonce still never touches the attribute directive.
+          it "appends to script-src-elem without weakening script-src-attr" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w(cdn.example.com),
+                script_src_attr: %w('none')
+              }
+            end
+
+            SecureHeaders.append_content_security_policy_directives(request, { script_src_elem: %w(extra.example.com) })
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem cdn.example.com extra.example.com 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+          end
+
+          it "overrides script-src-elem and script-src-attr independently" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self')
+              }
+            end
+
+            SecureHeaders.override_content_security_policy_directives(
+              request,
+              script_src_elem: %w(cdn.example.com),
+              script_src_attr: %w('none')
+            )
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem cdn.example.com 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+          end
+
+          it "produces identical enforced and report-only headers for the same calls" do
+            Configuration.default do |config|
+              base = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w(cdn.example.com),
+                script_src_attr: %w('none')
+              }
+              config.csp = base
+              config.csp_report_only = base
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expected =
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem cdn.example.com 'nonce-#{nonce}' 'unsafe-inline'"
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(expected)
+            expect(hash[ContentSecurityPolicyReportOnlyConfig::HEADER_NAME]).to eq(expected)
+          end
+
+          it "routes the nonce independently per policy when only report-only defines the split directives" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self')
+              }
+              config.csp_report_only = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w('self'),
+                script_src_attr: %w('none')
+              }
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+
+            expect(hash[ContentSecurityPolicyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+            expect(hash[ContentSecurityPolicyReportOnlyConfig::HEADER_NAME]).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}' 'unsafe-inline'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem 'self' 'nonce-#{nonce}' 'unsafe-inline'"
+            )
+          end
+
+          it "is independent of the order of nonce and override calls" do
+            def build_header(request)
+              SecureHeaders.header_hash_for(request)[ContentSecurityPolicyConfig::HEADER_NAME]
+            end
+
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w(cdn.example.com),
+                script_src_attr: %w('none')
+              }
+            end
+
+            first = Rack::Request.new(request.env.dup)
+            SecureHeaders.content_security_policy_script_nonce(first)
+            SecureHeaders.override_content_security_policy_directives(first, { script_src_elem: %w(cdn.example.com) })
+
+            second = Rack::Request.new(request.env.dup)
+            SecureHeaders.override_content_security_policy_directives(second, { script_src_elem: %w(cdn.example.com) })
+            SecureHeaders.content_security_policy_script_nonce(second)
+
+            expect(build_header(first)).to eq(build_header(second))
+          end
+
+          it "keeps the attribute directive restricted when nonce backwards compatibility is disabled" do
+            Configuration.default do |config|
+              config.csp = {
+                default_src: %w('self'),
+                script_src: %w('self'),
+                script_src_elem: %w(cdn.example.com),
+                script_src_attr: %w('none'),
+                disable_nonce_backwards_compatibility: true
+              }
+            end
+
+            SecureHeaders.content_security_policy_script_nonce(request)
+            hash = SecureHeaders.header_hash_for(request)
+            header = hash[ContentSecurityPolicyConfig::HEADER_NAME]
+
+            expect(header).to eq(
+              "default-src 'self'; "\
+              "script-src 'self' 'nonce-#{nonce}'; "\
+              "script-src-attr 'none'; "\
+              "script-src-elem cdn.example.com 'nonce-#{nonce}'"
+            )
+            expect(header).to_not include("'unsafe-inline'")
+          end
+        end
+
         it "does not support the deprecated `report_only: true` format" do
           expect {
             Configuration.default do |config|

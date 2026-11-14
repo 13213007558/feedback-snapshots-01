@@ -284,6 +284,73 @@ module SecureHeaders
           ContentSecurityPolicy.combine_policies(default_policy.csp.to_h, script_src: %w(anothercdn.com))
         end.to raise_error(ContentSecurityPolicyConfigError)
       end
+
+      it "fills an unconfigured element-level directive from default-src when appending" do
+        Configuration.default do |config|
+          config.csp = {
+            default_src: %w('self'),
+            script_src: %w('self')
+          }
+        end
+        default_policy = Configuration.dup
+        combined_config = ContentSecurityPolicy.combine_policies(
+          default_policy.csp.to_h,
+          script_src_elem: %w(elem.example.com)
+        )
+
+        # fetch directives (incl. script-src-elem) inherit default-src before
+        # the appended values are combined.
+        expect(combined_config[:script_src_elem]).to eq(%w('self' elem.example.com))
+      end
+
+      it "combines additions into an explicitly configured script-src-attr instead of default-src" do
+        Configuration.default do |config|
+          config.csp = {
+            default_src: %w('self'),
+            script_src: %w('self'),
+            script_src_attr: %w('none')
+          }
+        end
+        default_policy = Configuration.dup
+        combined_config = ContentSecurityPolicy.combine_policies(
+          default_policy.csp.to_h,
+          script_src_attr: %w(attr.example.com)
+        )
+
+        expect(combined_config[:script_src_attr]).to eq(%w('none' attr.example.com))
+      end
+
+      it "overrides script-src-elem and script-src-attr independently of script-src" do
+        Configuration.default do |config|
+          config.csp = {
+            default_src: %w('self'),
+            script_src: %w('self')
+          }
+        end
+        default_policy = Configuration.dup
+        combined_config = ContentSecurityPolicy.combine_policies(
+          default_policy.csp.to_h,
+          script_src_elem: %w(elem.example.com),
+          script_src_attr: %w('none')
+        )
+
+        expect(combined_config[:script_src]).to eq(%w('self'))
+        expect(combined_config[:script_src_elem]).to eq(%w('self' elem.example.com))
+        expect(combined_config[:script_src_attr]).to eq(%w('self' 'none'))
+      end
+    end
+
+    describe "nonce directive routing" do
+      it "maps the script nonce to the element-level fallback chain and never the attribute directive" do
+        expect(ContentSecurityPolicy::SCRIPT_FETCH_FALLBACK).to eq([
+          ContentSecurityPolicy::SCRIPT_SRC_ELEM,
+          ContentSecurityPolicy::SCRIPT_SRC
+        ])
+        expect(ContentSecurityPolicy::NONCE_KEY_FOR_DIRECTIVE[ContentSecurityPolicy::SCRIPT_SRC_ELEM]).to eq(:script_nonce)
+        expect(ContentSecurityPolicy::NONCE_KEY_FOR_DIRECTIVE[ContentSecurityPolicy::SCRIPT_SRC]).to eq(:script_nonce)
+        expect(ContentSecurityPolicy::NONCE_KEY_FOR_DIRECTIVE[ContentSecurityPolicy::SCRIPT_SRC_ATTR]).to be_nil
+        expect(ContentSecurityPolicy::ATTRIBUTE_LEVEL_DIRECTIVES).to include(ContentSecurityPolicy::SCRIPT_SRC_ATTR)
+      end
     end
   end
 end
