@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Rule-level observe mode: pass `observe: true` to `throttle`, `blocklist` or `track` (and to `Fail2Ban`/`Allow2Ban.filter`) to evaluate candidate rules without enforcing them. Observed rules count in a separate cache namespace (`Rack::Attack.observed_cache`), keep virtual ban history, emit `observed_<type>.rack_attack` notifications marked with `observed: true`, never run the enforced responders, and are fault-isolated from the official response. Virtual bans are not carried over when switching a rule to enforced mode unless explicitly promoted with `Fail2Ban.promote_observed!`/`Allow2Ban.promote_observed!`.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

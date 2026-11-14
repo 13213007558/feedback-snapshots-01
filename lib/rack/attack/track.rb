@@ -19,6 +19,10 @@ module Rack
       def matched_by?(request)
         filter.matched_by?(request)
       end
+
+      def observe?
+        filter.observe?
+      end
     end
   end
 end

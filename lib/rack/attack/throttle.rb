@@ -16,10 +16,15 @@ module Rack
         @limit = options[:limit]
         @period = options[:period].respond_to?(:call) ? options[:period] : options[:period].to_i
         @type   = options.fetch(:type, :throttle)
+        @observe = options.fetch(:observe, false)
+      end
+
+      def observe?
+        @observe
       end
 
       def cache
-        Rack::Attack.cache
+        observe? ? Rack::Attack.observed_cache : Rack::Attack.cache
       end
 
       def matched_by?(request)
@@ -42,8 +47,13 @@ module Rack
 
         (count > current_limit).tap do |throttled|
           if throttled
-            annotate_request_with_matched_data(request, data)
-            Rack::Attack.instrument(request)
+            if observe?
+              annotate_request_with_observed_match(request, data)
+              Rack::Attack.instrument_observed(request)
+            else
+              annotate_request_with_matched_data(request, data)
+              Rack::Attack.instrument(request)
+            end
           end
         end
       end
@@ -67,7 +77,8 @@ module Rack
       end
 
       def annotate_request_with_throttle_data(request, data)
-        (request.env['rack.attack.throttle_data'] ||= {})[name] = data
+        key = observe? ? 'rack.attack.observed.throttle_data' : 'rack.attack.throttle_data'
+        (request.env[key] ||= {})[name] = data
       end
 
       def annotate_request_with_matched_data(request, data)
@@ -75,6 +86,13 @@ module Rack
         request.env['rack.attack.match_discriminator'] = data[:discriminator]
         request.env['rack.attack.match_type']          = type
         request.env['rack.attack.match_data']          = data
+      end
+
+      def annotate_request_with_observed_match(request, data)
+        request.env['rack.attack.observed.matched']             = name
+        request.env['rack.attack.observed.match_discriminator'] = data[:discriminator]
+        request.env['rack.attack.observed.match_type']          = type
+        request.env['rack.attack.observed.match_data']          = data
       end
     end
   end

@@ -37,6 +37,7 @@ class Minitest::Spec
   after do
     Rack::Attack.clear_configuration
     Rack::Attack.instance_variable_set(:@cache, nil)
+    Rack::Attack.instance_variable_set(:@observed_cache, nil)
   end
 
   def app

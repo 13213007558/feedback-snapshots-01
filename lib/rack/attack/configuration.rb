@@ -50,8 +50,8 @@ module Rack
         end
       end
 
-      def blocklist(name = nil, &block)
-        blocklist = Blocklist.new(name, &block)
+      def blocklist(name = nil, options = {}, &block)
+        blocklist = Blocklist.new(name, options, &block)
 
         if name
           @blocklists[name] = blocklist
@@ -86,20 +86,42 @@ module Rack
       end
 
       def blocklisted?(request)
-        @anonymous_blocklists.any? { |blocklist| blocklist.matched_by?(request) } ||
-          @blocklists.any? { |_name, blocklist| blocklist.matched_by?(request) }
+        @anonymous_blocklists.any? { |blocklist| !blocklist.observe? && blocklist.matched_by?(request) } ||
+          @blocklists.any? { |_name, blocklist| !blocklist.observe? && blocklist.matched_by?(request) }
       end
 
       def throttled?(request)
         @throttles.any? do |_name, throttle|
-          throttle.matched_by?(request)
+          !throttle.observe? && throttle.matched_by?(request)
         end
       end
 
       def tracked?(request)
         @tracks.each_value do |track|
-          track.matched_by?(request)
+          track.matched_by?(request) unless track.observe?
         end
+      end
+
+      # Whether any observed (candidate) rules are registered.
+      def observing?
+        observed_rules.any?
+      end
+
+      # Evaluates every observed (candidate) rule against the request.
+      # Observed rules never raise: a misbehaving candidate is reported on
+      # the request env and must not change the enforced outcome.
+      def observed?(request)
+        matched = false
+
+        observed_rules.each do |rule|
+          begin
+            matched = true if rule.matched_by?(request)
+          rescue StandardError => error
+            request.env["rack.attack.observed.error"] = error
+          end
+        end
+
+        matched
       end
 
       def clear_configuration
@@ -107,6 +129,13 @@ module Rack
       end
 
       private
+
+      def observed_rules
+        @anonymous_blocklists.select(&:observe?) +
+          @blocklists.values.select(&:observe?) +
+          @throttles.values.select(&:observe?) +
+          @tracks.values.select(&:observe?)
+      end
 
       def set_defaults
         @safelists = {}

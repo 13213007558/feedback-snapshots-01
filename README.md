@@ -299,6 +299,49 @@ ActiveSupport::Notifications.subscribe("track.rack_attack") do |name, start, fin
 end
 ```
 
+### Observing candidate rules
+
+Before enforcing a new rule (e.g. a stricter credential-stuffing heuristic), you can run it in observe mode to compare its decisions against the official rules on the same request stream. Pass `observe: true` to `throttle`, `blocklist` or `track`:
+
+```ruby
+# Official rule, enforced as usual.
+Rack::Attack.throttle("logins/ip", limit: 5, period: 60) do |req|
+  req.ip if req.path == "/login" && req.post?
+end
+
+# Candidate rule: evaluated on every request, but never enforced.
+Rack::Attack.throttle("logins/username", limit: 3, period: 60, observe: true) do |req|
+  req.params["username"] if req.path == "/login" && req.post?
+end
+```
+
+Observed (candidate) rules:
+
+- are evaluated on every non-safelisted request, even when an official rule already rejected it, so they always receive their attempt events;
+- share the request's input stream with the official rules and the app (Rack::Attack rewinds `rack.input` between evaluations, buffering it first if the server provides a non-rewindable stream);
+- count in a separate cache namespace (`Rack::Attack.observed_cache`), so they never consume the official rules' quota;
+- never trigger the blocklisted/throttled responders and never change the response;
+- report hypothetical matches on `observed_<type>.rack_attack` notifications (e.g. `observed_throttle.rack_attack`) with `observed: true` in the payload, so penalty subscriptions to the enforced `<type>.rack_attack` events are not executed. Match details are annotated under `req.env['rack.attack.observed.*']`;
+- are fault-isolated: an exception raised by a candidate rule is recorded in `req.env['rack.attack.observed.error']` and never changes the official response.
+
+`Fail2Ban`/`Allow2Ban` accept `observe: true` as well, keeping counts and ban flags in the virtual namespace:
+
+```ruby
+Rack::Attack.blocklist("allow2ban pentesters (candidate)", observe: true) do |req|
+  Rack::Attack::Allow2Ban.filter(req.ip, maxretry: 3, findtime: 60, bantime: 300, observe: true) do
+    req.path == "/login" && req.post?
+  end
+end
+```
+
+#### Promoting a candidate rule to enforced mode
+
+Switching a rule from `observe: true` to enforced starts with a clean slate: virtual bans recorded during the observation period are **not** carried over, so users observed while the rule was a candidate are not suddenly punished. To carry over a virtual ban explicitly, promote it:
+
+```ruby
+Rack::Attack::Allow2Ban.promote_observed!("1.2.3.4", 300) # => true if a virtual ban existed
+```
+
 ### Cache store configuration
 
 Throttle, track, allow2ban and fail2ban state is stored in a configurable cache (which defaults to `Rails.cache` if present), presumably backed by memcached or redis ([at least gem v3.0.0](https://rubygems.org/gems/redis)).
