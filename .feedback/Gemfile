@@ -1,0 +1,4 @@
+source 'https://rubygems.org'
+gem 'net-ldap', path: '..'
+gem 'test-unit'
+gem 'flexmock', '~> 1.3'

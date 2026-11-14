@@ -1,0 +1,44 @@
+[
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc4514.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4514.txt",
+    "sha256": "b272176d48a231b28e478c30c59c4bee6073883a0ca25bafd93ea3526702b7de",
+    "bytes": 31859
+  },
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc4511.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4511.txt",
+    "sha256": "49c6aab64bd9835420f7fc83e9cc53fe7aea46de882daa4f99fafe20273b06fd",
+    "bytes": 150116
+  },
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc4515.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4515.txt",
+    "sha256": "5b5d3332ca1e49e0b9a21a33bdcf55e6f3b2c5eeeb47457d59391b74c4c7a90d",
+    "bytes": 23885
+  },
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc4512.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4512.txt",
+    "sha256": "c3380501eaa81d93a2bcc4d9e8c38e9fdcef20d2ac4fa52759124bb2d2edd5bf",
+    "bytes": 108377
+  },
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc4533.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4533.txt",
+    "sha256": "907bd52b18420fecf10b6f57b9a56a3e2a71d5ed7851360eaceec8d005328e76",
+    "bytes": 73895
+  },
+  {
+    "repo": "net-ldap",
+    "file": ".feedback/specs/rfc5805.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5805.txt",
+    "sha256": "3292299af334e946a9a859d688a6afd692d2ccb2277cb7d02ee1cc15fb6645ec",
+    "bytes": 21723
+  }
+]
