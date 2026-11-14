@@ -18,3 +18,38 @@ Resolver#do_validation defaults to false; set it to true to enable local DNSSEC 
 Dnsruby maintains a cache of responses, and a cache of trusted keys. Once the initial keys have been downloaded, and a set of trusted keys built up, very little overhead is required to enjoy the benefits of DNSSEC. There is, however, some initial cost (to build up the caches).
 
 Dnsruby::Dnssec.clear_trusted_keys clears learned DNSKEYs and all DS/DLV anchors, including the built-in root DS anchors; configured DNSKEY anchors are retained. To remove local anchors and built-in root trust, call clear_trust_anchors followed by clear_trusted_keys. Use remove_trust_anchor or clear_trust_anchors to remove local anchors explicitly. Dnsruby::Dnssec.reset restores the built-in root anchors, clears local anchors and cached keys, and resets the validation policy and resolver settings to their defaults.
+
+NSEC3 authenticated denial of existence (RFC 5155)
+--------------------------------------------------
+
+Negative answers from NSEC3-signed zones are validated from the full proof
+rather than accepted on a single signed hash interval. All NSEC3 RRs in one
+proof must share the same hash algorithm, iteration count and salt; mixed
+parameters, unknown hash algorithms and flags other than 0/1 disqualify the
+records involved.
+
+The validator distinguishes and separately proves:
+
+- NXDOMAIN: a closest encloser proof (a matching encloser NSEC3 plus an NSEC3
+  covering the next closer name) and an NSEC3 covering the wildcard at the
+  closest encloser.
+- Plain NODATA (QTYPE != DS): an NSEC3 matching the QNAME whose bitmap lists
+  neither the QTYPE nor CNAME.
+- DS NODATA: a matching NSEC3 without DS/CNAME, or a closest provable encloser
+  proof whose next closer cover carries the Opt-Out flag.
+- Wildcard NODATA: a closest encloser proof plus an NSEC3 matching the
+  wildcard, without the QTYPE or CNAME bit.
+- Wildcard answers: the next closer name is covered, proving the correct
+  wildcard was used and no closer name existed.
+
+Opt-Out only authenticates the boundary of an unsigned delegation. When that
+is the strongest proof available, the message is marked INSECURE
+(Message#nsec3_insecure_delegation records the encloser and next closer name);
+it is never upgraded to a secure assertion that the name does not exist.
+Removing any required proof record, changing the bitmap, salt or iterations,
+or clearing the Opt-Out flag makes the response fail verification as BOGUS.
+
+RR::NSEC3 exposes matches_name?, covers_name?, compatible_with?, in_zone?,
+zone_name, owner_hash and salt_raw for the underlying match/cover checks.
+test/tc_nsec3_verification.rb and test/fixtures/nsec3/ build a locally signed
+NSEC3 zone and demonstrate each complete proof and its mutation failures.

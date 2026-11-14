@@ -55,6 +55,7 @@ TESTS = %w(
     naptr
     nsec
     nsec3
+    nsec3_verification
     nsec3param
     nxt
     tlsa

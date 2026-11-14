@@ -397,7 +397,13 @@ module Dnsruby
         }
       end
 
-      verify_nsecs(msg)
+      nsec_result = verify_nsecs(msg)
+      if Nsec3InsecureDelegation === nsec_result
+        # An Opt-Out proof authenticates the parent chain but explicitly
+        # refuses to assert anything below an unsigned delegation. Remember
+        # that so the message ends up INSECURE rather than SECURE.
+        msg.nsec3_insecure_delegation = nsec_result
+      end
 
       #  Then, look through all the remaining RRSets, and verify them all (unless not necessary).
       msg.section_rrsets.each do |section, rrsets|
@@ -508,56 +514,100 @@ module Dnsruby
       #  get upset if there aren't any. However, if there are, then we should verify that they say the right thing
       qtype = msg.question()[0].qtype
       return if (msg.rcode == RCode.NOERROR && ((qtype == Types.ANY) || (qtype == Types.NSEC) || (qtype == Types.NSEC3)))
-      if ((msg.rrsets('NSEC').length > 0) || (msg.rrsets('NSEC3').length > 0))
-        if (msg.rcode == RCode.NXDOMAIN)
-          #           print "Checking NSECs for Name Error\n"
-          # Name error - NSEC wil prove i) no exact match for <SNAME, SCLASS>, and ii) no RRSets that could match through wildcard expansion
-          #            - this may be proved in one or more NSECs (and associated RRSIGs)
-          check_name_in_nsecs(msg)
-          return check_no_wildcard_expansion(msg)
-        elsif (msg.rcode == RCode.NOERROR)
-          if (msg.answer.length > 0)
-            #             print "Checking NSECs for wildcard expansion\n"
-            #  wildcard expansion answer - check NSECs!
-            #  We want to make sure that the NSEC tells us that there is no closer match for this name
-            #  @TODO@ We need to make replace the RRSIG name with the wildcard name before we can verify it correctly.
-            check_num_rrsig_labels(msg)
-            return check_name_in_nsecs(msg, msg.question()[0].qtype, true)
-          else
-            #  Either no data or wildcard no data - check to see which
-            #  Should be able to tell this by checking the number of labels in the NSEC records.
-            #  Sort these two last cases out!
-            isWildcardNoData = false
-            [msg.authority.rrsets('NSEC'), msg.authority.rrsets('NSEC3')].each {|nsec_rrsets|
-              nsec_rrsets.each {|nsec_rrset|
-                nsec_rrset.rrs.each {|nsec|
-                  #                   print "Checking nsec to see if wildcard : #{nsec}\n"
-                  if (nsec.name.wild? ||(nsec.name.labels.length < msg.question()[0].qname.labels.length))
-                    isWildcardNoData = true
-                  end
-                }
-              }
-            }
+      nsec3_present = msg.rrsets('NSEC3').length > 0
+      nsec_present = msg.rrsets('NSEC').length > 0
+      if !nsec_present && !nsec3_present
+        # A signed negative answer must authenticate itself with an NSEC(3)
+        # proof. Removing every proof record from such an answer leaves
+        # nothing the validator can rely on, so it must fail rather than pass
+        # on the strength of an unrelated signed SOA.
+        if negative_answer_requiring_proof?(msg) && msg.rrsets('RRSIG').length > 0
+          raise VerifyError.new(
+            "Signed #{msg.rcode.string} response for #{qname_of(msg)} carries no NSEC/NSEC3 proof")
+        end
+        return
+      end
+      # RFC 5155 only permits NSEC3 inside an NSEC3-capable zone. A mix of
+      # NSEC and NSEC3 cannot form a coherent proof and must not be accepted
+      # on the strength of either record alone.
+      if nsec3_present && nsec_present
+        raise VerifyError.new("Response mixes NSEC and NSEC3 denial records for #{qname_of(msg)}")
+      end
+      return verify_nsec3(msg) if nsec3_present
+      verify_nsec(msg)
+    end
 
-            if (isWildcardNoData)
-              #               print "Checking NSECs for wildcard no data\n"
-              #  Check NSECs -
-              #          i) NSEC proving no RRSets matching STYPE at wildcard owner name that matched <SNAME, SCLASS> via wildcard expansion
-              check_name_not_in_wildcard_nsecs(msg)
-              #          ii) NSEC proving no RRSets in zone that would have been closer match for <SNAME, SCLASS>
-              return check_name_in_and_type_not_in_nsecs(msg)
-            else # (isNoData)
-              #               print "Checking NSECs for No data\n"
-              #  Check NSEC types covered to make sure this type not present.
-              return check_name_in_and_type_not_in_nsecs(msg)
-            end
-          end
+    def qname_of(msg) # :nodoc:
+      msg.question()[0].qname
+    end
+    private :qname_of
+
+    # Negative answers that RFC 4035/5155 require an NSEC(3) proof for:
+    # NXDOMAIN, or a NOERROR response with no answer RRSets (NODATA).
+    def negative_answer_requiring_proof?(msg)
+      return true if msg.rcode == RCode.NXDOMAIN
+      msg.rcode == RCode.NOERROR && msg.answer.length == 0
+    end
+    private :negative_answer_requiring_proof?
+
+    # A fully verified message is SECURE unless its NSEC3 proof only
+    # establishes an Opt-Out boundary, in which case the authenticated chain
+    # deliberately stops at an unsigned delegation and the result is INSECURE.
+    def apply_nsec3_security_level(msg) # :nodoc:
+      if msg.nsec3_insecure_delegation
+        msg.security_level = Message::SecurityLevel.INSECURE
+      else
+        msg.security_level = Message::SecurityLevel.SECURE
+      end
+    end
+    private :apply_nsec3_security_level
+
+    # Original NSEC (RFC 4035) proof handling.
+    def verify_nsec(msg) # :nodoc:
+      if (msg.rcode == RCode.NXDOMAIN)
+        #           print "Checking NSECs for Name Error\n"
+        # Name error - NSEC wil prove i) no exact match for <SNAME, SCLASS>, and ii) no RRSets that could match through wildcard expansion
+        #            - this may be proved in one or more NSECs (and associated RRSIGs)
+        check_name_in_nsecs(msg)
+        return check_no_wildcard_expansion(msg)
+      elsif (msg.rcode == RCode.NOERROR)
+        if (msg.answer.length > 0)
+          #             print "Checking NSECs for wildcard expansion\n"
+          #  wildcard expansion answer - check NSECs!
+          #  We want to make sure that the NSEC tells us that there is no closer match for this name
+          #  @TODO@ We need to make replace the RRSIG name with the wildcard name before we can verify it correctly.
+          check_num_rrsig_labels(msg)
+          return check_name_in_nsecs(msg, msg.question()[0].qtype, true)
         else
-          #  Anything we should do here?
+          #  Either no data or wildcard no data - check to see which
+          #  Should be able to tell this by checking the number of labels in the NSEC records.
+          #  Sort these two last cases out!
+          isWildcardNoData = false
+          msg.authority.rrsets('NSEC').each {|nsec_rrset|
+            nsec_rrset.rrs.each {|nsec|
+              #                   print "Checking nsec to see if wildcard : #{nsec}\n"
+              if (nsec.name.wild? ||(nsec.name.labels.length < msg.question()[0].qname.labels.length))
+                isWildcardNoData = true
+              end
+            }
+          }
+
+          if (isWildcardNoData)
+            #               print "Checking NSECs for wildcard no data\n"
+            #  Check NSECs -
+            #          i) NSEC proving no RRSets matching STYPE at wildcard owner name that matched <SNAME, SCLASS> via wildcard expansion
+            check_name_not_in_wildcard_nsecs(msg)
+            #          ii) NSEC proving no RRSets in zone that would have been a closer match for <SNAME, SCLASS>
+            return check_name_in_and_type_not_in_nsecs(msg)
+          else # (isNoData)
+            #               print "Checking NSECs for No data\n"
+            #  Check NSEC types covered to make sure this type not present.
+            return check_name_in_and_type_not_in_nsecs(msg)
+          end
         end
       end
-
     end
+    private :verify_nsec
 
     def check_num_rrsig_labels(msg) # :nodoc:
       #  Check that the number of labels in the RRSIG is less than the number
@@ -573,17 +623,14 @@ module Dnsruby
     end
 
     def check_no_wildcard_expansion(msg) # :nodoc:
-      #  @TODO@ Do this for NSEC3 records!!!
       proven_no_wildcards = false
-      [msg.authority.rrsets('NSEC'), msg.authority.rrsets('NSEC3')].each {|nsec_rrsets|
-        nsec_rrsets.each {|nsecs|
-          nsecs.rrs.each {|nsec|
-            #             print "Checking NSEC : #{nsec}\n"
-            next if (nsec.name.wild?)
-            if (check_record_proves_no_wildcard(msg, nsec))
-              proven_no_wildcards = true
-            end
-          }
+      msg.authority.rrsets('NSEC').each {|nsecs|
+        nsecs.rrs.each {|nsec|
+          #             print "Checking NSEC : #{nsec}\n"
+          next if (nsec.name.wild?)
+          if (check_record_proves_no_wildcard(msg, nsec))
+            proven_no_wildcards = true
+          end
         }
       }
       if (!proven_no_wildcards)
@@ -611,31 +658,28 @@ module Dnsruby
     def check_name_in_nsecs(msg, qtype=nil, expected_qtype = false) # :nodoc:
       #  Check these NSECs to make sure that this name cannot be in the zone
       #  and that no RRSets could match through wildcard expansion
-      #  @TODO@ Get this right for NSEC3 too!
       name = msg.question()[0].qname
       proven_name_in_nsecs = false
       type_covered_checked = false
-      [msg.authority.rrsets('NSEC'), msg.authority.rrsets('NSEC3')].each {|nsec_rrsets|
-        nsec_rrsets.each {|nsecs|
-          nsecs.rrs.each {|nsec|
-            #             print "Checking NSEC : #{nsec}\n"
-            next if (nsec.name.wild?)
-            if nsec.check_name_in_range(name)
-              proven_name_in_nsecs = true
-              qtype_present = false
-              if (qtype)
-                if (nsec.types.include?qtype)
-                  qtype_present = true
-                end
-                if (qtype_present != expected_qtype)
-                  #                   print "#{nsec.type} record #{nsec} does #{expected_qtype ? 'not ' : ''} include #{qtype} type\n"
-                  raise VerifyError.new("#{nsec.type} record #{nsec} does #{expected_qtype ? 'not ' : ''}include #{qtype} type")
-                  #               return false
-                end
-                type_covered_checked = true
+      msg.authority.rrsets('NSEC').each {|nsecs|
+        nsecs.rrs.each {|nsec|
+          #             print "Checking NSEC : #{nsec}\n"
+          next if (nsec.name.wild?)
+          if nsec.check_name_in_range(name)
+            proven_name_in_nsecs = true
+            qtype_present = false
+            if (qtype)
+              if (nsec.types.include?qtype)
+                qtype_present = true
               end
+              if (qtype_present != expected_qtype)
+                #                   print "#{nsec.type} record #{nsec} does #{expected_qtype ? 'not ' : ''} include #{qtype} type\n"
+                raise VerifyError.new("#{nsec.type} record #{nsec} does #{expected_qtype ? 'not ' : ''}include #{qtype} type")
+                #               return false
+              end
+              type_covered_checked = true
             end
-          }
+          end
         }
       }
       if (!proven_name_in_nsecs)
@@ -653,36 +697,346 @@ module Dnsruby
     end
 
     def check_name_not_in_wildcard_nsecs(msg) # :nodoc:
-      #  @TODO@ Do this for NSEC3 records too!
       name = msg.question()[0].qname
       qtype = msg.question()[0].qtype
       done= false
-      [msg.authority.rrsets('NSEC'), msg.authority.rrsets('NSEC3')].each {|nsec_rrsets|
-        nsec_rrsets.each {|nsecs|
-          nsecs.rrs.each {|nsec|
-            #             print "Checking NSEC : #{nsec}\n"
-            next if !nsec.name.wild?
-            #  Check the wildcard expansion
-            #  We want to see that the name is in the wildcard range, and that the type
-            #  is not in the types for the NSEC
-            if nsec.check_name_in_wildcard_range(name)
-              #               print "Wildcard expansion in #{nsec} includes #{name}\n"
-              raise VerifyError.new("Wildcard expansion in #{nsec} includes #{name}")
-              #             return false
-            end
-            if (nsec.types.include?qtype)
-              #               print "#{qtype} present in wildcard #{nsec}\n"
-              raise VerifyError.new("#{qtype} present in wildcard #{nsec}")
-              #             return false
-            end
-            done = true
-          }
+      msg.authority.rrsets('NSEC').each {|nsecs|
+        nsecs.rrs.each {|nsec|
+          #             print "Checking NSEC : #{nsec}\n"
+          next if !nsec.name.wild?
+          #  Check the wildcard expansion
+          #  We want to see that the name is in the wildcard range, and that the type
+          #  is not in the types for the NSEC
+          if nsec.check_name_in_wildcard_range(name)
+            #               print "Wildcard expansion in #{nsec} includes #{name}\n"
+            raise VerifyError.new("Wildcard expansion in #{nsec} includes #{name}")
+            #             return false
+          end
+          if (nsec.types.include?qtype)
+            #               print "#{qtype} present in wildcard #{nsec}\n"
+            raise VerifyError.new("#{qtype} present in wildcard #{nsec}")
+            #             return false
+          end
+          done = true
         }
       }
       return if done
       #       print("Expected wildcard expansion in #{msg}\n")
       raise VerifyError.new("Expected wildcard expansion in #{msg}")
       #       return false
+    end
+
+    # ======================================================================
+    # NSEC3 (RFC 5155) authenticated denial of existence.
+    #
+    # NSEC3 owner names are hashes, so the legacy NSEC range checks cannot be
+    # reused. Each proof is rebuilt from the primitives defined by RFC 5155
+    # section 8: a closest (provable) encloser, the "next closer" name, and,
+    # where required, the wildcard at the closest encloser. Every NSEC3 RR in
+    # a proof must carry the same hash algorithm, iteration count and salt,
+    # and the Opt-Out flag may only relax proofs for insecure delegations.
+    # ======================================================================
+
+    def verify_nsec3(msg) # :nodoc:
+      nsec3s = nsec3_records(msg)
+      qname = qname_of(msg)
+      check_nsec3_parameters(nsec3s, qname)
+      qtype = msg.question()[0].qtype
+
+      if (msg.rcode == RCode.NXDOMAIN)
+        verify_nsec3_name_error(nsec3s, qname)
+      elsif (msg.rcode == RCode.NOERROR)
+        if (msg.answer.length > 0)
+          # RFC 5155 8.8 : wildcard answer. The answer RRSIG's reduced label
+          # count identifies the generating wildcard; the next closer name
+          # must be covered to prove no closer name existed.
+          check_num_rrsig_labels(msg)
+          verify_nsec3_wildcard_answer(nsec3s, msg, qname)
+        elsif (qtype == Types.DS)
+          verify_nsec3_no_data_ds(nsec3s, qname)
+        elsif (wildcard_nodata?(nsec3s, qname))
+          # RFC 5155 8.7 : a matching wildcard NSEC3 distinguishes wildcard
+          # NODATA from an ordinary NODATA response.
+          verify_nsec3_wildcard_no_data(nsec3s, qname, qtype)
+        else
+          verify_nsec3_no_data(nsec3s, qname, qtype)
+        end
+      else
+        raise VerifyError.new("Unexpected rcode #{msg.rcode} for NSEC3 response at #{qname}")
+      end
+    end
+    private :verify_nsec3
+
+    # Wildcard NODATA is present when some ancestor of QNAME has a wildcard
+    # whose hash matches one of the response's NSEC3 owner names.
+    def wildcard_nodata?(nsec3s, qname) # :nodoc:
+      ancestor_names(qname).each do |ancestor|
+        next if ancestor.labels.length == qname.labels.length
+        return true if nsec3_match(nsec3s, wildcard_name(ancestor))
+      end
+      false
+    end
+    private :wildcard_nodata?
+
+    def nsec3_records(msg) # :nodoc:
+      records = []
+      msg.authority.rrsets('NSEC3').each { |rrset| records.concat(rrset.rrs) }
+      if records.empty?
+        # Some paths hand over messages whose NSEC3 RRs sit elsewhere; the
+        # proof can only ever be authenticated from authority NSEC3 RRs.
+        raise VerifyError.new("No NSEC3 records in authority section for #{qname_of(msg)}")
+      end
+      records
+    end
+    private :nsec3_records
+
+    # RFC 5155 8.1/8.2 : flags other than 0/1 disqualify an RR; hash
+    # algorithm, iterations and salt must be coherent across every NSEC3 RR
+    # used in the same proof. Records using an unsupported hash algorithm
+    # cannot match or cover anything and so cannot participate in a proof.
+    def check_nsec3_parameters(nsec3s, qname) # :nodoc:
+      reference = nsec3s.first
+      nsec3s.each do |nsec3|
+        unless nsec3.flags == 0 || nsec3.flags == RR::NSEC3::OPT_OUT
+          raise VerifyError.new("NSEC3 record #{nsec3.name} has unsupported flags #{nsec3.flags}")
+        end
+        unless nsec3.supported_hash_algorithm?
+          raise VerifyError.new("NSEC3 record #{nsec3.name} uses an unsupported hash algorithm")
+        end
+        unless reference.compatible_with?(nsec3)
+          raise VerifyError.new(
+            "Incompatible NSEC3 parameters in proof: #{reference.name} and #{nsec3.name} " +
+              "must share hash algorithm, iterations and salt")
+        end
+        unless nsec3.in_zone?(qname)
+          raise VerifyError.new("NSEC3 record #{nsec3.name} is outside the zone of #{qname}")
+        end
+      end
+    end
+    private :check_nsec3_parameters
+
+    def nsec3_match(nsec3s, name) # :nodoc:
+      nsec3s.find { |nsec3| nsec3.matches_name?(name) }
+    end
+    private :nsec3_match
+
+    def nsec3_cover(nsec3s, name) # :nodoc:
+      nsec3s.find { |nsec3| nsec3.covers_name?(name) }
+    end
+    private :nsec3_cover
+
+    # RFC 5155 8.3 closest encloser proof. Walk the ancestors of QNAME from
+    # the longest to the shortest. The closest encloser is the longest
+    # ancestor matched by an NSEC3 RR, while the name one label longer (the
+    # next closer name) must be covered by another NSEC3 RR.
+    #
+    # Returns [closest_encloser, next_closer, matching_nsec3, covering_nsec3].
+    # When only a closest *provable* encloser is available because the next
+    # closer span is Opt-Out (an insecure delegation), require_opt_out marks
+    # that the covering record must carry the Opt-Out flag.
+    def closest_encloser_proof(nsec3s, qname, require_opt_out: false) # :nodoc:
+      flag_set = false
+      ancestor_names(qname).each do |candidate|
+        covering = nsec3_cover(nsec3s, candidate)
+        matching = nsec3_match(nsec3s, candidate)
+        if covering
+          # An NSEC3 span says this ancestor does not exist.
+          flag_set = true
+        end
+        if matching
+          unless flag_set
+            raise VerifyError.new(
+              "Bogus NSEC3 closest encloser proof for #{qname}: #{candidate} matches without a covering record")
+          end
+          next_closer = one_label_longer(qname, candidate)
+          cover = nsec3_cover(nsec3s, next_closer)
+          unless cover
+            raise VerifyError.new(
+              "NSEC3 proof for #{qname} does not cover the next closer name #{next_closer}")
+          end
+          if require_opt_out && !cover.opt_out?
+            raise VerifyError.new(
+              "NSEC3 record covering #{next_closer} must have the Opt-Out flag set for the insecure delegation")
+          end
+          check_encloser_record(matching, qname)
+          return [candidate, next_closer, matching, cover]
+        end
+      end
+      raise VerifyError.new("No NSEC3 closest encloser proof for #{qname}")
+    end
+    private :closest_encloser_proof
+
+    # RFC 5155 8.3 : the matched closest encloser NSEC3 must come from the
+    # proper zone - no DNAME bit, and NS only alongside SOA.
+    def check_encloser_record(nsec3, qname) # :nodoc:
+      if nsec3.types.include?(Types.DNAME)
+        raise VerifyError.new("Closest encloser NSEC3 #{nsec3.name} must not carry the DNAME type for #{qname}")
+      end
+      if nsec3.types.include?(Types.NS) && !nsec3.types.include?(Types.SOA)
+        raise VerifyError.new(
+          "Closest encloser NSEC3 #{nsec3.name} carries NS without SOA; it cannot authenticate #{qname}")
+      end
+    end
+    private :check_encloser_record
+
+    # All ancestors of qname including qname itself, longest first, ending at
+    # the zone apex. The zone is taken from the NSEC3 owner names so no
+    # separate SOA parse is needed.
+    def ancestor_names(qname) # :nodoc:
+      names = []
+      current = Name.create(qname)
+      while current.labels.length > 0
+        names << Name.new(current.labels.dup, current.absolute?)
+        break if current.labels.length == 1
+        current = current.strip_label
+      end
+      names
+    end
+    private :ancestor_names
+
+    # The "next closer name": one label longer than the encloser while still
+    # an ancestor of (or equal to) qname.
+    def one_label_longer(qname, encloser) # :nodoc:
+      extra = qname.labels.length - encloser.labels.length
+      raise VerifyError.new("Encloser #{encloser} is not an ancestor of #{qname}") if extra <= 0
+      Name.new(qname.labels.last(encloser.labels.length + 1), qname.absolute?)
+    end
+    private :one_label_longer
+
+    def wildcard_name(encloser) # :nodoc:
+      Name.new([Name::Label.new('*')] + encloser.labels, encloser.absolute?)
+    end
+    private :wildcard_name
+
+    # RFC 5155 8.4 : NXDOMAIN needs a closest encloser proof for QNAME plus
+    # an NSEC3 RR covering the wildcard at the closest encloser. A matching
+    # wildcard record would mean the wildcard exists and an NXDOMAIN answer
+    # is impossible.
+    def verify_nsec3_name_error(nsec3s, qname) # :nodoc:
+      encloser, _next_closer, _match, _cover = closest_encloser_proof(nsec3s, qname)
+      wildcard = wildcard_name(encloser)
+      if nsec3_match(nsec3s, wildcard)
+        raise VerifyError.new("NXDOMAIN for #{qname} contradicted by matching wildcard NSEC3 #{wildcard}")
+      end
+      unless nsec3_cover(nsec3s, wildcard)
+        raise VerifyError.new("NSEC3 NXDOMAIN proof for #{qname} does not cover wildcard #{wildcard}")
+      end
+      true
+    end
+    private :verify_nsec3_name_error
+
+    # RFC 5155 8.5 : an NSEC3 RR matching QNAME, with neither QTYPE nor CNAME
+    # set, proves a plain NODATA response. A closest encloser proof alone is
+    # not sufficient for non-DS queries and must be rejected.
+    def verify_nsec3_no_data(nsec3s, qname, qtype) # :nodoc:
+      matching = nsec3_match(nsec3s, qname)
+      unless matching
+        raise VerifyError.new(
+          "NODATA for #{qname}/#{qtype.string} requires an NSEC3 matching the QNAME")
+      end
+      if matching.types.include?(qtype)
+        raise VerifyError.new("NODATA contradicted: matching NSEC3 for #{qname} lists #{qtype.string}")
+      end
+      if matching.types.include?(Types.CNAME)
+        raise VerifyError.new("NODATA contradicted: matching NSEC3 for #{qname} lists CNAME")
+      end
+      true
+    end
+    private :verify_nsec3_no_data
+
+    # RFC 5155 8.6 : DS NODATA. A matching NSEC3 without DS/CNAME proves the
+    # delegation is secure but has no DS. Otherwise a closest provable
+    # encloser proof with an Opt-Out next closer record establishes that the
+    # delegation is insecure - it must never be upgraded to a secure
+    # name-does-not-exist verdict.
+    def verify_nsec3_no_data_ds(nsec3s, qname) # :nodoc:
+      matching = nsec3_match(nsec3s, qname)
+      if matching
+        if matching.types.include?(Types.DS) || matching.types.include?(Types.CNAME)
+          raise VerifyError.new("DS NODATA contradicted by matching NSEC3 for #{qname}")
+        end
+        return true
+      end
+      encloser, next_closer, _m, cover = closest_encloser_proof(nsec3s, qname, require_opt_out: true)
+      unless cover.opt_out?
+        raise VerifyError.new(
+          "DS NODATA for #{qname} without a matching NSEC3 requires an Opt-Out cover of #{next_closer}")
+      end
+      insecure_delegation_result(encloser, next_closer, qname)
+    end
+    private :verify_nsec3_no_data_ds
+
+    # RFC 5155 8.7 : wildcard NODATA. A closest encloser proof for QNAME, and
+    # an NSEC3 matching the wildcard at that encloser which lists neither
+    # QTYPE nor CNAME.
+    def verify_nsec3_wildcard_no_data(nsec3s, qname, qtype) # :nodoc:
+      encloser, _next_closer, encloser_match, _cover = closest_encloser_proof(nsec3s, qname)
+      wildcard = wildcard_name(encloser)
+      wildcard_match = nsec3_match(nsec3s, wildcard)
+      unless wildcard_match
+        if nsec3_cover(nsec3s, wildcard)
+          raise VerifyError.new("Wildcard NODATA for #{qname} contradicted: #{wildcard} is covered, not matched")
+        end
+        raise VerifyError.new("Wildcard NODATA for #{qname} lacks an NSEC3 matching #{wildcard}")
+      end
+      if wildcard_match.types.include?(qtype)
+        raise VerifyError.new("Wildcard NODATA contradicted: #{wildcard} NSEC3 lists #{qtype.string}")
+      end
+      if wildcard_match.types.include?(Types.CNAME)
+        raise VerifyError.new("Wildcard NODATA contradicted: #{wildcard} NSEC3 lists CNAME")
+      end
+      check_encloser_record(encloser_match, qname)
+      true
+    end
+    private :verify_nsec3_wildcard_no_data
+
+    # RFC 5155 8.8 : wildcard answer. The generating wildcard's immediate
+    # ancestor is the closest encloser; an NSEC3 must cover the next closer
+    # name to prove QNAME did not exist and the right wildcard was used.
+    def verify_nsec3_wildcard_answer(nsec3s, msg, qname) # :nodoc:
+      answer_rrset = msg.answer.rrset(qname, msg.question()[0].qtype)
+      rrsig = answer_rrset.sigs()[0]
+      # RFC 5155 8.8 : the answer RRSIG's label count identifies the
+      # generating wildcard; its immediate ancestor is the closest encloser.
+      wildcard_labels = qname.labels.last(rrsig.labels + 1)
+      encloser = Name.new(wildcard_labels.last(wildcard_labels.length - 1), qname.absolute?)
+      wildcard = wildcard_name(encloser)
+      matching = nsec3_match(nsec3s, encloser)
+      unless matching
+        raise VerifyError.new("Wildcard answer for #{qname}: no NSEC3 matching closest encloser #{encloser}")
+      end
+      check_encloser_record(matching, qname)
+      next_closer = one_label_longer(qname, encloser)
+      cover = nsec3_cover(nsec3s, next_closer)
+      unless cover
+        raise VerifyError.new("Wildcard answer for #{qname}: no NSEC3 covering next closer #{next_closer}")
+      end
+      # The wildcard itself must exist (the answer proves it), so a covering
+      # record that denies it would be contradictory.
+      if nsec3_cover(nsec3s, wildcard) && !nsec3_match(nsec3s, wildcard)
+        raise VerifyError.new("Wildcard answer for #{qname} contradicted by NSEC3 covering #{wildcard}")
+      end
+      true
+    end
+    private :verify_nsec3_wildcard_answer
+
+    # Opt-Out evidence means the name sits under an unsigned delegation. The
+    # denial proof itself verifies, but the chain of trust cannot assert the
+    # name's status, so surface an explicit insecure verdict instead of a
+    # secure non-existence result.
+    def insecure_delegation_result(encloser, next_closer, qname) # :nodoc:
+      TheLog.debug("NSEC3 Opt-Out: #{qname} under insecure delegation at #{encloser} (#{next_closer})")
+      Nsec3InsecureDelegation.new(encloser, next_closer)
+    end
+    private :insecure_delegation_result
+
+    # Signals an authenticated-but-insecure outcome (RFC 5155 section 6).
+    class Nsec3InsecureDelegation
+      attr_reader :encloser, :next_closer
+      def initialize(encloser, next_closer)
+        @encloser = encloser
+        @next_closer = next_closer
+      end
     end
 
     def verify_ds_rrset(ds_rrset, keys = nil, msg = nil) # :nodoc:
@@ -1521,7 +1875,7 @@ module Dnsruby
           #           print "Trying to verify one last time\n"
 
           if verify(msg) # Just make sure we haven't picked the keys up anywhere
-            msg.security_level = Message::SecurityLevel.SECURE
+            apply_nsec3_security_level(msg)
             return true
           end
         rescue VerifyError
@@ -1568,7 +1922,7 @@ module Dnsruby
           begin
             if (verify(msg, actual_anchor))
               TheLog.debug("Validated #{qname}")
-              msg.security_level = Message::SecurityLevel.SECURE
+              apply_nsec3_security_level(msg)
             end
           rescue VerifyError => e
             TheLog.info("BOGUS #{qname}! Error : #{e}")

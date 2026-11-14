@@ -91,6 +91,11 @@ module Dnsruby
     #  true. It will be false otherwise.
     attr_accessor :cached
 
+    # Set when an NSEC3 Opt-Out proof establishes that the QNAME lies under an
+    # unsigned delegation. The chain above the delegation is authenticated, but
+    # the name's status itself is INSECURE rather than SECURE.
+    attr_accessor :nsec3_insecure_delegation
+
 
 
     #  Create a new Message. Takes optional name, type and class
@@ -119,6 +124,7 @@ module Dnsruby
       @security_level = SecurityLevel.UNCHECKED
       @security_error = nil
       @cached = false
+      @nsec3_insecure_delegation = nil
       type = Types::A
       klass = Classes::IN
       if (args.length > 0)

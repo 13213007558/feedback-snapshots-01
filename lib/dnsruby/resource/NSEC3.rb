@@ -90,14 +90,108 @@ module Dnsruby
       # NSEC RR's owner name
       attr_reader :types
 
-      def check_name_in_range(_name)
-        #  @TODO@ Check if the name is covered by this record
-        false
+      # The owner name of an NSEC3 RR is the base32 hex encoding of the
+      # hashed owner name, prepended as a single label to the zone name.
+      # Return the raw hashed owner name carried in the RR's owner name.
+      def owner_hash
+        return nil if @name.nil? || @name.labels.empty?
+        Base32.decode32hex(@name.labels[0].string.downcase)
+      end
+
+      # NSEC3 parameters (hash algorithm, iterations and salt) have to be
+      # identical for every NSEC3 RR used in a single proof (RFC 5155 8.2).
+      def compatible_with?(other)
+        other.is_a?(NSEC3) &&
+          hash_alg == other.hash_alg &&
+          iterations == other.iterations &&
+          salt_raw == other.salt_raw
+      end
+
+      # The raw (binary) salt used by this NSEC3 RR.
+      def salt_raw
+        @salt ||= +''
+      end
+
+      # RFC 5155, section 3.3 : an NSEC3 RR "matches" a name when its owner
+      # name is the hash of that name prepended to the zone name.
+      def matches_name?(name)
+        target = hash_for(name)
+        return false unless target
+        target == owner_hash
+      end
+
+      # RFC 5155, section 3.3 : an NSEC3 RR "covers" a name when the hash of
+      # the name falls between the owner hash and the next hashed owner name
+      # in hash order. The final NSEC3 RR wraps around the hash ring.
+      def covers_name?(name)
+        target = hash_for(name)
+        return false unless target
+        start_hash = owner_hash
+        return false unless start_hash && @next_hashed
+        return false if target == start_hash
+        if start_hash < @next_hashed
+          start_hash < target && target < @next_hashed
+        else
+          # Wrap-around span of the last NSEC3 RR in the chain.
+          target > start_hash || target < @next_hashed
+        end
+      end
+
+      # Retained for symmetry with NSEC : NSEC3 RRs never use wildcard owner
+      # names; wildcard proofs are expressed through hashed owner names.
+      def check_name_in_range(name)
+        matches_name?(name) || covers_name?(name)
       end
 
       def check_name_in_wildcard_range(_name)
-        #  @TODO@ Check if the name is covered by this record
         false
+      end
+
+      # Hash an owner name using this NSEC3 RR's own parameters. Returns nil
+      # when the name does not live in the RR's zone, or when the RR uses a
+      # hash algorithm the validator does not understand (RFC 5155 8.1), so
+      # the record can neither match nor cover anything.
+      def hash_for(name)
+        target = NSEC3.absolute_name(name)
+        return nil unless in_zone?(target)
+        return nil unless supported_hash_algorithm?
+        NSEC3.hash_to_binary(target, @iterations, salt_raw, @hash_alg)
+      end
+
+      SUPPORTED_HASH_ALGORITHMS = [Nsec3HashAlgorithms.SHA_1].freeze
+
+      def supported_hash_algorithm?
+        SUPPORTED_HASH_ALGORITHMS.include?(@hash_alg&.code)
+      end
+
+      # NSEC3 RRs only authenticate names within (or at the apex of) their
+      # zone, i.e. names ending in the zone portion of the owner name.
+      def in_zone?(name)
+        n = NSEC3.absolute_name(name)
+        zone = zone_name
+        n.canonical == zone.canonical || n.subdomain_of?(zone)
+      end
+
+      def self.absolute_name(name)
+        n = Name.create(name)
+        n.absolute? ? n : Name.new(n.labels, true)
+      end
+
+      # The zone name is the NSEC3 owner name with the leading hash label
+      # removed (RFC 5155 section 3.1.3). NSEC3 owner names are always
+      # absolute, so the derived zone name is absolute as well.
+      def zone_name
+        labels = @name.labels[1..-1] || []
+        Name.new(labels, true)
+      end
+
+      def NSEC3.hash_to_binary(name, iterations, salt, hash_alg)
+        n = Name.create(name)
+        out = n.canonical
+        (iterations + 1).times do
+          out = NSEC3.h(out + salt, hash_alg)
+        end
+        out
       end
 
       def calculate_hash
