@@ -496,6 +496,50 @@ end
 Sanitize.fragment(html, transformers: transformer)
 ```
 
+### Reentrant transformers
+
+A transformer may call back into the same `Sanitize` instance to sanitize embedded content. This is supported: nested calls are isolated from one another. Each transformer call gets its own `env` Hash, so a nested call can't replace the outer call's `:node`, `:node_name`, `:is_allowlisted`, or `:node_allowlist`. The outer call's values are restored when the nested call returns, and also when it raises an exception that the caller rescues.
+
+Nested calls also don't share allowlists. Nodes allowlisted by an inner `Sanitize#node!` call are not automatically trusted by the outer traversal. If you want the outer call to trust a node that the inner call approved, you must explicitly return `{node_allowlist: [...]}` from the outer transformer after verifying the node.
+
+If a transformer needs to inspect the currently active call (for example, an extension that wraps a Sanitize instance), use `Sanitize#current_env`, `#current_node`, or `#current_node_name`. These always describe the innermost transformer call active in the current thread, and revert to the outer call once a nested call completes. They return `nil` outside of a transformer call.
+
+```ruby
+sanitizer = nil
+
+transformer = lambda do |env|
+  node = env[:node]
+
+  # Only handle outer <div> elements once.
+  next unless env[:node_name] == "div" && node.element? && !node.key?("data-inner")
+
+  node["data-inner"] = "1"
+
+  # Sanitize the embedded content with the same instance.
+  sanitizer.node!(node)
+
+  # The outer call's context is restored after the nested call.
+  raise unless sanitizer.current_node.equal?(node)
+  raise unless sanitizer.current_node_name == "div"
+  raise if env[:is_allowlisted]
+
+  # Nodes allowlisted by the nested call are not in the outer allowlist.
+  raise if env[:node_allowlist].include?(node)
+end
+
+sanitizer = Sanitize.new(
+  elements: ["div"],
+  attributes: {"div" => ["data-inner"]},
+  transformers: transformer
+)
+
+html = %(<div><script>alert(1)</script><img src=x onerror=alert(2)></div>)
+
+# The nested call may be more permissive, but the outer config still removes
+# everything except the allowlisted <div>.
+sanitizer.fragment(html) # => '<div data-inner="1"></div>'
+```
+
 Transformers have a tremendous amount of power, including the power to completely bypass Sanitize's built-in filtering. Be careful! Your safety is in your own hands.
 
 ### Example: Transformer to allow image URLs by domain

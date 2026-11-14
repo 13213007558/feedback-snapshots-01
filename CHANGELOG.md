@@ -2,6 +2,16 @@
 
 All notable changes to Sanitize are documented in this file. The format (since version 7.0.0) is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Security
+
+- Fixed a reentrancy issue where a transformer that sanitized embedded content by calling back into the same `Sanitize` instance could corrupt the outer call's context. Previously, every transformer call reused a single mutable environment Hash (`@transformer_config`), so a nested call replaced the outer call's `:node`, `:node_name`, `:is_allowlisted`, and `:node_allowlist` while the outer transformer was still running. When the nested call returned or raised, subsequent transformers and extensions that read the "current" context could see the innermost node and its allowlist instead of the outer node. A transformer that trusted that context could then propagate an inner allowlist decision to an outer node that hadn't been reviewed, letting dangerous content survive outer sanitization. Each transformer call now gets its own environment Hash, and the legacy context view is saved and restored around every call, including when a nested call raises and the exception is rescued.
+
+### Added
+
+- Added `Sanitize#current_env`, `Sanitize#current_node`, and `Sanitize#current_node_name`, which expose the innermost active transformer call in the current thread. Extensions can use these to inspect the current node without reading internal state, and they're reentrancy-safe: after a nested call completes (or raises), they refer to the outer call again. They return `nil` outside of a transformer call. The context is tracked per thread, so concurrent sanitizations using the same instance don't see each other's nodes.
+
 ## 7.0.2 (2026-11-02)
 
 ### Security

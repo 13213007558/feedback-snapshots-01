@@ -46,6 +46,10 @@ class Sanitize
   # https://html.spec.whatwg.org/multipage/parsing.html#preprocessing-the-input-stream
   REGEX_UNSUITABLE_CHARS = /(?:#{REGEX_HTML_CONTROL_CHARACTERS}|#{REGEX_HTML_NON_CHARACTERS})/u
 
+  # Thread variable used to store each thread's map of active transformer
+  # contexts, keyed by Sanitize instance.
+  CONTEXT_STACKS_KEY = :sanitize_transformer_contexts
+
   #--
   # Class Methods
   #++
@@ -111,6 +115,11 @@ class Sanitize
     @transformers << Transformers::CleanDoctype
     @transformers << Transformers::CleanCDATA
 
+    # Compatibility view of the innermost active transformer call, kept for
+    # extensions that read it directly. It's saved and restored around every
+    # transformer call, so a reentrant call can't leave its node or allowlist
+    # visible to the call that invoked it. Prefer #current_env, which is also
+    # safe across threads.
     @transformer_config = {config: @config}
   end
 
@@ -168,6 +177,39 @@ class Sanitize
   # @deprecated Use {#node!} instead.
   alias_method :clean_node!, :node!
 
+  # Returns the environment Hash of the innermost transformer call currently
+  # being processed by this instance in the current thread, or `nil` if no
+  # transformer is running.
+  #
+  # When transformers are nested (a transformer calls back into this same
+  # Sanitize instance), this always refers to the innermost active call. Once
+  # the inner call returns or raises, the outer call's environment becomes
+  # current again.
+  #
+  # The returned Hash is a snapshot of the call as it was made. It contains the
+  # same keys passed to the transformer (`:node`, `:node_name`,
+  # `:is_allowlisted`, `:node_allowlist`, and their deprecated aliases).
+  def current_env
+    stack = active_context_stack
+    stack&.last
+  end
+
+  # Returns the `Nokogiri::XML::Node` of the innermost transformer call
+  # currently being processed by this instance in the current thread, or
+  # `nil` if no transformer is running.
+  def current_node
+    env = current_env
+    env && env[:node]
+  end
+
+  # Returns the lowercase name of the node of the innermost transformer call
+  # currently being processed by this instance in the current thread, or
+  # `nil` if no transformer is running.
+  def current_node_name
+    env = current_env
+    env && env[:node_name]
+  end
+
   private
 
   # Preprocesses HTML before parsing to remove undesirable Unicode chars.
@@ -189,32 +231,93 @@ class Sanitize
   end
 
   def transform_node!(node, node_allowlist)
+    # Resolve the per-thread context stack once per traversal step instead of
+    # once per transformer call.
+    stack = transformer_context_stack
+
     @transformers.each do |transformer|
-      # Since transform_node! may be called in a tight loop to process thousands
-      # of items, we can optimize both memory and CPU performance by:
-      #
-      # 1. Reusing the same config hash for each transformer
-      # 2. Directly assigning values to hash instead of using merge!. Not only
-      # does merge! create a new hash, it is also 2.6x slower:
-      # https://github.com/JuanitoFatas/fast-ruby#hashmerge-vs-hashmerge-code
-      config = @transformer_config
-      config[:is_allowlisted] = config[:is_whitelisted] = node_allowlist.include?(node)
-      config[:node] = node
-      config[:node_name] = node.name.downcase
-      config[:node_allowlist] = config[:node_whitelist] = node_allowlist
+      # Build a fresh environment Hash for each transformer call. Reusing a
+      # single mutable Hash would let a reentrant call (a transformer that
+      # sanitizes embedded content with this same Sanitize instance) replace
+      # the outer call's node, node name, allowlist, and allowlist status
+      # while the outer transformer is still running.
+      env = transformer_env(node, node_allowlist)
 
-      result = transformer.call(**config)
+      # Keep a per-thread stack of the environments currently being
+      # processed by this instance. This lets extensions query the node of
+      # the innermost active transformer call (see #current_env), and it
+      # gives reentrant calls a precise context to return to.
+      previous_env = @transformer_config
+      @transformer_config = env
+      stack.push(env)
 
-      if result.is_a?(Hash)
-        result_allowlist = result[:node_allowlist] || result[:node_whitelist]
+      begin
+        result = transformer.call(**env)
 
-        if result_allowlist.respond_to?(:each)
-          node_allowlist.merge(result_allowlist)
+        if result.is_a?(Hash)
+          result_allowlist = result[:node_allowlist] || result[:node_whitelist]
+
+          if result_allowlist.respond_to?(:each)
+            node_allowlist.merge(result_allowlist)
+          end
         end
+      ensure
+        # Restore even if the transformer raised, so a rescued exception
+        # inside a reentrant call can't leave the inner context visible to the
+        # call that invoked it.
+        stack.pop
+        @transformer_config = previous_env
       end
     end
 
+    release_context_stack if stack.empty?
+
     node
+  end
+
+  # Returns a fresh environment Hash describing the current transformer call.
+  def transformer_env(node, node_allowlist)
+    is_allowlisted = node_allowlist.include?(node)
+
+    {
+      config: @config,
+      is_allowlisted: is_allowlisted,
+      is_whitelisted: is_allowlisted,
+      node: node,
+      node_name: node.name.downcase,
+      node_allowlist: node_allowlist,
+      node_whitelist: node_allowlist
+    }
+  end
+
+  # Returns this instance's per-thread stack of active transformer
+  # environments, creating it if necessary.
+  #
+  # Using a thread variable (rather than an instance variable) keeps
+  # concurrently running sanitizations from seeing each other's contexts.
+  def transformer_context_stack
+    stacks = Thread.current.thread_variable_get(CONTEXT_STACKS_KEY)
+
+    unless stacks
+      stacks = {}
+      Thread.current.thread_variable_set(CONTEXT_STACKS_KEY, stacks)
+    end
+
+    stacks[self] ||= []
+  end
+
+  # Returns this instance's per-thread stack of active transformer
+  # environments if one exists, without creating a new one.
+  def active_context_stack
+    stacks = Thread.current.thread_variable_get(CONTEXT_STACKS_KEY)
+    stacks && stacks[self]
+  end
+
+  # Removes this instance's now-empty stack from the current thread's map so
+  # idle instances aren't retained by threads that once used them.
+  def release_context_stack
+    stacks = Thread.current.thread_variable_get(CONTEXT_STACKS_KEY)
+    stacks&.delete(self)
   end
 
   # Performs top-down traversal of the given node, operating first on the node
