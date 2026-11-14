@@ -14,6 +14,7 @@
 # limitations under the License.
 # ++
 
+require 'dnsruby/dnssec_time'
 
 # This class does verification/validation from a single point - signed root,
 # DLV, trust anchors. Dnssec controls a set of these to perform validation for
@@ -180,6 +181,8 @@ module Dnsruby
     # cannot outlive a configured DNSKEY anchor. Other configured anchors remain
     # available and can establish fresh trust without retaining stale descendants.
     def expire_trust_anchors
+      # Configured anchor expirations are absolute Unix times, unlike RRSIG
+      # serial times, so they remain tied to the wall clock.
       now = Time.now.to_i
       expired = @configured_dnskey_identities.any? { |_identity, expiration| expiration < now }
       return unless expired
@@ -214,9 +217,20 @@ module Dnsruby
       #       end
 
       #  Now check that we are in the validity period for the RRSIG
-      now = Time.now.to_i
-      if ((sigrec.expiration < now) || (sigrec.inception > now))
-        raise VerifyError.new("Signature record not in validity period")
+      now = DnssecTime.current
+      case DnssecTime.signature_validity(sigrec.inception, sigrec.expiration, now)
+      when DnssecTime::VALID
+        nil
+      when DnssecTime::EXPIRED
+        raise VerifyError.new("Signature record not in validity period (expired at #{sigrec.expiration})")
+      when DnssecTime::NOT_YET_VALID
+        raise VerifyError.new("Signature record not in validity period (not yet valid from #{sigrec.inception})")
+      when DnssecTime::INDETERMINATE
+        # RFC 1982 leaves this pair unordered: the interval cannot be
+        # attributed to either side of the 32-bit wrap, so reject it.
+        raise VerifyError.new("Signature record not in validity period (indeterminate ordering)")
+      else
+        raise VerifyError.new("Signature record not in validity period (empty interval)")
       end
     end
 
@@ -317,14 +331,15 @@ module Dnsruby
 
     private def check_ds_internal(key, ds_rrset)
       expiration = 0
+      now = DnssecTime.current
       found = false
       ds_rrset.sigs.each { |sig|
         if ((sig.type_covered == Types.DS) || ((sig.type_covered == Types.DLV)&& (@verifier_type==VerifierType::DLV)))
-          if (sig.inception <= Time.now.to_i)
-            #  Check sig.expiration, sig.algorithm
-            if (sig.expiration > expiration)
-              expiration = sig.expiration
-            end
+          next unless DnssecTime.valid?(sig.inception, sig.expiration, now)
+          sig_expiration = DnssecTime.expiration_time(sig.expiration, now)
+          next unless sig_expiration
+          if (sig_expiration > expiration)
+            expiration = sig_expiration
           end
         end
       }
@@ -759,7 +774,12 @@ module Dnsruby
     private def check_ds_stores_internal(key_rrset, signatures)
       signatures ||= valid_signatures(key_rrset)
       return if signatures.empty?
-      key_expiration = signatures.first.expiration
+      # Signature expirations are serial-time values. Convert them with the
+      # same validation view used to accept the signatures, so a key learned
+      # from this RRset cannot outlive the signature that authenticated it.
+      now = DnssecTime.current
+      key_expiration = DnssecTime.expiration_time(signatures.first.expiration, now)
+      return unless key_expiration
       configured, discovered = @trust_mutex.synchronize do
         [@configured_ds_store.dup, @discovered_ds_store.dup]
       end
@@ -771,11 +791,14 @@ module Dnsruby
           end
         end
         discovered.each do |rrset|
-          if rrset.sigs[0].expiration < Time.now.to_i
+          discovered_sig = rrset.sigs[0]
+          ds_expiration = DnssecTime.expiration_time(discovered_sig.expiration, now)
+          if ds_expiration.nil? ||
+              !DnssecTime.valid?(discovered_sig.inception, discovered_sig.expiration, now)
             publish_trust { @discovered_ds_store.delete(rrset) }
           elsif rrset.rrs.any? { |ds| ValidationBudget.current&.check!(1); ds.check_key(key) }
             publish_trust do
-              @trusted_keys.add_key_with_expiration(key, rrset.sigs[0].expiration)
+              @trusted_keys.add_key_with_expiration(key, ds_expiration)
               @discovered_ds_store.delete(rrset)
             end
           end
@@ -857,11 +880,12 @@ module Dnsruby
 
       if (rrset.type == Types.DNSKEY)
         if (keys && !(Array === keys) && ((keys.type == Types.DS) || ((keys.type == Types.DLV) && (@verifier_type == VerifierType::DLV))))
+          expiration = DnssecTime.expiration_time(sigrecs.first.expiration)
           rrset.rrs.each do |key|
             keys.rrs.each do |ds|
               ValidationBudget.current&.check!(1)
-              if ds.check_key(key)
-                publish_trust { @trusted_keys.add_key_with_expiration(key, sigrecs.first.expiration) }
+              if expiration && ds.check_key(key)
+                publish_trust { @trusted_keys.add_key_with_expiration(key, expiration) }
               end
             end
           end
@@ -956,7 +980,7 @@ module Dnsruby
       end
       ValidationBudget.current&.check!
       #  Sort out the TTLs - set it to the minimum valid ttl
-      expiration_diff = (sigrec.expiration.to_i - Time.now.to_i).abs
+      expiration_diff = (DnssecTime.distance(DnssecTime.current, sigrec.expiration) || 0).abs
       rrset.ttl = ([rrset.ttl, sigrec.ttl, sigrec.original_ttl,
           expiration_diff].sort)[0]
       #             print "VERIFIED OK\n"

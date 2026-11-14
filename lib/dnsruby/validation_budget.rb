@@ -1,4 +1,5 @@
 require 'dnsruby/query_control'
+require 'dnsruby/dnssec_time'
 
 module Dnsruby
   # Resource limits are verification failures, never evidence that a zone is
@@ -30,6 +31,15 @@ module Dnsruby
 
     attr_reader :control
 
+    # All signature validity decisions in one validation use this civil-time
+    # view. It is established once per operation and shared by nested calls,
+    # so they cannot disagree about which side of a signature boundary (or a
+    # 32-bit wrap) the operation is on. A budget queued before validation
+    # begins must not stamp an older time, so the default is captured lazily.
+    def now
+      @now ||= Time.now.to_i
+    end
+
     def self.current
       Thread.current[:dnsruby_validation_budget]
     end
@@ -51,12 +61,13 @@ module Dnsruby
       Thread.current[:dnsruby_validation_budget] = previous
     end
 
-    def initialize(deadline: nil, limits: Dnssec.validation_limits)
+    def initialize(deadline: nil, limits: Dnssec.validation_limits, now: nil)
       @limits = limits
       deadline = [deadline, TransportClock.now + limits[:timeout]].compact.min
       @control = QueryControl.new(deadline: deadline, parent: QueryControl.current)
       @signature_verifications = 0
       @work = 0
+      @now = now && now.to_i
     end
 
     def deadline

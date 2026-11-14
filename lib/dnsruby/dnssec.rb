@@ -344,9 +344,12 @@ module Dnsruby
 
 
     def self.verify_rrset(rrset, keys = nil)
-      @@anchor_verifier.verify_rrset(rrset, keys) ||
-        @@root_verifier.verify_rrset(rrset, keys) ||
-        @@dlv_verifier.verify_rrset(rrset, keys)
+      # One time view for all trust-source attempts in this call.
+      ValidationBudget.with do
+        @@anchor_verifier.verify_rrset(rrset, keys) ||
+          @@root_verifier.verify_rrset(rrset, keys) ||
+          @@dlv_verifier.verify_rrset(rrset, keys)
+      end
     end
   end
 end

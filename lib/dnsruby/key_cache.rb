@@ -14,6 +14,8 @@
 # limitations under the License.
 # ++
 
+require 'dnsruby/dnssec_time'
+
 module Dnsruby
   class KeyCache #:nodoc: all
     #  Cache includes expiration time for keys
@@ -54,15 +56,16 @@ module Dnsruby
       #  We want to choose the one with the most secure signing algorithm, key length,
       #  and the longest expiration time - not easy!
       #  for now, we simply accept all signed keys
+      now = DnssecTime.current
       k.sigs.each { |sig|
         if (sig.type_covered == Types.DNSKEY)
-          if (sig.inception <= Time.now.to_i)
-            #  Check sig.expiration, sig.algorithm
-            if (sig.expiration > Time.now.to_i)
-              #  add the keys to the store
-              k.rrs.each {|rr| priv_add_key(rr, sig.expiration)}
-            end
-          end
+          next unless DnssecTime.valid?(sig.inception, sig.expiration, now)
+          expiration = DnssecTime.expiration_time(sig.expiration, now)
+          # Store civil-time expirations, derived from the same serial-time view
+          # that validated the signature, so cache pruning cannot disagree with
+          # the RRSIG interval across the 32-bit wrap.
+          next unless expiration
+          k.rrs.each {|rr| priv_add_key(rr, expiration)}
         end
       }
     end
@@ -97,8 +100,12 @@ module Dnsruby
       @keys.values.map(&:dup)
     end
     def remove_expired_keys
+      # Entries hold absolute Unix expirations (serial RRSIG times are
+      # converted when the key is added). Prune against the active validation
+      # view so every decision in one validation agrees about "now".
+      now = DnssecTime.current
       @keys.delete_if {|k,v|
-        v[0] < Time.now.to_i
+        v[0] < now
       }
     end
     def find_key_for(name)
