@@ -162,7 +162,7 @@ class TestLDAPConnectionSocketReads < Test::Unit::TestCase
       error_message: "",
     }.merge(options)
     result = Net::BER::BerIdentifiedArray.new([options[:code], options[:matched_dn], options[:error_message]])
-    result.ber_identifier = options[:app_tag]
+    result.ber_identifier = APPLICATION_CONSTRUCTED_BASE + options[:app_tag]
     [message_id, result]
   end
 
@@ -387,7 +387,7 @@ class TestLDAPConnectionErrors < Test::Unit::TestCase
 
   def test_error_failed_operation
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeUnwillingToPerform, "", "The provided password value was rejected by a password validator:  The provided password did not contain enough characters from the character set 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.  The minimum number of characters from that set that must be present in user passwords is 1"])
-    ber.ber_identifier = Net::LDAP::PDU::ModifyResponse
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::ModifyResponse
     @tcp_socket.should_receive(:read_ber).and_return([1, ber])
 
     result = @connection.modify(:dn => "1", :operations => [[:replace, "mail", "something@sothsdkf.com"]])
@@ -397,7 +397,7 @@ class TestLDAPConnectionErrors < Test::Unit::TestCase
 
   def test_no_error_on_success
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::ModifyResponse
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::ModifyResponse
     @tcp_socket.should_receive(:read_ber).and_return([1, ber])
 
     result = @connection.modify(:dn => "1", :operations => [[:replace, "mail", "something@sothsdkf.com"]])
@@ -480,7 +480,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
 
   def test_write_net_ldap_connection_event
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::BindResult
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::BindResult
     read_result = [1, ber]
     @tcp_socket.should_receive(:read_ber).and_return(read_result)
 
@@ -497,7 +497,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
 
   def test_read_net_ldap_connection_event
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::BindResult
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::BindResult
     read_result = [1, ber]
     @tcp_socket.should_receive(:read_ber).and_return(read_result)
 
@@ -514,7 +514,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
 
   def test_parse_pdu_net_ldap_connection_event
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::BindResult
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::BindResult
     read_result = [1, ber]
     @tcp_socket.should_receive(:read_ber).and_return(read_result)
 
@@ -536,7 +536,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
 
   def test_bind_net_ldap_connection_event
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::BindResult
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::BindResult
     bind_result = [1, ber]
     @tcp_socket.should_receive(:read_ber).and_return(bind_result)
 
@@ -557,11 +557,11 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
       "uid=user1,ou=People,dc=rubyldap,dc=com",
       [["uid", ["user1"]]],
     ]])
-    search_data_ber.ber_identifier = Net::LDAP::PDU::SearchReturnedData
+    search_data_ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::SearchReturnedData
     search_data = [1, search_data_ber]
     # search result (end of results)
     search_result_ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    search_result_ber.ber_identifier = Net::LDAP::PDU::SearchResult
+    search_result_ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::SearchResult
     search_result = [1, search_result_ber]
     @tcp_socket.should_receive(:read_ber).and_return(search_data)
                .and_return(search_result)
@@ -592,7 +592,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
     controls << [ldap_server_sd_flags.to_ber, true.to_ber, control_values].to_ber_sequence
 
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::AddResponse
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::AddResponse
     @tcp_socket.should_receive(:read_ber).and_return([1, ber])
 
     result = @connection.add(:dn => "uid=added-user1,ou=People,dc=rubyldap,dc=com", :controls => controls)
@@ -609,7 +609,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
     controls << [ldap_server_sd_flags.to_ber, true.to_ber, control_values].to_ber_sequence
 
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    ber.ber_identifier = Net::LDAP::PDU::ModifyResponse
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::ModifyResponse
     @tcp_socket.should_receive(:read_ber).and_return([1, ber])
 
     result = @connection.modify(:dn => "1", :operations => [[:replace, "mail", "something@sothsdkf.com"]], :controls => controls)
@@ -623,11 +623,11 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
       "uid=user1,ou=People,dc=rubyldap,dc=com",
       [["uid", ["user1"]]],
     ]])
-    search_data_ber.ber_identifier = Net::LDAP::PDU::SearchReturnedData
+    search_data_ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::SearchReturnedData
     search_data = [1, search_data_ber]
     # search result (end of results)
     search_result_ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, "", ""])
-    search_result_ber.ber_identifier = Net::LDAP::PDU::SearchResult
+    search_result_ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::SearchResult
     search_result = [1, search_result_ber]
     @tcp_socket.should_receive(:read_ber).and_return(search_data)
                .and_return(search_result)
@@ -658,7 +658,7 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
 
   def test_ldapwhoami
     ber = Net::BER::BerIdentifiedArray.new([Net::LDAP::ResultCodeSuccess, '', '', 0, 'dn:uid=zerosteiner,ou=users,dc=example,dc=org'])
-    ber.ber_identifier = Net::LDAP::PDU::ExtendedResponse
+    ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::ExtendedResponse
     response = [1, ber]
 
     @tcp_socket.should_receive(:read_ber).and_return(response)

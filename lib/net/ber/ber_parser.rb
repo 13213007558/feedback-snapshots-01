@@ -25,6 +25,43 @@ module Net::BER::BERParser
   BuiltinSyntax = Net::BER.compile_syntax(:universal => universal,
                                           :context_specific => context)
 
+  # BER tag octet (X.690 8.1.2) for the two "integer-like" universal types.
+  # Both are decoded to a Ruby Integer, so without recording the originating
+  # tag an ENUMERATED and an INTEGER value are indistinguishable downstream.
+  INTEGER_TAG    = 0x02
+  ENUMERATED_TAG = 0x0A
+
+  class << self
+    # Ruby Integers cannot carry metadata (Integer is not subclassable and its
+    # instances are frozen), so the association between a decoded Integer and
+    # its BER identifier is kept in a Fiber-local registry instead of on the
+    # value. The registry is opened with .with_identifier_registry around the
+    # decode-plus-dispatch of a single wire message (see Net::LDAP::Connection#
+    # read) and shared by every nested parse (arrays spin up their own
+    # StringIO readers). It is torn down in an ensure, so integer tag
+    # provenance never leaks from one message into another or into Integers
+    # assembled purely in code (test doubles and client-built requests), which
+    # simply have no record and are treated as plain values. Fiber-local
+    # storage keeps concurrent connections on separate fibers isolated.
+    def with_identifier_registry
+      previous = Fiber[:"net_ber_identifier_registry"]
+      Fiber[:"net_ber_identifier_registry"] = {}
+      yield
+    ensure
+      Fiber[:"net_ber_identifier_registry"] = previous
+    end
+
+    def record_integer_identifier(value, identifier)
+      registry = Fiber[:"net_ber_identifier_registry"]
+      registry[value.object_id] = identifier if registry
+    end
+
+    def identifier_for_integer(value)
+      registry = Fiber[:"net_ber_identifier_registry"]
+      registry && registry[value.object_id]
+    end
+  end
+
   ##
   # This is an extract of our BER object parsing to simplify our
   # understanding of how we parse basic BER object types.
@@ -48,11 +85,17 @@ module Net::BER::BERParser
         int = (int << 8) + (neg ? 255 - b : b)
       end
 
-      if neg
-        (int + 1) * -1
-      else
-        int
-      end
+      int = if neg
+              (int + 1) * -1
+            else
+              int
+            end
+
+      # Remember whether this Integer came from an INTEGER or an ENUMERATED
+      # tag so callers such as the LDAP PDU dispatcher can enforce the
+      # expected ASN.1 type instead of trusting a numerically equal value.
+      Net::BER::BERParser.record_integer_identifier(int, id)
+      int
     elsif object_type == :oid
       # See X.690 pgh 8.19 for an explanation of this algorithm.
       # This is potentially not good enough. We may need a
@@ -166,6 +209,16 @@ module Net::BER::BERParser
     # from streams that don't block when we ask for more data (like
     # StringIOs). At it is, this can throw TypeErrors and other nasties.
 
+    # Integer tag provenance is recorded into the active Fiber-local registry
+    # when one has been opened by the caller (Net::LDAP::Connection#read does
+    # this around decode + PDU dispatch). Standalone reads simply leave the
+    # registry unset, in which case integer tag metadata is not retained.
+    read_ber_element(syntax)
+  end
+
+  private
+
+  def read_ber_element(syntax = nil)
     id = getbyte or return nil  # don't trash this value, we'll use it later
     content_length = read_ber_length
 

@@ -6,6 +6,14 @@ require 'flexmock/test_unit'
 # Whether integration tests should be run.
 INTEGRATION = ENV.fetch("INTEGRATION", "skip") != "skip"
 
+# BER identifier for an [APPLICATION n] constructed value: the APPLICATION
+# class bits (0x40) plus the constructed bit (0x20). A real read_ber stores
+# the full identifier octet (this base + the protocolOp tag number) in
+# BerIdentifiedArray#ber_identifier, so test doubles that stand in for parsed
+# PDUs must use the same full octet rather than the bare tag number.
+APPLICATION_CONSTRUCTED_BASE = Net::BER::TAG_CLASS[:application] |
+                               Net::BER::ENCODING_TYPE[:constructed]
+
 # The CA file to verify certs against for tests.
 # Override with CA_FILE env variable; otherwise checks for the VM-specific path
 # and falls back to the test/fixtures/cacert.pem for local testing.

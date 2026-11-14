@@ -24,6 +24,26 @@ require 'ostruct'
 class Net::LDAP::PDU
   class Error < RuntimeError; end
 
+  # Bit layout of a single-octet BER identifier (see X.690 8.1.2 and
+  # Net::BER::TAG_CLASS / Net::BER::ENCODING_TYPE).
+  TAG_CLASS_MASK       = 0xC0 # bits 8-7: universal/application/context/private
+  ENCODING_TYPE_MASK   = 0x20 # bit 6: primitive (0) or constructed (1)
+  TAG_NUMBER_MASK      = 0x1F # bits 5-1: tag number
+  APPLICATION_TAG_CLASS = Net::BER::TAG_CLASS[:application]
+  CONSTRUCTED_ENCODING  = Net::BER::ENCODING_TYPE[:constructed]
+
+  # Every LDAP protocolOp is an [APPLICATION n] constructed value
+  # (RFC 4511 section 4.1.1). Its identifier therefore has the application
+  # class bits and the constructed bit set, leaving only the tag number
+  # variable.
+  PROTOCOL_OP_CLASS_AND_ENCODING = APPLICATION_TAG_CLASS | CONSTRUCTED_ENCODING
+
+  # LDAPResult.resultCode is an ENUMERATED (RFC 4511 section 4.1.9), whose
+  # universal tag is 0x0A. An INTEGER (0x02) with the same numeric value is a
+  # different ASN.1 type and must not be interpreted as a result code.
+  ENUMERATED_TAG = Net::BER::BERParser::ENUMERATED_TAG
+  INTEGER_TAG = Net::BER::BERParser::INTEGER_TAG
+
   # http://tools.ietf.org/html/rfc4511#section-4.2
   BindRequest = 0
   # http://tools.ietf.org/html/rfc4511#section-4.2.2
@@ -84,15 +104,51 @@ class Net::LDAP::PDU
 
   def initialize(ber_object)
     begin
-      @message_id = ber_object[0].to_i
+      # MessageID is an INTEGER (RFC 4511 section 4.1.1). Do not coerce other
+      # ASN.1 types (OCTET STRING, context values, ...) with #to_i, because
+      # that would let a non-INTEGER element stand in for a messageID and line
+      # a spoofed answer up with an outstanding request.
+      message_id_element = ber_object[0]
+      unless message_id_element.is_a?(Integer)
+        raise Net::LDAP::PDU::Error,
+              "Invalid LDAP messageID: expected INTEGER, got #{message_id_element.class}"
+      end
+
+      # INTEGER and ENUMERATED both decode to a Ruby Integer, so use the
+      # recorded BER tag to reject an ENUMERATED (or any other integer-like
+      # tag) used in place of the required INTEGER messageID. Values assembled
+      # in code (no recorded tag) are treated as plain Integers.
+      message_id_tag = Net::BER::BERParser.identifier_for_integer(message_id_element)
+      if message_id_tag && (message_id_tag & TAG_NUMBER_MASK) != INTEGER_TAG
+        raise Net::LDAP::PDU::Error,
+              "Invalid LDAP messageID tag 0x#{message_id_tag.to_s(16).upcase}: expected INTEGER"
+      end
+      @message_id = message_id_element
+
+      protocol_op = ber_object[1]
+      identifier = protocol_op.ber_identifier
+
+      # The protocolOp of an LDAPMessage is always [APPLICATION n] constructed.
+      # Masking off only the low five bits (the tag number) is not sufficient:
+      # a context-specific or primitive value that happens to share the tag
+      # number is a different ASN.1 type and must never be dispatched as that
+      # operation. Reject anything that does not carry the application class
+      # and the constructed bit. See RFC 4511 section 4.1.1.
+      unless (identifier & (TAG_CLASS_MASK | ENCODING_TYPE_MASK)) ==
+             PROTOCOL_OP_CLASS_AND_ENCODING
+        raise Net::LDAP::PDU::Error,
+              "Invalid LDAP protocolOp tag 0x#{identifier.to_s(16).upcase}: " \
+              "expected APPLICATION constructed"
+      end
+
       # Grab the bottom five bits of the identifier so we know which type of
-      # PDU this is.
-      #
-      # This is safe enough in LDAP-land, but it is recommended that other
-      # approaches be taken for other protocols in the case that there's an
-      # app-specific tag that has both primitive and constructed forms.
-      @app_tag = ber_object[1].ber_identifier & 0x1f
+      # PDU this is. The class and constructed bit have already been verified
+      # above, so this number unambiguously names an LDAP application
+      # protocolOp.
+      @app_tag = identifier & TAG_NUMBER_MASK
       @ldap_controls = []
+    rescue Net::LDAP::PDU::Error
+      raise
     rescue Exception => ex
       raise Net::LDAP::PDU::Error, "LDAP PDU Format Error: #{ex.message}"
     end
@@ -172,8 +228,22 @@ class Net::LDAP::PDU
 
   def parse_ldap_result(sequence)
     sequence.length >= 3 or raise Net::LDAP::PDU::Error, "Invalid LDAP result length."
+
+    result_code = sequence[0]
+    # resultCode is ENUMERATED (RFC 4511 section 4.1.9). When the value was
+    # decoded from the wire its originating BER tag is recorded; reject any
+    # non-ENUMERATED encoding (e.g. an INTEGER that happens to hold the same
+    # numeric value) so it cannot be read as success. A missing record means
+    # the value was assembled in code rather than read from the wire (the
+    # common test/mock path), which is left untouched.
+    identifier = Net::BER::BERParser.identifier_for_integer(result_code)
+    if identifier && (identifier & TAG_NUMBER_MASK) != ENUMERATED_TAG
+      raise Net::LDAP::PDU::Error,
+            "Invalid LDAP resultCode: expected ENUMERATED, got tag 0x#{identifier.to_s(16).upcase}"
+    end
+
     @ldap_result = {
-      :resultCode => sequence[0],
+      :resultCode => result_code,
       :matchedDN => sequence[1],
       :errorMessage => sequence[2],
     }

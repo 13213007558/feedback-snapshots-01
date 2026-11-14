@@ -56,7 +56,7 @@ class TestLDAPInstrumentation < Test::Unit::TestCase
      Net::LDAP::ResultCodeSaslBindInProgress,
      Net::LDAP::ResultCodeInvalidCredentials].each do |code|
       ber = Net::BER::BerIdentifiedArray.new([code, "", ""])
-      ber.ber_identifier = Net::LDAP::PDU::BindResult
+      ber.ber_identifier = APPLICATION_CONSTRUCTED_BASE + Net::LDAP::PDU::BindResult
       result = Net::LDAP::PDU.new([1, ber])
       @subject.connection = flexmock(:bind => result)
 

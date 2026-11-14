@@ -234,23 +234,29 @@ class Net::LDAP::Connection #:nodoc:
   #
   # Returns parsed Net::LDAP::PDU object.
   def read(syntax = Net::LDAP::AsnSyntax)
-    ber_object =
-      instrument "read.net_ldap_connection", :syntax => syntax do |payload|
-        socket.read_ber(syntax) do |id, content_length|
-          payload[:object_type_id] = id
-          payload[:content_length] = content_length
+    # Scope integer tag provenance to the decode and PDU dispatch of this one
+    # wire message so the PDU can distinguish ENUMERATED result codes from
+    # numerically equal INTEGERs without leaking tag metadata beyond this
+    # read.
+    Net::BER::BERParser.with_identifier_registry do
+      ber_object =
+        instrument "read.net_ldap_connection", :syntax => syntax do |payload|
+          socket.read_ber(syntax) do |id, content_length|
+            payload[:object_type_id] = id
+            payload[:content_length] = content_length
+          end
         end
+
+      return unless ber_object
+
+      instrument "parse_pdu.net_ldap_connection" do |payload|
+        pdu = payload[:pdu]  = Net::LDAP::PDU.new(ber_object)
+
+        payload[:message_id] = pdu.message_id
+        payload[:app_tag]    = pdu.app_tag
+
+        pdu
       end
-
-    return unless ber_object
-
-    instrument "parse_pdu.net_ldap_connection" do |payload|
-      pdu = payload[:pdu]  = Net::LDAP::PDU.new(ber_object)
-
-      payload[:message_id] = pdu.message_id
-      payload[:app_tag]    = pdu.app_tag
-
-      pdu
     end
   end
   private :read
