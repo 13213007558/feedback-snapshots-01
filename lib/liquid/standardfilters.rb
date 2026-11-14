@@ -1113,6 +1113,7 @@ module Liquid
       def each
         @input.each do |e|
           e = e.respond_to?(:to_liquid) ? e.to_liquid : e
+          e = e.for_context(@context) if e.is_a?(SelfDrop)
           e.context = @context if e.respond_to?(:context=)
           yield(e)
         end

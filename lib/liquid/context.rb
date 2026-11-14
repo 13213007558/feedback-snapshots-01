@@ -226,6 +226,10 @@ module Liquid
 
       liquid_variable = variable.to_liquid
 
+      if liquid_variable.is_a?(SelfDrop)
+        liquid_variable = liquid_variable.for_context(self)
+      end
+
       liquid_variable.context = self if variable != liquid_variable && liquid_variable.respond_to?(:context=)
 
       liquid_variable

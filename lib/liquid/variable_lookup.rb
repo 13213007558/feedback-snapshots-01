@@ -85,6 +85,7 @@ module Liquid
 
         # If we are dealing with a drop here we have to
         object.context = context if object.respond_to?(:context=)
+        object = object.for_context(context) if object.is_a?(SelfDrop)
       end
 
       object
