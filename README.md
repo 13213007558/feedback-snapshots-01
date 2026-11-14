@@ -271,6 +271,24 @@ end # The `InputStream` is closed at the end of the block.
 
 Any attempt to move about in a zip file opened with `Zip::InputStream` could result in the incorrect entry being accessed and/or Zlib buffer errors. If you need random access in a zip file, use `Zip::File`.
 
+### Read-only forensic structure inspection
+
+For archives that may contain hidden or malformed records, require `zip/forensic` and use `Zip::Forensic.inspect`. Unlike `Zip::File`, this never builds an `EntrySet`, never treats an entry name as a unique key, and offers no extraction or repair. It preserves the on-disk order of central directory records, the original bytes of every name, every declared offset and the correspondence between central records and local file headers.
+
+Every reported value is a `Zip::Forensic::Field` carrying its parsed value together with the raw bytes, the source structure and the absolute byte offset, so findings can be independently verified. Duplicate names, dangling or misaligned local-header offsets, orphan local headers, overlapping data ranges and unparsed preamble/gap/trailing byte regions are reported separately; nothing is guessed and then treated as a confirmed entry. The source is only ever read (its SHA256 is included in the report), and the ordinary `Zip::File`/`Zip::InputStream` behaviour is unchanged.
+
+```ruby
+require 'zip/forensic'
+
+report = Zip::Forensic.inspect('suspicious.zip') # a path, IO or raw bytes
+puts report.to_text                              # offset-oriented walk-through
+report.anomalies.map(&:type)                     # e.g. [:duplicate_entry_name, ...]
+report.central_records.size                      # duplicates are all retained
+report.regions                                   # bytes not interpreted as entries
+```
+
+Hand-crafted samples and an annotated, offset-by-offset walkthrough live under `samples/forensic/` (see `samples/forensic/EVIDENCE.md`).
+
 ### Encryption and Password Protection (experimental)
 
 Rubyzip supports reading and writing zip files with AES encryption (reading: version 3.1 and later; writing: version 3.7 and later), and reading and writing zip files with traditional zip encryption (a.k.a. "ZipCrypto"). Encryption is currently only available with the stream API, with either files or buffers, e.g.:
