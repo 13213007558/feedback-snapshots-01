@@ -13,6 +13,9 @@ versioned together, so those entries cover all of them.
 
 ## [Unreleased]
 
+### Added
+- Regression specs and `script/verify_passthrough_security.rb` pin the security boundary of `Strategy#call`'s fast passthrough: a path-lambda option, an `other_phase`, test mode, or an overridden dispatch method force the full `dup.call!` path, so the path probe never runs a side-effecting path lambda; a reused strategy instance keeps no route cache across requests, mount points, or option changes; callback variants (format suffix, mixed case, collapsed slashes) still enter the callback phase; and no phase hook or `omniauth.*` env key reaches a request that passes through to the app.
+
 ### Fixed
 - `Strategy#redirect` no longer raises `Encoding::CompatibilityError` for a URI in an encoding that isn't ASCII-compatible, such as UTF-16 or UTF-32. The URI is transcoded to UTF-8 first, with invalid or unmappable characters replaced, so both the `:iframe` script and the 302 work.
 

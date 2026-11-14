@@ -456,6 +456,77 @@ describe OmniAuth::Strategy do
         expect(instance.instance_variable_get(:@env)).to be_nil
       end
 
+      it 'never builds a path probe while a path option is a lambda, so the lambda runs no extra time' do
+        %i[request_path callback_path].each do |option|
+          calls = 0
+          path_lambda = ->(env) { calls += 1; env['PATH_INFO'] == '/x' }
+          instance = klass.new(inner, option => path_lambda)
+          allow(instance).to receive(:path_probe).and_call_original
+
+          instance.call(make_env('/trips/1', 'REQUEST_METHOD' => 'GET'))
+          expect(instance).not_to have_received(:path_probe)
+          calls_without_probe = calls
+
+          instance.call(make_env('/x', 'REQUEST_METHOD' => 'GET'))
+          expect(instance).not_to have_received(:path_probe)
+          expect(calls).to be > calls_without_probe
+        end
+      end
+
+      it 'keeps routing requests apart when one strategy instance serves several mounts' do
+        instance = klass.new(inner)
+
+        expect(instance.call(make_env('/trips/1', 'SCRIPT_NAME' => '/mount-a', 'REQUEST_METHOD' => 'GET')))
+          .to eq([200, {}, ['app']])
+        expect(instance.call(make_env('/auth/pass', 'SCRIPT_NAME' => '/mount-b', 'REQUEST_METHOD' => 'POST')))
+          .to eq([200, {}, ['request phase']])
+        expect(instance.call(make_env('/auth/pass/callback', 'SCRIPT_NAME' => '/mount-b')))
+          .to eq([200, {}, ['callback phase']])
+        expect(instance.call(make_env('/trips/2', 'SCRIPT_NAME' => '/mount-a', 'REQUEST_METHOD' => 'GET')))
+          .to eq([200, {}, ['app']])
+        expect(instance.instance_variables).to match_array(%i[@app @env @options])
+      end
+
+      it 're-reads a changed path option on the next request instead of keeping the old route' do
+        instance = klass.new(inner, :request_path => '/login')
+        expect(instance.call(make_env('/login'))).to eq([200, {}, ['request phase']])
+
+        instance.options[:request_path] = '/signin'
+        expect(instance.call(make_env('/login', 'REQUEST_METHOD' => 'GET'))).to eq([200, {}, ['app']])
+        expect(instance.call(make_env('/signin'))).to eq([200, {}, ['request phase']])
+      end
+
+      it 'runs no phase hook on a request that passes through, and every hook on its own paths' do
+        hooks = []
+        OmniAuth.config.request_validation_phase = ->(env) { hooks << [:validation, env['PATH_INFO']] }
+        OmniAuth.config.before_request_phase = ->(env) { hooks << [:before_request, env['PATH_INFO']] }
+        OmniAuth.config.after_request_phase = ->(env) { hooks << [:after_request, env['PATH_INFO']] }
+        OmniAuth.config.before_callback_phase = ->(env) { hooks << [:before_callback, env['PATH_INFO']] }
+        OmniAuth.config.before_options_phase = ->(env) { hooks << [:before_options, env['PATH_INFO']] }
+        instance = klass.new(inner)
+
+        expect(instance.call(make_env('/trips/1', 'REQUEST_METHOD' => 'GET'))).to eq([200, {}, ['app']])
+        expect(hooks).to eq([])
+
+        instance.call(make_env('/auth/pass', 'REQUEST_METHOD' => 'POST'))
+        expect(hooks).to eq([[:validation, '/auth/pass'], [:before_request, '/auth/pass'],
+                             [:after_request, '/auth/pass']])
+
+        hooks.clear
+        instance.call(make_env('/auth/pass/callback'))
+        expect(hooks).to eq([[:before_callback, '/auth/pass/callback']])
+
+        hooks.clear
+        instance.call(make_env('/auth/pass', 'REQUEST_METHOD' => 'OPTIONS'))
+        expect(hooks).to eq([[:before_options, '/auth/pass']])
+      ensure
+        OmniAuth.config.request_validation_phase = nil
+        OmniAuth.config.before_request_phase = nil
+        OmniAuth.config.after_request_phase = nil
+        OmniAuth.config.before_callback_phase = nil
+        OmniAuth.config.before_options_phase = nil
+      end
+
       it 'answers every request the way dup.call! does' do
         configs = [
           {},
