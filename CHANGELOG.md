@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* Server-side verification supports rotating, versioned consumer secrets without
+  disconnecting clients still using an overlapping old version.
+  * A resolver block may return `OAuth::Signature::Credentials` holding a finite
+    list of `OAuth::Signature::SecretCandidate` versions (with `valid_from`,
+    `expires_at` and `revoked_at`) plus the single token secret.
+  * An injectable `OAuth::Signature::Clock` controls validity and revocation
+    evaluation; it defaults to the real system clock.
+  * `OAuth::Signature::Base#verify!` raises structured errors
+    (`SignatureMethodRejected`, `AmbiguousSignatureError`, `VerificationError`);
+    the boolean `#verify` remains backwards compatible and never reveals which
+    part of the signing key was wrong.
+  * An optional `:audit` callback receives an `OAuth::Signature::AuditEvent`,
+    including the consumer secret version that verified the request.
+  * `:allowed_signature_methods` restricts which signature algorithms a message
+    may select; the server-side resolver decides the admissible versions.
 
 ### Changed
 

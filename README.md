@@ -302,6 +302,69 @@ hydra.run
 @response = req.response
 ```
 
+## Verifying requests with rotating consumer secrets
+
+A server can rotate an OAuth consumer secret without disconnecting clients that
+still hold the old value. Instead of returning a single secret, a credentials
+resolver returns the finite set of currently admissible, versioned consumer
+secret candidates together with the single token secret for the request's
+token. Each candidate carries a validity window and optional revocation time.
+
+```ruby
+require "oauth/signature"
+
+clock = OAuth::Signature::Clock.new # inject a fixed clock in tests; defaults to Time.now
+
+def credentials_for(token, consumer_key, _nonce, _timestamp)
+  versions = secret_store.versions_for(consumer_key) # application-provided lookup
+  candidates = versions.map do |version|
+    OAuth::Signature::SecretCandidate.new(
+      version:    version.id,          # handed to audit on a match
+      secret:     version.secret,
+      valid_from: version.valid_from,  # nil means always valid in the past
+      expires_at: version.expires_at,  # nil means never expires
+      revoked_at: version.revoked_at   # nil means active
+    )
+  end
+  OAuth::Signature::Credentials.new(candidates, token_store.secret_for(token))
+end
+
+audit = ->(event) { AuditLog.record(event.to_h) }
+
+verifier = OAuth::Signature.build(request,
+                                 clock: clock,
+                                 audit: audit,
+                                 allowed_signature_methods: %w[HMAC-SHA256]) do |token, consumer_key, nonce, timestamp|
+  credentials_for(token, consumer_key, nonce, timestamp)
+end
+
+verifier.verify                       # true/false; never reveals which secret was wrong
+verifier.matched_consumer_version     # the exact version that verified the request
+```
+
+Security properties:
+
+* The token secret is resolved once and held fixed while each consumer secret
+  version is tried. Consumer and token secrets are different identity layers
+  and are never combined as a cartesian product.
+* Revoked and out-of-window versions are excluded before any signature
+  comparison, against the injected clock.
+* When several valid versions match at once, verification fails with
+  `OAuth::Signature::AmbiguousSignatureError` rather than guessing a version.
+* Every other failure raises the generic
+  `OAuth::Signature::VerificationError`, whose message never discloses which
+  part of the signing key was correct.
+* `allowed_signature_methods` (and the server-side resolver) decide the
+  algorithm and versions; parameters in the message cannot opt into anything
+  the server has not allowed.
+* The audit callback receives an `OAuth::Signature::AuditEvent` containing the
+  winning version on success and only a machine-readable failure category on
+  failure.
+
+The original resolver contract remains supported. A block returning the
+two-element array `[token_secret, consumer_secret]` keeps working unchanged, as
+do the `:consumer_secret` / `:token_secret` options.
+
 ## More Information
 
 * RubyDoc Documentation: [![RubyDoc.info](https://img.shields.io/badge/documentation-rubydoc-brightgreen.svg?style=flat)][documentation]
