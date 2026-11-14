@@ -385,6 +385,83 @@ own. It still sets `omniauth.origin` and `omniauth.params` in the session
 for the latest sign-in, and falls back to them when a callback's key isn't
 remembered.
 
+## Per-Request (Multi-Tenant) Configuration
+Multi-tenant applications often pick a provider's client credentials per
+request. The traditional way — mutating `env['omniauth.strategy'].options`
+in the setup phase — shares nested option hashes between concurrent
+requests and can even write back into the strategy's class-level defaults,
+so one tenant's credentials can leak into another tenant's login.
+
+`OmniAuth::RequestConfig` is a bounded alternative. The application
+assigns an immutable config during the setup phase, taking the tenant from
+its own **verified** context (an authorized subdomain, a record loaded for
+the signed-in user) — never from an unchecked query parameter:
+
+```ruby
+use OmniAuth::Builder do
+  provider :oauth2, :setup => lambda { |env|
+    tenant = env['myapp.current_tenant'] # resolved and verified by the app
+    OmniAuth::RequestConfig.assign(env,
+      :tenant => tenant.id,
+      :version => tenant.config_version, # optional, see below
+      :overrides => {
+        :client_id => tenant.client_id,
+        :client_secret => tenant.client_secret
+      }
+    )
+  }
+end
+```
+
+Strategies read the merged result through `effective_options`, a fresh
+deep-copied view per request: the strategy's `options`, its class's
+`default_options`, and `OmniAuth.config` are never modified, and two
+requests paused anywhere in the flow can't see each other's values.
+
+### Which options can be overridden, and why
+`ALLOWED_OVERRIDES` is deliberately short:
+
+* `client_id`, `client_secret` — the per-tenant application credentials.
+* `scope`, `authorize_params`, `token_params` — per-tenant protocol
+  parameters sent to the provider.
+* `redirect_uri`, `client_options` — per-tenant endpoints and connection
+  settings.
+
+Everything that decides routing or dispatch — `name`, `path_prefix`,
+`request_path`, `callback_path`, `setup`, `origin_param`, and friends —
+is rejected (`:unallowed_override`). Those are evaluated before the setup
+phase runs and must stay identical between the request and callback
+phases; letting a request change them would let one tenant reroute
+another's callback.
+
+### How the callback stays on the same tenant
+The request phase binds the tenant and version into the session (the
+overrides themselves, including secrets, are never stored). At the
+callback phase the application assigns a fresh config — reloading the
+tenant named by `OmniAuth::RequestConfig.pending(session)` from its own
+storage rather than trusting a query parameter — and OmniAuth verifies it
+against the binding before the callback phase runs:
+
+* tenant differs → fails with `:request_config_tenant_mismatch`
+* version differs (the tenant's configuration changed while the user was
+  at the provider, e.g. a credential rotation) → fails with
+  `:stale_request_config`, instead of mixing old and new credentials
+* a config assigned without a request-phase binding → `:unbound_request_config`
+* a binding left but no config assigned → `:missing_request_config`
+
+The binding is consumed when the callback phase ends, however it ends, so
+a half-finished flow can't be replayed. One session holds one binding per
+provider flow: starting a sign-in for a second tenant replaces the first
+one's binding, and the first one's callback then fails closed with
+`:request_config_tenant_mismatch` rather than completing with the wrong
+tenant's credentials.
+
+### Secrets and logs
+`RequestConfig#inspect` redacts values under sensitive-looking keys
+(`secret`, `token`, `password`, `credential`, `private_key`), recursively,
+and OmniAuth's own log lines name the tenant and the overridden keys but
+never their values, so client secrets don't reach the logs.
+
 ## Resources
 The [OmniAuth Wiki](https://github.com/omniauth/omniauth/wiki) has
 actively maintained in-depth documentation for OmniAuth. It should be

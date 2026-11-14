@@ -13,6 +13,7 @@ requires:
   - omniauth/builder
   - omniauth/failure_endpoint
   - omniauth/form
+  - omniauth/request_config
   - omniauth/strategies/developer
   - omniauth/strategy
   - omniauth/test

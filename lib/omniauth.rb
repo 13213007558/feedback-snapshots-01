@@ -11,6 +11,7 @@ module OmniAuth
 
   autoload :Builder,  'omniauth/builder'
   autoload :Strategy, 'omniauth/strategy'
+  autoload :RequestConfig, 'omniauth/request_config'
   autoload :Test,     'omniauth/test'
   autoload :Form,     'omniauth/form'
   autoload :AuthHash, 'omniauth/auth_hash'
@@ -171,6 +172,22 @@ module OmniAuth
       end
 
       target
+    end
+
+    # A deep copy of a nested hash/array structure: every hash and array
+    # is duplicated, and strings are duplicated so the copy can't be
+    # changed through the original. Other values are returned as-is.
+    def deep_dup(value)
+      case value
+      when Hash
+        value.each_pair.with_object({}) { |(key, element), copy| copy[key] = deep_dup(element) }
+      when Array
+        value.collect { |element| deep_dup(element) }
+      when String
+        value.dup
+      else
+        value
+      end
     end
 
     def camelize(word, first_letter_in_uppercase = true)

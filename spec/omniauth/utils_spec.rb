@@ -38,6 +38,25 @@ describe OmniAuth::Utils do
     end
   end
 
+  describe '.deep_dup' do
+    it 'copies nested hashes, arrays, and strings' do
+      original = {'a' => {'b' => ['c', {'d' => 'e'}]}, 'f' => 'g'}
+      copy = OmniAuth::Utils.deep_dup(original)
+
+      expect(copy).to eq(original)
+      copy['a']['b'][0] << 'anged'
+      copy['a']['b'][1]['d'] << 'vil'
+      copy['f'] << 'ood'
+      expect(original).to eq('a' => {'b' => ['c', {'d' => 'e'}]}, 'f' => 'g')
+    end
+
+    it 'returns other values as-is' do
+      expect(OmniAuth::Utils.deep_dup(1)).to eq(1)
+      expect(OmniAuth::Utils.deep_dup(:sym)).to eq(:sym)
+      expect(OmniAuth::Utils.deep_dup(nil)).to be_nil
+    end
+  end
+
   describe '.camelize' do
     before do
       @old_camelizations = OmniAuth.config.camelizations

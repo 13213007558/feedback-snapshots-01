@@ -99,7 +99,53 @@ module OmniAuth
 
     def self?.deep_merge: (Hash[untyped, untyped] hash, Hash[untyped, untyped] other_hash) -> Hash[untyped, untyped]
 
+    def self?.deep_dup: (untyped value) -> untyped
+
     def self?.camelize: (String | Symbol word, ?bool first_letter_in_uppercase) -> String
+  end
+
+  # A bounded, request-scoped set of strategy option overrides, for
+  # multi-tenant applications that pick client credentials per request.
+  class RequestConfig
+    ENV_KEY: String
+    SESSION_KEY: String
+    ALLOWED_OVERRIDES: Array[String]
+    SENSITIVE_KEY: Regexp
+    REDACTED: String
+
+    # Raised when a request config can't be assigned or verified.
+    class Error < OmniAuth::Error
+      attr_reader message_key: Symbol
+
+      def initialize: (Symbol message_key, ?String detail) -> void
+    end
+
+    attr_reader tenant: untyped
+    attr_reader version: untyped
+
+    def initialize: (?Hash[untyped, untyped]? attributes) -> void
+
+    def self.assign: (env, Hash[untyped, untyped] attributes) -> RequestConfig
+
+    def self.fetch: (env) -> RequestConfig?
+
+    def self.pending: (Hash[String, untyped] session) -> Hash[String, String?]?
+
+    def self.verify!: (Hash[String, untyped] session, RequestConfig? config) -> void
+
+    def self.conclude: (Hash[String, untyped] session) -> void
+
+    def self.redact: (Hash[untyped, untyped] hash) -> Hash[untyped, untyped]
+
+    def []: (String | Symbol key) -> untyped
+
+    def keys: () -> Array[String]
+
+    def to_h: () -> Hash[String, untyped]
+
+    def bind: (Hash[String, untyped] session) -> Hash[String, String?]
+
+    def inspect: () -> String
   end
 
   # Generic helper hash that allows method access on deeply nested keys.
@@ -556,6 +602,14 @@ module OmniAuth
 
     def name: () -> String
 
+    # The request-scoped configuration assigned during the setup phase,
+    # if any.
+    def request_config: () -> RequestConfig?
+
+    # The strategy's options deep-merged with the request config's
+    # overrides, as a fresh copy.
+    def effective_options: () -> Options
+
     def redirect: (String uri) -> rack_response
 
     def user_info: () -> Hash[untyped, untyped]
@@ -591,6 +645,10 @@ module OmniAuth
     def ascii_compatible_uri: [T < Object] (T uri) -> (T | String)
 
     def handle_phase_error: (StandardError error) -> rack_response
+
+    def bind_request_config: () -> void
+
+    def verify_request_config: () -> void
 
     def run_hook: (Symbol name) -> void
 

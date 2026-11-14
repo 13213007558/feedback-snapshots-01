@@ -13,6 +13,9 @@ versioned together, so those entries cover all of them.
 
 ## [Unreleased]
 
+### Added
+- `OmniAuth::RequestConfig`: a bounded, request-scoped way to override strategy options per request, for multi-tenant applications that pick client credentials in the setup phase. The application assigns an immutable config (tenant, optional version, and overrides limited to `client_id`, `client_secret`, `scope`, `redirect_uri`, `authorize_params`, `token_params`, and `client_options`) from its own verified context; strategies read the merged result through `Strategy#effective_options`, a fresh deep copy per request that leaves the strategy's options, class defaults, and `OmniAuth.config` untouched. The request phase binds the tenant and version into the session and the callback phase verifies a freshly assigned config against that binding, failing with `:request_config_tenant_mismatch`, `:stale_request_config`, `:unbound_request_config`, or `:missing_request_config` instead of mixing tenants or credential versions. Sensitive values are redacted from `RequestConfig#inspect` so client secrets don't reach the logs.
+
 ### Fixed
 - `Strategy#redirect` no longer raises `Encoding::CompatibilityError` for a URI in an encoding that isn't ASCII-compatible, such as UTF-16 or UTF-32. The URI is transcoded to UTF-8 first, with invalid or unmappable characters replaced, so both the `:iframe` script and the 302 work.
 

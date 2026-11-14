@@ -173,10 +173,13 @@ module OmniAuth
 
       run_hook(:request_validation_phase)
       session['omniauth.params'] = omniauth_params
+      bind_request_config
       run_hook(:before_request_phase)
       request_response.tap { run_hook(:after_request_phase) }
     rescue OmniAuth::AuthenticityError => e
       fail!(:authenticity_error, e)
+    rescue OmniAuth::RequestConfig::Error => e
+      fail!(e.message_key, e)
     end
 
     # Renders the login form (from a Rack endpoint or the app itself) if
@@ -223,6 +226,7 @@ module OmniAuth
     # Performs the steps necessary to run the callback phase of a strategy.
     def callback_call
       setup_phase
+      verify_request_config
       log :debug, 'Callback phase initiated.'
       return invalid_host! unless allowed_host?
 
@@ -232,6 +236,10 @@ module OmniAuth
       env['omniauth.params'] = sign_in.fetch('params') || {}
       run_hook(:before_callback_phase)
       callback_phase
+    rescue OmniAuth::RequestConfig::Error => e
+      fail!(e.message_key, e)
+    ensure
+      OmniAuth::RequestConfig.conclude(session)
     end
 
     def options_request?
@@ -283,6 +291,25 @@ module OmniAuth
 
     def name
       options.fetch(:name)
+    end
+
+    # The request-scoped configuration assigned during the setup phase,
+    # if any. See OmniAuth::RequestConfig.
+    def request_config
+      env[OmniAuth::RequestConfig::ENV_KEY]
+    end
+
+    # The options in effect for this request: the strategy's options
+    # deep-merged with the assigned request config's overrides, as a
+    # fresh copy. Nested hashes are duplicated, so concurrent requests
+    # never share them and neither the strategy's options nor its
+    # class's default options can be changed through the returned hash.
+    # Strategies that take per-tenant credentials should read them here.
+    def effective_options
+      config = request_config
+      return options unless config
+
+      Options.new(OmniAuth::Utils.deep_merge(OmniAuth::Utils.deep_dup(options.to_hash), config.to_h))
     end
 
     def redirect(uri)
@@ -415,6 +442,25 @@ module OmniAuth
       raise error if env.delete('omniauth.error.app')
 
       fail!(error.message, error)
+    end
+
+    # Binds the assigned request config's tenant and version into the
+    # session, so the callback phase can verify a freshly assigned
+    # config against them. The overrides themselves never enter the
+    # session, and the log line names the overridden keys but never
+    # their values.
+    def bind_request_config
+      config = request_config
+      return unless config
+
+      config.bind(session)
+      log :debug, "Request config bound for tenant #{config.tenant} with overrides: #{config.keys.sort.join(', ')}"
+    end
+
+    # Checks the callback phase's freshly assigned request config
+    # against the request-phase binding.
+    def verify_request_config
+      OmniAuth::RequestConfig.verify!(session, request_config)
     end
 
     # Calls the named OmniAuth.config hook (such as :before_request_phase)
