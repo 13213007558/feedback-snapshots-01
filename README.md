@@ -562,6 +562,61 @@ Results in the same email as done using the block form
 @mail.retryable?       #=> false
 ```
 
+### Verifying Detached S/MIME Signatures
+
+For a `multipart/signed` message, `#verify_smime` verifies the detached CMS
+signature against the exact MIME entity bytes that were received. It does not
+use `Mail::Message#encoded`, so folded headers, boundary framing and transfer
+encodings are never normalised into a different byte string.
+
+```ruby
+raw = Mail.read('/path/to/signed_message.eml').raw_source
+
+result = Mail::SMIME.verify(
+  raw,
+  trust: {
+    certificates: [ca_certificate],        # OpenSSL::X509::Certificate
+    certificate_files: ['/path/to/ca.pem'],
+    certificate_directories: ['/etc/ssl/certs'],
+    default_paths: false,                  # load OpenSSL's default trust store
+    crls: [crl],                           # OpenSSL::X509::CRL
+    flags: 0                               # OpenSSL::X509::Store flags
+  }
+)
+
+result.valid?             #=> true only if every signer verified against the trust store
+result.signed_content     #=> the exact MIME entity bytes covered by the signature
+result.signers.each do |signer|
+  signer.status           #=> :valid, :untrusted, :digest_mismatch,
+                          #   :invalid, :unsupported or :signer_not_found
+  signer.reason           #=> human-readable detail
+  signer.certificate      #=> OpenSSL::X509::Certificate (when present in the CMS)
+  signer.email_addresses  #=> addresses from the signing certificate only
+end
+
+# Reasons for an invalid result include:
+#   :not_multipart_signed, :missing_boundary, :missing_signature,
+#   :unexpected_part_count, :unsupported_protocol, :invalid_signature_part,
+#   :invalid_cms, :no_signers, :no_trusted_signer
+```
+
+`trust:` also accepts a plain array of certificates or a pre-configured
+`OpenSSL::X509::Store`. If omitted, no trust anchors and no network lookups
+are used, so signatures verify but signers report `:untrusted`.
+
+A `Mail::Message` or `Mail::Part` that is itself `multipart/signed` also
+responds to `#verify_smime(trust: ...)`; the part's raw source is used, and
+`#smime_signed?` identifies such an entity.
+
+Outer headers such as `From`, `To` and `Subject` are **not** covered by a
+detached S/MIME signature. A valid signature therefore says nothing about
+those headers. Use `result.signer_email_addresses` (which comes from the
+trusted signer certificate) for identity decisions, never the outer `From`.
+
+`result.valid?` requires every signer to be valid. When a message may carry
+several signers and only one needs to be trusted, use
+`result.any_trusted_signer?` or check `result.signers` explicitly.
+
 ### Attaching and Detaching Files
 
 You can just read the file off an absolute path, Mail will try
