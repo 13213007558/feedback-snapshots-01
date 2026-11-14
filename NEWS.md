@@ -1,5 +1,19 @@
 # NEWS
 
+## Unreleased
+
+### Improvements
+
+* Add MTA-STS policy enforcement. Pass a structured
+  `Net::SMTP::MTASTSPolicy` (or a Hash) via `mta_sts_policy:` to
+  `Net::SMTP.start`/`Net::SMTP.new`; the library validates the recipient
+  domain, selected MX, policy lifetime, and TLS certificate identity during
+  connection. Policies are supplied by the application; Net::SMTP does not
+  download them. `enforce` fails closed before AUTH or the mail envelope,
+  `testing` reports violations and permits delivery, and expired/`none`/
+  absent policies are treated as no active policy.
+  (`Net::SMTP::MTASTSPolicy`, `Net::SMTPMTASTSPolicyError`)
+
 ## Version 0.5.0 (2024-03-27)
 
 ### Improvements

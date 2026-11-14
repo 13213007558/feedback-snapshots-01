@@ -86,6 +86,40 @@ end
 
 I strongly recommend this scheme.  This form is simpler and more robust.
 
+### MTA-STS policies
+
+Net::SMTP does not fetch MTA-STS policies. Fetch the policy elsewhere (for
+example, from `https://mta-sts.<domain>/.well-known/mta-sts.txt`), then pass
+a structured policy and the time it was fetched. Net::SMTP checks the
+recipient domain, the selected MX, the policy lifetime, and the TLS
+certificate identity at connection time.
+
+```ruby
+policy = Net::SMTP::MTASTSPolicy.new(
+  domain: "example.com",
+  mode: :enforce,
+  mx: ["mail.example.com", "*.example.net"],
+  max_age: 86400,
+  fetched_at: Time.now
+)
+
+Net::SMTP.start("mail.example.com", 25,
+                mta_sts_policy: policy,
+                mta_sts_domain: "example.com",
+                mta_sts_mx_hostname: "mail.example.com") do |smtp|
+  smtp.send_message msgstr, "from@example.com", "to@example.com"
+end
+```
+
+With `mode: :enforce`, the connection requires STARTTLS and a certificate
+valid for the selected MX. Failure raises `Net::SMTPMTASTSPolicyError`
+before AUTH, MAIL FROM, or message data is sent. `mode: :testing` records
+violations (through `mta_sts_reporter`) and still allows delivery. A policy
+that is expired, in mode `none`, or absent is treated as no active policy.
+
+`Net::SMTP::MTASTSPolicy.parse(text, domain: ..., fetched_at: ...)` accepts
+the RFC 8461 key/value policy body if you already have it in memory.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

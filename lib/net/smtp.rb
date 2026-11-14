@@ -71,6 +71,24 @@ module Net
     include SMTPError
   end
 
+  # Raised when a connection cannot satisfy an applied MTA-STS policy.
+  #
+  # This is deliberately not an SMTPError because the failure happens before
+  # (or independently of) an SMTP response. +reason+ identifies the policy
+  # check that failed, for example +:domain_mismatch+, +:mx_mismatch+,
+  # +:starttls_unsupported+, +:tls_required+, or +:certificate_identity+.
+  class SMTPMTASTSPolicyError < ProtocolError
+    attr_reader :reason
+
+    def initialize(message, reason: nil)
+      @reason = reason
+      super(message)
+    end
+  end
+
+  # Backwards friendly short name.
+  MTASTSPolicyError = SMTPMTASTSPolicyError
+
   #
   # == What is This Library?
   #
@@ -167,6 +185,35 @@ module Net
   #       smtp.send_message msgstr, 'from@address', 'to@address'
   #     end
   #
+  # === MTA-STS
+  #
+  # MTA-STS ([RFC8461[https://www.rfc-editor.org/rfc/rfc8461.html]]) lets a
+  # recipient domain publish a policy that requires TLS and constrains the
+  # MX hosts a sender may use. This library does not discover or download
+  # policies; the application fetches the policy and passes it in:
+  #
+  #     policy = Net::SMTP::MTASTSPolicy.new(
+  #       domain: "example.com",
+  #       mode: :enforce,
+  #       mx: ["mail.example.com", "*.example.net"],
+  #       max_age: 86400,
+  #       fetched_at: Time.now
+  #     )
+  #
+  #     Net::SMTP.start("mail.example.com", 25,
+  #                     mta_sts_policy: policy,
+  #                     mta_sts_domain: "example.com",
+  #                     mta_sts_mx_hostname: "mail.example.com") do |smtp|
+  #       smtp.send_message msgstr, "from@example.com", "to@example.com"
+  #     end
+  #
+  # An +enforce+ policy requires STARTTLS and a certificate valid for the
+  # selected MX host. If the policy cannot be satisfied, the connection is
+  # refused with Net::SMTPMTASTSPolicyError before authentication or the
+  # mail envelope is sent. +testing+ records the same failures for reporting
+  # but still permits delivery; +none+, expired, and absent policies are
+  # treated as no active policy.
+  #
   # === \SMTP Authentication
   #
   # The Net::SMTP class supports the \SMTP extension for SASL Authentication
@@ -237,11 +284,27 @@ module Net
     # <tt>tls_verify: true</tt> is equivalent to <tt>ssl_context_params: {
     # verify_mode: OpenSSL::SSL::VERIFY_PEER }</tt>.
     #
+    # === MTA-STS policies
+    #
+    # +mta_sts_policy+ accepts a Net::SMTP::MTASTSPolicy or an equivalent
+    # Hash. Net::SMTP does not fetch policies; the application is responsible
+    # for retrieving the policy and for passing its fetch time so that
+    # +max_age+ can be evaluated. See Net::SMTP::MTASTSPolicy.
+    #
+    # +mta_sts_domain+ is the recipient domain whose policy is being applied.
+    # When omitted, the policy's own domain is used. +mta_sts_mx_hostname+
+    # identifies the selected MX when it differs from +address+; it defaults
+    # to +address+.
+    #
+    # +mta_sts_reporter+ is an optional callable invoked as
+    # <tt>reporter.call(reason, details)</tt> for policy validation failures.
+    #
     # This method does not open the TCP connection.  You can use
     # SMTP.start instead of SMTP.new if you want to do everything
     # at once.  Otherwise, follow SMTP.new with SMTP#start.
     #
-    def initialize(address, port = nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil)
+    def initialize(address, port = nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil,
+                   mta_sts_policy: nil, mta_sts_domain: nil, mta_sts_mx_hostname: nil, mta_sts_reporter: nil)
       @address = address
       @port = (port || SMTP.default_port)
       @esmtp = true
@@ -259,7 +322,60 @@ module Net
       @tls_verify = tls_verify
       @tls_hostname = tls_hostname
       @ssl_context_params = ssl_context_params
+      self.mta_sts_domain = mta_sts_domain
+      self.mta_sts_mx_hostname = mta_sts_mx_hostname
+      self.mta_sts_reporter = mta_sts_reporter
+      self.mta_sts_policy = mta_sts_policy
     end
+
+    # The structured MTA-STS policy applied to this connection, or +nil+.
+    attr_reader :mta_sts_policy
+
+    # Assign an MTA-STS policy. Accepts a Net::SMTP::MTASTSPolicy, a Hash,
+    # or +nil+. The policy must be obtained by the application; Net::SMTP
+    # never downloads it.
+    def mta_sts_policy=(policy)
+      @mta_sts_policy = MTASTSPolicy.coerce(policy)
+    end
+
+    # The recipient domain whose MTA-STS policy is being applied.
+    attr_reader :mta_sts_domain
+
+    def mta_sts_domain=(domain)
+      @mta_sts_domain = domain && MTASTSPolicy.normalize_host(domain)
+    end
+
+    # The selected MX host name used for policy matching and certificate
+    # identity verification. Defaults to #address.
+    attr_reader :mta_sts_mx_hostname
+
+    def mta_sts_mx_hostname=(hostname)
+      @mta_sts_mx_hostname = hostname && MTASTSPolicy.normalize_host(hostname)
+    end
+
+    # Optional callable reporting MTA-STS validation failures.
+    attr_accessor :mta_sts_reporter
+
+    # The policy that was found valid and applicable during the current
+    # connection, or +nil+ when no valid policy applies (absent, expired,
+    # "none" mode, or not applicable to the recipient domain). An enforce
+    # policy whose MX pattern does not match the selected MX is rejected
+    # before any connection is opened.
+    attr_reader :mta_sts_applied_policy
+
+    # True when an enforce policy governs the current connection.
+    def mta_sts_enforced?
+      !!(@mta_sts_applied_policy && @mta_sts_applied_policy.enforce?)
+    end
+
+    # True when a testing policy governs the current connection.
+    def mta_sts_testing?
+      !!(@mta_sts_applied_policy && @mta_sts_applied_policy.testing?)
+    end
+
+    # Validation failures recorded while applying MTA-STS. Each entry is a
+    # Hash with a +:reason+ key and contextual details.
+    attr_reader :mta_sts_failures
 
     # If +true+, verify th server's certificate.
     attr_accessor :tls_verify
@@ -455,7 +571,7 @@ module Net
 
     #
     # :call-seq:
-    #  start(address, port = nil, helo: 'localhost', user: nil, secret: nil, authtype: nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil) { |smtp| ... }
+    #  start(address, port = nil, helo: 'localhost', user: nil, secret: nil, authtype: nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil, mta_sts_policy: nil, mta_sts_domain: nil, mta_sts_mx_hostname: nil, mta_sts_reporter: nil) { |smtp| ... }
     #  start(address, port = nil, helo = 'localhost', user = nil, secret = nil, authtype = nil) { |smtp| ... }
     #
     # Creates a new Net::SMTP object and connects to the server.
@@ -505,6 +621,17 @@ module Net
     # <tt>tls_verify: true</tt> is equivalent to <tt>ssl_context_params: {
     # verify_mode: OpenSSL::SSL::VERIFY_PEER }</tt>.
     #
+    # +mta_sts_policy+ is a Net::SMTP::MTASTSPolicy (or Hash) that the
+    # application obtained elsewhere. Net::SMTP never fetches policies.
+    # +mta_sts_domain+ must be the recipient domain the policy covers, and
+    # +mta_sts_mx_hostname+ identifies the selected MX (defaulting to
+    # +address+). An enforce policy requires STARTTLS and a certificate valid
+    # for the selected MX; it cannot be satisfied in plaintext, so it
+    # overrides +starttls: :auto+ and +tls_verify: false+. A testing policy
+    # records violations through +mta_sts_reporter+ but still allows
+    # delivery. Expired policies, "none" policies, and absent policies are
+    # treated as no active policy.
+    #
     # The remaining arguments are used for \SMTP authentication, if required or
     # desired.
     #
@@ -530,19 +657,24 @@ module Net
     # * Net::SMTPUnknownError
     # * Net::OpenTimeout
     # * Net::ReadTimeout
+    # * Net::SMTPMTASTSPolicyError
     # * IOError
     #
     def SMTP.start(address, port = nil, *args, helo: nil,
                    user: nil, secret: nil, password: nil, authtype: nil,
                    tls: false, starttls: :auto,
                    tls_verify: true, tls_hostname: nil, ssl_context_params: nil,
+                   mta_sts_policy: nil, mta_sts_domain: nil,
+                   mta_sts_mx_hostname: nil, mta_sts_reporter: nil,
                    &block)
       raise ArgumentError, "wrong number of arguments (given #{args.size + 2}, expected 1..6)" if args.size > 4
       helo ||= args[0] || 'localhost'
       user ||= args[1]
       secret ||= password || args[2]
       authtype ||= args[3]
-      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params).start(helo: helo, user: user, secret: secret, authtype: authtype, &block)
+      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params,
+          mta_sts_policy: mta_sts_policy, mta_sts_domain: mta_sts_domain,
+          mta_sts_mx_hostname: mta_sts_mx_hostname, mta_sts_reporter: mta_sts_reporter).start(helo: helo, user: user, secret: secret, authtype: authtype, &block)
     end
 
     # +true+ if the \SMTP session has been started.
@@ -621,17 +753,25 @@ module Net
       user ||= args[1]
       secret ||= password || args[2]
       authtype ||= args[3]
+      @mta_sts_failures = []
+      @mta_sts_applied_policy = resolve_mta_sts_policy
       if defined?(OpenSSL::VERSION)
-        ssl_context_params = @ssl_context_params&.dup || {}
-        unless ssl_context_params.has_key?(:verify_mode)
-          ssl_context_params[:verify_mode] = @tls_verify ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
-        end
+        ssl_context_params = effective_ssl_context_params
         if @tls && @ssl_context_tls.nil?
           @ssl_context_tls = SMTP.default_ssl_context(ssl_context_params)
         end
-        if @starttls && @ssl_context_starttls.nil?
+        if (@starttls || (policy_tls_required? && !@tls)) && @ssl_context_starttls.nil?
           @ssl_context_starttls = SMTP.default_ssl_context(ssl_context_params)
         end
+        if policy_tls_required?
+          apply_policy_tls_requirements(@ssl_context_tls)
+          apply_policy_tls_requirements(@ssl_context_starttls)
+        end
+      elsif policy_tls_required?
+        raise mta_sts_error(
+          "an MTA-STS policy requires TLS, but the openssl library is not installed",
+          :tls_unavailable
+        )
       end
       if block_given?
         begin
@@ -664,22 +804,89 @@ module Net
       if user || secret || authtype
         check_auth_args authtype, user, secret
       end
+      enforced = mta_sts_enforced?
+      @mta_sts_satisfied = !enforced
       @error_occurred = false
       s = Timeout.timeout(@open_timeout, Net::OpenTimeout) do
         tcp_socket(@address, @port)
       end
       logging "Connection opened: #{@address}:#{@port}"
-      @socket = new_internet_message_io(tls? ? tlsconnect(s, @ssl_context_tls) : s)
+      if tls?
+        begin
+          @socket = new_internet_message_io(tlsconnect(s, @ssl_context_tls))
+        rescue OpenSSL::SSL::SSLError => error
+          mta_sts_failure(:tls_failure, :server => @address, :error => error) if mta_sts_testing?
+          raise
+        end
+        @mta_sts_satisfied = true if enforced
+      else
+        @socket = new_internet_message_io(s)
+      end
       check_response critical { recv_response() }
       do_helo helo_domain
-      if ! tls? and (starttls_always? or (capable_starttls? and starttls_auto?))
-        unless capable_starttls?
-          raise SMTPUnsupportedCommand, "STARTTLS is not supported on this server"
+      if !tls?
+        if enforced
+          # An enforce policy overrides starttls: false/:auto. A policy-bound
+          # connection must never continue in plaintext.
+          unless capable_starttls?
+            raise mta_sts_error("MTA-STS enforce policy requires STARTTLS, but the server does not advertise it", :starttls_unsupported)
+          end
+          begin
+            starttls
+          rescue SMTPError => error
+            raise mta_sts_error("MTA-STS enforce policy requires STARTTLS, but the server refused it: #{error.message}", :starttls_refused)
+          end
+          @socket = new_internet_message_io(tlsconnect(s, @ssl_context_starttls))
+          # helo response may be different after STARTTLS
+          do_helo helo_domain
+          @mta_sts_satisfied = true
+        elsif mta_sts_testing?
+          if starttls_always?
+            # An explicit starttls: :always keeps its hard-failure semantics;
+            # testing mode only softens opportunistic STARTTLS.
+            if capable_starttls?
+              begin
+                starttls
+                @socket = new_internet_message_io(tlsconnect(s, @ssl_context_starttls))
+                do_helo helo_domain
+              rescue SMTPError, OpenSSL::SSL::SSLError, SMTPMTASTSPolicyError => error
+                mta_sts_failure(:starttls_failed, :server => @address, :error => error)
+                raise
+              end
+            else
+              mta_sts_failure(:starttls_unsupported, :server => @address)
+              raise SMTPUnsupportedCommand, "STARTTLS is not supported on this server"
+            end
+          elsif starttls_auto?
+            if capable_starttls?
+              begin
+                starttls
+                @socket = new_internet_message_io(tlsconnect(s, @ssl_context_starttls))
+                do_helo helo_domain
+              rescue SMTPError => error
+                # The server declined STARTTLS but the SMTP session is still
+                # usable; testing mode reports the failure and continues.
+                mta_sts_failure(:starttls_refused, :server => @address, :error => error)
+              rescue OpenSSL::SSL::SSLError, SMTPMTASTSPolicyError => error
+                mta_sts_failure(:tls_failure, :server => @address, :error => error)
+                s, @socket = reconnect_plaintext(s)
+                check_response critical { recv_response() }
+                do_helo helo_domain
+              end
+            else
+              mta_sts_failure(:starttls_unsupported, :server => @address)
+            end
+          end
+        elsif starttls_always? || (capable_starttls? && starttls_auto?)
+          if capable_starttls?
+            starttls
+            @socket = new_internet_message_io(tlsconnect(s, @ssl_context_starttls))
+            # helo response may be different after STARTTLS
+            do_helo helo_domain
+          elsif starttls_always?
+            raise SMTPUnsupportedCommand, "STARTTLS is not supported on this server"
+          end
         end
-        starttls
-        @socket = new_internet_message_io(tlsconnect(s, @ssl_context_starttls))
-        # helo response may be different after STARTTLS
-        do_helo helo_domain
       end
       authenticate user, secret, (authtype || DEFAULT_AUTH_TYPE) if user
       @started = true
@@ -695,17 +902,150 @@ module Net
       OpenSSL::SSL::SSLSocket.new socket, context
     end
 
+    # Testing mode only: abandon the failed TLS transport and open a fresh
+    # plaintext one so delivery can proceed as though no policy existed.
+    def reconnect_plaintext(old_socket)
+      old_socket.close if old_socket && !old_socket.closed?
+      @socket = nil
+      fresh = Timeout.timeout(@open_timeout, Net::OpenTimeout) do
+        tcp_socket(@address, @port)
+      end
+      logging "Connection reopened: #{@address}:#{@port}"
+      [fresh, new_internet_message_io(fresh)]
+    end
+
+    # SSLContext parameters for a connection that must honor an MTA-STS
+    # policy. Certificate chain and host identity verification are mandatory;
+    # the caller cannot turn them off for a policy-bound connection.
+    def effective_ssl_context_params
+      params = @ssl_context_params&.dup || {}
+      if policy_tls_required?
+        params[:verify_mode] = OpenSSL::SSL::VERIFY_PEER
+        if OpenSSL::SSL::SSLContext.method_defined?(:verify_hostname=)
+          params[:verify_hostname] = true
+        end
+      elsif !params.has_key?(:verify_mode)
+        params[:verify_mode] = @tls_verify ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
+      end
+      params
+    end
+
+    def policy_tls_required?
+      policy = @mta_sts_applied_policy
+      !!policy && (policy.enforce? || policy.testing?)
+    end
+
+    # A caller-supplied SSLContext must not weaken an applied policy. The
+    # context is mutated in place so that both the handshake and any
+    # introspection by the application see verification enabled. OpenSSL
+    # freezes a context once it has been used in a handshake; a frozen
+    # context is accepted only if it already enforces verification.
+    def apply_policy_tls_requirements(context)
+      return unless context
+      if context.frozen?
+        hostname_verified = !context.respond_to?(:verify_hostname) || context.verify_hostname
+        return if context.verify_mode == OpenSSL::SSL::VERIFY_PEER && hostname_verified
+        raise mta_sts_error(
+          "an SSLContext supplied for an MTA-STS connection does not verify the certificate",
+          :tls_misconfigured
+        )
+      end
+      context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      context.verify_hostname = true if context.respond_to?(:verify_hostname=)
+    end
+
+    # The host name the certificate must be valid for. An applied policy
+    # always pins the identity to the selected MX, overriding tls_hostname.
+    def policy_tls_hostname
+      return nil unless policy_tls_required?
+      selected_mx_hostname
+    end
+
+    def selected_mx_hostname
+      @mta_sts_mx_hostname || MTASTSPolicy.normalize_host(@address)
+    end
+
+    # Determine which policy, if any, governs this connection.
+    #
+    # The policy is supplied by the caller. It is applicable only when it
+    # belongs to the recipient domain being contacted, is not in mode
+    # "none", is not expired, and its mx patterns cover the selected MX.
+    # A mismatch between the supplied policy domain and the recipient
+    # domain is a configuration error and is rejected rather than
+    # silently ignored.
+    def resolve_mta_sts_policy
+      policy = @mta_sts_policy
+      return nil if policy.nil?
+
+      recipient_domain = @mta_sts_domain || policy.domain
+      if MTASTSPolicy.normalize_host(recipient_domain) != policy.domain
+        raise mta_sts_error(
+          "MTA-STS policy is for #{policy.domain.inspect}, not the recipient domain #{recipient_domain.inspect}",
+          :domain_mismatch
+        )
+      end
+
+      return nil if policy.none?
+      unless policy.valid_at?
+        mta_sts_failure(:policy_expired, :domain => policy.domain, :expires_at => policy.expires_at)
+        return nil
+      end
+
+      mx_hostname = selected_mx_hostname
+      unless policy.mx_allowed?(mx_hostname)
+        return nil if policy.testing? && mta_sts_failure(:mx_mismatch, :domain => policy.domain, :mx => mx_hostname)
+        raise mta_sts_error(
+          "MTA-STS policy for #{policy.domain.inspect} does not allow MX #{mx_hostname.inspect}",
+          :mx_mismatch
+        )
+      end
+
+      policy
+    end
+
+    def mta_sts_error(message, reason)
+      SMTPMTASTSPolicyError.new(message, reason: reason)
+    end
+
+    def mta_sts_failure(reason, details = {})
+      @mta_sts_failures ||= []
+      @mta_sts_failures << { :reason => reason }.merge(details)
+      @mta_sts_reporter.call(reason, details) if @mta_sts_reporter
+      true
+    end
+
     def tlsconnect(s, context)
       verified = false
       s = ssl_socket(s, context)
       logging "TLS connection started"
       s.sync_close = true
-      s.hostname = @tls_hostname || @address
+      s.hostname = policy_tls_hostname || @tls_hostname || @address
       ssl_socket_connect(s, @open_timeout)
+      verify_policy_identity!(s)
       verified = true
       s
     ensure
       s.close unless verified
+    end
+
+    # Defense in depth: even if the underlying OpenSSL context did not
+    # enforce the host name, an applied policy requires the certificate to
+    # be valid for the selected MX. Failure is treated as a policy failure.
+    def verify_policy_identity!(ssl_socket)
+      hostname = policy_tls_hostname
+      return unless hostname
+      return unless OpenSSL::SSL.respond_to?(:verify_certificate_identity)
+
+      certificate = ssl_socket.peer_cert
+      if certificate.nil?
+        raise mta_sts_error("MTA-STS policy requires the MX to present a certificate", :certificate_identity)
+      end
+      unless OpenSSL::SSL.verify_certificate_identity(certificate, hostname)
+        raise mta_sts_error(
+          "certificate presented by MX #{hostname.inspect} is not valid for that name",
+          :certificate_identity
+        )
+      end
     end
 
     def new_internet_message_io(s)
@@ -730,6 +1070,8 @@ module Net
     ensure
       @started = false
       @error_occurred = false
+      @mta_sts_applied_policy = nil
+      @mta_sts_satisfied = false
       @socket.close if @socket
       @socket = nil
     end
@@ -791,6 +1133,7 @@ module Net
     def send_message(msgstr, from_addr, *to_addrs)
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
+      check_mta_sts_delivery(from_addr, to_addrs)
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
       rcptto_list(to_addrs) {data msgstr}
@@ -846,12 +1189,48 @@ module Net
     def open_message_stream(from_addr, *to_addrs, &block)   # :yield: stream
       to_addrs.flatten!
       raise IOError, 'closed session' unless @socket
+      check_mta_sts_delivery(from_addr, to_addrs)
       from_addr = Address.new(from_addr, 'SMTPUTF8') if any_require_smtputf8(to_addrs) && capable?('SMTPUTF8')
       mailfrom from_addr
       rcptto_list(to_addrs) {data(&block)}
     end
 
     alias ready open_message_stream   # obsolete
+
+    private
+
+    # Refuse to put anything on the wire for an enforced connection that did
+    # not satisfy its policy. Delivery requires the policy to have been
+    # applied and the TLS state to have been established under it.
+    def check_mta_sts_delivery(from_addr, to_addrs)
+      return unless @mta_sts_applied_policy&.enforce?
+      unless @mta_sts_satisfied
+        raise mta_sts_error(
+          "MTA-STS enforce policy was not satisfied; refusing to send mail",
+          :policy_not_satisfied
+        )
+      end
+
+      recipient_domains = []
+      to_addrs.each do |address|
+        value = address.kind_of?(Address) ? address.address : address.to_s
+        domain = value.rpartition("@").last
+        next if domain.empty? || domain == value
+        recipient_domains << MTASTSPolicy.normalize_host(domain)
+      end
+      return if recipient_domains.empty?
+
+      policy_domain = @mta_sts_applied_policy.domain
+      unless recipient_domains.all? { |domain| domain == policy_domain }
+        raise mta_sts_error(
+          "MTA-STS enforce policy for #{policy_domain.inspect} cannot carry mail for " \
+            "#{recipient_domains.uniq.inspect}",
+          :recipient_domain_mismatch
+        )
+      end
+    end
+
+    public
 
     #
     # Authentication
@@ -1155,6 +1534,7 @@ module Net
   SMTPSession = SMTP # :nodoc:
 end
 
+require_relative 'smtp/mta_sts_policy'
 require_relative 'smtp/authenticator'
 Dir.glob("#{__dir__}/smtp/auth_*.rb") do |r|
   require_relative r
