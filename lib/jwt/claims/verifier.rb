@@ -13,6 +13,7 @@ module JWT
         aud: ->(options) { Claims::Audience.new(expected_audience: options[:aud]) },
         sub: ->(options) { Claims::Subject.new(expected_subject: options[:sub]) },
         crit: ->(options) { Claims::Crit.new(expected_crits: options[:crit]) },
+        token_binding: ->(options) { Claims::TokenBinding.new(options: options[:token_binding]) },
         required: ->(options) { Claims::Required.new(required_claims: options[:required]) },
         numeric: ->(*)        { Claims::Numeric.new }
       }.freeze

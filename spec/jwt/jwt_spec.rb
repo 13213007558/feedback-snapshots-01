@@ -796,4 +796,119 @@ RSpec.describe JWT do
       expect { JWT.decode(token, 'secret', true, algorithm: 'invalid-HS256') }.to raise_error(JWT::IncorrectAlgorithm, 'Expected a different algorithm')
     end
   end
+
+  context 'OpenID Connect token binding' do
+    let(:access_token) { 'raw-access-token+/?=' }
+    let(:authorization_code) { 'raw-authorization-code+/?=' }
+    let(:binding_options) { { access_token: access_token, code: authorization_code, required: %i[at_hash c_hash] } }
+
+    def half_hash(value, digest)
+      full_digest = OpenSSL::Digest.new(digest).digest(value)
+      JWT::Base64.url_encode(full_digest.byteslice(0, full_digest.bytesize / 2))
+    end
+
+    def encode_id_token(algorithm:, key:, digest:)
+      JWT.encode({ 'at_hash' => half_hash(access_token, digest), 'c_hash' => half_hash(authorization_code, digest) }, key, algorithm)
+    end
+
+    {
+      'HS256' => [:hmac, 'SHA256'],
+      'RS256' => ['rsa-2048-private.pem', 'SHA256'],
+      'ES384' => ['ec384-private.pem', 'SHA384'],
+      'PS512' => ['rsa-2048-private.pem', 'SHA512']
+    }.each do |algorithm, (key_fixture, digest)|
+      context "when the ID token is signed with #{algorithm}" do
+        let(:key) { key_fixture == :hmac ? 'sha256-secret-key' : test_pkey(key_fixture) }
+
+        it 'decodes with matching bindings' do
+          token = encode_id_token(algorithm: algorithm, key: key, digest: digest)
+
+          payload, _header = JWT.decode(token, key, true, algorithm: algorithm, token_binding: binding_options)
+          expect(payload).to include('at_hash' => half_hash(access_token, digest))
+        end
+      end
+    end
+
+    it 'does not conclude the binding when the header algorithm does not match the signature' do
+      jwt = JWT::Token.new(payload: { 'at_hash' => half_hash(access_token, 'SHA384') }, header: { 'alg' => 'HS256' })
+                        .tap { |token| token.sign!(algorithm: 'HS384', key: 'sha384-secret-key') }
+                        .jwt
+
+      expect do
+        JWT.decode(jwt, 'sha384-secret-key', true, algorithm: %w[HS256 HS384], token_binding: { access_token: access_token, required: %i[at_hash] })
+      end.to raise_error(JWT::VerificationError, 'Signature verification failed')
+    end
+
+    it 'rejects an at_hash derived from another signature algorithm' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA512')
+
+      expect do
+        JWT.decode(token, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: binding_options)
+      end.to raise_error(JWT::InvalidTokenBindingError, 'Invalid at_hash token binding')
+    end
+
+    it 'rejects a c_hash derived from another signature algorithm' do
+      token = JWT.encode({ 'at_hash' => half_hash(access_token, 'SHA256'), 'c_hash' => half_hash(authorization_code, 'SHA384') }, 'sha256-secret-key', 'HS256')
+
+      expect do
+        JWT.decode(token, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: binding_options)
+      end.to raise_error(JWT::InvalidTokenBindingError, 'Invalid c_hash token binding')
+    end
+
+    it 'rejects values from another authentication flow' do
+      other_flow = JWT.encode({ 'at_hash' => half_hash('other-access-token', 'SHA256'), 'c_hash' => half_hash('other-code', 'SHA256') }, 'sha256-secret-key', 'HS256')
+
+      expect do
+        JWT.decode(other_flow, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: binding_options)
+      end.to raise_error(JWT::InvalidTokenBindingError, 'Invalid at_hash token binding')
+    end
+
+    it 'rejects the binding when the signature does not verify' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA256')
+
+      expect do
+        JWT.decode(token, 'wrong-secret-key', true, algorithm: 'HS256', token_binding: binding_options)
+      end.to raise_error(JWT::VerificationError, 'Signature verification failed')
+    end
+
+    it 'raises instead of skipping the binding when signature verification is disabled' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA256')
+
+      expect do
+        JWT.decode(token, nil, false, algorithm: 'HS256', token_binding: binding_options)
+      end.to raise_error(JWT::InvalidTokenBindingError, 'Token bindings can only be verified after a successful signature verification')
+    end
+
+    it 'rejects bindings on an unsecured token' do
+      token = JWT.encode({ 'at_hash' => half_hash(access_token, 'SHA256') }, nil, 'none')
+
+      expect do
+        JWT.decode(token, nil, true, algorithm: 'none', token_binding: binding_options)
+      end.to raise_error(JWT::UnsupportedTokenBindingAlgorithmError, 'No token binding hash mapping for signing algorithm none')
+    end
+
+    it 'fails closed when the raw binding value is not supplied' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA256')
+
+      expect do
+        JWT.decode(token, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: { required: %i[at_hash] })
+      end.to raise_error(JWT::InvalidTokenBindingError, 'Missing raw access_token value for at_hash token binding')
+    end
+
+    it 'fails closed when the required kinds are not declared' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA256')
+
+      expect do
+        JWT.decode(token, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: { access_token: access_token, code: authorization_code })
+      end.to raise_error(JWT::InvalidTokenBindingError, 'The required token binding kinds must be given explicitly')
+    end
+
+    it 'does not URL decode the supplied raw access token' do
+      token = encode_id_token(algorithm: 'HS256', key: 'sha256-secret-key', digest: 'SHA256')
+
+      expect do
+        JWT.decode(token, 'sha256-secret-key', true, algorithm: 'HS256', token_binding: binding_options.merge(access_token: access_token.gsub('+', '%2B').gsub('/', '%2F').gsub('=', '%3D')))
+      end.to raise_error(JWT::InvalidTokenBindingError)
+    end
+  end
 end

@@ -69,6 +69,11 @@ module JWT
         end
       end
 
+      # @api private
+      def token_binding_hash
+        digest
+      end
+
       if ::JWT.openssl_3?
         def self.create_public_key_from_point(point)
           sequence = OpenSSL::ASN1::Sequence([

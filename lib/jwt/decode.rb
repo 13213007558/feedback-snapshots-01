@@ -34,11 +34,14 @@ module JWT
     # @return [Array<Hash>] an array containing the decoded payload and header.
     def decode_segments
       validate_segment_count!
+      validate_token_binding_configuration!
+
       if @verify
         verify_algo
+        validate_token_binding_algorithm!
         set_key
         verify_signature
-        Claims::DecodeVerifier.verify!(token.unverified_payload, @options)
+        Claims::DecodeVerifier.verify!(token, @options)
       end
 
       [token.unverified_payload, token.header]
@@ -47,6 +50,29 @@ module JWT
     private
 
     attr_reader :token
+
+    # A binding can only be concluded from a verified signature. Explicitly
+    # asking for one without signature verification is a configuration error.
+    def validate_token_binding_configuration!
+      return if @verify
+      return unless token_binding_configured?
+
+      raise JWT::InvalidTokenBindingError, 'Token bindings can only be verified after a successful signature verification'
+    end
+
+    # An unsecured token has no signature to derive a digest from. This runs
+    # after the algorithm allow-list check, so a disallowed none token is still
+    # reported as an algorithm mismatch.
+    def validate_token_binding_algorithm!
+      return unless token_binding_configured?
+      return unless none_algorithm?
+
+      raise JWT::UnsupportedTokenBindingAlgorithmError, 'No token binding hash mapping for signing algorithm none'
+    end
+
+    def token_binding_configured?
+      @options.key?(:token_binding) || @options.key?('token_binding')
+    end
 
     def verify_signature
       return if none_algorithm?

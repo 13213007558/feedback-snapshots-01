@@ -70,6 +70,18 @@ module JWT
   # The InvalidPayload class is raised when the JWT payload is invalid.
   class InvalidPayload < ClaimValidationError; end
 
+  # The TokenBindingError class is the base class for errors raised while
+  # checking an OpenID Connect at_hash or c_hash token binding.
+  class TokenBindingError < ClaimValidationError; end
+
+  # The InvalidTokenBindingError class is raised when a token binding is
+  # missing, malformed or does not match the supplied raw value.
+  class InvalidTokenBindingError < TokenBindingError; end
+
+  # The UnsupportedTokenBindingAlgorithmError class is raised when the
+  # algorithm that verified the signature has no defined token binding hash.
+  class UnsupportedTokenBindingAlgorithmError < InvalidTokenBindingError; end
+
   # The MissingRequiredClaim class is raised when a required claim is missing from the JWT.
   class MissingRequiredClaim < ClaimValidationError; end
 

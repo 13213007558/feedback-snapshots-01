@@ -6,7 +6,7 @@
 
 **Features:**
 
-- Your contribution here
+- Add optional OpenID Connect `at_hash`/`c_hash` token binding verification. The digest is derived from the JWA algorithm that actually verified the signature, bindings cannot be concluded from an unverified signature, and missing or malformed caller-supplied values fail closed
 
 **Fixes and enhancements:**
 

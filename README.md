@@ -337,6 +337,7 @@ used. JWT supports these reserved claim names:
 - 'jti' (JWT ID) Claim
 - 'iat' (Issued At) Claim
 - 'sub' (Subject) Claim
+- 'at_hash' / 'c_hash' (OpenID Connect token binding) Claims
 
 ### Expiration Time Claim
 
@@ -592,6 +593,70 @@ JWT::Claims.verify_payload!({"exp" => Time.now.to_i - 10}, exp: { leeway: 11})
 
 JWT::Claims.verify_payload!({"exp" => Time.now.to_i + 10, "sub" => "subject"}, :exp, sub: "subject")
 ```
+
+### OpenID Connect token binding (`at_hash` and `c_hash`)
+
+When an OpenID Connect login callback receives an ID token together with an
+access token and an authorization code, the ID token can bind those values with
+the `at_hash` and `c_hash` claims (OpenID Connect Core 3.1.3.6 / 3.3.2.11).
+This library can verify those bindings from a verified signature.
+
+The check is opt-in, but once `token_binding` is supplied it fails closed:
+
+- `required:` must name the binding kinds that must be present (`:at_hash`,
+  `:c_hash`, or both). It is never inferred from which claims happen to exist.
+- The raw `access_token:` and `code:` values must be given for the required
+  kinds. A missing, empty or non-String value raises instead of skipping the
+  check.
+- Values are compared as bytes. The token and code are **not** URL decoded; pass
+  exactly the values received from the token endpoint.
+- The digest algorithm comes from the JWA algorithm that actually verified the
+  signature, not from the unverified `alg` header. The current mapping is
+  HS/RS/PS 256→SHA-256, 384→SHA-384, 512→SHA-512, ES256/ES256K→SHA-256,
+  ES384→SHA-384 and ES512→SHA-512. Any verified algorithm without a defined
+  binding hash (custom algorithms by default, and `none`) is rejected; a custom
+  algorithm can opt in by implementing `token_binding_hash`.
+- A binding can only be concluded after a successful signature verification. On
+  `JWT::EncodedToken` this means `verify_signature!`/`valid_signature?` must have
+  succeeded for the current token instance; a later failed verification clears
+  that state. `JWT.decode(..., false, token_binding: ...)` raises, and a
+  `token_binding` claim cannot be verified through `JWT::Claims.verify_payload!`,
+  which has no signature to derive the algorithm from.
+
+```ruby
+# Login callback: the ID token was verified with the provider's key.
+binding = {
+  access_token: params[:access_token],
+  code: params[:code],
+  required: %i[at_hash c_hash]
+}
+
+JWT.decode(id_token, provider_key, true, algorithm: 'RS256', token_binding: binding)
+
+# or with the object API
+encoded_token = JWT::EncodedToken.new(id_token)
+encoded_token.verify_signature!(algorithm: 'RS256', key: provider_key)
+encoded_token.verify_claims!(token_binding: binding)
+encoded_token.payload
+```
+
+Raised errors derive from `JWT::TokenBindingError`, which derives from
+`JWT::ClaimValidationError`: `JWT::InvalidTokenBindingError` for missing or
+mismatched values and `JWT::UnsupportedTokenBindingAlgorithmError` when the
+verified algorithm has no binding hash.
+
+This check is narrower than the other OIDC validations and does not replace
+them:
+
+- `iss` / `aud` decide whether this ID token came from the expected provider and
+  was issued for this client. Check them first; `at_hash`/`c_hash` only link the
+  token to the other values from this flow.
+- `nonce` binds the ID token to the authentication request this client sent. It
+  is stored and compared by the client and is not derived from the token's
+  signature.
+- `at_hash`/`c_hash` bind the ID token to an access token or authorization code.
+  They do not make the access token or code valid, and they do not prove which
+  user authenticated.
 
 ### Finding a Key
 

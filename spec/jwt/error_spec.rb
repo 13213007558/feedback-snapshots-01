@@ -93,6 +93,9 @@ RSpec.describe 'JWT error hierarchy' do
       InvalidJtiError
       InvalidPayload
       MissingRequiredClaim
+      TokenBindingError
+      InvalidTokenBindingError
+      UnsupportedTokenBindingAlgorithmError
     ].each do |error_class|
       it "JWT::#{error_class} inherits from JWT::ClaimValidationError" do
         expect(JWT.const_get(error_class)).to be < JWT::ClaimValidationError

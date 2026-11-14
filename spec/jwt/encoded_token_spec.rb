@@ -445,6 +445,91 @@ RSpec.describe JWT::EncodedToken do
     end
   end
 
+
+  describe '#verified_jwa' do
+    it 'is nil before the signature has been verified' do
+      expect(token.verified_jwa).to be_nil
+    end
+
+    it 'is the algorithm that verified the signature' do
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+
+      expect(token.verified_jwa.alg).to eq('HS256')
+    end
+
+    it 'is cleared by a failed signature verification' do
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+      expect(token.valid_signature?(algorithm: 'HS256', key: 'wrong')).to be(false)
+
+      expect(token.verified_jwa).to be_nil
+    end
+
+    it 'is cleared when the payload is reassigned' do
+      token.verify_signature!(algorithm: 'HS256', key: 'secret')
+
+      token.encoded_payload = JWT::Token.new(payload: { 'other' => true }).tap { |other| other.sign!(algorithm: 'HS256', key: 'secret') }.encoded_payload
+      expect(token.verified_jwa).to be_nil
+    end
+  end
+
+  describe 'token binding integration' do
+    let(:access_token) { 'raw-access-token' }
+    let(:binding_options) { { access_token: access_token, required: %i[at_hash] } }
+    let(:at_hash) do
+      digest = OpenSSL::Digest.new('SHA256').digest(access_token)
+      JWT::Base64.url_encode(digest.byteslice(0, digest.bytesize / 2))
+    end
+
+    def signed_token(payload, algorithm: 'HS256', key: 'secret')
+      JWT::Token.new(payload: payload).tap { |tok| tok.sign!(algorithm: algorithm, key: key) }.jwt
+    end
+
+    context 'when the signature is valid and the binding matches' do
+      it 'passes through #verify!' do
+        token = described_class.new(signed_token({ 'at_hash' => at_hash }))
+
+        expect(token.verify!(signature: { algorithm: 'HS256', key: 'secret' }, claims: { token_binding: binding_options })).to eq(nil)
+      end
+    end
+
+    context 'when the signature verification fails' do
+      it 'does not conclude the binding' do
+        token = described_class.new(signed_token({ 'at_hash' => at_hash }))
+
+        expect(token.valid?(signature: { algorithm: 'HS256', key: 'wrong' }, claims: { token_binding: binding_options })).to be(false)
+        expect(token.claim_errors(token_binding: binding_options).map(&:message)).to eq(['Token bindings can only be verified after a successful signature verification'])
+      end
+    end
+
+    context 'when the binding does not match' do
+      it 'fails the #valid? predicate without raising' do
+        token = described_class.new(signed_token({ 'at_hash' => at_hash }))
+
+        expect(token.valid?(signature: { algorithm: 'HS256', key: 'secret' }, claims: { token_binding: binding_options.merge(access_token: 'other-access-token') })).to be(false)
+      end
+    end
+
+    context 'when the token was signed with another algorithm and the header disagrees' do
+      let(:access_token) { 'raw-access-token' }
+      let(:sha384_hash) do
+        digest = OpenSSL::Digest.new('SHA384').digest(access_token)
+        JWT::Base64.url_encode(digest.byteslice(0, digest.bytesize / 2))
+      end
+
+      it 'uses the verified algorithm, not the header alg' do
+        jwt = JWT::Token.new(payload: { 'at_hash' => sha384_hash }, header: { 'alg' => 'HS256' })
+                          .tap { |tok| tok.sign!(algorithm: 'HS384', key: 'h' * 64) }
+                          .jwt
+        token = described_class.new(jwt)
+        expect(token.header['alg']).to eq('HS256')
+
+        token.verify_signature!(algorithm: %w[HS256 HS384], key: 'h' * 64)
+        expect(token.verified_jwa.alg).to eq('HS384')
+        expect { token.verify_claims!(token_binding: binding_options) }.not_to raise_error
+      end
+    end
+  end
+
   describe '#verify_claims!' do
     context 'when required_claims is passed' do
       it 'raises error' do

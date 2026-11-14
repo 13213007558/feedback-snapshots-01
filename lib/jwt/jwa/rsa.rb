@@ -31,6 +31,11 @@ module JWT
       register_algorithm(new('RS384'))
       register_algorithm(new('RS512'))
 
+      # @api private
+      def token_binding_hash
+        digest
+      end
+
       private
 
       attr_reader :digest

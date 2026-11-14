@@ -26,6 +26,15 @@ module JWT
         { 'alg' => alg }
       end
 
+      # The digest used for OpenID Connect at_hash/c_hash bindings.
+      # Algorithms that cannot be bound return nil.
+      #
+      # @api private
+      # @return [String, nil] an OpenSSL digest name.
+      def token_binding_hash
+        nil
+      end
+
       def sign(*)
         raise_sign_error!('Algorithm implementation is missing the sign method')
       end

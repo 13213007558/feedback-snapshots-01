@@ -32,9 +32,19 @@ module JWT
       @jwt = jwt
       @signature_verified = false
       @claims_verified    = false
+      @verified_jwa       = nil
 
       @encoded_header, @encoded_payload, @encoded_signature = jwt.split('.')
     end
+
+    # The JWA algorithm that verified the signature, or nil when the
+    # signature has not been verified successfully.
+    #
+    # Token binding checks derive their hash from this value rather than from
+    # the unverified `alg` header.
+    #
+    # @return [Object, nil] the verifying JWA algorithm.
+    attr_reader :verified_jwa
 
     # Returns the decoded signature of the JWT token.
     #
@@ -94,6 +104,7 @@ module JWT
       @encoded_payload = encoded_payload
       @decoded_payload = nil
       @signature_verified = @claims_verified = false
+      @verified_jwa = nil
     end
 
     # Returns the signing input of the JWT token.
@@ -159,6 +170,7 @@ module JWT
       raise ArgumentError, 'Provide either key or key_finder, not both or neither' if key.nil? == key_finder.nil?
 
       @signature_verified = false
+      @verified_jwa = nil
       validate_segment_count!
       return false if key_finder && !algorithm_allowed?(algorithm)
 
@@ -167,10 +179,16 @@ module JWT
 
       raise JWT::VerificationError, 'No algorithm provided' if verifiers.empty?
 
-      valid = verifiers.any? do |jwa|
-        jwa.verify(data: signing_input, signature: signature)
+      verifier = verifiers.find do |candidate|
+        candidate.verify(data: signing_input, signature: signature)
       end
-      valid.tap { |verified| @signature_verified = verified }
+
+      if verifier
+        @verified_jwa = verifier.jwa
+        @signature_verified = true
+      end
+
+      @signature_verified
     end
 
     # Verifies the claims of the token.
