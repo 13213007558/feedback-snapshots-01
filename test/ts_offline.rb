@@ -47,6 +47,7 @@ TESTS = %w(
     review_code_mapper
     review_presentation
     record_regressions
+    dane
     selector_wakeup
     message
     misc

@@ -113,6 +113,45 @@ For asynchronous validation, up to four workers can run at once, with another
 Cancellation is checked between operations and while waiting on the network.
 An OpenSSL operation already in progress is allowed to finish first.
 
+Offline DANE (TLSA) verification
+--------------------------------
+
+Resolving a TLSA record is not enough to trust a TLS peer: the RRset must
+first be DNSSEC-validated, and the certificate association then checked
+against the presented chain. `Dnsruby::DANE.verify` performs the second step
+entirely offline. The caller supplies the service name, port, the TLSA
+associations, the peer certificate chain (leaf first) and the trust
+settings, and asserts that the DNS data came from a SECURE response:
+
+```ruby
+result = Dnsruby::DANE.verify(
+  service: 'www.example.com',
+  port: 443,
+  tlsa_records: tlsa_rrs,           # Dnsruby::RR::IN::TLSA objects or hashes
+  chain: [leaf_certificate, ca_certificate],
+  trust_config: Dnsruby::DANE::TrustConfig.new(system_ca: true),
+  verified: true                    # or SecurityLevel::SECURE, or a per-record array
+)
+result.authenticated?               # => true
+result.matched                      # the TLSA record that authenticated the peer
+```
+
+All four certificate usages are implemented per RFC 6698 and RFC 7671.
+PKIX-TA(0) and PKIX-EE(1) require a PKIX path against the configured trust
+store plus a service name check; DANE-TA(2) validates the chain to the
+TLSA-matched anchor without local PKIX trust and still enforces names and
+validity; DANE-EE(3) matches only the leaf and ignores names, expiry and
+the rest of the chain. Selectors Cert(0)/SPKI(1) and matching types
+Full(0), SHA-256(1) and SHA-512(2) are supported.
+
+Verification is fail-closed. Unknown usage, selector or matching type
+values, malformed association data and owner-name mismatches are reported
+in `result.unusable_associations` rather than trusted; records not marked
+as DNSSEC SECURE raise `Dnsruby::DANE::ArgumentError` before any matching;
+and a peer that no usable association matches raises
+`Dnsruby::DANE::VerificationError`. A runnable walkthrough with locally
+generated certificates is in `demo/dane_verify.rb`.
+
 Dependencies
 ------------
 
