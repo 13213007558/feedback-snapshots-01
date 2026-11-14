@@ -29,28 +29,47 @@ module Loofah
   #
   module ScrubBehavior
     module Node # :nodoc:
-      def scrub!(scrubber)
+      def scrub!(scrubber, evidence: nil)
         #
         #  yes. this should be three separate methods. but nokogiri decorates (or not) based on
         #  whether the module name has already been included. and since documents get decorated just
         #  like their constituent nodes, we need to jam all the logic into a single module.
         #
         scrubber = ScrubBehavior.resolve_scrubber(scrubber)
+        recorder = ScrubBehavior.resolve_evidence(evidence)
         case self
         when Nokogiri::XML::Document
-          scrubber.traverse(root) if root
+          if recorder
+            scrubber.traverse(root, evidence: recorder) if root
+          else
+            scrubber.traverse(root) if root
+          end
         when Nokogiri::XML::DocumentFragment
-          children.scrub!(scrubber)
+          if recorder
+            recorder.with_step(scrubber) do
+              children.each { |child| scrubber.traverse(child, evidence: recorder) }
+            end
+          else
+            children.each { |child| scrubber.traverse(child) }
+          end
         else
-          scrubber.traverse(self)
+          recorder ? scrubber.traverse(self, evidence: recorder) : scrubber.traverse(self)
         end
         self
       end
     end
 
     module NodeSet # :nodoc:
-      def scrub!(scrubber)
-        each { |node| node.scrub!(scrubber) }
+      def scrub!(scrubber, evidence: nil)
+        recorder = ScrubBehavior.resolve_evidence(evidence)
+        if recorder
+          resolved = ScrubBehavior.resolve_scrubber(scrubber)
+          recorder.with_step(resolved) do
+            each { |node| node.scrub!(resolved, evidence: recorder) }
+          end
+        else
+          each { |node| node.scrub!(scrubber) }
+        end
         self
       end
     end
@@ -63,6 +82,10 @@ module Loofah
         end
 
         scrubber
+      end
+
+      def resolve_evidence(evidence) # :nodoc:
+        Loofah::Evidence.resolve(evidence)
       end
     end
   end
@@ -132,8 +155,33 @@ module Loofah
 
   module HtmlDocumentBehavior # :nodoc:
     module ClassMethods
-      def parse(*args, &block)
-        remove_comments_before_html_element(super)
+      def parse(*args, evidence: nil, **kwargs, &block)
+        recorder = Loofah::Evidence.resolve(evidence)
+        recorder&.note_input(args.first, format: evidence_format, collector: html5_parser?)
+
+        options = kwargs.dup
+        if recorder && html5_parser? && !options.key?(:max_errors)
+          options[:max_errors] = Loofah::Evidence::DEFAULT_MAX_PARSER_NOTICES
+        end
+
+        doc = if options.empty?
+          super(*args, &block)
+        else
+          super(*args, **options, &block)
+        end
+        Loofah::Evidence.capture_parser_diagnostics(recorder, doc)
+        remove_comments_before_html_element(doc)
+      end
+
+
+      # The structural format name used in evidence input metadata.
+      def evidence_format
+        name = self.name.to_s.split("::")
+        "#{name[-2]}_#{name[-1]}".downcase.to_sym
+      end
+
+      def html5_parser?
+        defined?(Loofah::HTML5::Document) && self <= Loofah::HTML5::Document
       end
 
       private
@@ -168,13 +216,31 @@ module Loofah
 
   module HtmlFragmentBehavior # :nodoc:
     module ClassMethods
-      def parse(tags, encoding = nil)
+      def parse(tags, encoding = nil, evidence: nil, **options)
+        recorder = Loofah::Evidence.resolve(evidence)
+        recorder&.note_input(tags, format: evidence_format, collector: html5_parser?)
+
         doc = document_klass.new
 
         encoding ||= tags.respond_to?(:encoding) ? tags.encoding.name : "UTF-8"
         doc.encoding = encoding
 
-        new(doc, tags)
+        if recorder && html5_parser? && !options.key?(:max_errors)
+          options[:max_errors] = Loofah::Evidence::DEFAULT_MAX_PARSER_NOTICES
+        end
+
+        fragment = options.empty? ? new(doc, tags) : new(doc, tags, **options)
+        Loofah::Evidence.capture_parser_diagnostics(recorder, fragment)
+        fragment
+      end
+
+      def evidence_format
+        name = self.name.to_s.split("::")
+        "#{name[-2]}_#{name[-1]}".downcase.to_sym
+      end
+
+      def html5_parser?
+        defined?(Loofah::HTML5::DocumentFragment) && self <= Loofah::HTML5::DocumentFragment
       end
 
       def document_klass

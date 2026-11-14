@@ -117,11 +117,24 @@ module Loofah
       end
 
       def scrub(node)
-        return CONTINUE if html5lib_sanitize(node) == CONTINUE
+        sanitized = html5lib_sanitize(node)
+        return CONTINUE if sanitized == CONTINUE
 
+        path = evidence_path(node)
+        retained = node.children.to_a
         node.before(node.children)
         node.remove
+        unless sanitized == REPLACED
+          record_unwrap(node, reason: strip_reason(node),
+            retained_nodes: retained.select { |child| attached?(child) }, path: path)
+        end
         STOP
+      end
+
+      private
+
+      def strip_reason(node)
+        node.element? && !HTML5::Scrub.allowed_element?(node.name) ? :element_not_allowed : :node_not_allowed
       end
     end
 
@@ -140,10 +153,19 @@ module Loofah
       end
 
       def scrub(node)
-        return CONTINUE if html5lib_sanitize(node) == CONTINUE
+        sanitized = html5lib_sanitize(node)
+        return CONTINUE if sanitized == CONTINUE
 
+        path = evidence_path(node)
         node.remove
+        record_removal(node, reason: prune_reason(node), path: path) unless sanitized == REPLACED
         STOP
+      end
+
+      private
+
+      def prune_reason(node)
+        node.element? && !HTML5::Scrub.allowed_element?(node.name) ? :element_not_allowed : :node_not_allowed
       end
     end
 
@@ -162,10 +184,17 @@ module Loofah
       end
 
       def scrub(node)
-        return CONTINUE if html5lib_sanitize(node) == CONTINUE
+        sanitized = html5lib_sanitize(node)
+        return CONTINUE if sanitized == CONTINUE
 
-        node.add_next_sibling(Nokogiri::XML::Text.new(node.to_s, node.document))
+        path = evidence_path(node)
+        replacement = Nokogiri::XML::Text.new(node.to_s, node.document)
+        node.add_next_sibling(replacement)
         node.remove
+        unless sanitized == REPLACED
+          record_rewrite(node, reason: :element_not_allowed, path: path, replacement_nodes: [replacement],
+            details: { replacement: :text })
+        end
         STOP
       end
     end
@@ -194,21 +223,42 @@ module Loofah
       end
 
       def scrub(node)
+        path = evidence_path(node)
+        reason = whitewash_reason(node)
         case node.type
         when Nokogiri::XML::Node::ELEMENT_NODE
           if HTML5::Scrub.allowed_element?(node.name)
-            node.attributes.each { |attr| node.remove_attribute(attr.first) }
+            node.attributes.each do |attr|
+              before = attr[1]
+              node.remove_attribute(attr.first)
+              record_attribute_removal(node, attr.first, reason: :whitewash_attribute, before_value: before)
+            end
             return CONTINUE if node.namespaces.empty?
           end
         when Nokogiri::XML::Node::TEXT_NODE, Nokogiri::XML::Node::CDATA_SECTION_NODE
           if HTML5::Scrub.cdata_needs_escaping?(node)
-            node.before(HTML5::Scrub.cdata_escape(node))
+            escaped = HTML5::Scrub.cdata_escape(node)
+            node.before(escaped)
+            record_rewrite(node, reason: :unsafe_cdata_escaped, path: path, replacement_nodes: [escaped],
+              details: { replacement: escaped.cdata? ? :cdata : :text })
+            node.remove
+            STOP
           else
             return CONTINUE
           end
         end
         node.remove
+        record_removal(node, reason: reason, path: path)
         STOP
+      end
+
+      private
+
+      def whitewash_reason(node)
+        return :element_not_allowed if node.element? && !HTML5::Scrub.allowed_element?(node.name)
+        return :namespaced_element if node.element?
+
+        :node_not_allowed
       end
     end
 
@@ -229,6 +279,7 @@ module Loofah
       def scrub(node)
         return CONTINUE unless (node.type == Nokogiri::XML::Node::ELEMENT_NODE) && (node.name == "a")
 
+        record_attribute_change(node, "rel", "nofollow", :rel_nofollow)
         append_attribute(node, "rel", "nofollow")
         STOP
       end
@@ -257,7 +308,10 @@ module Loofah
 
         href = node["href"]
 
-        node.set_attribute("target", "_blank") if href && href[0] != "#"
+        if href && href[0] != "#"
+          record_attribute_change(node, "target", "_blank", :target_blank)
+          node.set_attribute("target", "_blank")
+        end
 
         STOP
       end
@@ -280,6 +334,7 @@ module Loofah
       def scrub(node)
         return CONTINUE unless (node.type == Nokogiri::XML::Node::ELEMENT_NODE) && (node.name == "a")
 
+        record_attribute_change(node, "rel", "noopener", :rel_noopener)
         append_attribute(node, "rel", "noopener")
         STOP
       end
@@ -302,6 +357,7 @@ module Loofah
       def scrub(node)
         return CONTINUE unless (node.type == Nokogiri::XML::Node::ELEMENT_NODE) && (node.name == "a")
 
+        record_attribute_change(node, "rel", "noreferrer", :rel_noreferrer)
         append_attribute(node, "rel", "noreferrer")
         STOP
       end
@@ -316,13 +372,17 @@ module Loofah
       def scrub(node)
         return CONTINUE unless Loofah::Elements::LINEBREAKERS.include?(node.name)
 
+        path = evidence_path(node)
         replacement = if Loofah::Elements::INLINE_LINE_BREAK.include?(node.name)
           "\n"
         else
           "\n#{node.content}\n"
         end
-        node.add_next_sibling(Nokogiri::XML::Text.new(replacement, node.document))
+        text_node = Nokogiri::XML::Text.new(replacement, node.document)
+        node.add_next_sibling(text_node)
         node.remove
+        record_rewrite(node, reason: :newline_block_element, target: :element, path: path,
+          replacement_nodes: [text_node], details: { replacement: :text })
       end
     end
 
@@ -348,7 +408,13 @@ module Loofah
 
       def scrub(node)
         if node.type == Nokogiri::XML::Node::TEXT_NODE || node.type == Nokogiri::XML::Node::CDATA_SECTION_NODE
-          node.content = node.content.gsub(/\u2028|\u2029/, "")
+          before = node.content
+          after = before.gsub(/\u2028|\u2029/, "")
+          if before != after
+            record_rewrite(node, reason: :unprintable_character, target: :text,
+              details: { removed_characters: before.length - after.length })
+          end
+          node.content = after
         end
         CONTINUE
       end
@@ -373,18 +439,24 @@ module Loofah
         return CONTINUE unless (node.type == Nokogiri::XML::Node::ELEMENT_NODE) && (node.name == "p")
         return CONTINUE unless node.at_xpath("./br[following-sibling::br]")
 
+        path = evidence_path(node)
         new_paragraph = node.add_previous_sibling("<p>").first
 
         node.children.each do |child|
           remove_blank_text_nodes(child)
         end
 
+        split_nodes = []
+        merged = []
         node.children.each do |child|
           # already unlinked
           next if child.parent.nil?
 
           if child.name == "br" && child.next_sibling&.name == "br"
             new_paragraph = node.add_previous_sibling("<p>").first
+            split_nodes << new_paragraph
+            merged << child.next_sibling
+            merged << child
             child.next_sibling.unlink
             child.unlink
           else
@@ -393,6 +465,11 @@ module Loofah
         end
 
         node.unlink
+        record_rewrite(node, reason: :double_breakpoint, target: :element, path: path,
+          replacement_nodes: [new_paragraph], details: {
+            paragraphs_created: split_nodes.length + 1,
+            line_breaks_removed: merged.length,
+          })
         CONTINUE
       end
 

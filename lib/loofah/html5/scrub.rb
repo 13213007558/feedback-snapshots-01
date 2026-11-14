@@ -68,7 +68,11 @@ module Loofah
         end
 
         #  alternative implementation of the html5lib attribute scrubbing algorithm
-        def scrub_attributes(node)
+        #
+        #  If an +evidence+ recorder is given, attribute removals and rewrites are reported to it,
+        #  with the html5lib rule that rejected or changed each value as the reason. The parser is
+        #  never consulted here: only changes made by this method are reported.
+        def scrub_attributes(node, evidence: nil)
           node.attribute_nodes.each do |attr_node|
             attr_name = prefixed_attribute_name(attr_node)
 
@@ -78,21 +82,25 @@ module Loofah
 
             unless SafeList::ALLOWED_ATTRIBUTES.include?(attr_name)
               attr_node.remove
+              record_attribute_evidence(evidence, node, attr_name, :attribute_not_allowed)
               next
             end
 
-            scrub_attribute_value(node, attr_node, attr_name)
+            next if scrub_attribute_value(node, attr_node, attr_name, evidence: evidence)
           end
 
-          scrub_css_attribute(node)
+          scrub_css_attribute(node, evidence: evidence)
 
           node.attribute_nodes.each do |attr_node|
             if attr_node.value !~ /[^[:space:]]/ && attr_node.name !~ DATA_ATTRIBUTE_NAME
+              before = attr_node.value
               node.remove_attribute(attr_node.name)
+              record_attribute_evidence(evidence, node, attr_node.name, :blank_attribute,
+                before_value: before)
             end
           end
 
-          force_correct_attribute_escaping!(node)
+          force_correct_attribute_escaping!(node, evidence: evidence)
         end
 
         #  The name an attribute is matched by in the safelists, qualified by its namespace prefix.
@@ -107,13 +115,23 @@ module Loofah
         #  Apply the html5lib value rules to an attribute that is already permitted by name.
         #  Returns true when `scrub_uri_attribute` removed the attribute, in which case the caller
         #  should stop scrubbing it.
-        def scrub_attribute_value(node, attr_node, attr_name = prefixed_attribute_name(attr_node))
+        def scrub_attribute_value(node, attr_node, attr_name = prefixed_attribute_name(attr_node), evidence: nil)
+          original_value = attr_node.value
+
           if SafeList::ATTR_VAL_IS_URI.include?(attr_name)
-            return true if scrub_uri_attribute(attr_node)
+            if scrub_uri_attribute(attr_node)
+              record_attribute_evidence(evidence, node, attr_name, :unsafe_uri, before_value: original_value)
+              return true
+            end
           end
 
           if SafeList::SVG_ATTR_VAL_ALLOWS_REF.include?(attr_name)
+            before = attr_node.value
             scrub_attribute_that_allows_local_ref(attr_node)
+            if attr_node.value != before
+              record_attribute_evidence(evidence, node, attr_name, :local_reference_only,
+                before_value: before, after_value: attr_node.value)
+            end
           end
 
           # The whitespace run is `[^\S\n]*` rather than `\s*` so that it cannot cross a line
@@ -122,29 +140,55 @@ module Loofah
           if SafeList::SVG_ALLOW_LOCAL_HREF.include?(node.name) &&
               SafeList::SVG_HREF_ATTRIBUTES.include?(attr_name) &&
               attr_node.value =~ /^[^\S\n]*[^#\s]/
+            removed_value = attr_node.value
             attr_node.remove
+            record_attribute_evidence(evidence, node, attr_name, :local_reference_only,
+              before_value: removed_value, removed: true)
           end
 
           false
         end
 
-        def scrub_css_attribute(node)
+        def scrub_css_attribute(node, evidence: nil)
           style = node.attributes["style"]
-          style.value = scrub_css(style.value) if style
+          return unless style
+
+          before = style.value
+          after, dropped = scrub_css_properties(before)
+          return if before == after
+
+          style.value = after
+          details = dropped.empty? ? {} : { dropped_declarations: dropped }
+          record_attribute_evidence(evidence, node, "style", :css_rewritten,
+            before_value: before, after_value: after, target: :style, details: details)
         end
 
         def scrub_css(style)
+          scrub_css_properties(style)[0]
+        end
+
+        # Returns the sanitized stylesheet and a list of dropped declarations, each described by
+        # the CSS property name (when parseable) and a symbolic reason. Values are never returned.
+        def scrub_css_properties(style)
           style_tree = Crass.parse_properties(style)
           sanitized_tree = []
+          dropped = []
 
           style_tree.each do |node|
             next unless node[:node] == :property
-            next if node[:children].any? { |child| CSS_URLISH_NODES.include?(child[:node]) }
+
+            if node[:children].any? { |child| CSS_URLISH_NODES.include?(child[:node]) }
+              dropped << css_drop(node, :css_url)
+              next
+            end
 
             name = node[:name].downcase
-            next unless SafeList::ALLOWED_CSS_PROPERTIES.include?(name) ||
-              SafeList::ALLOWED_SVG_PROPERTIES.include?(name) ||
-              SafeList::SHORTHAND_CSS_PROPERTIES.include?(name.split("-").first)
+            unless SafeList::ALLOWED_CSS_PROPERTIES.include?(name) ||
+                SafeList::ALLOWED_SVG_PROPERTIES.include?(name) ||
+                SafeList::SHORTHAND_CSS_PROPERTIES.include?(name.split("-").first)
+              dropped << css_drop(node, :css_property_not_allowed)
+              next
+            end
 
             value = node[:children].filter_map do |child|
               case child[:node]
@@ -170,7 +214,10 @@ module Loofah
               end
             end.join.strip
 
-            next if value.empty?
+            if value.empty?
+              dropped << css_drop(node, :css_value_not_allowed)
+              next
+            end
 
             value << CSS_WHITESPACE << CSS_IMPORTANT if node[:important]
             # Dropping tokens can join the survivors into new ones (`url/(a)*/(b)` becomes `url/*/`),
@@ -179,13 +226,25 @@ module Loofah
             # stringify unchanged, so the tokens checked are exactly the tokens a browser will see.
             propstring = format("%s:%s", name, value)
             sanitized_node = Crass.parse_properties(propstring).first
-            next unless Crass::Parser.stringify(sanitized_node) == propstring
-            next if css_property_unsafe?(sanitized_node)
+            unless Crass::Parser.stringify(sanitized_node) == propstring
+              dropped << css_drop(node, :css_rebuilt_value_not_safe)
+              next
+            end
+            if css_property_unsafe?(sanitized_node)
+              dropped << css_drop(node, :css_function_not_allowed)
+              next
+            end
 
             sanitized_tree << sanitized_node << CRASS_SEMICOLON
           end
 
-          Crass::Parser.stringify(sanitized_tree)
+          [Crass::Parser.stringify(sanitized_tree), dropped]
+        end
+
+        def css_drop(node, reason)
+          name = node[:name].to_s.downcase
+          name = "unknown" unless name.match?(/\A[a-z-][a-z0-9-]*\z/)
+          { property: name, reason: reason }
         end
 
         # Dropping a token joins its neighbours, which can build a token that was not in the input:
@@ -296,7 +355,7 @@ module Loofah
         #
         #  see comments about CVE-2018-8048 within the tests for more information
         #
-        def force_correct_attribute_escaping!(node)
+        def force_correct_attribute_escaping!(node, evidence: nil)
           return unless Nokogiri::VersionInfo.instance.libxml2?
 
           node.attribute_nodes.each do |attr_node|
@@ -310,10 +369,61 @@ module Loofah
             #  only encodes space and double-quote, to mimic
             #  pre-2.9.2 behavior
             #
+            before = attr_node.value
             encoding = attr_node.value.encoding
             attr_node.value = attr_node.value.gsub(/[ "]/) do |m|
               "%" + m.unpack("H2" * m.bytesize).join("%").upcase
             end.force_encoding(encoding)
+            if attr_node.value != before
+              record_attribute_evidence(evidence, node, attr_node.name, :attribute_escaping,
+                before_value: before, after_value: attr_node.value)
+            end
+          end
+        end
+
+        def record_attribute_evidence(evidence, node, attribute_name, reason, before_value: nil,
+          after_value: nil, target: :attribute, details: {}, removed: false)
+          return unless evidence
+
+          case reason
+          when :attribute_not_allowed, :unsafe_uri, :blank_attribute
+            evidence.record_attribute_removal(
+              node: node,
+              attribute: attribute_name,
+              reason: reason,
+              before_value: before_value,
+              details: details,
+            )
+          when :local_reference_only
+            if removed
+              evidence.record_attribute_removal(
+                node: node,
+                attribute: attribute_name,
+                reason: reason,
+                before_value: before_value,
+                details: details,
+              )
+            else
+              evidence.record_attribute_rewrite(
+                node: node,
+                attribute: attribute_name,
+                reason: reason,
+                before_value: before_value,
+                after_value: after_value,
+                target: target,
+                details: details,
+              )
+            end
+          else
+            evidence.record_attribute_rewrite(
+              node: node,
+              attribute: attribute_name,
+              reason: reason,
+              before_value: before_value,
+              after_value: after_value,
+              target: target,
+              details: details,
+            )
           end
         end
 

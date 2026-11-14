@@ -243,6 +243,53 @@ doc.scrub!(:double_breakpoint) # where `<br><br>` appears in a `p` tag, close th
 See `Loofah::Scrubbers` for more details and example usage.
 
 
+### Change Evidence
+
+Loofah can optionally record why the output looks the way it does. Pass a
+`Loofah::Evidence::Recorder` to `scrub!`:
+
+``` ruby
+recorder = Loofah::Evidence::Recorder.new
+
+doc = Loofah.html5_fragment(unsafe_html)
+doc.scrub!(:prune, evidence: recorder)
+
+recorder.entries.each do |entry|
+  puts entry.summary
+  # => "removed <script> (element not allowed)"
+end
+
+recorder.final_nodes.each do |node|
+  puts "#{node[:id]} now at #{node[:path]}"
+  # => "n-0001 now at /div[1]/p[1]"
+end
+```
+
+Each entry records the scrubber step, the structural path, a symbolic reason,
+and the stable node id of the affected node. The record is deliberately
+value-free by default: text, comments, attribute values, CSS declarations and
+URLs are not copied. `include_values: true` opts into values for trusted local
+debugging, but passwords, token-like attribute names, URL userinfo and query
+strings are still redacted.
+
+Parser diagnostics are kept in a separate `parser_notices` channel and are
+never reported as scrubber actions. To collect them, pass the recorder while
+parsing (the HTML5 parser is asked to report diagnostics automatically):
+
+``` ruby
+recorder = Loofah::Evidence::Recorder.new
+Loofah.html5_fragment(input, evidence: recorder).scrub!(:prune, evidence: recorder)
+```
+
+Calling `scrub!` on a document parsed without a recorder does not blame the
+parser: `recorder.parser_diagnostics_status` is `:not_collected`, and the
+scrubber changes are recorded as usual.
+
+Re-running the same input with the same scrubbers yields the same entry
+sequence and `recorder.fingerprint`. Evidence is opt-in and off by default, so
+existing calls produce exactly the same output as before.
+
+
 ### Chaining Scrubbers
 
 You can chain scrubbers:

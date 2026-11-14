@@ -18,6 +18,7 @@ require_relative "loofah/html5/safelist"
 require_relative "loofah/html5/libxml2_workarounds"
 require_relative "loofah/html5/scrub"
 
+require_relative "loofah/evidence"
 require_relative "loofah/scrubber"
 require_relative "loofah/scrubbers"
 
@@ -67,65 +68,69 @@ module Loofah
     # Shortcut for Loofah::HTML4::Document.parse(*args, &block)
     #
     # This method accepts the same parameters as Nokogiri::HTML4::Document.parse
-    def html4_document(*args, &block)
-      Loofah::HTML4::Document.parse(*args, &block)
+    def html4_document(*args, evidence: nil, **kwargs, &block)
+      Loofah::HTML4::Document.parse(*args, evidence: evidence, **kwargs, &block)
     end
 
     # Shortcut for Loofah::HTML4::DocumentFragment.parse(*args, &block)
     #
     # This method accepts the same parameters as Nokogiri::HTML4::DocumentFragment.parse
-    def html4_fragment(*args, &block)
-      Loofah::HTML4::DocumentFragment.parse(*args, &block)
+    def html4_fragment(*args, evidence: nil, **kwargs, &block)
+      Loofah::HTML4::DocumentFragment.parse(*args, evidence: evidence, **kwargs, &block)
     end
 
     # Shortcut for Loofah::HTML4::Document.parse(string_or_io).scrub!(method)
-    def scrub_html4_document(string_or_io, method)
-      Loofah::HTML4::Document.parse(string_or_io).scrub!(method)
+    def scrub_html4_document(string_or_io, method, evidence: nil)
+      doc = Loofah::HTML4::Document.parse(string_or_io, evidence: evidence)
+      evidence ? doc.scrub!(method, evidence: evidence) : doc.scrub!(method)
     end
 
     # Shortcut for Loofah::HTML4::DocumentFragment.parse(string_or_io).scrub!(method)
-    def scrub_html4_fragment(string_or_io, method)
-      Loofah::HTML4::DocumentFragment.parse(string_or_io).scrub!(method)
+    def scrub_html4_fragment(string_or_io, method, evidence: nil)
+      fragment = Loofah::HTML4::DocumentFragment.parse(string_or_io, evidence: evidence)
+      evidence ? fragment.scrub!(method, evidence: evidence) : fragment.scrub!(method)
     end
 
     if Loofah.html5_support?
       # Shortcut for Loofah::HTML5::Document.parse(*args, &block)
       #
       # This method accepts the same parameters as Nokogiri::HTML5::Document.parse
-      def html5_document(*args, &block)
-        Loofah::HTML5::Document.parse(*args, &block)
+      def html5_document(*args, evidence: nil, **kwargs, &block)
+        Loofah::HTML5::Document.parse(*args, evidence: evidence, **kwargs, &block)
       end
 
       # Shortcut for Loofah::HTML5::DocumentFragment.parse(*args, &block)
       #
       # This method accepts the same parameters as Nokogiri::HTML5::DocumentFragment.parse
-      def html5_fragment(*args, &block)
-        Loofah::HTML5::DocumentFragment.parse(*args, &block)
+      def html5_fragment(*args, evidence: nil, **kwargs, &block)
+        Loofah::HTML5::DocumentFragment.parse(*args, evidence: evidence, **kwargs, &block)
       end
 
       # Shortcut for Loofah::HTML5::Document.parse(string_or_io).scrub!(method)
-      def scrub_html5_document(string_or_io, method)
-        Loofah::HTML5::Document.parse(string_or_io).scrub!(method)
+      def scrub_html5_document(string_or_io, method, evidence: nil)
+        doc = Loofah::HTML5::Document.parse(string_or_io, evidence: evidence)
+        evidence ? doc.scrub!(method, evidence: evidence) : doc.scrub!(method)
       end
 
       # Shortcut for Loofah::HTML5::DocumentFragment.parse(string_or_io).scrub!(method)
-      def scrub_html5_fragment(string_or_io, method)
-        Loofah::HTML5::DocumentFragment.parse(string_or_io).scrub!(method)
+      def scrub_html5_fragment(string_or_io, method, evidence: nil)
+        fragment = Loofah::HTML5::DocumentFragment.parse(string_or_io, evidence: evidence)
+        evidence ? fragment.scrub!(method, evidence: evidence) : fragment.scrub!(method)
       end
     else
-      def html5_document(*args, &block)
+      def html5_document(*args, evidence: nil, **kwargs, &block)
         raise NotImplementedError, "Loofah::HTML5 is not supported by your version of Nokogiri"
       end
 
-      def html5_fragment(*args, &block)
+      def html5_fragment(*args, evidence: nil, **kwargs, &block)
         raise NotImplementedError, "Loofah::HTML5 is not supported by your version of Nokogiri"
       end
 
-      def scrub_html5_document(string_or_io, method)
+      def scrub_html5_document(string_or_io, method, evidence: nil)
         raise NotImplementedError, "Loofah::HTML5 is not supported by your version of Nokogiri"
       end
 
-      def scrub_html5_fragment(string_or_io, method)
+      def scrub_html5_fragment(string_or_io, method, evidence: nil)
         raise NotImplementedError, "Loofah::HTML5 is not supported by your version of Nokogiri"
       end
     end
@@ -138,25 +143,27 @@ module Loofah
     # Shortcut for Loofah::XML::Document.parse(*args, &block)
     #
     # This method accepts the same parameters as Nokogiri::XML::Document.parse
-    def xml_document(*args, &block)
-      Loofah::XML::Document.parse(*args, &block)
+    def xml_document(*args, evidence: nil, **kwargs, &block)
+      Loofah::XML::Document.parse(*args, evidence: evidence, **kwargs, &block)
     end
 
     # Shortcut for Loofah::XML::DocumentFragment.parse(*args, &block)
     #
     # This method accepts the same parameters as Nokogiri::XML::DocumentFragment.parse
-    def xml_fragment(*args, &block)
-      Loofah::XML::DocumentFragment.parse(*args, &block)
+    def xml_fragment(*args, evidence: nil, **kwargs, &block)
+      Loofah::XML::DocumentFragment.parse(*args, evidence: evidence, **kwargs, &block)
     end
 
     # Shortcut for Loofah.xml_fragment(string_or_io).scrub!(method)
-    def scrub_xml_fragment(string_or_io, method)
-      Loofah.xml_fragment(string_or_io).scrub!(method)
+    def scrub_xml_fragment(string_or_io, method, evidence: nil)
+      fragment = Loofah.xml_fragment(string_or_io, evidence: evidence)
+      evidence ? fragment.scrub!(method, evidence: evidence) : fragment.scrub!(method)
     end
 
     # Shortcut for Loofah.xml_document(string_or_io).scrub!(method)
-    def scrub_xml_document(string_or_io, method)
-      Loofah.xml_document(string_or_io).scrub!(method)
+    def scrub_xml_document(string_or_io, method, evidence: nil)
+      doc = Loofah.xml_document(string_or_io, evidence: evidence)
+      evidence ? doc.scrub!(method, evidence: evidence) : doc.scrub!(method)
     end
 
     # A helper to remove extraneous whitespace from text-ified HTML

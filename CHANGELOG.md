@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* `Loofah::Evidence::Recorder` and the optional `evidence:` keyword on parsing and `scrub!` methods. The recorder explains what a scrubber removed, unwrapped, or rewrote, with structural paths, symbolic reasons, and stable node ids that correlate with the retained tree. Records are value-free by default (no text, attribute values, CSS declarations, or URL query strings); `include_values: true` opts into values with credential and query-string redaction. Parser diagnostics are recorded in a separate channel and are never attributed to a scrubber. Scrubbing without a recorder is unchanged. @flavorjones
+
 ## 2.25.3 / 2026-11-01
 
 ### Security
