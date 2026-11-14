@@ -1,0 +1,23 @@
+[
+  {
+    "repo": "rack",
+    "file": ".feedback/specs/rfc9530.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9530.txt",
+    "sha256": "544dbb7d9afceafa8c9931d9924ca6cff2b4807274166d7ed2483342ef2cdd6a",
+    "bytes": 67152
+  },
+  {
+    "repo": "rack",
+    "file": ".feedback/specs/rfc9421.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9421.txt",
+    "sha256": "612655786bf4293bfc486e4177571467fbb3de6e6f0eea90cb74c346a34fdf3c",
+    "bytes": 241160
+  },
+  {
+    "repo": "rack",
+    "file": ".feedback/specs/rfc8941.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc8941.txt",
+    "sha256": "92e07becbe27974319d79de6195e72e25062b4193f68623e90ea4f7deaf33bb9",
+    "bytes": 60854
+  }
+]
