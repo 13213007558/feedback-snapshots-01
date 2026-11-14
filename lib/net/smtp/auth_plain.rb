@@ -1,6 +1,7 @@
 class Net::SMTP
   class AuthPlain < Net::SMTP::Authenticator
     auth_type :plain
+    auth_credential :password
 
     def auth(user, secret)
       finish('AUTH PLAIN ' + base64_encode("\0#{user}\0#{secret}"))

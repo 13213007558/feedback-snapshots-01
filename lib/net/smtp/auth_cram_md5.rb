@@ -8,6 +8,7 @@ end
 class Net::SMTP
   class AuthCramMD5 < Net::SMTP::Authenticator
     auth_type :cram_md5
+    auth_credential :password
 
     def auth(user, secret)
       challenge = continue('AUTH CRAM-MD5')

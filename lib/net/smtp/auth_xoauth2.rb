@@ -1,6 +1,7 @@
 class Net::SMTP
   class AuthXoauth2 < Net::SMTP::Authenticator
     auth_type :xoauth2
+    auth_credential :oauth2
 
     def auth(user, secret)
       token = xoauth2_string(user, secret)

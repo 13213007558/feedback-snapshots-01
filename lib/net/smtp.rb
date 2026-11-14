@@ -71,6 +71,15 @@ module Net
     include SMTPError
   end
 
+  # Raised when an authentication policy cannot select exactly one mechanism
+  # from the currently advertised server capabilities.
+  #
+  # This is a client-side configuration/capability error, distinct from
+  # Net::SMTPAuthenticationError, which means the server rejected an
+  # authentication attempt.
+  class SMTPAuthMechanismError < ArgumentError
+  end
+
   #
   # == What is This Library?
   #
@@ -172,7 +181,7 @@ module Net
   # The Net::SMTP class supports the \SMTP extension for SASL Authentication
   # [RFC4954[https://www.rfc-editor.org/rfc/rfc4954.html]] and the following
   # SASL mechanisms: +PLAIN+, +LOGIN+ _(deprecated)_, and +CRAM-MD5+
-  # _(deprecated)_.
+  # _(deprecated)_, plus +XOAUTH2+ for OAuth 2.0 bearer tokens.
   #
   # To use \SMTP authentication, pass extra arguments to
   # SMTP.start or SMTP#start.
@@ -181,14 +190,43 @@ module Net
   #     Net::SMTP.start('your.smtp.server', 25,
   #                     user: 'Your Account', secret: 'Your Password', authtype: :plain)
   #
-  # Support for other SASL mechanisms-such as +EXTERNAL+, +OAUTHBEARER+,
-  # +SCRAM-SHA-256+, and +XOAUTH2+-will be added in a future release.
+  # +authtype+ always requests that exact mechanism.  It remains the
+  # explicit, backwards-compatible entry point.
+  #
+  # ==== Selecting a mechanism with a policy
+  #
+  # When several mechanisms are acceptable, +auth_policy+ selects exactly
+  # one mechanism from the caller's ordered allow-list and the server's
+  # current EHLO +AUTH+ capabilities.  The policy also names the credential
+  # type, so an OAuth token is never offered to a password mechanism:
+  #
+  #     policy = Net::SMTP::AuthPolicy.new(
+  #       mechanisms: [:xoauth2, :plain],
+  #       credential: :oauth2
+  #     )
+  #     Net::SMTP.start('your.smtp.server', 587, user: 'Your Account',
+  #                     secret: access_token, auth_policy: policy)
+  #
+  # A policy Hash is accepted as well:
+  #
+  #     Net::SMTP.start('your.smtp.server', 587, user: 'Your Account',
+  #                     secret: access_token,
+  #                     auth_policy: {mechanisms: [:xoauth2], credential: :oauth2})
+  #
+  # Selection happens after the final EHLO, including the EHLO performed
+  # after STARTTLS.  If nothing matches, Net::SMTPAuthMechanismError is
+  # raised before any authentication data is sent.  If the server rejects
+  # the selected mechanism, Net::SMTPAuthenticationError propagates as-is:
+  # the library never retries the same secret using another mechanism.
   #
   # The +LOGIN+ and +CRAM-MD5+ mechanisms are still available for backwards
   # compatibility, but are deprecated and should be avoided.
   #
   class SMTP < Protocol
     VERSION = "0.5.2"
+
+    # Alias for Net::SMTPAuthMechanismError.
+    AuthMechanismError = SMTPAuthMechanismError
 
     # The default SMTP port number, 25.
     def SMTP.default_port
@@ -322,19 +360,48 @@ module Net
 
     # Returns whether the server advertises support for the authentication type.
     # You cannot get valid result before opening SMTP session.
+    #
+    # The mechanism name is compared case-insensitively, and duplicate
+    # advertisements are ignored.
     def auth_capable?(type)
       return nil unless @capabilities
-      return false unless @capabilities['AUTH']
-      @capabilities['AUTH'].include?(type)
+      auth_mechanisms.include?(Authenticator.normalize_type(type))
     end
 
-    # Returns supported authentication methods on this server.
+    # Returns the authentication mechanisms advertised by the server, in EHLO
+    # order and without duplicates, as upper-case Symbols.
+    #
+    # This reflects the most recent EHLO response.  In particular, after
+    # STARTTLS it reflects the capabilities re-advertised on the encrypted
+    # connection, which may differ from the pre-TLS list.
+    #
+    # You cannot get a valid value before opening an SMTP session.
+    def auth_mechanisms
+      return [] unless @capabilities
+      # A HELO fallback is not an EHLO response.  It cannot establish any
+      # valid AUTH extension advertisement, even if a malformed multi-line
+      # HELO reply looks like one.
+      return [] unless @esmtp
+      Array(@capabilities['AUTH']).map do |mechanism|
+        mechanism = mechanism.to_s.strip
+        mechanism.empty? ? nil : Authenticator.normalize_type(mechanism)
+      end.compact.uniq
+    end
+
+    # Returns the authentication method names advertised by the server, in
+    # EHLO order, with duplicate advertisements removed.  The names retain the
+    # case used by the server; see #auth_mechanisms for normalized Symbols.
+    #
     # You cannot get valid value before opening SMTP session.
     def capable_auth_types
-      return [] unless @capabilities
-      return [] unless @capabilities['AUTH']
-      @capabilities['AUTH']
+      return [] unless @capabilities && @esmtp
+      Array(@capabilities['AUTH']).map { |mechanism| mechanism.to_s.strip }.reject(&:empty?).uniq
     end
+
+    # The mechanism most recently selected for an authentication attempt, as
+    # an upper-case Symbol, or nil if no attempt has been made.  When a policy
+    # is used this records the single mechanism chosen for the attempt.
+    attr_reader :auth_mechanism
 
     # true if this object uses SMTP/TLS (SMTPS).
     def tls?
@@ -455,7 +522,7 @@ module Net
 
     #
     # :call-seq:
-    #  start(address, port = nil, helo: 'localhost', user: nil, secret: nil, authtype: nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil) { |smtp| ... }
+    #  start(address, port = nil, helo: 'localhost', user: nil, secret: nil, authtype: nil, auth_policy: nil, mechanisms: nil, credential: nil, tls: false, starttls: :auto, tls_verify: true, tls_hostname: nil, ssl_context_params: nil) { |smtp| ... }
     #  start(address, port = nil, helo = 'localhost', user = nil, secret = nil, authtype = nil) { |smtp| ... }
     #
     # Creates a new Net::SMTP object and connects to the server.
@@ -510,6 +577,13 @@ module Net
     #
     # +authtype+ is the SASL authentication mechanism.
     #
+    # +auth_policy+ is an alternative to +authtype+: a Net::SMTP::AuthPolicy
+    # (or equivalent Hash) that selects exactly one mechanism from the
+    # server's current EHLO capabilities.  See Net::SMTP@Selecting+a+mechanism+with+a+policy.
+    # +authtype+ and +auth_policy+ are mutually exclusive.  The policy may also
+    # be expressed as +mechanisms:+ (ordered allow-list, alias +allowed:+) and
+    # +credential:+ (alias +credential_type:+).
+    #
     # +user+ is the authentication or authorization identity.
     #
     # +secret+ or +password+ is your password or other authentication token.
@@ -534,6 +608,9 @@ module Net
     #
     def SMTP.start(address, port = nil, *args, helo: nil,
                    user: nil, secret: nil, password: nil, authtype: nil,
+                   auth_policy: nil, mechanisms: nil, allowed: nil, order: nil,
+                   credential: nil, credential_type: nil,
+                   auth_mechanisms: nil, credential_kind: nil,
                    tls: false, starttls: :auto,
                    tls_verify: true, tls_hostname: nil, ssl_context_params: nil,
                    &block)
@@ -542,7 +619,7 @@ module Net
       user ||= args[1]
       secret ||= password || args[2]
       authtype ||= args[3]
-      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params).start(helo: helo, user: user, secret: secret, authtype: authtype, &block)
+      new(address, port, tls: tls, starttls: starttls, tls_verify: tls_verify, tls_hostname: tls_hostname, ssl_context_params: ssl_context_params).start(helo: helo, user: user, secret: secret, authtype: authtype, auth_policy: auth_policy, mechanisms: mechanisms, allowed: allowed, order: order, credential: credential, credential_type: credential_type, auth_mechanisms: auth_mechanisms, credential_kind: credential_kind, &block)
     end
 
     # +true+ if the \SMTP session has been started.
@@ -552,7 +629,7 @@ module Net
 
     #
     # :call-seq:
-    #  start(helo: 'localhost', user: nil, secret: nil, authtype: nil) { |smtp| ... }
+    #  start(helo: 'localhost', user: nil, secret: nil, authtype: nil, auth_policy: nil, mechanisms: nil, credential: nil) { |smtp| ... }
     #  start(helo = 'localhost', user = nil, secret = nil, authtype = nil) { |smtp| ... }
     #
     # Opens a TCP connection and starts the SMTP session.
@@ -566,6 +643,11 @@ module Net
     # desired.
     #
     # +authtype+ is the SASL authentication mechanism.
+    #
+    # +auth_policy+ is an alternative to +authtype+: a Net::SMTP::AuthPolicy
+    # (or equivalent Hash) that selects exactly one mechanism from the
+    # server's current EHLO capabilities.  +authtype+ and +auth_policy+ are
+    # mutually exclusive.
     #
     # +user+ is the authentication or authorization identity.
     #
@@ -615,12 +697,21 @@ module Net
     # * Net::ReadTimeout
     # * IOError
     #
-    def start(*args, helo: nil, user: nil, secret: nil, password: nil, authtype: nil)
+    def start(*args, helo: nil, user: nil, secret: nil, password: nil,
+              authtype: nil, auth_policy: nil, mechanisms: nil, allowed: nil,
+              order: nil, credential: nil, credential_type: nil,
+              auth_mechanisms: nil, credential_kind: nil)
       raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..4)" if args.size > 4
       helo ||= args[0] || 'localhost'
       user ||= args[1]
       secret ||= password || args[2]
       authtype ||= args[3]
+      auth_policy = policy_from_arguments(authtype, auth_policy, credential,
+                                          mechanisms: mechanisms, allowed: allowed,
+                                          order: order, auth_mechanisms: auth_mechanisms,
+                                          credential_type: credential_type,
+                                          credential_kind: credential_kind)
+      authtype = nil if auth_policy
       if defined?(OpenSSL::VERSION)
         ssl_context_params = @ssl_context_params&.dup || {}
         unless ssl_context_params.has_key?(:verify_mode)
@@ -635,13 +726,13 @@ module Net
       end
       if block_given?
         begin
-          do_start helo, user, secret, authtype
+          do_start helo, user, secret, authtype, auth_policy
           return yield(self)
         ensure
           do_finish
         end
       else
-        do_start helo, user, secret, authtype
+        do_start helo, user, secret, authtype, auth_policy
         return self
       end
     end
@@ -659,9 +750,13 @@ module Net
       TCPSocket.open address, port
     end
 
-    def do_start(helo_domain, user, secret, authtype)
+    def do_start(helo_domain, user, secret, authtype, auth_policy = nil)
       raise IOError, 'SMTP session already started' if @started
-      if user || secret || authtype
+      @auth_mechanism = nil
+      if auth_policy
+        AuthPolicy.coerce(auth_policy).validate_mechanisms!
+        Authenticator.check_args(user, secret)
+      elsif user || secret || authtype
         check_auth_args authtype, user, secret
       end
       @error_occurred = false
@@ -681,7 +776,11 @@ module Net
         # helo response may be different after STARTTLS
         do_helo helo_domain
       end
-      authenticate user, secret, (authtype || DEFAULT_AUTH_TYPE) if user
+      if auth_policy
+        authenticate_with_policy user, secret, auth_policy
+      elsif user
+        authenticate user, secret, (authtype || DEFAULT_AUTH_TYPE)
+      end
       @started = true
     ensure
       unless @started
@@ -714,8 +813,16 @@ module Net
     end
 
     def do_helo(helo_domain)
-      res = @esmtp ? ehlo(helo_domain) : helo(helo_domain)
-      @capabilities = res.capabilities
+      if @esmtp
+        res = ehlo(helo_domain)
+        @capabilities = res.capabilities
+      else
+        res = helo(helo_domain)
+        # HELO is not an extension negotiation.  A multi-line reply to HELO
+        # must not be parsed as an EHLO capability list, or a malformed or
+        # hostile server could fabricate AUTH/SMTPUTF8 support.
+        @capabilities = {}
+      end
     rescue SMTPError
       if @esmtp
         @esmtp = false
@@ -866,13 +973,134 @@ module Net
     # All arguments-other than +authtype+-are forwarded to the authenticator.
     # Different authenticators may interpret the +user+ and +secret+
     # arguments differently.
-    def authenticate(user, secret, authtype = DEFAULT_AUTH_TYPE)
+    #
+    # If +auth_policy+ is given instead of +authtype+, exactly one mechanism
+    # is selected from the server's current EHLO capabilities according to the
+    # policy, and only that mechanism is attempted.  A rejected attempt raises
+    # Net::SMTPAuthenticationError and is never retried with another
+    # mechanism.  See AuthPolicy.
+    #
+    # Instead of a single +auth_policy+ object, the ordered allow-list and the
+    # credential type may be passed separately with +mechanisms:+ (or
+    # +allowed:+ / +order:+) and +credential:+ (or +credential_type:+).
+    def authenticate(user, secret, authtype = nil, auth_policy: nil,
+                     mechanisms: nil, allowed: nil, order: nil,
+                     credential: nil, credential_type: nil,
+                     auth_mechanisms: nil, credential_kind: nil)
+      policy = policy_from_arguments(authtype, auth_policy, credential,
+                                     mechanisms: mechanisms, allowed: allowed,
+                                     order: order, auth_mechanisms: auth_mechanisms,
+                                     credential_type: credential_type,
+                                     credential_kind: credential_kind)
+      if policy
+        return authenticate_with_policy(user, secret, policy)
+      end
+      authtype ||= DEFAULT_AUTH_TYPE
       check_auth_args authtype, user, secret
+      @auth_mechanism = Authenticator.normalize_type(authtype)
       authenticator = Authenticator.auth_class(authtype).new(self)
       authenticator.auth(user, secret)
     end
 
+    # Selects and attempts exactly one authentication mechanism according to
+    # +policy+ and the server's current EHLO capabilities.
+    #
+    # +policy+ is an AuthPolicy, or a Hash accepted by
+    # AuthPolicy.new (for example <tt>{mechanisms: [:login, :plain],
+    # credential: :password}</tt>).
+    #
+    # The selected mechanism is the first entry in the policy's allowed order
+    # that is both advertised by the server and accepts the requested
+    # credential type.  If there is no such mechanism, SMTPAuthMechanismError is
+    # raised before any credential is sent.  If the server rejects the single
+    # selected mechanism, Net::SMTPAuthenticationError is raised to the caller
+    # unchanged; no other mechanism is attempted.
+    def authenticate_with_policy(user, secret, auth_policy = nil, credential = nil,
+                                 policy: nil, mechanisms: nil, allowed: nil,
+                                 order: nil, auth_mechanisms: nil,
+                                 credential_type: nil, credential_kind: nil)
+      if policy
+        if auth_policy || credential
+          raise ArgumentError, 'policy may not be combined with another policy argument'
+        end
+        auth_policy = policy
+      end
+      policy = policy_from_arguments(nil, auth_policy, credential,
+                                     mechanisms: mechanisms, allowed: allowed,
+                                     order: order, auth_mechanisms: auth_mechanisms,
+                                     credential_type: credential_type,
+                                     credential_kind: credential_kind)
+      unless policy
+        raise ArgumentError, 'authentication policy requires at least one mechanism'
+      end
+      Authenticator.check_args(user, secret)
+      mechanism = policy.select(self)
+      @auth_mechanism = mechanism
+      authenticator = Authenticator.auth_class(mechanism).new(self)
+      if authenticator.respond_to?(:credential_type=)
+        authenticator.credential_type = Authenticator.credential_for(mechanism)
+      end
+      authenticator.auth(user, secret)
+    end
+
+    # Returns the mechanism that the given policy would select for the
+    # server's current EHLO capabilities, without sending any authentication
+    # data.
+    #
+    # The policy may be a Net::SMTP::AuthPolicy, a Hash, or an ordered
+    # mechanism list plus a credential type.
+    #
+    # This raises SMTPAuthMechanismError when no single mechanism can be selected.
+    def select_auth_mechanism(auth_policy = nil, positional_credential = nil,
+                              policy: nil, mechanisms: nil, allowed: nil,
+                              order: nil, auth_mechanisms: nil, credential: nil,
+                              credential_type: nil, credential_kind: nil)
+      if policy
+        if auth_policy || positional_credential
+          raise ArgumentError, 'policy may not be combined with a positional policy'
+        end
+        auth_policy = policy
+      end
+      policy = policy_from_arguments(nil, auth_policy,
+                                     credential || positional_credential,
+                                     mechanisms: mechanisms, allowed: allowed,
+                                     order: order, auth_mechanisms: auth_mechanisms,
+                                     credential_type: credential_type,
+                                     credential_kind: credential_kind)
+      unless policy
+        raise ArgumentError, 'authentication policy requires at least one mechanism'
+      end
+      policy.select(self)
+    end
+
     private
+
+    # Resolves the various public policy spellings.  +authtype+ is the
+    # explicit mechanism slot; when it holds a policy object, Hash, or ordered
+    # mechanism Array it is treated as the policy.  Returns nil when no policy
+    # was requested (so the caller can use the explicit authtype path).
+    def policy_from_arguments(authtype, auth_policy, credential, mechanisms: nil,
+                              allowed: nil, order: nil, auth_mechanisms: nil,
+                              credential_type: nil, credential_kind: nil)
+      if authtype.is_a?(AuthPolicy) || authtype.is_a?(Hash) || authtype.is_a?(Array)
+        if auth_policy
+          raise ArgumentError, 'authtype and auth_policy are mutually exclusive'
+        end
+        auth_policy = authtype
+        authtype = nil
+      end
+
+      policy = AuthPolicy.resolve(auth_policy,
+                                  mechanisms: mechanisms, allowed: allowed,
+                                  order: order, auth_mechanisms: auth_mechanisms,
+                                  credential: credential,
+                                  credential_type: credential_type,
+                                  credential_kind: credential_kind)
+      if policy && !authtype.nil?
+        raise ArgumentError, 'authtype and auth_policy are mutually exclusive'
+      end
+      policy
+    end
 
     def check_auth_args(type, *args, **kwargs)
       type ||= DEFAULT_AUTH_TYPE
@@ -1096,12 +1324,23 @@ module Net
       # is multiple lines. It does not return the first line. The key of the
       # hash is the first word the value of the hash is an array with each word
       # thereafter being a value in the array
+      #
+      # Repeated capability keywords are merged in the order they first appear,
+      # and repeated values are removed.  Some servers advertise the same
+      # extension (notably AUTH) on more than one EHLO line; silently keeping
+      # only the last value would hide mechanisms that the server actually
+      # supports.
       def capabilities
         return {} unless @string[3, 1] == '-'
         h = {}
         @string.lines.drop(1).each do |line|
           k, *v = line[4..-1].split(' ')
-          h[k] = v
+          next if k.nil?
+          if h.key?(k)
+            h[k] |= v
+          else
+            h[k] = v
+          end
         end
         h
       end
@@ -1159,3 +1398,4 @@ require_relative 'smtp/authenticator'
 Dir.glob("#{__dir__}/smtp/auth_*.rb") do |r|
   require_relative r
 end
+require_relative 'smtp/auth_policy'

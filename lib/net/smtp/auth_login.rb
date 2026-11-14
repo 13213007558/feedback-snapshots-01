@@ -1,6 +1,7 @@
 class Net::SMTP
   class AuthLogin < Net::SMTP::Authenticator
     auth_type :login
+    auth_credential :password
 
     def auth(user, secret)
       continue('AUTH LOGIN')

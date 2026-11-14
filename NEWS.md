@@ -1,5 +1,21 @@
 # NEWS
 
+## Unreleased
+
+### Improvements
+
+* Add `Net::SMTP::AuthPolicy` and the `auth_policy:` keyword for
+  `Net::SMTP.start`, `Net::SMTP#start`, and `Net::SMTP#authenticate`.
+  A policy specifies an ordered allow-list of SASL mechanisms and the
+  credential type (`:password` or `:oauth2`).  Net::SMTP selects exactly one
+  mechanism from the current EHLO `AUTH` capabilities (including after
+  STARTTLS) and attempts only that mechanism.  Rejected authentication is
+  never retried with another mechanism, and an OAuth token is never offered
+  to a password mechanism.  The explicit `authtype:`/positional argument
+  entry point is unchanged.
+* Merge repeated EHLO capability lines and de-duplicate their values, so
+  `AUTH` mechanisms advertised on multiple lines are all visible.
+
 ## Version 0.5.0 (2024-03-27)
 
 ### Improvements
