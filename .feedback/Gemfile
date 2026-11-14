@@ -1,0 +1,4 @@
+source 'https://rubygems.org'
+gem 'brakeman', path: '..', require: false
+gem 'minitest', '>= 6.0', require: false
+gem 'minitest-mock', require: false
