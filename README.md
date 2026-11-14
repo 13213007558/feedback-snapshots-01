@@ -286,6 +286,48 @@ access_token = request_token.get_access_token
 @photos = access_token.get("/photos.xml")
 ```
 
+### Token request redirects
+
+A token endpoint may answer with a redirect. Because a token request carries
+proof of the consumer secret (and, for access tokens, the token secret), the
+client only follows redirects it has been configured to trust.
+
+The default `:allowlist` policy follows the configured token endpoint itself
+and any destinations in `:redirect_allowlist`, and rejects everything else
+with `OAuth::RedirectNotAllowed`:
+
+```ruby
+oauth_consumer = OAuth::Consumer.new(
+  "key", "secret",
+  site: "https://provider.example",
+  redirect_allowlist: [
+    "https://tokens.provider.example/oauth/access_token", # exact path
+    "https://login.provider.example"                      # any path on this origin
+  ]
+)
+```
+
+An allowlist URL with no path (or with `/`) approves any path on that scheme,
+host and port; a URL with a path approves only that (canonicalized) path.
+Hashes such as `{ scheme: "https", host: "tokens.provider.example", port: 443, path: "/oauth/access_token" }`
+are also accepted. `:redirect_policy` may be `:allowlist` (default), `:deny`
+(never follow) or `:any` (follow any target that passes the safety checks).
+
+Every hop is validated individually:
+
+- scheme, host, port and canonicalized path are rechecked; an HTTPS request is
+  never downgraded to HTTP, even under `:any`
+- relative `Location` values resolve against the hop that returned them, and
+  fragments are dropped
+- loops and excessive redirects abort with `Net::HTTPRetriableError`
+- `303` switches to `GET` and drops the body, `301`/`302` switch `POST` to
+  `GET`, and `307`/`308` preserve the method and rewind a replayable body
+
+Each followed hop is signed again for the exact new request with a fresh
+nonce. Redirects never modify the consumer's `site`, `request_endpoint` or
+connection, so the original endpoint keeps working after a rejected redirect
+or a failed hop.
+
 Now that you have an access token, you can use Typhoeus to interact with the
 OAuth provider if you choose.
 

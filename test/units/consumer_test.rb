@@ -264,7 +264,8 @@ class ConsumerTest < Minitest::Test
                                                            headers: { "Location" => redirect_url.to_s })
     stub_request(:get, /.*#{redirect_url.path}/).to_return(body: "oauth_token=token&oauth_token_secret=secret")
 
-    hash = @consumer.token_request(:get, @request_uri.path) do
+    hash = @consumer.token_request(:get, @request_uri.path, nil,
+                                   { redirect_allowlist: [redirect_url.to_s] }) do
       { oauth_token: "token", oauth_token_secret: "secret" }
     end
 
@@ -272,7 +273,7 @@ class ConsumerTest < Minitest::Test
     assert_equal "secret", hash[:oauth_token_secret]
   end
 
-  def test_follow_redirect_different_host_same_path
+  def test_follow_redirect_different_host_same_path_when_explicitly_approved
     request_uri = URI.parse("https://example.com/request_token")
     redirect_uri = URI.parse("https://foobar.com/request_token")
 
@@ -281,7 +282,8 @@ class ConsumerTest < Minitest::Test
     stub_request(:get,
                  "https://foobar.com/request_token").to_return(body: "oauth_token=token&oauth_token_secret=secret")
 
-    hash = @consumer.token_request(:get, request_uri.path) do
+    hash = @consumer.token_request(:get, request_uri.path, nil,
+                                   { redirect_allowlist: [redirect_uri.to_s] }) do
       { oauth_token: "token", oauth_token_secret: "secret" }
     end
 

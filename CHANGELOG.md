@@ -6,10 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* Explicit `:redirect_policy` for `OAuth::Consumer#token_request`
+  * `:allowlist` (default) follows only the configured token endpoint and `:redirect_allowlist` entries
+  * `:deny` never follows token request redirects
+  * `:any` follows targets that pass the safety checks
+* `OAuth::RedirectNotAllowed` is raised before an unapproved redirect target is contacted
+* `:redirect_limit` bounds the number of followed redirect hops
 
 ### Changed
+* Token request redirects are validated per hop (scheme, host, port, canonical path)
+* Each followed hop is re-signed for the new request with a fresh nonce
+* Token request redirects no longer modify the shared consumer's `site`
 
 ### Fixed
+* An HTTPS token endpoint can no longer be downgraded to HTTP by a redirect
 
 ### Removed
 
