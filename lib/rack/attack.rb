@@ -26,6 +26,7 @@ module Rack
 
     autoload :Check,                'rack/attack/check'
     autoload :Throttle,             'rack/attack/throttle'
+    autoload :BoundedThrottle,      'rack/attack/bounded_throttle'
     autoload :Safelist,             'rack/attack/safelist'
     autoload :Blocklist,            'rack/attack/blocklist'
     autoload :Track,                'rack/attack/track'
@@ -34,6 +35,9 @@ module Rack
 
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
+      # Optional deployment-wide secret used to hash discriminators in
+      # BoundedThrottle. Set the same value in every process.
+      attr_accessor :bounded_throttle_hash_key
       attr_reader :configuration
 
       def instrument(request)
@@ -67,6 +71,7 @@ module Rack
         :blocklist_ip,
         :safelist_ip,
         :throttle,
+        :bounded_throttle,
         :track,
         :throttled_responder,
         :throttled_responder=,
@@ -82,7 +87,8 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
-        :tracks
+        :tracks,
+        :bounded_throttles
       )
     end
 

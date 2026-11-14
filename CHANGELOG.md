@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Rack::Attack.bounded_throttle` with `:gate`, `:budget`, `:sketch`, and `:hybrid` strategies. These cap cache-key cardinality when the discriminator is attacker-controlled, and expose a per-throttle state-key bound. See `docs/bounded_state_throttling.md`.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

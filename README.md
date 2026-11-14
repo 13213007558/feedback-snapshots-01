@@ -276,6 +276,25 @@ Rack::Attack.throttle('request per ip', limit: limit_proc, period: period_proc) 
 end
 ```
 
+#### Bounded-state throttling for attacker-controlled discriminators
+
+When the discriminator is an unauthenticated account identifier, a normal throttle creates one cache key per distinct value before it evaluates the limit. See [Bounded-State Throttling](docs/bounded_state_throttling.md) for the key path and tradeoffs, and use `bounded_throttle` to cap the number of keys:
+
+```ruby
+Rack::Attack.bounded_throttle(
+  'login/account',
+  strategy: :gate,
+  limit: 5,
+  period: 60,
+  budgets: {
+    global: { limit: 5_000, buckets: 1 },
+    tenant: { limit: 500, buckets: 256, discriminator: ->(req) { req.get_header('HTTP_X_TENANT_ID') } }
+  }
+) { |req| req.params['email'] }
+```
+
+`strategy: :gate` checks the exact budgets first, so a high-cardinality account flood cannot create one key per account and admitted accounts get exact per-account counts.
+
 ### Tracks
 
 ```ruby

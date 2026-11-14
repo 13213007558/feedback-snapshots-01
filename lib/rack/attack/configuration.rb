@@ -19,7 +19,8 @@ module Rack
         end
       end
 
-      attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
+      attr_reader :safelists, :blocklists, :throttles, :bounded_throttles, :tracks,
+                  :anonymous_blocklists, :anonymous_safelists
       attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
@@ -76,6 +77,10 @@ module Rack
         @throttles[name] = Throttle.new(name, options, &block)
       end
 
+      def bounded_throttle(name, options, &block)
+        @bounded_throttles[name] = BoundedThrottle.new(name, options, &block)
+      end
+
       def track(name, options = {}, &block)
         @tracks[name] = Track.new(name, options, &block)
       end
@@ -91,9 +96,8 @@ module Rack
       end
 
       def throttled?(request)
-        @throttles.any? do |_name, throttle|
-          throttle.matched_by?(request)
-        end
+        @throttles.any? { |_name, throttle| throttle.matched_by?(request) } ||
+          @bounded_throttles.any? { |_name, throttle| throttle.matched_by?(request) }
       end
 
       def tracked?(request)
@@ -112,6 +116,7 @@ module Rack
         @safelists = {}
         @blocklists = {}
         @throttles = {}
+        @bounded_throttles = {}
         @tracks = {}
         @anonymous_blocklists = []
         @anonymous_safelists = []
