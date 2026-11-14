@@ -71,7 +71,7 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       prompt_without_tty agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms no_delay
-      control_master control_path preopen_channels
+      control_master control_path control_master_policy preopen_channels
     ]
 
     class << self
@@ -180,6 +180,27 @@ module Net
     #   host through the same master and the explicitly passed host key and
     #   authentication options are ignored. Defaults to ControlPath from
     #   ssh_config; +"none"+ disables the master.
+    # * :control_master_policy => what to do when :control_master is +:auto+
+    #   and reusing the master cannot satisfy this call's security
+    #   requirements. Two kinds of requirement cannot be checked on a proxied
+    #   session: explicitly passed master-owned options (:verify_host_key,
+    #   :known_hosts, :host_key, :kex, :encryption, :hmac,
+    #   :pubkey_algorithms, :keys, :key_data, :password, :passphrase,
+    #   :auth_methods, :use_agent and the rest of the connection-setup
+    #   options), because the master's own settings apply, and an unverifiable
+    #   target, when the ControlPath template has no %C or %h/%n, %p and %r
+    #   tokens, so the same socket path doesn't prove the master's host, port
+    #   and user match this request. Values are:
+    #   * :allow (default) :: reuse the master and log the uncheckable
+    #     requirements at info level, matching OpenSSH's behaviour.
+    #   * :strict :: raise Net::SSH::ControlMasterSecurityError before any
+    #     channel is opened or remote command sent.
+    #   * :direct :: do not touch the master for this call and open a fresh
+    #     direct connection, where every option is enforced by Net::SSH itself.
+    #   Options that only shape the multiplexed channel layer (:send_env,
+    #   :set_env, :properties, :timeout, :preopen_channels ...) or that are
+    #   neutralized over a master (:keepalive, :forward_agent, :rekey_*) are
+    #   guaranteed without trusting the master and never conflict.
     # * :config => set to +true+ to load the default OpenSSH config files
     #   (~/.ssh/config, /etc/ssh_config), or to +false+ to not load them, or to
     #   a file-name (or array of file-names) to load those specific configuration
@@ -362,6 +383,7 @@ module Net
 
       user = options.fetch(:user, user) || Etc.getpwuid.name
       options[:remote_user] ||= user
+      options[:control_master_policy] = :allow unless options.key?(:control_master_policy)
 
       connection = Multiplex.connect(host_arg, host, user, options, explicit: explicit_options) if options[:control_master]
       connection ||= connect_directly(host, user, options)
@@ -439,6 +461,7 @@ module Net
       compression: "compression: false to disable compression",
       control_master: "control_master: false to not use a ControlMaster",
       control_path: "control_path: 'none' to not use a ControlMaster socket",
+      control_master_policy: "control_master_policy: :allow to reuse a master while logging uncheckable requirements",
       send_env: "send_env: [] to send no environment variables",
       set_env: "set_env: {} to set no environment variables"
     }.freeze

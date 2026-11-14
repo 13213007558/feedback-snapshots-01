@@ -29,6 +29,15 @@ module Net
     # or X11 forwarding, or other global requests.
     class NotSupportedOverControlMaster < Net::SSH::Exception; end
 
+    # Raised by a strict ControlMaster policy (the :strict value of the
+    # :control_master_policy option of Net::SSH.start) when reusing a master
+    # cannot honor the caller's security requirements: an explicitly requested
+    # host key verifier, algorithm restriction or authentication identity is
+    # owned by the master and can't be checked, or the ControlPath carries no
+    # host, port and user tokens, so the master's target can't be verified.
+    # It is raised before any channel is opened or remote command is sent.
+    class ControlMasterSecurityError < Net::SSH::Exception; end
+
     # This exception is primarily used internally, but if you have a channel
     # request handler (see Net::SSH::Connection::Channel#on_request) that you
     # want to fail in such a way that the server knows it failed, you can

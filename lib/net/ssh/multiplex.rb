@@ -5,6 +5,7 @@ require 'net/ssh/connection/session'
 require 'net/ssh/multiplex/client'
 require 'net/ssh/multiplex/control_path'
 require 'net/ssh/multiplex/proxy_transport'
+require 'net/ssh/multiplex/security_policy'
 
 module Net
   module SSH
@@ -33,16 +34,26 @@ module Net
       VALUES = [:auto, false, nil].freeze
 
       def self.validate_options!(options)
-        return if VALUES.include?(options[:control_master])
+        unless VALUES.include?(options[:control_master])
+          raise ArgumentError, "control_master must be :auto or false, got #{options[:control_master].inspect}"
+        end
 
-        raise ArgumentError, "control_master must be :auto or false, got #{options[:control_master].inspect}"
+        return unless options.key?(:control_master_policy) &&
+                      !SecurityPolicy::POLICIES.include?(options[:control_master_policy])
+
+        raise ArgumentError,
+              "control_master_policy must be one of #{SecurityPolicy::POLICIES.map(&:inspect).join(', ')}, " \
+              "got #{options[:control_master_policy].inspect}"
       end
 
       # Returns a Connection::Session running through the ControlMaster for
       # this connection, or nil (after logging why) when there is no usable
-      # master, in which case the caller connects as usual. +explicit+ are
-      # the option names the caller passed to Net::SSH.start. Raises
-      # ArgumentError for an invalid ControlPath, as ssh does.
+      # master or the security policy asks for a direct connection, in which
+      # case the caller connects as usual. +explicit+ are the option names the
+      # caller passed to Net::SSH.start. Raises ArgumentError for an invalid
+      # ControlPath, as ssh does, and ControlMasterSecurityError under the
+      # :strict policy when reuse can't honor the caller's security
+      # requirements (before any channel is opened).
       def self.connect(host_arg, host, user, options, explicit: [])
         logger = options[:logger]
         path = socket_path(host_arg, host, user, options)
@@ -52,7 +63,18 @@ module Net
         return nil unless socket
 
         logger.info { "control_master: using ControlMaster at #{path}" }
-        log_master_owned(logger, explicit)
+        policy = SecurityPolicy.new(options, explicit: explicit, logger: logger)
+        decision = begin
+          policy.decide
+        rescue StandardError
+          socket.close
+          raise
+        end
+        if decision == :direct
+          socket.close
+          return nil
+        end
+        log_master_owned(logger, policy.master_owned_conflicts)
         begin
           transport = ProxyTransport.new(socket, host: host, control_path: path, options: options)
           Connection::Session.new(transport, session_options(logger, options))
@@ -105,11 +127,10 @@ module Net
         ControlPath.jump_host(proxy.jump_proxies)
       end
 
-      def self.log_master_owned(logger, explicit)
-        bypassed = explicit & MASTER_OWNED_OPTIONS
-        return if bypassed.empty?
+      def self.log_master_owned(logger, conflicts)
+        return if conflicts.empty?
 
-        logger.info { "control_master: ignoring #{bypassed.join(', ')}, the ControlMaster's own settings apply" }
+        logger.info { "control_master: ignoring #{conflicts.join(', ')}, the ControlMaster's own settings apply" }
       end
 
       # Keepalive is a global request, which the master doesn't allow; it

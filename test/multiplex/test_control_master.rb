@@ -22,6 +22,12 @@ module NetSSH
       Net::SSH.start('example.com', 'alice', { config: false, logger: @logger, control_master: :auto, control_path: @path }.merge(options), &block)
     end
 
+    # A ControlPath that binds the socket to the host, port and user, like the
+    # ssh_config default ~/.ssh/cm-%r@%h:%p.
+    def bound_path
+      File.join(@dir, 'cm-%r@%h:%p')
+    end
+
     def expect_direct_connection
       direct = mock('direct connection')
       direct.stubs(:closed?).returns(true)
@@ -260,6 +266,125 @@ module NetSSH
       assert_match(/control_master: false/, error.message)
       error = assert_raises(ArgumentError) { start(control_path: nil) }
       assert_match(/control_path: 'none'/, error.message)
+    end
+
+    def test_invalid_control_master_policy_raises
+      error = assert_raises(ArgumentError) { start(control_master_policy: :paranoid) }
+      assert_match(/control_master_policy must be one of :allow, :strict, :direct/, error.message)
+    end
+
+    def test_strict_policy_rejects_an_explicit_verifier_before_any_channel
+      @master = FakeMaster.new(@path)
+      Net::SSH.expects(:connect_directly).never
+
+      error = assert_raises(Net::SSH::ControlMasterSecurityError) do
+        start(control_master_policy: :strict, verify_host_key: :always)
+      end
+      assert_match(/refusing to reuse the ControlMaster/, error.message)
+      assert_match(/verify_host_key/, error.message)
+      assert_equal 1, @master.connections
+      assert_empty @master.received_types
+    end
+
+    def test_strict_policy_rejects_an_explicit_algorithm_restriction
+      @master = FakeMaster.new(@path)
+      Net::SSH.expects(:connect_directly).never
+
+      error = assert_raises(Net::SSH::ControlMasterSecurityError) do
+        start(control_master_policy: :strict, encryption: 'aes256-gcm@openssh.com')
+      end
+      assert_match(/encryption/, error.message)
+      assert_empty @master.received_types
+    end
+
+    def test_strict_policy_rejects_an_explicit_identity
+      @master = FakeMaster.new(@path)
+      error = assert_raises(Net::SSH::ControlMasterSecurityError) do
+        start(control_master_policy: :strict, keys: [File.join(@dir, 'id_ed25519')])
+      end
+      assert_match(/keys/, error.message)
+      assert_empty @master.received_types
+    end
+
+    def test_strict_policy_rejects_a_fixed_control_path
+      @master = FakeMaster.new(@path)
+      error = assert_raises(Net::SSH::ControlMasterSecurityError) do
+        start(control_master_policy: :strict)
+      end
+      assert_match(/which host, port and user the master is connected to/, error.message)
+      assert_empty @master.received_types
+    end
+
+    def test_strict_policy_allows_a_bound_path_with_layer_options
+      @master = FakeMaster.new(File.join(@dir, 'cm-alice@example.com:22'))
+      Net::SSH.expects(:connect_directly).never
+
+      start(control_path: bound_path, control_master_policy: :strict, send_env: ['LANG']) do |ssh|
+        assert_instance_of Net::SSH::Multiplex::ProxyTransport, ssh.transport
+        assert_equal "hello\n", ssh.exec!("true")
+      end
+      assert_equal 1, @master.connections
+    end
+
+    def test_strict_policy_does_not_open_the_master_when_no_socket
+      direct = expect_direct_connection
+      assert_equal direct, start(control_master_policy: :strict, verify_host_key: :always)
+      assert_equal 0, @master.connections if @master
+    end
+
+    def test_direct_policy_falls_back_to_a_fresh_connection
+      @master = FakeMaster.new(@path)
+      direct = expect_direct_connection
+
+      assert_equal direct, start(control_master_policy: :direct, verify_host_key: :always)
+      assert_equal 1, @master.connections
+      assert_empty @master.received_types
+      assert_match(/WARN.*bypassing the ControlMaster and connecting directly/, @log.string)
+    end
+
+    def test_direct_policy_uses_the_master_when_requirements_are_layer_guaranteed
+      @master = FakeMaster.new(File.join(@dir, 'cm-alice@example.com:22'))
+      Net::SSH.expects(:connect_directly).never
+
+      start(control_path: bound_path, control_master_policy: :direct, send_env: ['LANG'], &:close)
+      assert_equal 1, @master.connections
+    end
+
+    def test_allow_policy_keeps_reusing_the_master
+      @master = FakeMaster.new(@path)
+      Net::SSH.expects(:connect_directly).never
+
+      start(verify_host_key: :always) do |ssh|
+        assert_instance_of Net::SSH::Multiplex::ProxyTransport, ssh.transport
+        assert_equal "hello\n", ssh.exec!("true")
+      end
+      assert_equal 1, @master.connections
+      assert_match(/INFO.*reusing despite requirements/, @log.string)
+    end
+
+    def test_a_different_alias_through_a_bound_path_uses_its_own_master
+      @master = FakeMaster.new(@path)
+      other = FakeMaster.new(File.join(@dir, 'cm-bob@other.example:2222'))
+      Net::SSH.expects(:connect_directly).never
+
+      path = File.join(@dir, 'cm-%r@%h:%p')
+      Net::SSH.start('other.example', 'bob', config: false, logger: @logger, port: 2222,
+                                            control_master: :auto, control_path: path,
+                                            control_master_policy: :strict, &:close)
+      assert_equal 1, other.connections
+      assert_equal 0, @master.connections
+    ensure
+      other&.stop
+    end
+
+    def test_ssh_config_verifier_is_not_a_strict_policy_conflict
+      @master = FakeMaster.new(File.join(@dir, 'cm-alice@example.com:22'))
+      Net::SSH.expects(:connect_directly).never
+      config = File.join(@dir, 'config')
+      File.write(config, "Host *\n  StrictHostKeyChecking yes\n")
+
+      start(config: config, control_path: bound_path, control_master_policy: :strict, &:close)
+      assert_equal 1, @master.connections
     end
   end
 end

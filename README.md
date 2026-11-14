@@ -154,6 +154,76 @@ end
 
 See Net::SSH for more documentation, and links to further information.
 
+## ControlMaster reuse and its security policy
+
+With `control_master: :auto` a session runs through an already running OpenSSH
+ControlMaster (started with `ssh -M` or `ControlMaster auto`) instead of
+opening a new TCP connection. The master performed the TCP connection, key
+exchange, host key verification and authentication, so a proxied session
+cannot re-check any of them. The `:control_master_policy` option makes that
+fact explicit instead of silently ignoring the options you passed to `start`.
+
+The options split into three groups:
+
+| Group | Options | Who guarantees the requirement over a master |
+| --- | --- | --- |
+| Layer-guaranteed | `:send_env`, `:set_env`, `:properties`, `:timeout`, `:preopen_channels`, `:max_pkt_size`, `:max_win_size`, channel operations (`exec`, `open_channel`, local forwarding, data transfer) | the multiplexed channel layer itself; they keep working unchanged |
+| Neutralized over a master | `:keepalive`, `:forward_agent`, `:rekey_limit`, `:rekey_blocks_limit`, `:rekey_packet_limit`, remote forwarding and other global requests, agent/X11 channel requests | Net::SSH disables or rejects them; the master owns the behavior (`NotSupportedOverControlMaster`) |
+| Master-owned, uncheckable on a proxy | `:verify_host_key`, `:known_hosts`, `:global_known_hosts_file`, `:user_known_hosts_file`, `:host_key`, `:host_key_alias`, `:check_host_ip`, `:fingerprint_hash`, `:kex`, `:encryption`, `:hmac`, `:compression`, `:compression_level`, `:pubkey_algorithms`, `:append_all_supported_algorithms`, `:minimum_dh_bits`, `:keys`, `:key_data`, `:keycerts`, `:keycert_data`, `:keys_only`, `:password`, `:passphrase`, `:auth_methods`, `:use_agent`, `:identity_agent`, `:agent_socket_factory`, `:non_interactive`, `:proxy`, `:no_delay`, `:bind_address` | only the master's own configuration; Net::SSH cannot verify it |
+
+There is a fourth, separate concern: the ControlPath identifies the target. A
+path containing `%C`, or all of `%h`/`%n`, `%p` and `%r`, is bound to one host,
+port and user, so a socket at that path is the master for exactly this target.
+A fixed path without those tokens (e.g. `/tmp/ssh-ctl`) is not bound to
+anything: the same path can lead to a master for a different host or identity,
+and a matching path alone proves nothing.
+
+`:control_master_policy` selects the behavior when a master is present and a
+requirement from the last two rows, or an unbound ControlPath, cannot be
+verified:
+
+* `:allow` (default) — reuse the master and log the uncheckable requirements at
+  info level, matching OpenSSH.
+* `:strict` — raise `Net::SSH::ControlMasterSecurityError` before any channel is
+  opened or remote command sent. Use this when the call's verifier, algorithm
+  restrictions or identity must not be bypassed.
+* `:direct` — skip the master for this call and open a fresh direct connection,
+  where every option is enforced by Net::SSH itself.
+
+Only options explicitly passed to `Net::SSH.start` count as requirements;
+values coming from ssh_config or `Net::SSH.default_configuration` do not
+conflict. If no usable master exists (no socket, refused, timed out, another
+owner), every policy logs why and connects directly as usual.
+
+```ruby
+# Reuse a master for a bound per-target socket; layer options stay effective.
+Net::SSH.start('example.com', 'alice',
+               control_master: :auto,
+               control_path: '~/.ssh/cm-%r@%h:%p',
+               control_master_policy: :strict,
+               send_env: ['LANG']) do |ssh|
+  ssh.exec!('deploy')
+end
+
+# An explicit verifier can't be checked on a proxy: strict fails loudly before
+# a command is sent rather than silently trusting the master.
+Net::SSH.start('example.com', 'alice',
+               control_master: :auto,
+               control_path: '~/.ssh/cm-%r@%h:%p',
+               control_master_policy: :strict,
+               verify_host_key: :always)
+# => raises Net::SSH::ControlMasterSecurityError
+
+# Same requirement with :direct: fall back to a fresh connection that honors it.
+Net::SSH.start('example.com', 'alice',
+               control_master: :auto,
+               control_path: '~/.ssh/cm-%r@%h:%p',
+               control_master_policy: :direct,
+               keys: ['~/.ssh/id_ed25519']) do |ssh|
+  ssh.exec!('deploy')
+end
+```
+
 ## REQUIREMENTS:
 
 Net::SSH requires Ruby 2.7 or newer and the Ruby `openssl` gem version `3.2.0` or newer.
