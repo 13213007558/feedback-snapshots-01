@@ -605,6 +605,59 @@ module Psych
   end
 
   ###
+  # call-seq:
+  #   Psych.dump_data(o)               -> string of yaml
+  #   Psych.dump_data(o, options)      -> string of yaml
+  #   Psych.dump_data(o, io)           -> io object passed in
+  #   Psych.dump_data(o, io, options)  -> io object passed in
+  #
+  # Dump the basic data structure +o+ to a YAML string without running any of
+  # its objects' custom serialization hooks.  Only the following scalar,
+  # sequence and mapping classes are accepted, and every node of the
+  # structure is checked rather than just the outermost object:
+  #
+  # * NilClass
+  # * TrueClass
+  # * FalseClass
+  # * Integer
+  # * Float
+  # * String
+  # * Array
+  # * Hash
+  #
+  # Subclasses of these classes, +Symbol+ and arbitrary objects are rejected
+  # with Psych::DisallowedClass.  Instances of an accepted class that carry
+  # singleton methods (including +encode_with+) are still exported purely as
+  # that base class; their hooks are never invoked and any instance variables
+  # are not emitted.
+  #
+  # Because hooks are bypassed, this is suitable for exporting configuration
+  # or audit data where executing application-defined methods is undesirable.
+  # Use Psych.dump or Psych.safe_dump when custom objects or hooks are wanted.
+  #
+  # A shared reference or recursive structure raises Psych::BadAlias unless
+  # <tt>aliases: true</tt> is passed, in which case anchors and aliases are
+  # emitted.
+  #
+  # The same formatting +options+ as Psych.dump are supported (+:indentation+,
+  # +:line_width+, +:canonical+, +:header+ and +:stringify_names+).
+  #
+  # Example:
+  #
+  #   Psych.dump_data(['a', { 'b' => 1 }])
+  #   # => "---\n- a\n- b: 1\n"
+  def self.dump_data o, io = nil, options = {}
+    if Hash === io
+      options = io
+      io      = nil
+    end
+
+    visitor = Psych::Visitors::DataYAMLTree.create options
+    visitor << o
+    visitor.tree.yaml io, options
+  end
+
+  ###
   # Dump a list of objects as separate documents to a document stream.
   #
   # Example:

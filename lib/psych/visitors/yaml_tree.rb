@@ -619,5 +619,60 @@ module Psych
         super
       end
     end
+
+    # DataYAMLTree is the strict, hook-free data export visitor.
+    #
+    # It serializes only instances of the basic scalar, sequence and mapping
+    # classes and rejects every other object.  Unlike YAMLTree (and
+    # RestrictedYAMLTree), it never calls an object's own serialization hooks
+    # (+encode_with+), so instances that carry singleton methods are exported
+    # purely according to their base class.  The check runs on every node of
+    # the structure rather than just the outermost object, which means nested
+    # objects, subclasses and hooked instances are all handled deterministically.
+    #
+    # Shared references and recursive structures raise Psych::BadAlias unless
+    # the +:aliases+ option is enabled, in which case they are emitted with
+    # YAML anchors and aliases.
+    class DataYAMLTree < YAMLTree
+      # The only classes that may be exported, matched by exact class.
+      PERMITTED_CLASSES = {
+        NilClass   => true,
+        TrueClass  => true,
+        FalseClass => true,
+        Integer    => true,
+        Float      => true,
+        String     => true,
+        Array      => true,
+        Hash       => true,
+      }.compare_by_identity.freeze
+
+      def initialize emitter, ss, options
+        super
+        @aliases = options.fetch(:aliases, false)
+      end
+
+      def accept target
+        if @st.key?(target)
+          unless @aliases
+            raise BadAlias, "Tried to dump an aliased object"
+          end
+
+          oid         = @st.id_for target
+          node        = @st.node_for target
+          anchor      = oid.to_s
+          node.anchor = anchor
+          return @emitter.alias anchor
+        end
+
+        unless PERMITTED_CLASSES[target.class]
+          raise DisallowedClass.new('dump', target.class.name || target.class.inspect)
+        end
+
+        # Dispatch straight to the visitor for the exact base class.  The
+        # permitted set contains only leaf classes, and encode_with is never
+        # consulted, so no custom serialization hook can run.
+        send @dispatch_cache[target.class], target
+      end
+    end
   end
 end
