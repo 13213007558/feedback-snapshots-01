@@ -1,0 +1,15 @@
+Received: from edge-a.example (edge-a.example [198.51.100.10]) by mx.corp.example (Postfix) with ESMTPS id 4X1 for <analyst@corp.example>; Tue, 10 May 2005 18:05:00 -0400 (EDT)
+Received: from relay-b.example (relay-b.example [203.0.113.20]) by edge-a.example with ESMTP id 4X2; Tue, 10 May 2005 17:50:00 -0500 (EST)
+Received: from workstation.example (workstation.example [192.0.2.5] (outer (inner by forged.example [198.51.100.99]) note)) by relay-b.example with ESMTP id 4X3; Tue, 10 May 2005 23:30:00 +0000
+Received: from gateway.example (gateway.example [192.0.2.6]) by workstation.example with ESMTP id 4X4; Tue, 10 May 2005 20:00:00 +0000
+From: Analyst <analyst@corp.example>
+To: Investigator <investigator@forensics.example>
+Subject: Received trace sample
+Date: Tue, 10 May 2005 18:06:00 -0400
+Message-ID: <sample-4X1@corp.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="US-ASCII"
+
+The body may look like a trace, but it is not part of the transport chain.
+
+Received: from body-forged.example by body-forged-mx.example; Tue, 10 May 2005 23:59:00 +0000

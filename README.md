@@ -373,6 +373,36 @@ mail.decoded         #=> 'This is the body of the email...
 
 Many more methods available.
 
+### Examining the Received Trace
+
+`Mail::ReceivedChain` exposes the `Received` fields as a reviewable transfer
+chain. It keeps header order, preserves each field's raw text, and separates
+what trusted infrastructure observed from what the mail merely claims:
+
+```ruby
+mail = Mail.read('/path/to/message.eml')
+chain = mail.received_chain(trusted_receivers: ['mx.corp.example'])
+
+chain.raw_order            #=> [0, 1, 2]  (header order, never sorted by time)
+chain.first.raw_field      #=> 'Received: from edge.example ... ; Tue, 10 May 2005 18:00:00 -0400'
+chain.first.from.host      #=> 'edge.example'
+chain.first.from.address   #=> '198.51.100.10'
+chain.first.protocol       #=> 'esmtps'
+chain.first.timestamp.utc  #=> 2005-05-10 22:00:00 UTC
+chain.first.evidence       #=> 'trusted_source'
+chain.time_anomalies       #=> [{ 'kind' => 'time_reversal', ... }]
+chain.conclusions          #=> [{ 'subject' => 'by', 'evidence' => 'trusted_source' }, ...]
+chain.to_h                 #=> full structured evidence
+```
+
+Only header fields can become hops, so a `Received:` line in the body is
+ignored. Comments are parsed as comments: a host mentioned inside a nested
+comment is recorded as a rejected claim, not as a hop. Timestamps are compared
+in UTC, and a clock reversal is reported as an anomaly instead of being
+repaired. `chronological_order` is an annotation-only view; `raw_order` stays
+authoritative. Without a trust boundary every hop is reported as
+`mail_self_report`.
+
 ### Reading a Multipart Email
 
 ```ruby

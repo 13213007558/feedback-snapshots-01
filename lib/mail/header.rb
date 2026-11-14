@@ -200,6 +200,12 @@ module Mail
       fields.summary
     end
 
+    # Returns a forensic view of this header's Received trace fields, keeping
+    # their original order.  See Mail::ReceivedChain.
+    def received_chain(options = {})
+      Mail::ReceivedChain.new(self, options)
+    end
+
     # Returns true if the header has a Message-ID defined (empty or not)
     def has_message_id?
       fields.has_field? 'Message-ID'

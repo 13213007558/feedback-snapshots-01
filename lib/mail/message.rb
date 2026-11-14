@@ -759,6 +759,18 @@ module Mail
       header[:received] = val
     end
 
+    # Returns a forensic view of the Received trace fields, in the order they
+    # appear in the header.  Unlike #received, this does not sort hops by their
+    # timestamps, and it only reads header fields, never the message body.
+    #
+    #   mail.received_chain.raw_order
+    #   mail.received_chain(trusted_receivers: ['mx.example.com']).conclusions
+    #
+    # See Mail::ReceivedChain for the full evidence model.
+    def received_chain(options = {})
+      Mail::ReceivedChain.new(header, options)
+    end
+
     def references( val = nil )
       default :references, val
     end
