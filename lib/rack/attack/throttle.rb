@@ -22,9 +22,40 @@ module Rack
         Rack::Attack.cache
       end
 
+      # Metering contract: counts the current request against this throttle,
+      # exactly once per request, without any decision side effects (no match
+      # annotation, no instrumentation).
+      #
+      # Returns true/false when the throttle applies to the request (i.e. the
+      # discriminator is present), indicating whether the limit is exceeded.
+      # Returns nil when the throttle does not apply; in that case nothing is
+      # written to the cache.
+      def meter(request)
+        metered = (request.env['rack.attack.metered_throttles'] ||= {})
+
+        return metered[name] if metered.key?(name)
+
+        metered[name] = perform_metering(request)
+      end
+
+      # Legacy contract: meters the request and, when the limit is exceeded,
+      # annotates the request and instruments the match. Kept for backwards
+      # compatibility; new code should rely on Configuration#evaluate instead.
       def matched_by?(request)
+        !!meter(request).tap do |throttled|
+          if throttled
+            data = request.env['rack.attack.throttle_data'][name]
+            annotate_request_with_matched_data(request, data)
+            Rack::Attack.instrument(request)
+          end
+        end
+      end
+
+      private
+
+      def perform_metering(request)
         discriminator = discriminator_for(request)
-        return false unless discriminator
+        return nil unless discriminator
 
         current_period  = period_for(request)
         current_limit   = limit_for(request)
@@ -40,15 +71,8 @@ module Rack
 
         annotate_request_with_throttle_data(request, data)
 
-        (count > current_limit).tap do |throttled|
-          if throttled
-            annotate_request_with_matched_data(request, data)
-            Rack::Attack.instrument(request)
-          end
-        end
+        count > current_limit
       end
-
-      private
 
       def discriminator_for(request)
         discriminator = block.call(request)

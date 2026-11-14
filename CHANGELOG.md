@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Split rule evaluation into separate metering and decision contracts. Every
+  applicable throttle now counts each request exactly once, even when another
+  rule already matched, instead of short-circuiting after the first match.
+  The enforcement decision keeps a stable priority (safelist, then blocklist,
+  then throttle; first defined rule wins within a category) and is
+  instrumented exactly once per request, while all matched rules are recorded
+  in `request.env["rack.attack.matches"]`.
+- Safelisted requests are metered by default; set
+  `Rack::Attack.meter_safelisted_requests = false` to restore the previous
+  behavior of skipping throttle metering for safelisted requests.
+- A rule's discriminator/check block is now evaluated at most once per request.
+
 ## [6.8.0] - 2025-10-14
 
 ### Changed

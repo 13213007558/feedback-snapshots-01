@@ -20,7 +20,8 @@ module Rack
       end
 
       attr_reader :safelists, :blocklists, :throttles, :tracks, :anonymous_blocklists, :anonymous_safelists
-      attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header
+      attr_accessor :blocklisted_responder, :throttled_responder, :throttled_response_retry_after_header,
+        :meter_safelisted_requests
 
       attr_reader :blocklisted_response, :throttled_response # Keeping these for backwards compatibility
 
@@ -80,6 +81,40 @@ module Rack
         @tracks[name] = Track.new(name, options, &block)
       end
 
+      # Decision contract: meters every applicable rule for the request
+      # (counting each throttle at most once, even when another rule already
+      # matched), then derives a single enforcement decision with a stable
+      # priority: safelist, then blocklist, then throttle; within a category
+      # the first defined rule wins.
+      #
+      # Annotates the request env with the winning rule (same keys as the
+      # legacy flow) plus "rack.attack.matches" listing every matched rule,
+      # and instruments the final decision exactly once.
+      #
+      # Returns :safelist, :blocklist, :throttle or nil (request allowed).
+      def evaluate(request)
+        matched_safelists  = all_safelists.select { |safelist| safelist.match(request) }
+        matched_blocklists = all_blocklists.select { |blocklist| blocklist.match(request) }
+
+        exceeded_throttles = []
+        if matched_safelists.empty? || meter_safelisted_requests
+          exceeded_throttles = @throttles.each_value.select { |throttle| throttle.meter(request) }
+        end
+
+        record_matches(request, matched_safelists, matched_blocklists, exceeded_throttles)
+
+        if matched_safelists.any?
+          decide(request, :safelist, matched_safelists.first)
+        elsif matched_blocklists.any?
+          decide(request, :blocklist, matched_blocklists.first)
+        elsif exceeded_throttles.any?
+          decide(request, :throttle, exceeded_throttles.first)
+        else
+          tracked?(request)
+          nil
+        end
+      end
+
       def safelisted?(request)
         @anonymous_safelists.any? { |safelist| safelist.matched_by?(request) } ||
           @safelists.any? { |_name, safelist| safelist.matched_by?(request) }
@@ -108,6 +143,37 @@ module Rack
 
       private
 
+      def all_safelists
+        @anonymous_safelists + @safelists.values
+      end
+
+      def all_blocklists
+        @anonymous_blocklists + @blocklists.values
+      end
+
+      def record_matches(request, safelists, blocklists, throttles)
+        matches = (safelists + blocklists + throttles).map do |rule|
+          { name: rule.name, type: rule.type }
+        end
+
+        request.env["rack.attack.matches"] = matches unless matches.empty?
+      end
+
+      def decide(request, decision, rule)
+        request.env["rack.attack.matched"] = rule.name
+        request.env["rack.attack.match_type"] = rule.type
+
+        if decision == :throttle
+          data = request.env["rack.attack.throttle_data"][rule.name]
+          request.env["rack.attack.match_discriminator"] = data[:discriminator]
+          request.env["rack.attack.match_data"] = data
+        end
+
+        Rack::Attack.instrument(request)
+
+        decision
+      end
+
       def set_defaults
         @safelists = {}
         @blocklists = {}
@@ -116,6 +182,7 @@ module Rack
         @anonymous_blocklists = []
         @anonymous_safelists = []
         @throttled_response_retry_after_header = false
+        @meter_safelisted_requests = true
 
         @blocklisted_responder = DEFAULT_BLOCKLISTED_RESPONDER
         @throttled_responder = DEFAULT_THROTTLED_RESPONDER

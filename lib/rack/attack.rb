@@ -79,6 +79,8 @@ module Rack
         :throttled_response_retry_after_header,
         :throttled_response_retry_after_header=,
         :clear_configuration,
+        :meter_safelisted_requests,
+        :meter_safelisted_requests=,
         :safelists,
         :blocklists,
         :throttles,
@@ -108,16 +110,17 @@ module Rack
       env['PATH_INFO'] = PathNormalizer.normalize_path(env['PATH_INFO'])
       request = Rack::Attack::Request.new(env)
 
-      if configuration.safelisted?(request)
+      case configuration.evaluate(request)
+      when :safelist
         @app.call(env)
-      elsif configuration.blocklisted?(request)
+      when :blocklist
         # Deprecated: Keeping blocklisted_response for backwards compatibility
         if configuration.blocklisted_response
           configuration.blocklisted_response.call(env)
         else
           configuration.blocklisted_responder.call(request)
         end
-      elsif configuration.throttled?(request)
+      when :throttle
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
@@ -125,7 +128,6 @@ module Rack
           configuration.throttled_responder.call(request)
         end
       else
-        configuration.tracked?(request)
         @app.call(env)
       end
     end

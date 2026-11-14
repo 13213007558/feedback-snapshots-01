@@ -138,7 +138,8 @@ Rack::Attack.safelist("mark any authenticated access safe") do |request|
 end
 
 # Always allow requests from localhost
-# (blocklist & throttles are skipped)
+# (blocklists are skipped; throttles are still metered unless
+#  Rack::Attack.meter_safelisted_requests = false is configured)
 Rack::Attack.safelist('allow from localhost') do |req|
   # Requests are allowed if the return value is truthy
   '127.0.0.1' == req.ip || '::1' == req.ip
@@ -417,9 +418,28 @@ for more on how to do this.
 
 The Rack::Attack middleware compares each request against *safelists*, *blocklists*, *throttles*, and *tracks* that you define. There are none by default.
 
- * If the request matches any **safelist**, it is allowed.
+Rule evaluation is split into two phases with separate contracts:
+
+ * **Metering**: every applicable rule observes the request exactly once. Each
+   throttle whose discriminator is present increments its counter in
+   `Rack::Attack.cache` — even when another rule already matched — so an
+   attacker rotating across accounts, devices or IPs cannot dodge one
+   threshold while tripping another. Rules that don't apply to the request
+   (e.g. a `nil` discriminator) never write to the cache, and a rule's
+   discriminator callback runs at most once per request.
+ * **Decision**: a single enforcement decision is derived with a stable
+   priority — safelist, then blocklist, then throttle; within a category the
+   first defined rule wins. The decision is annotated on the request env
+   (`rack.attack.matched`, `rack.attack.match_type`, …) and instrumented
+   exactly once, while `rack.attack.matches` records every rule that matched.
+
+In other words:
+
+ * If the request matches any **safelist**, it is allowed. Safelisted requests
+   are still metered by default; set
+   `Rack::Attack.meter_safelisted_requests = false` to skip metering for them.
  * Otherwise, if the request matches any **blocklist**, it is blocked.
- * Otherwise, if the request matches any **throttle**, a counter is incremented in the Rack::Attack.cache. If any throttle's limit is exceeded, the request is blocked.
+ * Otherwise, if any **throttle**'s limit is exceeded, the request is blocked.
  * Otherwise, all **tracks** are checked, and the request is allowed.
 
 The algorithm is actually more concise in code: See [Rack::Attack.call](lib/rack/attack.rb):
@@ -428,17 +448,23 @@ The algorithm is actually more concise in code: See [Rack::Attack.call](lib/rack
 def call(env)
   req = Rack::Attack::Request.new(env)
 
-  if safelisted?(req)
+  case configuration.evaluate(req) # meters all rules, returns the decision
+  when :safelist
     @app.call(env)
-  elsif blocklisted?(req)
+  when :blocklist
     self.class.blocklisted_responder.call(req)
-  elsif throttled?(req)
+  when :throttle
     self.class.throttled_responder.call(req)
   else
-    tracked?(req)
     @app.call(env)
   end
 end
+```
+
+All rules matched by the request are listed in the env, in evaluation order:
+
+```ruby
+request.env['rack.attack.matches'] # => [{ name: "first ban", type: :blocklist }, ...]
 ```
 
 Note: `Rack::Attack::Request` is just a subclass of `Rack::Request` so that you
