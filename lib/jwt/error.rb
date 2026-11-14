@@ -34,6 +34,59 @@ module JWT
   # verification cannot be used, as opposed to a signature that does not match.
   class VerificationKeyError < VerificationError; end
 
+  # The CertificateVerificationError class is raised when an x5c certificate
+  # chain cannot be accepted as the source of a JWT verification key.
+  #
+  # The +reason+ attribute gives a stable classification of the failure so that
+  # callers do not have to parse OpenSSL error strings.
+  class CertificateVerificationError < VerificationKeyError
+    attr_reader :reason, :current_certificate, :certificate_chain, :openssl_error
+
+    def initialize(message = nil, reason: nil, current_certificate: nil, certificate_chain: nil, openssl_error: nil)
+      super(message)
+      @reason = reason
+      @current_certificate = current_certificate
+      @certificate_chain = certificate_chain
+      @openssl_error = openssl_error
+    end
+  end
+
+  # The CertificateChainError class is raised when the header certificates do
+  # not form a valid path to a server-provided trusted root.
+  class CertificateChainError < CertificateVerificationError; end
+
+  # The CertificatePurposeError class is raised when a trusted certificate is
+  # not permitted by the requested purpose (for example its extended key usage
+  # does not allow the operation).
+  class CertificatePurposeError < CertificateVerificationError; end
+
+  # The CertificateTimeError class is raised when a certificate is expired or
+  # not yet valid at the requested verification time.
+  class CertificateTimeError < CertificateVerificationError; end
+
+  # The CertificateRevocationError class is the base class for failures caused
+  # by revocation evidence.
+  class CertificateRevocationError < CertificateVerificationError; end
+
+  # The CertificateRevokedError class is raised when the certificate is
+  # explicitly listed as revoked.
+  class CertificateRevokedError < CertificateRevocationError; end
+
+  # The CertificateRevocationDataMissingError class is raised when the applied
+  # policy requires revocation evidence but no usable CRL was supplied. This is
+  # deliberately distinct from "not revoked": missing evidence must not pass.
+  class CertificateRevocationDataMissingError < CertificateRevocationError; end
+
+  # The CertificateRevocationDataExpiredError class is raised when the supplied
+  # CRL is outside its last_update/next_update window at the verification time.
+  # This does not imply that the certificate is revoked.
+  class CertificateRevocationDataExpiredError < CertificateRevocationError; end
+
+  # The CertificateRevocationDataInvalidError class is raised when a CRL is
+  # present but cannot be trusted (for example a bad signature or a malformed
+  # update field).
+  class CertificateRevocationDataInvalidError < CertificateRevocationError; end
+
   # The IncorrectAlgorithm class is raised when the JWT algorithm is incorrect.
   class IncorrectAlgorithm < SignatureError; end
 

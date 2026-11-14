@@ -626,7 +626,9 @@ JWT.decode(token, hmac_secret, true, { required_claims: ['exp'], algorithm: 'HS2
 
 ### X.509 certificates in x5c header
 
-A JWT signature can be verified using certificate(s) given in the `x5c` header. Before doing that, the trustworthiness of these certificate(s) must be established. This is done in accordance with RFC 5280 which (among other things) verifies the certificate(s) are issued by a trusted root certificate, the timestamps are valid, and none of the certificate(s) are revoked (i.e. being present in the root certificate's Certificate Revocation List).
+A JWT signature can be verified using certificate(s) given in the `x5c` header. The certificates in that header are only chain material: the trust anchors must come from the server, and a chain that validates does not by itself authorize the leaf certificate to sign your credentials. You must also state the certificate purpose, the verification time and the revocation evidence policy that are acceptable for the token being verified.
+
+This is done in accordance with RFC 5280 which (among other things) verifies the certificate(s) are issued by a trusted root certificate, the timestamps are valid, and none of the certificate(s) are revoked (i.e. being present in the root certificate's Certificate Revocation List).
 
 ```ruby
 root_certificates = [] # trusted `OpenSSL::X509::Certificate` objects
@@ -639,11 +641,52 @@ crls = crl_uris.map do |uri|
 end
 
 begin
-  JWT.decode(token, nil, true, { x5c: { root_certificates: root_certificates, crls: crls } })
-rescue JWT::TokenError
-  # Handle error, e.g. x5c header certificate revoked or expired
+  JWT.decode(token, nil, true,
+             x5c: {
+               root_certificates: root_certificates,
+               crls: crls,
+               # Optional explicit policy. The defaults are purpose: :any and
+               # revocation: :require at the current time.
+               purpose: :client_auth,       # or an OpenSSL::X509::PURPOSE_* constant
+               at_time: verification_time,  # Time (defaults to Time.now)
+               revocation: :require         # :require (default) or :none
+             })
+rescue JWT::CertificatePurposeError
+  # The chain is trusted but the certificate is not valid for this purpose.
+rescue JWT::CertificateRevocationDataMissingError
+  # Revocation evidence was required but no CRL was available: not "not revoked".
+rescue JWT::CertificateRevocationDataExpiredError
+  # The CRL was outside its validity window at `at_time`.
+rescue JWT::CertificateRevokedError
+  # The certificate is explicitly listed as revoked.
+rescue JWT::CertificateTimeError
+  # The certificate was expired or not yet valid at `at_time`.
+rescue JWT::CertificateChainError
+  # The header chain does not lead to a server-provided trust anchor.
 end
 ```
+
+The same options are accepted directly by `JWT::X5cKeyFinder#from`:
+
+```ruby
+key = JWT::X5cKeyFinder.new(root_certificates, crls).from(
+  token_header['x5c'],
+  purpose: :client_auth,
+  at_time: Time.now,
+  revocation: :require
+)
+# `key` is the leaf certificate public key; it still has to verify the token
+# signature. Passing certificate validation alone does not authenticate the token.
+```
+
+`JWT::X5cKeyFinder.new(root_certificates, crls)` also accepts a defaults hash as its second argument, so `JWT::X5cKeyFinder.new(roots, purpose: :client_auth, at_time: t, revocation: :require, crls: crls)` works without a separate `crls` argument.
+
+The revocation policies are deliberately distinct:
+
+- `:require` (default) demands a CRL for every certificate in the chain. A missing CRL raises `JWT::CertificateRevocationDataMissingError`; it is never downgraded to a passing result.
+- `:none` skips CRL checking. Only use it when revocation evidence is obtained and enforced elsewhere.
+
+All policy is applied to a per-call OpenSSL verification context. The finder's underlying store is not modified after initialization, and a per-call `crls:` argument builds a separate store, so concurrent calls with different times or policies do not affect each other.
 
 ## JSON Web Key (JWK)
 

@@ -74,7 +74,9 @@ module JWT
 
       return unless (x5c_options = @options[:x5c])
 
-      @key = X5cKeyFinder.new(x5c_options[:root_certificates], x5c_options[:crls]).from(token.header['x5c'])
+      x5c_options = x5c_options.each_with_object({}) { |(key, value), result| result[key.to_sym] = value }
+      policy = x5c_options.reject { |key, _| %i[root_certificates crls].include?(key) }
+      @key = X5cKeyFinder.new(x5c_options[:root_certificates], x5c_options[:crls]).from(token.header['x5c'], policy)
     end
 
     def allowed_and_valid_algorithms
