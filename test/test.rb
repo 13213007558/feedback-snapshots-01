@@ -52,6 +52,18 @@ module BrakemanTester
       Brakeman.run(opts).report.to_hash
     end
 
+    # Like run_scan, but returns the tracker so individual report formats can
+    # be exercised by the caller.
+    def run_scan_tracker path, opts = {}
+      opts.merge! :app_path => "#{TEST_PATH}/apps/#{path}",
+        :url_safe_methods => [:ensure_valid_proto!],
+        :parallel_checks => false
+
+      opts[:use_prism] = true if ENV['TEST_PRISM']
+
+      Brakeman.run(opts)
+    end
+
     def new_tracker options = {}
       Brakeman.logger ||= Brakeman::Logger.get_logger(options)
       Brakeman::Tracker.new(Brakeman::AppTree.new("/tmp/FAKE_BRAKEMAN_PATH#{rand(10000)}"), nil, options)

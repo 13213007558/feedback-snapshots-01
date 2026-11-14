@@ -131,6 +131,9 @@ module Brakeman::WarningCodes
     :missing_rsa_padding_mode => 127,
     :small_rsa_key_size => 128,
     :ransack_search => 129,
+    :short_circuit_credential_comparison => 130,
+    :unknown_credential_comparison_helper => 131,
+    :single_credential_comparison => 132,
 
     :custom_check => 9090,
   }

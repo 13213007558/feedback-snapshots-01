@@ -1,3 +1,7 @@
+# Unreleased
+
+* Add optional `CheckCredentialComparisonTiming` check for short-circuiting credential comparisons in hand-written authentication blocks
+
 # 8.1.0 - 2026-09-30
 
 * Better help and error message for `--ensure-latest`
