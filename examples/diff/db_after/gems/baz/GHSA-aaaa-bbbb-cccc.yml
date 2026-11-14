@@ -1,0 +1,8 @@
+cve: 2020-1234
+ghsa: aaaa-bbbb-cccc
+title: Renamed title for the baz issue
+url: https://github.com/advisories/GHSA-aaaa-bbbb-cccc
+cvss_v3: 6.5
+date: 2020-01-15
+patched_versions:
+- ">= 1.0.1"

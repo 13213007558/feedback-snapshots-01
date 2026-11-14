@@ -16,6 +16,8 @@ Patch-level verification for [bundler].
 * Checks for vulnerable versions of gems in `Gemfile.lock`.
 * Checks for insecure gem sources (`http://` and `git://`).
 * Allows ignoring certain advisories that have been manually worked around.
+* Explains the differences between two scans (new dependencies, newly
+  disclosed or revised advisories, expired exemptions, real fixes).
 * Prints advisory information.
 * Does not require a network connection.
 
@@ -147,6 +149,41 @@ Output the audit's results in JSON, to a file:
 ```shell
 $ bundle-audit check --format json --output bundle-audit.json
 ```
+
+## Report Diff
+
+`bundle-audit diff` compares two scans structurally (not by diffing report
+text) and explains why findings appeared or disappeared. Each side of the
+comparison binds the identity of its lockfile, advisory database and ignore
+configuration (SHA-256 digests, plus the database git commit when available):
+
+```shell
+$ bundle-audit diff path/to/yesterday path/to/today \
+    --database-before /path/to/db-yesterday \
+    --database-after  /path/to/db-today
+```
+
+Each difference is classified by its cause:
+
+* `new_dependency` - the gem was added or relocked to a vulnerable version.
+* `newly_disclosed` - the locked version did not change, but the advisory is
+  new to the database.
+* `advisory_revised` - the advisory existed before, but its affected version
+  ranges were revised to cover the locked version.
+* `exemption_expired` - the advisory was ignored by the previous
+  configuration and is no longer ignored.
+* `fixed` - the gem was removed or upgraded to a patched/unaffected version.
+* `unexplained` - the finding could not be matched to a cause; it is kept
+  instead of being silently dropped.
+
+Advisories are matched across scans by their identifiers (CVE/GHSA/OSVDB),
+so renumbering or retitling an advisory does not by itself create a
+difference. Every entry carries the evidence for its classification and the
+conditions that would close the alert (patched/unaffected versions, or the
+identifiers that suppress it). Use `--format json` for machine-readable
+output that preserves each finding's gem name, version and platform. A
+self-contained example with both dependency and advisory-database changes
+lives in [examples/diff](examples/diff).
 
 ## Rake Tasks
 
