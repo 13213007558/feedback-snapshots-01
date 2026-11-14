@@ -800,6 +800,157 @@ describe MQTT::Client do
     end
   end
 
+  describe "when calling the 'subscribe_and_wait' method" do
+    class ClientWithSubackInjection < MQTT::Client
+      def initialize
+        super(:host => 'localhost')
+        @injected_subacks = {}
+      end
+
+      def inject_suback(packet)
+        @injected_subacks[packet.id] = packet
+      end
+
+      def wait_for_suback(id)
+        packet = @injected_subacks.fetch(id) {
+          return super
+        }
+        Queue.new << packet
+      end
+    end
+
+    let(:client) { ClientWithSubackInjection.new }
+
+    before(:each) do
+      client.instance_variable_set('@socket', socket)
+    end
+
+    def inject_suback(packet_id, return_codes)
+      client.inject_suback(MQTT::Packet::Suback.new(:id => packet_id, :return_codes => return_codes))
+    end
+
+    it "should write a valid SUBSCRIBE packet to the socket" do
+      inject_suback(1, 0)
+      client.subscribe_and_wait('a/b')
+      expect(socket.string).to eq("\x82\x08\x00\x01\x00\x03a/b\x00")
+    end
+
+    it "should return the granted QoS for each topic filter" do
+      inject_suback(1, [0, 1, 2])
+      results = client.subscribe_and_wait('a/b' => 0, 'c/d' => 1, 'e/f' => 2)
+      expect(results).to eq([['a/b', 0], ['c/d', 1], ['e/f', 2]])
+    end
+
+    it "should report a rejected filter as :failure without affecting the other filters" do
+      inject_suback(1, [1, 0x80, 2])
+      results = client.subscribe_and_wait(['sec/alerts', 1], ['sec/admin', 2], ['sec/audit', 2])
+      expect(results).to eq([['sec/alerts', 1], ['sec/admin', :failure], ['sec/audit', 2]])
+
+      # The caller confirms coverage by checking each filter's result
+      uncovered = results.reject { |(_filter, result)| result.is_a?(Integer) }.map(&:first)
+      expect(uncovered).to eq(['sec/admin'])
+    end
+
+    it "should raise an ArgumentError if the requested QoS level is invalid" do
+      expect {
+        client.subscribe_and_wait('a/b' => 3)
+      }.to raise_error(ArgumentError, 'Invalid QoS level 3 in subscription')
+      expect(socket.string).to be_empty
+    end
+
+    it "should raise a ProtocolException if the SUBACK has fewer return codes than filters" do
+      inject_suback(1, [0])
+      expect {
+        client.subscribe_and_wait('a/b', 'c/d')
+      }.to raise_error(MQTT::ProtocolException, /1 return codes for 2 topic filters/)
+    end
+
+    it "should raise a ProtocolException if the SUBACK has more return codes than filters" do
+      inject_suback(1, [0, 1])
+      expect {
+        client.subscribe_and_wait('a/b')
+      }.to raise_error(MQTT::ProtocolException, /2 return codes for 1 topic filters/)
+    end
+
+    it "should raise a ProtocolException if the SUBACK contains an invalid return code" do
+      inject_suback(1, [0, 0x7F])
+      expect {
+        client.subscribe_and_wait('a/b', 'c/d')
+      }.to raise_error(MQTT::ProtocolException, 'Invalid return code 0x7F in SUBACK packet')
+    end
+
+    it "should not drop a message received before the SUBACK, nor treat it as confirmation" do
+      allow(client).to receive(:send_packet).and_wrap_original do |send_packet, packet|
+        send_packet.call(packet)
+        client.send(:handle_packet, MQTT::Packet::Publish.new(:topic => 'a/b', :payload => 'early'))
+        client.send(:handle_packet, MQTT::Packet::Suback.new(:id => packet.id, :return_codes => 0x80))
+      end
+
+      results = client.subscribe_and_wait('a/b')
+
+      # The early message is not evidence that the subscription succeeded
+      expect(results).to eq([['a/b', :failure]])
+      # ... and it is queued for delivery as usual
+      expect(client.queue_length).to eq(1)
+      topic, payload = client.get
+      expect(topic).to eq('a/b')
+      expect(payload).to eq('early')
+    end
+
+    it "should match SUBACKs to two interleaved subscriptions by packet id" do
+      results = {}
+      first = Thread.new do
+        results[:first] = client.subscribe_and_wait(['sec/alerts', 1], ['sec/admin', 2])
+      end
+      Timeout.timeout(5) { sleep 0.01 until client.instance_variable_get(:@subacks).size == 1 }
+      second = Thread.new do
+        results[:second] = client.subscribe_and_wait('sec/audit' => 0)
+      end
+      Timeout.timeout(5) { sleep 0.01 until client.instance_variable_get(:@subacks).size == 2 }
+
+      # The broker answers the second subscription first
+      client.send(:handle_packet, MQTT::Packet::Suback.new(:id => 2, :return_codes => 0))
+      client.send(:handle_packet, MQTT::Packet::Suback.new(:id => 1, :return_codes => [1, 0x80]))
+      first.join(5)
+      second.join(5)
+
+      expect(results[:first]).to eq([['sec/alerts', 1], ['sec/admin', :failure]])
+      expect(results[:second]).to eq([['sec/audit', 0]])
+
+      # The caller confirms coverage across both subscriptions
+      covered = results.values.flatten(1).select { |(_f, r)| r.is_a?(Integer) }.map(&:first)
+      expect(covered).to contain_exactly('sec/alerts', 'sec/audit')
+    end
+
+    it "should report filters as :unconfirmed when the connection is lost before the SUBACK" do
+      result = nil
+      thread = Thread.new do
+        result = client.subscribe_and_wait('a/b' => 1)
+      end
+      Timeout.timeout(5) { sleep 0.01 until client.instance_variable_get(:@subacks).size == 1 }
+      client.send(:handle_close)
+      thread.join(5)
+
+      expect(result).to eq([['a/b', :unconfirmed]])
+    end
+
+    it "should report filters as :unconfirmed when no SUBACK arrives before the timeout" do
+      client.ack_timeout = 0.1
+      allow(IO).to receive(:select).and_return(nil)
+      reader = Thread.new do
+        Thread.current[:parent] = Thread.current
+        loop { client.send(:receive_packet) }
+      end
+
+      start = now
+      results = client.subscribe_and_wait('a/b')
+      reader.kill
+
+      expect(results).to eq([['a/b', :unconfirmed]])
+      expect(now - start).to be_within(0.5).of(0.1)
+    end
+  end
+
   describe "when calling the 'queue_length' method" do
     it "should return 0 if there are no incoming messages waiting" do
       expect(client.queue_length).to eq(0)

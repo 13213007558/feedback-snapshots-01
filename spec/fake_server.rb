@@ -29,6 +29,7 @@ class MQTT::FakeServer
   attr_accessor :respond_to_pings
   attr_accessor :just_one_connection
   attr_accessor :logger
+  attr_reader :rejected_topics
 
   # Create a new fake MQTT server
   #
@@ -40,6 +41,7 @@ class MQTT::FakeServer
     @pings_received = 0
     @just_one_connection = false
     @respond_to_pings = true
+    @rejected_topics = []
   end
 
   # Get the logger used by the server
@@ -106,9 +108,12 @@ class MQTT::FakeServer
             client.write puback
           end
         when MQTT::Packet::Subscribe
+          return_codes = packet.topics.map do |topic, qos|
+            rejected_topics.include?(topic) ? 0x80 : qos
+          end
           client.write MQTT::Packet::Suback.new(
             :id => packet.id,
-            :return_codes => 0
+            :return_codes => return_codes
           )
           topic = packet.topics[0][0]
           client.write MQTT::Packet::Publish.new(

@@ -177,9 +177,11 @@ module MQTT
       @socket = nil
       @read_queue = Queue.new
       @pubacks = {}
+      @subacks = {}
       @read_thread = nil
       @write_semaphore = Mutex.new
       @pubacks_semaphore = Mutex.new
+      @subacks_semaphore = Mutex.new
     end
 
     # Get the OpenSSL context, that is used if SSL/TLS is enabled
@@ -381,6 +383,86 @@ module MQTT
       send_packet(packet)
     end
 
+    # Send a subscribe message for one or more topics on the MQTT server and
+    # wait for the SUBACK response from the server.
+    #
+    # Accepts the same topic arguments as #subscribe. Unlike #subscribe, this
+    # method blocks until the server acknowledges the subscription (or the
+    # acknowledgement timeout expires) and returns the actual result for each
+    # topic filter, as an array of [topic_filter, result] pairs in the same
+    # order as the filters were given. The result is one of:
+    #
+    # * 0, 1 or 2: the QoS level granted by the server for this filter
+    # * :failure: the server rejected this topic filter (return code 0x80)
+    # * :unconfirmed: no SUBACK was received, so the state of this filter is
+    #   unknown (acknowledgement timeout or the connection was lost)
+    #
+    # Only the SUBACK packet confirms a subscription; messages received while
+    # waiting are queued as usual and are never treated as confirmation.
+    #
+    # For example:
+    #   client.subscribe_and_wait('a/b' => 1, 'c/d' => 2).each do |filter, result|
+    #     case result
+    #     when Integer then puts "#{filter}: subscribed with QoS #{result}"
+    #     when :failure then puts "#{filter}: rejected by server"
+    #     when :unconfirmed then puts "#{filter}: subscription not confirmed"
+    #     end
+    #   end
+    #
+    def subscribe_and_wait(*topics)
+      packet = MQTT::Packet::Subscribe.new(
+        :id => next_packet_id,
+        :topics => topics
+      )
+
+      packet.topics.each do |(_filter, qos)|
+        unless qos.is_a?(Integer) && qos >= 0 && qos <= 2
+          raise ArgumentError, "Invalid QoS level #{qos.inspect} in subscription"
+        end
+      end
+
+      queue = wait_for_suback(packet.id)
+      send_packet(packet)
+
+      deadline = current_time + @ack_timeout
+      suback = nil
+      loop do
+        response = queue.pop
+        case response
+        when :read_timeout
+          break if current_time > deadline
+        when :close
+          break
+        else
+          suback = response
+          break
+        end
+      end
+
+      @subacks_semaphore.synchronize do
+        @subacks.delete(packet.id)
+      end
+
+      filters = packet.topics.map { |filter, _qos| filter }
+      return filters.map { |filter| [filter, :unconfirmed] } if suback.nil?
+
+      unless suback.return_codes.length == filters.length
+        raise MQTT::ProtocolException,
+              "SUBACK contained #{suback.return_codes.length} return codes for #{filters.length} topic filters"
+      end
+
+      filters.zip(suback.return_codes).map do |filter, return_code|
+        case return_code
+        when 0, 1, 2
+          [filter, return_code]
+        when 0x80
+          [filter, :failure]
+        else
+          raise MQTT::ProtocolException, format('Invalid return code 0x%2.2X in SUBACK packet', return_code)
+        end
+      end
+    end
+
     # Return the next message received from the MQTT server.
     # An optional topic can be given to subscribe to.
     #
@@ -494,6 +576,12 @@ module MQTT
       end
     end
 
+    def wait_for_suback(id)
+      @subacks_semaphore.synchronize do
+        @subacks[id] = Queue.new
+      end
+    end
+
     def handle_packet(packet)
       if packet.class == MQTT::Packet::Publish
         # Add to queue
@@ -504,6 +592,10 @@ module MQTT
         @pubacks_semaphore.synchronize do
           @pubacks[packet.id] << packet if @pubacks[packet.id]
         end
+      elsif packet.class == MQTT::Packet::Suback
+        @subacks_semaphore.synchronize do
+          @subacks[packet.id] << packet if @subacks[packet.id]
+        end
       end
       # Ignore all other packets
       # FIXME: implement responses for QoS  2
@@ -513,11 +605,17 @@ module MQTT
       @pubacks_semaphore.synchronize do
         @pubacks.each_value { |q| q << :read_timeout }
       end
+      @subacks_semaphore.synchronize do
+        @subacks.each_value { |q| q << :read_timeout }
+      end
     end
 
     def handle_close
       @pubacks_semaphore.synchronize do
         @pubacks.each_value { |q| q << :close }
+      end
+      @subacks_semaphore.synchronize do
+        @subacks.each_value { |q| q << :close }
       end
     end
 

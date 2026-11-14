@@ -142,6 +142,20 @@ client.subscribe( 'foo/#' )
 
 For more information see the [MQTT::Client#subscribe] method.
 
+Sending a subscription request does not mean the server accepted it. To wait
+for the server's SUBACK and learn the fate of each topic filter, use
+subscribe_and_wait, which returns a [filter, result] pair per filter:
+
+~~~ ruby
+client.subscribe_and_wait( 'topic1' => 1, 'topic2' => 1 ).each do |filter, result|
+  case result
+  when Integer      then puts "#{filter}: subscribed with QoS #{result}"
+  when :failure     then puts "#{filter}: rejected by the server"
+  when :unconfirmed then puts "#{filter}: no SUBACK received (timeout or disconnect)"
+  end
+end
+~~~
+
 
 ### Receiving Messages ###
 

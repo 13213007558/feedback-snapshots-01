@@ -1,6 +1,13 @@
 Ruby MQTT NEWS
 ==============
 
+Unreleased
+----------
+
+* Add Client#subscribe_and_wait, which waits for the SUBACK and reports the
+  result (granted QoS, :failure or :unconfirmed) of each topic filter
+
+
 Ruby MQTT Version 0.7.0 (2025-10-29)
 ------------------------------------
 

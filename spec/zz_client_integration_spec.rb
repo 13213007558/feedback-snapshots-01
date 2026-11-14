@@ -87,8 +87,49 @@ describe "a client talking to a server" do
     end
   end
 
-  context "connecting, subscribing to a topic and getting a packet" do
-    def connect_and_subscribe
+  context "confirming subscription coverage with subscribe_and_wait" do
+    it "reports the granted QoS for accepted filters and :failure for rejected ones" do
+      @server.rejected_topics << 'sec/restricted'
+      @client.connect
+
+      results = @client.subscribe_and_wait(['sec/alerts', 1], ['sec/restricted', 2])
+      expect(results).to eq([['sec/alerts', 1], ['sec/restricted', :failure]])
+
+      # The caller confirms coverage by checking each filter's result
+      covered = results.select { |(_filter, result)| result.is_a?(Integer) }.map(&:first)
+      expect(covered).to eq(['sec/alerts'])
+      expect(@error_log.string).to be_empty
+    end
+
+    it "confirms two interleaved subscriptions independently" do
+      @server.rejected_topics << 'sec/restricted'
+      @client.connect
+
+      first = Thread.new { @client.subscribe_and_wait(['sec/alerts', 1], ['sec/restricted', 0]) }
+      second = Thread.new { @client.subscribe_and_wait('sec/audit' => 2) }
+      results = first.value + second.value
+
+      covered = results.select { |(_filter, result)| result.is_a?(Integer) }.map(&:first)
+      rejected = results.select { |(_filter, result)| result == :failure }.map(&:first)
+      expect(covered).to contain_exactly('sec/alerts', 'sec/audit')
+      expect(rejected).to eq(['sec/restricted'])
+      expect(@error_log.string).to be_empty
+    end
+
+    it "keeps messages received before the SUBACK is processed" do
+      @client.connect
+      results = @client.subscribe_and_wait('test')
+      expect(results).to eq([['test', 0]])
+
+      # The fake server publishes a message straight after the SUBACK;
+      # it is queued for delivery rather than dropped or mistaken for confirmation
+      topic, message = @client.get
+      expect(topic).to eq('test')
+      expect(message).to eq('hello test')
+    end
+  end
+
+  context "connecting, subscribing to a topic and getting a packet" do    def connect_and_subscribe
       @client.connect
       @client.subscribe('test', 'foobar')
       @packet = @client.get_packet
