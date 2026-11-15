@@ -45,7 +45,12 @@ _QQ = struct.Struct("<QQ")
 
 
 def cmp_omap(key: tuple[int, int], other: bytes) -> Literal[-1, 0, 1]:
-    """Comparison function for OMAP keys."""
+    """Comparison function for OMAP keys.
+
+    Like the other key comparators in this module, the sign is expressed from the perspective of the B-tree node
+    search: a negative result means the search key sorts after ``other``, so ``BTree._node_search`` can find the
+    predecessor of a key in an ascending node.
+    """
     oid, xid = key
     (other_oid, other_xid) = _QQ.unpack(other)
     if (res := (oid < other_oid) - (oid > other_oid)) != 0:

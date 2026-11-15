@@ -131,6 +131,9 @@ class BTree(Object):
         if node.is_leaf:
             raise TypeError("Cannot traverse from a leaf node")
 
+        if idx < 0 or idx >= node.nkeys:
+            raise IndexError(f"Invalid child index {idx} for node with {node.nkeys} keys")
+
         child_oid = c_apfs.oid_t(self._read_value(node, idx))
 
         if self._uses_physical_oid:
@@ -160,6 +163,9 @@ class BTree(Object):
             exact: If ``True``, only return if an exact match is found.
             cmp: Comparison function to use. Should return -1, 0, or 1
         """
+        if node.nkeys == 0:
+            return -1
+
         lo, hi = 0, node.nkeys - 1
 
         while lo <= hi:
@@ -178,6 +184,45 @@ class BTree(Object):
             return mid if res == 0 else -1
 
         return mid if res <= 0 else mid - 1
+
+    def search_item(
+        self,
+        key: Any,
+        *,
+        exact: bool = False,
+        cmp: Callable[[Any, bytes], Literal[-1, 0, 1]] = cmp_default,
+        omap: ObjectMap | None = None,
+        oid: int = 0,
+        xid: int | None = None,
+    ) -> tuple[bytes, bytes]:
+        """Search for a key in the B-tree and return both the key and value of the match.
+
+        Unless ``exact`` is set, the match is the last entry whose key compares less than or equal to ``key``
+        (i.e. the predecessor). Callers that search a composite key space have to verify that the returned key
+        still belongs to the requested range; this method deliberately returns the key so they can.
+
+        Args:
+            key: Key to search for.
+            exact: If ``True``, only return if an exact match is found.
+            cmp: Comparison function to use. Should return -1, 0, or 1.
+            omap: The object map to use for resolving virtual child objects.
+            oid: The base object ID to use for resolving virtual child objects.
+            xid: The transaction ID to use for resolving virtual child objects.
+        """
+        node = self.root
+
+        while node.is_nonleaf:
+            idx = self._node_search(node, key, cmp=cmp)
+            if idx < 0:
+                # The key sorts before the first key of this subtree, so no predecessor exists.
+                raise KeyError(f"Key not found: {key!r}")
+            node = self._node_child(node, idx, omap, oid, xid)
+
+        idx = self._node_search(node, key, exact=exact, cmp=cmp)
+        if idx >= node.nkeys or idx == -1:
+            raise KeyError(f"Key not found: {key!r}")
+
+        return self._read_key(node, idx), self._read_value(node, idx)
 
     def search(
         self,
@@ -199,14 +244,4 @@ class BTree(Object):
             oid: The base object ID to use for resolving virtual child objects.
             xid: The transaction ID to use for resolving virtual child objects.
         """
-        node = self.root
-
-        while node.is_nonleaf:
-            idx = self._node_search(node, key, cmp=cmp)
-            node = self._node_child(node, idx, omap, oid, xid)
-
-        idx = self._node_search(node, key, exact=exact, cmp=cmp)
-        if idx >= node.nkeys or idx == -1:
-            raise KeyError(f"Key not found: {key!r}")
-
-        return self._read_value(node, idx)
+        return self.search_item(key, exact=exact, cmp=cmp, omap=omap, oid=oid, xid=xid)[1]

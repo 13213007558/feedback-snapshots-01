@@ -183,6 +183,8 @@ class Cursor:
         """
         while self._node.is_nonleaf:
             self._idx = self.btree._node_search(self._node, key, cmp=cmp)
+            if self._idx < 0:
+                raise KeyError(f"Key not found: {key!r}")
             self.push()
 
         self._idx = self.btree._node_search(self._node, key, exact=exact, cmp=cmp)

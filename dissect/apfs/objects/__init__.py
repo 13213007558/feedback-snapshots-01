@@ -16,7 +16,7 @@ from dissect.apfs.objects.nx_fusion_wbc_list import NxFusionWbcList
 from dissect.apfs.objects.nx_reap_list import NxReapList
 from dissect.apfs.objects.nx_reaper import NxReaper
 from dissect.apfs.objects.nx_superblock import NxSuperblock
-from dissect.apfs.objects.omap import ObjectMap
+from dissect.apfs.objects.omap import ObjectMap, OmapEntry
 from dissect.apfs.objects.snap_meta_ext import SnapMetaExt
 from dissect.apfs.objects.spaceman import Spaceman
 from dissect.apfs.objects.spaceman_bitmap import SpacemanBitmap
@@ -41,6 +41,7 @@ __all__ = [
     "NxSuperblock",
     "Object",
     "ObjectMap",
+    "OmapEntry",
     "SnapMetaExt",
     "Spaceman",
     "SpacemanBitmap",
