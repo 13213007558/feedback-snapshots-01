@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gzip
 import io
-import shutil
 import tarfile
 import uuid
 from bisect import bisect_right
@@ -15,7 +14,13 @@ from dissect.util import ts
 from dissect.util.stream import AlignedStream, RangeStream
 
 from dissect.evidence.asdf.c_asdf import c_asdf
-from dissect.evidence.asdf.stream import CompressedStream, Crc32Stream, HashedStream
+from dissect.evidence.asdf.stream import (
+    CompressedStream,
+    Crc32Stream,
+    HashedStream,
+    WriteAllStream,
+    write_all,
+)
 from dissect.evidence.exception import (
     InvalidBlock,
     InvalidSnapshot,
@@ -70,7 +75,7 @@ class AsdfWriter(io.RawIOBase):
         self.fh = self._fh
 
         if compress:
-            self.fh = gzip.GzipFile(fileobj=self.fh, mode="wb")
+            self.fh = gzip.GzipFile(fileobj=WriteAllStream(self.fh), mode="wb")
 
         self.fh = HashedStream(self.fh)
         self.guid = guid or uuid.uuid4()
@@ -83,10 +88,33 @@ class AsdfWriter(io.RawIOBase):
         self._table_lookup = defaultdict(list)
         self._table_offset = 0
 
+        # Once any part of the file failed to be written, the writer is unusable and
+        # can never produce a completed snapshot anymore
+        self._failure: BaseException | None = None
+        self._closed = False
+
         self._meta_buf = io.BytesIO()
         self._meta_tar = tarfile.open(fileobj=self._meta_buf, mode="w")  # noqa: SIM115
 
         self._write_header()
+
+    @property
+    def failed(self) -> BaseException | None:
+        """Return the exception that put this writer in a failed state, if any."""
+        return self._failure
+
+    def _set_failure(self, exc: BaseException) -> None:
+        """Record the first failure, keeping the original exception for diagnostics."""
+        if self._failure is None:
+            self._failure = exc
+
+    def _raise_if_unusable(self) -> None:
+        """Raise if this writer is closed or in a failed state."""
+        if self._failure is not None:
+            raise self._failure
+
+        if self._closed:
+            raise ValueError("I/O operation on closed ASDF writer")
 
     def add_metadata_file(self, path: str, fh: BinaryIO, size: int | None = None) -> None:
         """Add a file to the metadata stream.
@@ -96,19 +124,25 @@ class AsdfWriter(io.RawIOBase):
             fh: The file-like object to write.
             size: Optional size to write.
         """
-        info = self._meta_tar.tarinfo()
-        info.name = path
-        info.uname = "root"
-        info.gname = "root"
+        self._raise_if_unusable()
 
-        if size is None and fh.seekable():
-            fh.seek(0, io.SEEK_END)
-            size = fh.tell()
+        try:
+            info = self._meta_tar.tarinfo()
+            info.name = path
+            info.uname = "root"
+            info.gname = "root"
 
-        info.size = size or 0
+            if size is None and fh.seekable():
+                fh.seek(0, io.SEEK_END)
+                size = fh.tell()
 
-        fh.seek(0)
-        self._meta_tar.addfile(info, fh)
+            info.size = size or 0
+
+            fh.seek(0)
+            self._meta_tar.addfile(info, fh)
+        except BaseException as e:
+            self._set_failure(e)
+            raise
 
     def add_bytes(self, data: bytes, idx: int = 0, base: int = 0) -> None:
         """Add some bytes into this snapshot.
@@ -120,7 +154,7 @@ class AsdfWriter(io.RawIOBase):
             idx: The stream index.
             base: The base offset.
         """
-        self._write_block(io.BytesIO(data), 0, len(data), idx=idx, base=base)
+        self.copy_bytes(io.BytesIO(data), 0, len(data), idx=idx, base=base)
 
     def copy_bytes(self, source: BinaryIO, offset: int, num_bytes: int, idx: int = 0, base: int = 0) -> None:
         """Copy some bytes from the source file-like object into this snapshot.
@@ -138,7 +172,13 @@ class AsdfWriter(io.RawIOBase):
             idx: The stream index, if copying from multiple disks.
             base: The base offset, if the source is a relative stream from e.g. a disk.
         """
-        self._write_block(source, offset, num_bytes, idx=idx, base=base)
+        self._raise_if_unusable()
+
+        try:
+            self._write_block(source, offset, num_bytes, idx=idx, base=base)
+        except BaseException as e:
+            self._set_failure(e)
+            raise
 
     def copy_block(
         self,
@@ -200,14 +240,53 @@ class AsdfWriter(io.RawIOBase):
     def close(self) -> None:
         """Close the ASDF file.
 
-        Writes the block table and footer, then closes the destination file-like object.
+        Writes the metadata, block table and footer, then closes the destination
+        file-like object. The footer is only written after all of the preceding
+        data was accepted, so a failed write never leaves a file that looks
+        complete.
+
+        Closing is idempotent. If any write failed, the writer stays failed and
+        a repeated close re-raises the original exception instead of turning
+        the snapshot into a successful one.
         """
-        super().close()
-        self._write_meta()
-        if self._table:
-            self._write_table()
-        self._write_footer()
-        self.fh.close()
+        if self._closed:
+            if self._failure is not None:
+                raise self._failure
+            return
+
+        self._closed = True
+        try:
+            if self._failure is not None:
+                raise self._failure
+
+            self._write_meta()
+            if self._table:
+                self._write_table()
+
+            # Make sure all data before the footer is accepted by the destination before
+            # declaring the snapshot complete by writing the footer
+            self._flush()
+            self._write_footer()
+            self._flush()
+
+            self.fh.close()
+        except BaseException as e:
+            self._set_failure(e)
+            raise
+        finally:
+            try:
+                # This may flush again, which must never mask the original failure
+                super().close()
+            except BaseException as e:
+                already_failed = self._failure is not None and self._failure is not e
+                self._set_failure(e)
+                if not already_failed:
+                    raise
+
+    def _flush(self) -> None:
+        """Flush the destination file-like object, if it supports flushing."""
+        if hasattr(self.fh, "flush"):
+            self.fh.flush()
 
     def _write_header(self) -> None:
         """Write the ASDF header to the destination file-like object."""
@@ -266,9 +345,20 @@ class AsdfWriter(io.RawIOBase):
         data_offset = self.fh.tell()  # Block data location
 
         source_stream = RangeStream(source, offset, size)
-        shutil.copyfileobj(source_stream, outfh)
+        copied = 0
+        while copied < size:
+            buf = source_stream.read(min(io.DEFAULT_BUFFER_SIZE, size - copied))
+            if not buf:
+                break
+
+            copied += len(buf)
+            write_all(outfh, buf)
+
         # This writes any remaining data or footer for each block writer
         outfh.finalize()
+
+        if copied != size:
+            raise InvalidBlock(f"short block data: expected {size} bytes, got {copied}")
 
         data_size = self.fh.tell() - data_offset
 
@@ -281,7 +371,7 @@ class AsdfWriter(io.RawIOBase):
 
         size = self._meta_buf.tell()
         self._meta_buf.seek(0)
-        self.copy_bytes(self._meta_buf, 0, size, idx=IDX_METADATA)
+        self._write_block(self._meta_buf, 0, size, idx=IDX_METADATA)
 
     def _write_table(self) -> None:
         """Write the ASDF block table to the destination file-like object."""
@@ -317,7 +407,21 @@ class AsdfSnapshot:
 
     def __init__(self, fh: BinaryIO, recover: bool = False):
         self.fh = fh
-        self.header = c_asdf.header(fh)
+
+        file_size = self.fh.seek(0, io.SEEK_END)
+        self.fh.seek(0)
+
+        # A normal read requires the smallest possible complete file (header + footer).
+        # Recovery only needs the header, so interrupted files can still be inspected.
+        min_size = len(c_asdf.header) if recover else len(c_asdf.header) + len(c_asdf.footer)
+        if file_size < min_size:
+            raise InvalidSnapshot("file too small")
+
+        try:
+            self.header = c_asdf.header(fh)
+        except EOFError as e:
+            raise InvalidSnapshot("truncated header") from e
+
         if self.header.magic != FILE_MAGIC:
             raise InvalidSnapshot("invalid header magic")
 
@@ -330,19 +434,28 @@ class AsdfSnapshot:
         self.table: dict[list[SnapshotTableEntry]] = defaultdict(list)
         self._table_lookup: dict[list[int]] = defaultdict(list)
 
-        footer_offset = self.fh.seek(-len(c_asdf.footer), io.SEEK_END)
-
-        self.footer = c_asdf.footer(self.fh)
-        if self.footer.magic != FOOTER_MAGIC:
-            if recover:
-                self._recover_block_table()
-            else:
-                raise InvalidSnapshot("invalid footer magic")
+        # The footer must be the last thing in the file, so anchor it to the end
+        footer_offset = file_size - len(c_asdf.footer)
+        if footer_offset < len(c_asdf.header):
+            self.footer = None
         else:
-            self._parse_block_table(
-                self.footer.table_offset,
-                (footer_offset - self.footer.table_offset) // len(c_asdf.table_entry),
-            )
+            self.fh.seek(footer_offset)
+            self.footer = c_asdf.footer(self.fh)
+
+        table_offset = self.footer.table_offset if self.footer is not None else 0
+        footer_valid = (
+            self.footer is not None
+            and self.footer.magic == FOOTER_MAGIC
+            and len(c_asdf.header) <= table_offset <= footer_offset
+        )
+        if not footer_valid:
+            # A file without a complete, consistent footer is not a finished snapshot
+            if recover:
+                self._recover_block_table(file_size)
+            else:
+                raise InvalidSnapshot("invalid footer")
+        else:
+            self._parse_block_table(table_offset, (footer_offset - table_offset) // len(c_asdf.table_entry))
 
         self.metadata = Metadata(self)
 
@@ -350,14 +463,30 @@ class AsdfSnapshot:
         """Parse the block table, getting rid of overlapping blocks."""
         self.fh.seek(offset)
         table_data = io.BytesIO(self.fh.read(count * len(c_asdf.table_entry)))
+        if len(table_data.getbuffer()) != count * len(c_asdf.table_entry):
+            raise InvalidSnapshot("truncated block table")
 
         for _ in range(count):
             entry = c_asdf.table_entry(table_data)
+
+            # All block data must be present and live before the block table. Anything
+            # else means the file was not completely written.
+            data_offset = entry.file_offset + len(c_asdf.block)
+            if (
+                entry.file_offset < len(c_asdf.header)
+                or data_offset > offset
+                or data_offset + entry.file_size > offset
+            ):
+                raise InvalidSnapshot("block table entry out of bounds")
+
             self._table_insert(entry.idx, entry.offset, entry.size, entry.file_offset)
 
-    def _recover_block_table(self) -> None:
+    def _recover_block_table(self, file_size: int | None = None) -> None:
+        if file_size is None:
+            file_size = self.fh.seek(0, io.SEEK_END)
+
         self.fh.seek(len(c_asdf.header))
-        for block, file_offset in scrape_blocks(self.fh):
+        for block, file_offset in scrape_blocks(self.fh, file_size=file_size):
             self._table_insert(block.idx, block.offset, block.size, file_offset)
 
     def _table_insert(self, idx: int, offset: int, size: int, file_offset: int) -> None:
@@ -540,20 +669,34 @@ class AsdfStream(AlignedStream):
         return b"".join(result)
 
 
-def scrape_blocks(fh: BinaryIO, buffer_size: int = io.DEFAULT_BUFFER_SIZE) -> Iterator[c_asdf.block, int]:
+def scrape_blocks(
+    fh: BinaryIO, buffer_size: int = io.DEFAULT_BUFFER_SIZE, file_size: int | None = None
+) -> Iterator[c_asdf.block, int]:
     """Scrape for block headers in ``fh`` and yield parsed block headers and their offset.
+
+    Only complete blocks are yielded: the block header and all of its data must fit
+    within ``file_size``. This prevents a truncated tail from being recovered as if
+    it were a complete block.
 
     Args:
         fh: The file-like object to scrape for block headers.
         buffer_size: The buffer size to use when scraping.
+        file_size: The size of the file. Determined from ``fh`` if not given.
     """
+    if file_size is None:
+        pos = fh.tell()
+        fh.seek(0, io.SEEK_END)
+        file_size = fh.tell()
+        fh.seek(pos)
+
     # If BLOCK_MAGIC is not found in the buffer (4 bytes), it's possible that part of it (up to 3 bytes) is in there
     # Keep an overlap buffer of 3 bytes that we prepend to the current buffer so we can also find these partial needles
     overlap_len = len(BLOCK_MAGIC) - 1
     overlap = b"\x00" * overlap_len
     while True:
         pos = fh.tell()
-        buf = fh.read(buffer_size)
+        # Never read beyond the known file size, so a buffer can't include data that isn't there
+        buf = fh.read(min(buffer_size, max(0, file_size - pos)))
         if not buf:
             break
 
@@ -565,11 +708,16 @@ def scrape_blocks(fh: BinaryIO, buffer_size: int = io.DEFAULT_BUFFER_SIZE) -> It
                 break
 
             offset = pos + needle_pos - overlap_len
+            if offset < 0 or offset + len(c_asdf.block) > file_size:
+                continue
 
             fh.seek(offset)
             block_buf = fh.read(len(c_asdf.block))
 
             # Some sanity checks that this is actually a block header
+            if len(block_buf) != len(c_asdf.block):
+                continue
+
             if block_buf[4] not in c_asdf.BLOCK_FLAG:
                 continue
 
@@ -577,6 +725,11 @@ def scrape_blocks(fh: BinaryIO, buffer_size: int = io.DEFAULT_BUFFER_SIZE) -> It
                 continue
 
             block_entry = c_asdf.block(block_buf)
+
+            # Only yield blocks whose data is fully present in the file
+            if offset + len(c_asdf.block) + block_entry.size > file_size:
+                continue
+
             yield block_entry, offset
 
         # Keep the last 3 bytes as overlap
