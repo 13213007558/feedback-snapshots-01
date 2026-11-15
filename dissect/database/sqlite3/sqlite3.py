@@ -14,7 +14,7 @@ from dissect.database.sqlite3.exception import (
     InvalidPageType,
     NoCellData,
 )
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.util import get_primary_key_columns_from_constraint, parse_table_columns_constraints
 from dissect.database.sqlite3.wal import WAL
 
 if TYPE_CHECKING:
@@ -328,6 +328,9 @@ class Column:
 
 
 class Table:
+    WITHOUT_ROWID_PATTERN = re.compile(r"WITHOUT\s+ROWID\b", re.IGNORECASE)
+    PRIMARY_KEY_CONSTRAINT_PATTERN = re.compile(r"(CONSTRAINT\s+.*?\s+)?PRIMARY\s+KEY\s*\(", re.IGNORECASE)
+
     def __init__(self, sqlite: SQLite3, type_: str, name: str, table_name: str, page: int, sql: str):
         self.sqlite = sqlite
         self.type = type_
@@ -338,8 +341,39 @@ class Table:
         self.columns = []
         self.primary_key = None
 
-        self.primary_key, columns, _ = parse_table_columns_constraints(sql)
+        self.primary_key, columns, table_constraints = parse_table_columns_constraints(sql)
         self.columns = [Column(name, description) for name, description in columns]
+
+        # WITHOUT ROWID tables are stored as an index b-tree, keyed by the primary key instead of a rowid.
+        # The table options follow the closing parenthesis of the column definitions.
+        self.without_rowid = bool(self.WITHOUT_ROWID_PATTERN.search(sql[sql.rfind(")") :]))
+        self.primary_key_columns = self._parse_primary_key_columns(table_constraints)
+
+    def _parse_primary_key_columns(self, table_constraints: list[str]) -> list[str]:
+        """Return the column names that make up the primary key, in primary key order."""
+        if self.primary_key is not None:
+            return [self.primary_key]
+
+        for constraint in table_constraints:
+            if self.PRIMARY_KEY_CONSTRAINT_PATTERN.match(constraint):
+                return get_primary_key_columns_from_constraint(constraint)
+        return []
+
+    @property
+    def record_columns(self) -> list[Column]:
+        """Return the columns in the order their values appear in the on-disk record.
+
+        Ordinary (rowid) tables store values in column declaration order. WITHOUT ROWID tables store
+        records as index entries: the primary key columns first (in primary key order), followed by
+        the remaining columns in declaration order.
+        """
+        if not self.without_rowid or not self.primary_key_columns:
+            return self.columns
+
+        pk_names = [name.lower() for name in self.primary_key_columns]
+        pk_columns = [column for name in pk_names for column in self.columns if column.name.lower() == name]
+        other_columns = [column for column in self.columns if column.name.lower() not in pk_names]
+        return pk_columns + other_columns
 
     def __repr__(self) -> str:
         return f"<Table name={self.name} page={self.page}>"
@@ -372,13 +406,21 @@ class Row:
     def __init__(self, table: Table, cell: Cell):
         self._table = table
         self._cell = cell
-        self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
+        self._values, self._unknowns = self._match_columns_to_values(table.record_columns, cell.values)
 
+        # For rowid tables with an INTEGER PRIMARY KEY column, that column is an alias for the rowid
+        # and its value is stored as NULL in the record; the actual value is the cell key.
         # If there is no primary key or the primary key is a compound key,
         # primary_key will be None, but then all (primary key) columns will
-        # already have a value assigned.
+        # already have a value assigned. WITHOUT ROWID tables store the primary
+        # key in the record itself and their cells have no rowid key.
         primary_key = table.primary_key
-        if primary_key and self._values.get(primary_key, None) is None and self._cell.key is not None:
+        if (
+            not table.without_rowid
+            and primary_key
+            and self._values.get(primary_key, None) is None
+            and self._cell.key is not None
+        ):
             self._values[primary_key] = self._cell.key
 
     def _match_columns_to_values(self, columns: list[Column], values: list[Any]) -> tuple[dict[str, Any], list[Any]]:

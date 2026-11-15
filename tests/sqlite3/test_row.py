@@ -12,6 +12,8 @@ def test_row_filled_with_defaults() -> None:
         Column("test2", "DEFAULT 2"),
         Column("test3", "TEXT DEFAULT 'hello people'"),
     ]
+    mocked_table.record_columns = mocked_table.columns
+    mocked_table.without_rowid = False
     mocked_cell = Mock()
     mocked_cell.values = [20]
     result_row = Row(table=mocked_table, cell=mocked_cell)
@@ -26,6 +28,8 @@ def test_row_more_cells() -> None:
     mocked_table.columns = [
         Column("test", "DEFAULT 1"),
     ]
+    mocked_table.record_columns = mocked_table.columns
+    mocked_table.without_rowid = False
     mocked_table.primary_key = None
 
     mocked_cell = Mock()

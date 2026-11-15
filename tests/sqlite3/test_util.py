@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.util import get_primary_key_columns_from_constraint, parse_table_columns_constraints
 
 testdata = [
     pytest.param(
@@ -170,9 +170,55 @@ testdata = [
         ),
         id="primary-key-constraint-multiple-parts",
     ),
+    # Quoted column names containing whitespace, as can be found in WITHOUT ROWID tables.
+    pytest.param(
+        'CREATE TABLE wr (\n  "payload data" TEXT,\n  "key two" INTEGER NOT NULL,\n  flag INTEGER,\n'
+        '  "key one" TEXT NOT NULL,\n  ratio REAL,\n  PRIMARY KEY ("key one", "key two")\n) WITHOUT ROWID',
+        (
+            None,
+            [
+                ("payload data", "TEXT"),
+                ("key two", "INTEGER NOT NULL"),
+                ("flag", "INTEGER"),
+                ("key one", "TEXT NOT NULL"),
+                ("ratio", "REAL"),
+            ],
+            [
+                'PRIMARY KEY ("key one", "key two")',
+            ],
+        ),
+        id="create-table-quoted-names-without-rowid",
+    ),
+    # Quoted column name with a single inline primary key.
+    pytest.param(
+        'CREATE TABLE wr ("my id" INTEGER PRIMARY KEY, "my value" TEXT)',
+        (
+            "my id",
+            [
+                ("my id", "INTEGER PRIMARY KEY"),
+                ("my value", "TEXT"),
+            ],
+            [],
+        ),
+        id="create-table-quoted-name-inline-pk",
+    ),
 ]
 
 
 @pytest.mark.parametrize(("sql", "result"), testdata)
 def test_parse_table_columns_constraints(sql: str, result: tuple) -> None:
     assert parse_table_columns_constraints(sql) == result
+
+
+@pytest.mark.parametrize(
+    ("constraint", "expected"),
+    [
+        pytest.param("PRIMARY KEY (id)", ["id"], id="single"),
+        pytest.param('PRIMARY KEY("foo" AUTOINCREMENT)', ["foo"], id="single-quoted-with-keyword"),
+        pytest.param("PRIMARY KEY ( column1, column2 )", ["column1", "column2"], id="compound"),
+        pytest.param('PRIMARY KEY ("key one", "key two")', ["key one", "key two"], id="compound-quoted-with-spaces"),
+        pytest.param("PRIMARY KEY (`key one` DESC, [key two] ASC)", ["key one", "key two"], id="quoted-flavours"),
+    ],
+)
+def test_get_primary_key_columns_from_constraint(constraint: str, expected: list[str]) -> None:
+    assert get_primary_key_columns_from_constraint(constraint) == expected

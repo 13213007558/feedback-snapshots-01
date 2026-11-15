@@ -109,33 +109,73 @@ def parse_table_columns_constraints(sql: str) -> tuple[str | None, list[str], li
 
 def split_column_def(sql: str, column_def: str) -> tuple[str, str]:
     """Splits the column definition to name and constraint."""
-    column_parts = column_def.split(maxsplit=1)
-    if not column_parts:
+    if not column_def.strip():
         raise InvalidSQL(f"Not a valid CREATE TABLE definition: empty column definition in {sql!r}")
 
-    column_name = column_parts[0]
-    column_type_constraint = column_parts[1] if len(column_parts) > 1 else ""
+    return split_column_name(column_def)
 
-    if column_name[0] in ('"', "'", "`"):
-        column_name = column_name[1:-1]
 
-    return column_name, column_type_constraint
+def split_column_name(definition: str) -> tuple[str, str]:
+    """Split a column (or primary key column) definition into the column name and the remainder.
+
+    Handles quoted column names (``"..."``, ``'...'``, ``` ``...`` ``` and ``[...]``), including
+    quoted names containing whitespace. Doubled quote characters inside a quoted name are
+    unescaped.
+    """
+    definition = definition.strip()
+    if not definition:
+        return "", ""
+
+    if definition[0] in ('"', "'", "`", "["):
+        closer = "]" if definition[0] == "[" else definition[0]
+        idx = 1
+        while True:
+            idx = definition.find(closer, idx)
+            if idx == -1:
+                # Unterminated quote, treat the remainder as the column name.
+                return definition[1:], ""
+            if closer != "]" and definition[idx + 1 : idx + 2] == closer:
+                # Doubled quote character, this is an escaped quote inside the name.
+                idx += 2
+                continue
+            break
+
+        name = definition[1:idx]
+        if closer != "]":
+            name = name.replace(closer * 2, closer)
+        return name, definition[idx + 1 :].strip()
+
+    parts = definition.split(maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def get_primary_key_columns_from_constraint(constraint: str) -> list[str]:
+    """Return the ordered column names from a ``PRIMARY KEY (...)`` constraint definition.
+
+    Handles compound primary keys and quoted column names, e.g. ``PRIMARY KEY ("key one", "key two")``
+    returns ``["key one", "key two"]``.
+    """
+    primary_key_sql = re.search(r"\((.+)\)", constraint, flags=re.DOTALL)
+    if not primary_key_sql:
+        raise InvalidSQL(f"Not a valid PRIMARY KEY constraint definition: {constraint!r}")
+
+    matched_group = primary_key_sql.groups()[0]
+    return [name for name in (split_column_name(def_)[0] for def_ in split_sql_list(matched_group)) if name]
 
 
 def get_primary_key_from_constraint(column_type_constraint: str, column_def: str, sql: str) -> str | None:
     """Finds a primary key from sql string."""
     primary_key = None
 
-    primary_key_sql = re.search(r"\((.+)\)", column_type_constraint, flags=re.DOTALL)
-    if not primary_key_sql:
+    try:
+        primary_key_columns = get_primary_key_columns_from_constraint(column_type_constraint)
+    except InvalidSQL:
         raise InvalidSQL(
             f"Not a valid CREATE TABLE definition: invalid PRIMARY KEY table constraint {column_def!r} in {sql!r}"
-        )
-    matched_group = primary_key_sql.groups()[0]
-    primary_key_defs = list(split_sql_list(matched_group))
+        ) from None
+
     # We only handle single primary keys, no compound keys or expressions, so a single entry in the list consisting of
     # a single part. For example we parse ``id`` as a primary_key in the constraint ``PRIMARY KEY("id" AUTOINCREMENT)``.
-    if len(primary_key_defs) == 1:
-        primary_key_parts = primary_key_defs[0].split(maxsplit=1)
-        primary_key = primary_key_parts[0].strip("'\"")
+    if len(primary_key_columns) == 1:
+        primary_key = primary_key_columns[0]
     return primary_key
