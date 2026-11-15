@@ -697,7 +697,12 @@ class TIBX:
         if locator is None:
             raise CorruptArchiveError(f"segment id {segment_id} not in segment_map")
 
-        plain = read_plaintext(self.store, locator.page_offset, self._data_key, locator.page_count)
+        try:
+            plain = read_plaintext(self.store, locator.page_offset, self._data_key, locator.page_count)
+        except Error as e:
+            # The segment header and payload errors speak of page numbers; say which segment
+            # that page belongs to, so a failure from a public read is locatable to a segment.
+            raise type(e)(f"segment {segment_id} at page {locator.page_offset}: {e}") from e
         self._segment_cache[segment_id] = plain
         self._segment_cache_bytes += len(plain)
         # Evict oldest until under budget, but always keep the just-added entry so a single

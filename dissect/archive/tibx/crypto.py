@@ -22,6 +22,30 @@ to a block boundary; GCM leaves it exactly as long as the plaintext, so a GCM se
 Either way the plaintext is what the segment's codec wrote: a zstd frame, an LZ4 block, a
 zlib stream, or the stored bytes when the codec is NONE.
 
+Integrity is not uniform across these layers; the tests in
+``tests/tibx/test_encryption_integrity.py`` pin each boundary:
+
+* The password-wrapped data key is confidentiality-only: PBKDF2 + AES-CBC with PKCS#7
+  padding, no MAC and no key id. A wrapped key is accepted when its header is plausible,
+  its wrapped bytes are a non-empty AES-block multiple, and decrypting it yields PKCS#7
+  padding of exactly the algorithm's key length. A modified wrapped key that still meets
+  those checks is accepted as *a* key; a wrong password is rejected only because its
+  padding or length check fails. If the keymap holds several structurally valid
+  candidates, the first one that passes those checks wins.
+* AES-CBC segments are confidentiality-only. The IV is unauthenticated and PKCS#7 padding
+  is a framing check, not a MAC: changing a non-final ciphertext block leaves the padding
+  valid and decrypts to altered plaintext. Whether the segment's codec then rejects the
+  altered bytes is incidental; a successful unpad or decompression does not authenticate
+  the segment.
+* AES-GCM segments are confidentiality *and* integrity protected. The 16-byte tag covers
+  the IV and ciphertext (no additional data); ``decrypt_and_verify`` rejects a modified
+  IV, tag or ciphertext, or truncated ciphertext, before returning any plaintext. A
+  payload shorter than the GCM header is a framing error, not an authentication success.
+* Encrypted LSM cell streams use the same framing and inherit the archive cipher's
+  guarantees.
+* Page CRC-32C is available to :meth:`PageStore.verify` for accidental damage, but the
+  read path does not authenticate pages with it and it is not a MAC.
+
 Ported from ``acronis-tib-reader`` (MIT License, Copyright (c) 2026 the tibread
 contributors, https://github.com/TreadingTheTiber/acronis-tib-reader) and ``acronis-tibx``
 (MIT License, Copyright (c) 2026 mniedermaier).
@@ -203,6 +227,12 @@ def _try_unwrap(blob: bytes, offset: int, password: bytes) -> DataKey | None:
 def unwrap_data_key(header: ArchiveHeader, password: str | bytes) -> DataKey:
     """Recover the archive's data key from ``password`` via the keymap tree.
 
+    The wrapped key carries no MAC, so this authenticates nothing: acceptance means only
+    that some candidate header parses and its AES-CBC decryption ends in valid PKCS#7
+    padding of exactly the algorithm's key length. An altered wrapped key that still
+    satisfies that is returned as a key; the archive's cipher (GCM, unlike CBC) may then
+    reject the segments it decrypts.
+
     Raises:
         ~dissect.archive.tibx.exception.InvalidPasswordError: If no wrapped key unwraps with this password.
     """
@@ -228,6 +258,10 @@ def decrypt_segment(payload: bytes, data_key: DataKey) -> bytes:
     Returns the still-compressed (or stored) plaintext; the caller decompresses per the
     segment's compression field. For CBC the padding is left intact -- the caller truncates
     to the segment's declared length; GCM plaintext is already exact.
+
+    A CBC payload is not authenticated: this returns whatever the cipher, its unauthenticated
+    IV and PKCS#7 padding yield, however the ciphertext was changed. GCM is authenticated,
+    so no plaintext is returned unless its tag verifies.
 
     Raises:
         ~dissect.archive.tibx.exception.CorruptArchiveError: If the payload is too short for its framing, or a GCM

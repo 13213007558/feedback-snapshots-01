@@ -67,7 +67,11 @@ class Segment:
 
 
 def _pkcs7_unpad(data: bytes) -> bytes:
-    """Strip PKCS#7 padding if present, else return the data unchanged."""
+    """Strip PKCS#7 padding if present, else return the data unchanged.
+
+    This is a framing check, not authentication: CBC segments carry no MAC, so data whose
+    padding happens to validate is returned even if a ciphertext block was changed.
+    """
     if data and len(data) % 16 == 0:
         pad = data[-1]
         if 1 <= pad <= 16 and data[-pad:] == bytes([pad]) * pad:
@@ -152,6 +156,10 @@ def read_plaintext(store: PageStore, page_index: int, data_key: DataKey | None =
     ``page_count``, the number of pages the segment_map says the segment takes, lets the
     header and its continuation pages come in one read instead of two: one round trip per
     segment over SMB. The header stays authoritative for where the segment ends.
+
+    GCM segments are authenticated and a changed IV, tag or ciphertext raises. CBC segments
+    are not: their plaintext is only unpad/decompress-validated, so altered data that still
+    satisfies these is returned as if intact.
 
     Raises:
         ~dissect.archive.tibx.exception.InvalidPasswordError: If the segment is encrypted but no data key was provided.
