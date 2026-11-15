@@ -23,3 +23,11 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotAReparsePointError(Error):
     pass
+
+
+class AmbiguousResourceError(Error):
+    pass
+
+
+class NotFileContentError(Error):
+    pass
