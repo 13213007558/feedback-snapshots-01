@@ -128,5 +128,8 @@ def test_increment_last_char() -> None:
     assert _increment_last_char("test") == "tesu"
     assert _increment_last_char("tesz") == "tet"
     assert _increment_last_char("a") == "b"
-    assert _increment_last_char("z") == "za"
-    assert _increment_last_char("") == "a"
+    assert _increment_last_char("A") == "B"
+    assert _increment_last_char("z") is None
+    assert _increment_last_char("Z") is None
+    assert _increment_last_char("zz") is None
+    assert _increment_last_char("") is None
