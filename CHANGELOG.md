@@ -1,5 +1,8 @@
 ## Unreleased
 
+* Fix: `Rack::Protection::CookieTossing` no longer shares detected bad cookies between requests handled by the same middleware instance
+  * Previously an attack request could cause later, unrelated requests to be rejected and to delete their own domain and path cookies.
+
 ## 4.2.1 / 2025-10-10
 
 * Fix: Revert "`PATH_INFO` can never be empty" ([#2124](https://github.com/sinatra/sinatra/pull/2124))

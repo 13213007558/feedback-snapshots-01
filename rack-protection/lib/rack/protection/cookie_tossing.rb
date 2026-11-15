@@ -40,6 +40,11 @@ module Rack
       end
 
       def accepts?(env)
+        detect_bad_cookies(env).empty?
+      end
+
+      def detect_bad_cookies(env)
+        bad_cookies = []
         cookie_header = env['HTTP_COOKIE']
         cookies = Rack::Utils.parse_query(cookie_header, ';,') { |s| s }
         cookies.each do |k, v|
@@ -48,10 +53,11 @@ module Rack
             bad_cookies << k
           end
         end
-        bad_cookies.empty?
+        bad_cookies
       end
 
       def remove_bad_cookies(request, response)
+        bad_cookies = detect_bad_cookies(request.env)
         return if bad_cookies.empty?
 
         paths = cookie_paths(request.path)
@@ -64,10 +70,6 @@ module Rack
         request = Request.new(env)
         warn env, "attack prevented by #{self.class}"
         [302, { 'content-type' => 'text/html', 'location' => request.path }, []]
-      end
-
-      def bad_cookies
-        @bad_cookies ||= []
       end
 
       def cookie_paths(path)
