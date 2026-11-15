@@ -30,6 +30,15 @@ class PcapngStrictnessWarning(PcapngWarning):
     """Indicate a condition about poorly formed pcapng files"""
 
 
+class StaleHashError(PcapngException):
+    """
+    Exception indicating that packet bytes changed after packet hashes
+    were verified or established, invalidating previous conclusions.
+    """
+
+    pass
+
+
 class StreamEmpty(PcapngLoadError):  # End of stream
     """
     Exception indicating that the end of the stream was reached

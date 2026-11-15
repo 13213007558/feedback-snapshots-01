@@ -1,6 +1,17 @@
 History
 #######
 
+Unreleased
+==========
+
+- Add the packet hash verification and editing contract
+  (``pcapng.pkthash``) for the ``epb_hash`` / ``pack_hash`` options:
+  supported algorithms (CRC32, MD5, SHA-1) are verified as
+  match/mismatch/malformed, other algorithms are preserved as unverified;
+  verification results are invalidated when the packet bytes change;
+  hashes can be explicitly recomputed, and stale declarations are
+  rejected (or dropped, in "fix" mode) when writing.
+
 2.1.1
 =====
 

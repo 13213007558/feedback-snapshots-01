@@ -15,6 +15,7 @@ import itertools
 
 from pcapng import strictness as strictness
 from pcapng.constants import link_types
+from pcapng.pkthash import PacketHashContractMixin
 from pcapng.structs import (
     IntField,
     ListField,
@@ -406,16 +407,20 @@ class BasePacketBlock(SectionMemberBlock, BlockWithInterfaceMixin):
 
 
 @register_block
-class EnhancedPacket(BasePacketBlock, BlockWithTimestampMixin):
+class EnhancedPacket(PacketHashContractMixin, BasePacketBlock, BlockWithTimestampMixin):
     """
     "An Enhanced Packet Block (EPB) is the standard container for storing the
     packets coming from the network."
     - pcapng spec, section 4.3. Other quoted citations are from this section
     unless otherwise noted.
+
+    The ``epb_hash`` option is handled according to the packet hash
+    verification and editing contract, see :py:mod:`pcapng.pkthash`.
     """
 
     magic_number = 0x00000006
-    __slots__ = []
+    __slots__ = ["_original_hashes", "_hash_decl_fingerprint", "_hashes_derived"]
+    _hash_option_name = "epb_hash"
     schema = [
         ("interface_id", IntField(32, False), 0),
         ("timestamp_high", IntField(32, False), 0),
@@ -428,7 +433,7 @@ class EnhancedPacket(BasePacketBlock, BlockWithTimestampMixin):
             OptionsField(
                 [
                     Option(2, "epb_flags", "epb_flags"),
-                    Option(3, "epb_hash", "type+bytes", multiple=True),  # todo: process
+                    Option(3, "epb_hash", "type+bytes", multiple=True),
                     Option(4, "epb_dropcount", "u64"),
                     Option(5, "epb_packetid", "u64"),
                     Option(6, "epb_queue", "u32"),
@@ -532,16 +537,20 @@ class SimplePacket(BasePacketBlock):
 
 
 @register_block
-class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
+class ObsoletePacket(PacketHashContractMixin, BasePacketBlock, BlockWithTimestampMixin):
     """
     "The Packet Block is obsolete, and MUST NOT be used in new files. [...] A
     Packet Block was a container for storing packets coming from the network."
     - pcapng spec, Appendix A. Other quoted citations are from this appendix
     unless otherwise noted.
+
+    The ``pack_hash`` option is handled according to the packet hash
+    verification and editing contract, see :py:mod:`pcapng.pkthash`.
     """
 
     magic_number = 0x00000002
-    __slots__ = []
+    __slots__ = ["_original_hashes", "_hash_decl_fingerprint", "_hashes_derived"]
+    _hash_option_name = "pack_hash"
     schema = [
         ("interface_id", IntField(16, False), 0),
         ("drops_count", IntField(16, False), 0),
