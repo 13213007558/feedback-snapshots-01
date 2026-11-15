@@ -20,6 +20,8 @@ from dissect.archive.tibx.map import Extent, ExtentTable, load_extents, load_seg
 from dissect.archive.tibx.tibx import (
     MIN_VOLUME_SIZE,
     TIBX,
+    VolumeClassification,
+    VolumeConfidence,
     _missing_volumes_message,
     find_split_parts,
     resolve_extents,
@@ -1003,3 +1005,240 @@ def test_find_split_parts_orders_numerically_and_ignores_other_stems(tmp_path: P
     (tmp_path / "Backup2-0001.tibx").write_bytes(b"")
 
     assert find_split_parts(parts[1]) == parts
+
+
+# --- Volume classification provenance -------------------------------------
+
+
+def _classification_candidates(archive: bytes) -> dict[int, object]:
+    return {candidate.volume_id: candidate for candidate in TIBX(io.BytesIO(archive)).candidates()}
+
+
+def test_candidate_cites_its_evidence() -> None:
+    # Each candidate names the evidence behind its verdict, and only the imap-confirmed
+    # one carries a partition name
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+            ExtentSpec(5, 0, b"\xff" * (MIN_VOLUME_SIZE + 0x2C5)),
+            ExtentSpec(9, 0, b"unformatted tail".ljust(512, b"\x00")),
+            ExtentSpec(9, MIN_VOLUME_SIZE, b"\x00" * 512),
+        ],
+        extra_slots={0: imap([ImapItem(2, b"disk1/part1", 4, 0x3000000)])},
+    )
+    candidates = _classification_candidates(archive)
+
+    partition = candidates[4]
+    assert partition.confidence is VolumeConfidence.CONFIRMED
+    assert partition.classification is VolumeClassification.PARTITION
+    assert partition.name == b"disk1/part1"
+    assert partition.evidence_kinds == ("imap-name", "filesystem")
+    assert all(evidence.supports for evidence in partition.evidence)
+    assert partition.selected
+
+    bitmap = candidates[5]
+    assert bitmap.confidence is VolumeConfidence.EXCLUDED
+    assert bitmap.classification is VolumeClassification.ALLOCATION_BITMAP
+    assert "bitmap-content" in bitmap.evidence_kinds
+    assert not bitmap.selected
+
+    # The partition-sized but unrecognised stream is a probable volume, but it is not
+    # selected: once the archive names its partitions, heuristics are kept separate
+    unknown = candidates[9]
+    assert unknown.confidence is VolumeConfidence.PROBABLE
+    assert unknown.classification is VolumeClassification.UNKNOWN_FILESYSTEM
+    assert not unknown.selected
+    assert unknown.evidence_kinds == ("partition-sized-span", "unknown-filesystem") or unknown.evidence_kinds == (
+        "unknown-filesystem",
+        "partition-sized-span",
+    )
+
+
+def test_zero_partition_keeps_its_legitimacy() -> None:
+    # A formatted-but-empty partition is all zeros: still a volume, classified as such
+    archive = build_lsm_archive([ExtentSpec(9, 0, b"\x00" * 512), ExtentSpec(9, MIN_VOLUME_SIZE - 512, b"\x00" * 512)])
+    candidate = _classification_candidates(archive)[9]
+
+    assert candidate.classification is VolumeClassification.ZERO_PARTITION
+    assert candidate.confidence is VolumeConfidence.PROBABLE
+    assert "zero-content" in candidate.evidence_kinds
+    assert "partition-sized-span" in candidate.evidence_kinds
+    assert candidate.is_volume
+
+
+def test_four_kib_structure_is_not_a_volume() -> None:
+    # Acronis's 4 KiB tables are neither partition-sized nor sector-positioned like one
+    archive = build_lsm_archive([ExtentSpec(3, 0, b"\x02\x00\x02\x00" * 8)])
+    candidate = _classification_candidates(archive)[3]
+
+    assert candidate.classification is VolumeClassification.METADATA
+    assert candidate.confidence is VolumeConfidence.EXCLUDED
+    assert not candidate.is_volume
+    assert "span-below-minimum" in candidate.evidence_kinds
+
+
+def test_file_backup_excludes_large_files_with_reason() -> None:
+    # A file-level backup's large files look like partitions; the imap names them files,
+    # and that classification must say so rather than silently dropping them
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+            ExtentSpec(5, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+        ],
+        extra_slots={
+            0: imap(
+                [
+                    ImapItem(2, b"C:/Users/user/disk.vhd", 4, 0x3000000),
+                    ImapItem(2, b"C:/Users/user/other.vhd", 5, 0x3000000),
+                ]
+            )
+        },
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    # No meta type, but the imap is unambiguous
+    assert tibx.archive_type == ""
+    assert tibx.volumes() == []
+    for candidate in tibx.candidates():
+        assert candidate.classification is VolumeClassification.FILE
+        assert candidate.confidence is VolumeConfidence.EXCLUDED
+        assert "imap-item" in candidate.evidence_kinds
+        assert candidate.name.startswith(b"C:/Users/user/")
+        assert not candidate.selected
+
+
+def test_identical_sized_partition_and_bytes_table_are_told_apart() -> None:
+    # Two streams of exactly the same span: one a partition, one an allocation bitmap.
+    # Only the content and the bitmap span can tell them apart.
+    span = MIN_VOLUME_SIZE
+    bitmap = b"\x0f" + b"\x00" * (span - 1)
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(span // 512) + b"\x00" * (span - 512)),
+            ExtentSpec(5, 0, bitmap),
+        ]
+    )
+    candidates = _classification_candidates(archive)
+
+    assert candidates[4].classification is VolumeClassification.PARTITION
+    assert candidates[4].confidence is VolumeConfidence.PROBABLE
+    assert candidates[5].classification is VolumeClassification.UNKNOWN_FILESYSTEM
+    # Both pass the span test; only the one's content names a filesystem
+    assert "filesystem" in candidates[4].evidence_kinds
+    assert "unknown-filesystem" in candidates[5].evidence_kinds
+    assert {candidate.volume_id for candidate in TIBX(io.BytesIO(archive)).volumes()} == {4, 5}
+
+
+def test_ambiguous_stream_remains_inspectable_but_is_not_confirmed() -> None:
+    # A stream that fits neither population: too small to be a partition and not
+    # recognisable as a filesystem. It must stay readable and keep its evidence, but it
+    # must not be presented as a confirmed partition.
+    archive = build_lsm_archive([ExtentSpec(7, 0, b"some opaque bytes" * 10)])
+    tibx = TIBX(io.BytesIO(archive))
+    candidate = _classification_candidates(archive)[7]
+
+    assert candidate.classification is VolumeClassification.METADATA
+    assert candidate.confidence is VolumeConfidence.EXCLUDED
+    assert candidate.read(0, 4) == b"some"
+    assert 7 not in {volume.volume_id for volume in tibx.volumes()}
+    assert candidate.explanation is None
+
+
+def _encrypted_imap(items: list[ImapItem]) -> bytes:
+    """The TLV[0] imap of ``items``, AES-GCM-encrypted under the archive's data key.
+
+    The framing is a segment's: the IV and the tag, then the ciphertext. This is the
+    layout real Cyber Protect archives use for the imap, which is what makes a locked
+    archive unable to name its partitions.
+    """
+    from Crypto.Cipher import AES
+
+    from tests._tools.tibx._synth import KEY_LENGTH, Cell, lsb, variable_cells
+
+    cells = [
+        Cell(
+            c_tibx.imap_key(slice_id=item.slice_id, flags=item.flags, type=0).dumps() + item.name,
+            c_tibx.imap_value(extra_streams=0).dumps()
+            + c_tibx.imap_stream(index=0, flags=c_tibx.StreamFlags.WRITTEN, id=item.stream_id, size=item.size).dumps(),
+        )
+        for item in items
+    ]
+    data_key = bytes(range(KEY_LENGTH[7]))
+    iv = bytes(range(16))
+    ciphertext, tag = AES.new(data_key, AES.MODE_GCM, nonce=iv).encrypt_and_digest(variable_cells(cells))
+    header = c_tibx.segment_gcm_header(iv=iv, tag=tag).dumps()
+    # The imap's keys are variable-length, so its L-SB declares no fixed key length/size
+    return lsb(0, 0, memtree_cells=cells, memtree_blob=header + ciphertext, memtree_encoding=0x80)
+
+
+def test_lock_and_unlock_explains_the_changed_identity() -> None:
+    # While locked, the span is all that can be judged: a partition-sized stream is a
+    # probable volume with no name. Unlocking reveals the imap's own partition record;
+    # the candidate then reports the change instead of silently replacing the guess.
+    password = b"secret"
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * (MIN_VOLUME_SIZE - 512)),
+            ExtentSpec(5, 0, b"\x00" * 0x1000),
+        ],
+        password=password,
+        alg=7,
+        extra_slots={0: _encrypted_imap([ImapItem(2, b"disk1/part1", 4, 0x3000000)])},
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    locked = {candidate.volume_id: candidate for candidate in tibx.volume_candidates()}
+    assert locked[4].confidence is VolumeConfidence.PROBABLE
+    assert locked[4].classification is VolumeClassification.LOCKED
+    assert locked[4].name is None
+    assert locked[4].previous is None
+
+    tibx.unlock(password)
+    unlocked = {candidate.volume_id: candidate for candidate in tibx.volume_candidates()}
+    confirmed = unlocked[4]
+
+    assert confirmed.confidence is VolumeConfidence.CONFIRMED
+    assert confirmed.classification is VolumeClassification.PARTITION
+    assert confirmed.name == b"disk1/part1"
+    assert confirmed.previous is not None
+    assert confirmed.previous.confidence is VolumeConfidence.PROBABLE
+    assert confirmed.previous.classification is VolumeClassification.LOCKED
+    assert "disk1/part1" in confirmed.explanation
+    assert "locked" in confirmed.explanation
+
+    # The small stream also changed once its content became readable -- from an
+    # unconfirmable unknown to metadata -- and that change is explained too
+    changed = {candidate.volume_id: candidate for candidate in tibx.classification_changes()}
+    assert set(changed) == {4, 5}
+    assert changed[5].previous is not None
+    assert changed[5].previous.classification is VolumeClassification.UNKNOWN
+    assert changed[5].classification is VolumeClassification.METADATA
+    assert changed[5].explanation is not None
+
+
+def test_volume_report_is_json_friendly() -> None:
+    # A forensic report must carry the evidence, not just the verdict, and must not
+    # contain raw bytes or enum objects
+    import json
+
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+            ExtentSpec(2, 0, b"\x00" * 16),
+        ],
+        extra_slots={0: imap([ImapItem(2, b"disk1/part1", 4, 0x3000000)])},
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    report = tibx.volume_report()
+    assert json.loads(json.dumps(report)) == report
+    by_id = {entry["volume_id"]: entry for entry in report}
+
+    assert by_id[4]["confidence"] == "confirmed"
+    assert by_id[4]["name"] == "disk1/part1"
+    assert by_id[4]["is_volume"] is True
+    assert by_id[4]["explanation"] is None
+    assert [item["kind"] for item in by_id[4]["evidence"]] == ["imap-name", "filesystem"]
+
+    assert by_id[2]["confidence"] == "excluded"
+    assert by_id[2]["is_volume"] is False
