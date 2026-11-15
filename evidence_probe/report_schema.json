@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FVE probe report",
+  "type": "object",
+  "required": [
+    "source",
+    "size",
+    "strongest_level",
+    "strongest_level_label",
+    "position_preserved",
+    "confirmed_formats",
+    "candidates",
+    "errors",
+    "upstream_policy"
+  ],
+  "properties": {
+    "source": {"type": "string"},
+    "size": {"type": "integer", "minimum": 0},
+    "strongest_level": {"type": "integer", "enum": [0, 1, 2, 3]},
+    "strongest_level_label": {
+      "type": "string",
+      "enum": ["inconclusive", "possible-encrypted", "format-header-recognized", "key-verified"]
+    },
+    "position_preserved": {"type": "boolean"},
+    "confirmed_formats": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["luks", "bitlocker", "veracrypt"]},
+      "description": "Only L3 key-verified formats appear here. The only field an upstream system may persist as a confirmed fact."
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["format", "max_level", "max_level_label", "key_verified", "evidence"],
+        "properties": {
+          "format": {"type": "string"},
+          "max_level": {"type": "integer", "enum": [0, 1, 2, 3]},
+          "max_level_label": {"type": "string"},
+          "key_verified": {"type": "boolean"},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["detector", "level", "level_label", "supports_claim", "detail"],
+              "properties": {
+                "detector": {"type": "string"},
+                "level": {"type": "integer", "enum": [0, 1, 2, 3]},
+                "level_label": {"type": "string"},
+                "supports_claim": {"type": "string"},
+                "detail": {"type": "object"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["detector", "error"],
+        "properties": {"detector": {"type": "string"}, "error": {"type": "string"}}
+      }
+    },
+    "upstream_policy": {"type": "string"}
+  }
+}
