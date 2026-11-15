@@ -8,6 +8,7 @@ from dissect.vmfs.exception import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.vmfs.lockcheck import LockAssessment, LockVerdict, assess_file_lock, assess_lock
 from dissect.vmfs.lvm import LVM, Device, Volume
 from dissect.vmfs.vmfs import VMFS
 
@@ -20,7 +21,11 @@ __all__ = [
     "FileDescriptor",
     "FileNotFoundError",
     "InvalidHeader",
+    "LockAssessment",
+    "LockVerdict",
     "NotADirectoryError",
     "NotASymlinkError",
     "Volume",
+    "assess_file_lock",
+    "assess_lock",
 ]
