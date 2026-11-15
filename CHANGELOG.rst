@@ -1,6 +1,18 @@
 History
 #######
 
+Unreleased
+==========
+
+- Blocks decoded from a capture now snapshot the interface metadata used
+  to interpret them (timestamp resolution, simple-packet captured length)
+  at decode time, so editing section/interface metadata after parsing no
+  longer changes the decoded view of already-read blocks, regardless of
+  the order in which attributes are accessed. Blocks created
+  programmatically are still interpreted live against current metadata.
+- Fix ``copy``/``deepcopy`` of block objects, which previously recursed
+  infinitely in ``Block.__getattr__``.
+
 2.1.1
 =====
 

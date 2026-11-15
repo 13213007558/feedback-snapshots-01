@@ -7,6 +7,25 @@ a variable amount of "items" (usually options).
 
 They can optionally expose some other properties, used eg. to provide
 better access to decoded information, ...
+
+Raw view vs. edit view
+----------------------
+
+Blocks decoded from a capture (ie. built by the scanner with raw data)
+snapshot the section/interface metadata they need for interpretation
+(timestamp resolution, captured length, ...) at decode time. Derived
+properties on such blocks therefore report capture-time facts and stay
+stable no matter how the section or interface metadata is edited
+afterwards, and no matter in which order attributes are accessed.
+
+Blocks created programmatically hold no such snapshot: their derived
+properties are computed live from the current metadata, so edits are
+immediately visible. The metadata objects themselves (interfaces,
+options, ...) also always reflect the current, editable state.
+
+The decode-time snapshot is written once and never invalidated (it is a
+historical fact, not a cache), and it is stored in ``__slots__`` so it
+is preserved when a block is copied.
 """
 
 
@@ -39,8 +58,10 @@ class Block(object):
     schema = []
     readonly_fields = set()
     __slots__ = [
-        # These are in addition to the above two properties
-        "magic_number",
+        # These are in addition to the above two properties.
+        # Note: magic_number is deliberately *not* here -- it is always
+        # defined as a class attribute by concrete blocks, and having a
+        # (shadowed) slot for it breaks copy/deepcopy reconstruction.
         "_decoded",
     ]
 
@@ -100,6 +121,10 @@ class Block(object):
     def __getattr__(self, name):
         # __getattr__ is only called when getting an attribute that
         # this object doesn't have.
+        if name == "_decoded":
+            # Avoid infinite recursion when _decoded itself is not set
+            # yet (eg. while copy/pickle reconstructs the object).
+            raise AttributeError(name)
         try:
             return self._decoded[name]
         except KeyError as e:
@@ -120,11 +145,18 @@ class Block(object):
                     prop=name, cls=self.__class__.__name__
                 )
             )
-        if self._decoded is None:
-            self._decoded = {}
+        try:
+            decoded = object.__getattribute__(self, "_decoded")
+        except AttributeError:
+            # _decoded is not set yet (eg. while copy/pickle
+            # reconstructs the object)
+            decoded = None
+        if decoded is None:
+            decoded = {}
             for key, packed_type, default in self.schema:
-                self._decoded[key] = None
-        self._decoded[name] = value
+                decoded[key] = None
+            object.__setattr__(self, "_decoded", decoded)
+        decoded[name] = value
 
     def __repr__(self):
         args = []
@@ -142,11 +174,22 @@ class Block(object):
 class SectionMemberBlock(Block):
     """Block which must be a member of a section"""
 
-    __slots__ = ["section"]
+    __slots__ = ["section", "_capture_context"]
 
     def __init__(self, section, **kwargs):
         super(SectionMemberBlock, self).__init__(**kwargs)
         self.section = section
+        self._capture_context = None
+        if "raw" in kwargs:
+            # The block was decoded from raw capture data: snapshot the
+            # section/interface metadata used to interpret it, so that
+            # later edits to that metadata cannot retroactively change
+            # the decoded ("raw") view of this block. Blocks created
+            # programmatically keep no snapshot and are always interpreted
+            # against the current metadata (the "edit" view).
+            snapshot = getattr(self, "_snapshot_capture_context", None)
+            if snapshot is not None:
+                self._capture_context = snapshot()
 
 
 def register_block(block):
@@ -293,8 +336,19 @@ class InterfaceDescription(SectionMemberBlock):
         ),
     ]
 
-    @property  # todo: cache this property
+    @property
     def timestamp_resolution(self):
+        """
+        Timestamp resolution for this interface, from the ``if_tsresol``
+        option (defaults to 10^-6, i.e. microseconds).
+
+        This is deliberately *not* cached: it reflects the current
+        (possibly edited) option value, so edits are immediately visible
+        here. Blocks parsed from a capture keep their own decode-time
+        snapshot of this value, so editing the option does not rewrite
+        capture history.
+        """
+
         # ------------------------------------------------------------
         # Resolution of timestamps. If the Most Significant Bit is
         # equal to zero, the remaining bits indicates the resolution
@@ -343,7 +397,28 @@ class BlockWithTimestampMixin(object):
 
     @property
     def timestamp_resolution(self):
+        # Blocks decoded from a capture use the resolution that was in
+        # effect at decode time; blocks created programmatically resolve
+        # it live from the (possibly edited) interface metadata.
+        context = self._capture_context
+        if context is not None and "timestamp_resolution" in context:
+            return context["timestamp_resolution"]
         return self.interface.timestamp_resolution
+
+    def _snapshot_capture_context(self):
+        """
+        Snapshot the interface metadata needed to interpret this block.
+
+        Called once, at decode time, for blocks parsed from raw capture
+        data. The result is a historical fact: it is never invalidated,
+        and it is stored in ``__slots__`` so it is preserved when the
+        block is copied. Returns None when the interface is not (yet)
+        known, in which case interpretation falls back to a live lookup.
+        """
+        try:
+            return {"timestamp_resolution": self.interface.timestamp_resolution}
+        except KeyError:
+            return None
 
     # todo: add some property returning a datetime() with timezone..
 
@@ -359,7 +434,9 @@ class BlockWithInterfaceMixin(object):
     @property
     def interface(self):
         # We need to get the correct interface from the section
-        # by looking up the interface_id
+        # by looking up the interface_id. This is a live reference to
+        # the (editable) interface object; derived capture-time facts
+        # (eg. timestamps) are snapshotted separately at decode time.
         return self.section.interfaces[self.interface_id]
 
     def _encode(self, outstream):
@@ -462,6 +539,7 @@ class SimplePacket(BasePacketBlock):
 
     def __init__(self, section, **kwargs):
         self.section = section
+        self._capture_context = None
         if "raw" in kwargs:
             # Since we can't be sure of the packet length without the snap length,
             # we have to do a bit of work here
@@ -471,6 +549,10 @@ class SimplePacket(BasePacketBlock):
             # to really know how much data we can load
             rb = RawBytes(self.captured_len)
             self._decoded["packet_data"] = rb.load(stream)
+            # Snapshot the capture-time captured length: it is the amount
+            # of data that was actually read from the capture, and must not
+            # change if the interface snaplen is edited afterwards.
+            self._capture_context = {"captured_len": len(self._decoded["packet_data"])}
         else:
             super(SimplePacket, self).__init__(section, **kwargs)
 
@@ -492,6 +574,9 @@ class SimplePacket(BasePacketBlock):
         "...the SnapLen value MUST be used to determine the size of the Packet
         Data field length."
         """
+        context = self._capture_context
+        if context is not None and "captured_len" in context:
+            return context["captured_len"]
         snap_len = self.interface.snaplen
         if snap_len == 0:  # unlimited
             return self.packet_len
