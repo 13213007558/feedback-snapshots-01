@@ -6,3 +6,4 @@
 
 from .scanner import FileScanner  # noqa
 from .writer import FileWriter  # noqa
+from .merge import merge_capture_files  # noqa
