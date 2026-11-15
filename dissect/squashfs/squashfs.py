@@ -15,6 +15,7 @@ from dissect.util.stream import RunlistStream
 
 from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
+from dissect.squashfs.consistency import DirectoryClaim, check_consistency
 from dissect.squashfs.exceptions import (
     FileNotFoundError,
     NotADirectoryError,
@@ -25,6 +26,8 @@ from dissect.squashfs.exceptions import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
+
+    from dissect.squashfs.consistency import ConsistencyReport
 
 
 class SquashFS:
@@ -78,9 +81,10 @@ class SquashFS:
         type: int | None = None,
         inode_number: int | None = None,
         parent: INode | None = None,
+        directory_entry: DirectoryClaim | None = None,
     ) -> INode:
         # squashfs inode numbers consist of a block number and offset in that block
-        return INode(self, block, offset, name, type, inode_number, parent)
+        return INode(self, block, offset, name, type, inode_number, parent, directory_entry)
 
     def get(self, path: str | int, node: INode | None = None) -> INode:
         if isinstance(path, int):
@@ -194,6 +198,14 @@ class SquashFS:
         for inum in range(1, self.sb.inodes + 1):
             yield self._lookup_inode(inum)
 
+    def check_consistency(self, root: INode | None = None) -> ConsistencyReport:
+        """Cross-check directory declarations, inode headers and the inode lookup table.
+
+        Args:
+            root: Optional subtree root. Defaults to the filesystem root.
+        """
+        return check_consistency(self, root)
+
 
 class INode:
     def __init__(
@@ -205,6 +217,7 @@ class INode:
         type: int | None = None,
         inode_number: int | None = None,
         parent: INode | None = None,
+        directory_entry: DirectoryClaim | None = None,
     ):
         self.fs = fs
         self.block = block
@@ -213,8 +226,19 @@ class INode:
         self._type = type
         self._inode_number = inode_number
         self.parent = parent
+        self.directory_entry = directory_entry
 
         self.listdir = cache(self.listdir)
+
+    @property
+    def path(self) -> str:
+        if self.parent is None:
+            return self.name or "/"
+        if self.name is None:
+            return self.parent.path
+        if self.parent.path == "/":
+            return f"/{self.name}"
+        return f"{self.parent.path}/{self.name}"
 
     def __repr__(self) -> str:
         return f"<inode {self.inode_number} ({self.block}, {self.offset})>"
@@ -241,6 +265,8 @@ class INode:
 
         header = base_struct(data)
         actual_struct = INODE_STRUCT_MAP.get(header.inode_type)
+        if actual_struct is None:
+            raise ValueError(f"unknown inode type {header.inode_type}")
 
         if len(actual_struct) != len(base_struct):
             data_block, data_offset, data = self.fs._read_metadata(block, self.offset, len(actual_struct))
@@ -283,11 +309,25 @@ class INode:
 
     @property
     def inode_number(self) -> int:
-        return self._inode_number or self.header.inode_number
+        # The inode header is the authoritative identity. The number carried by a
+        # directory entry is only a declaration and is exposed separately.
+        return self.header.inode_number
+
+    @property
+    def declared_inode_number(self) -> int | None:
+        """The inode number declared by the directory entry, if this inode came from one."""
+        return self._inode_number
+
+    @property
+    def declared_type(self) -> int | None:
+        """The POSIX type declared by the directory entry, if this inode came from one."""
+        if self._type is None or not (0 < self._type < len(TYPE_MAP)):
+            return None
+        return TYPE_MAP[self._type]
 
     @property
     def type(self) -> int:
-        return TYPE_MAP[self._type or self.header.inode_type]
+        return TYPE_MAP[self.header.inode_type]
 
     @property
     def mode(self) -> int:
@@ -377,11 +417,13 @@ class INode:
 
         bytes_read = 0
         while bytes_read < self.size - 3:
+            header_block, header_offset = start, offset
             start, offset, data = self.fs._read_metadata(start, offset, len(c_squashfs.squashfs_dir_header))
             dir_header = c_squashfs.squashfs_dir_header(data)
             bytes_read += len(data)
 
             for _ in range(dir_header.count + 1):
+                entry_block, entry_offset = start, offset
                 start, offset, data = self.fs._read_metadata(start, offset, len(c_squashfs.squashfs_dir_entry))
                 dir_entry = c_squashfs.squashfs_dir_entry(data)
                 bytes_read += len(data)
@@ -396,6 +438,19 @@ class INode:
                     dir_entry.type,
                     dir_header.inode_number + dir_entry.inode_number,
                     parent=self,
+                    directory_entry=DirectoryClaim(
+                        inode_number=dir_header.inode_number + dir_entry.inode_number,
+                        inode_type=dir_entry.type,
+                        inode_number_base=dir_header.inode_number,
+                        inode_number_delta=dir_entry.inode_number,
+                        inode_block=dir_header.start_block,
+                        inode_offset=dir_entry.offset,
+                        record_block=entry_block,
+                        record_offset=entry_offset,
+                        header_record_block=header_block,
+                        header_record_offset=header_offset,
+                        inode_table_start=self.fs.sb.inode_table_start,
+                    ),
                 )
 
     @cached_property

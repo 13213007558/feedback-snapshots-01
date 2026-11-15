@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dissect.squashfs.consistency import (
+    ConsistencyReport,
+    DirectoryEntryEvidence,
+    check_consistency,
+)
 from dissect.squashfs.exceptions import (
     Error,
     FileNotFoundError,
@@ -10,6 +15,8 @@ from dissect.squashfs.exceptions import (
 from dissect.squashfs.squashfs import FileStream, INode, SquashFS
 
 __all__ = [
+    "ConsistencyReport",
+    "DirectoryEntryEvidence",
     "Error",
     "FileNotFoundError",
     "FileStream",
@@ -18,4 +25,5 @@ __all__ = [
     "NotAFileError",
     "NotASymlinkError",
     "SquashFS",
+    "check_consistency",
 ]
