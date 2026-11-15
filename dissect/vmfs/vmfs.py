@@ -11,10 +11,19 @@ from dissect.vmfs.address import FileDescriptorAddr, address_fmt, address_type
 from dissect.vmfs.c_vmfs import (
     FS3_AddrType,
     FS3_Config,
+    FS3_DescriptorType,
     FS3_ResourceTypeID,
     c_vmfs,
 )
-from dissect.vmfs.descriptor import DirEntry, FileDescriptor, FileDescriptor5, FileDescriptor6
+from dissect.vmfs.descriptor import (
+    DescriptorCandidate,
+    DescriptorReference,
+    DirEntry,
+    FileDescriptor,
+    FileDescriptor5,
+    FileDescriptor6,
+    classify_descriptor,
+)
 from dissect.vmfs.exception import (
     FileNotFoundError,
     InvalidHeader,
@@ -311,6 +320,156 @@ class VMFS:
                 raise FileNotFoundError(f"File not found: {path}")
 
         return node
+
+    def _read_descriptor_metadata(self, address: int) -> tuple[bool, int | None, c_vmfs.FS3_FileMetadata | None]:
+        """Read and validate the metadata of a file descriptor slot.
+
+        Returns a tuple of a validity flag, the recorded generation (or ``None`` when unparseable) and the parsed
+        metadata structure (or ``None`` when unparseable).
+
+        On VMFS6 the metadata carries an ``fdmd`` signature that must be present. On VMFS5 no such signature exists,
+        so validity is a heuristic based on the descriptor type and on the metadata's ``descAddr`` matching the slot
+        address. This method never raises on corrupted or reused slots; callers rely on the validity flag instead.
+        """
+        try:
+            buf = self.resources.FD.read(address)
+            metadata = c_vmfs.FS3_FileMetadata(buf[self._fd_meta_offset :])
+        except Exception:
+            return False, None, None
+
+        if self.is_vmfs6 and metadata.signature != c_vmfs.FS3_FDMD_SIGNATURE:
+            return False, None, None
+
+        if metadata.type in (FS3_DescriptorType.INVALID, FS3_DescriptorType.SENTINEL):
+            return False, None, None
+
+        if metadata.descAddr != address:
+            return False, None, None
+
+        return True, metadata.generation, metadata
+
+    def collect_descriptor_references(self) -> dict[int, list[DescriptorReference]]:
+        """Walk every reachable directory and index directory entries by file descriptor address.
+
+        The traversal is read-only and does not modify the filesystem or the regular directory listing behavior.
+        Directories that cannot be read are skipped so that a single corrupt directory does not abort the whole
+        enumeration. Every reference records its directory entry generation, which is later compared against the
+        generation stored in the referenced slot to detect address reuse.
+
+        Returns:
+            A mapping of file descriptor address to the list of :class:`DescriptorReference` objects pointing at it.
+        """
+        references: dict[int, list[DescriptorReference]] = {}
+        visited: set[int] = set()
+        # Stack of (directory descriptor, path prefix including a trailing slash)
+        stack: list[tuple[FileDescriptor, str]] = [(self.root, "/")]
+
+        while stack:
+            directory, prefix = stack.pop()
+            if directory.address in visited:
+                continue
+            visited.add(directory.address)
+
+            try:
+                entries = list(directory.iterdir())
+            except Exception:
+                continue
+
+            for entry in entries:
+                references.setdefault(entry.address, []).append(
+                    DescriptorReference(
+                        address=entry.address,
+                        name=entry.name,
+                        path=prefix,
+                        generation=entry.raw.generation if entry.raw is not None else None,
+                        # Filled in once the slot generation is known during enumeration
+                        matches_generation=False,
+                    )
+                )
+
+                if entry.name in (".", ".."):
+                    continue
+
+                if entry.type == FS3_DescriptorType.DIRECTORY and entry.address not in visited:
+                    try:
+                        child = entry.file_descriptor
+                    except Exception:
+                        continue
+                    stack.append((child, prefix + entry.name + "/"))
+
+        return references
+
+    def enumerate_descriptor_candidates(
+        self,
+        references: dict[int, list[DescriptorReference]] | None = None,
+    ) -> list[DescriptorCandidate]:
+        """Enumerate read-only residual file descriptor candidates.
+
+        Every slot in the file descriptor resource (``.fdc.sf``) is inspected and classified by combining the
+        resource allocation bitmap with directory references. This makes it possible to surface objects that are no
+        longer reachable through a directory, without treating parseable metadata as proof of a current file or
+        inferring a deletion time.
+
+        Directory references are split into current (matching generation) and stale (mismatching generation) ones.
+        A stale reference never binds its old name to the current contents of a reused address. Regular directory
+        listing methods are unaffected; this is an additional, strictly read-only view.
+
+        Args:
+            references: An optional precomputed reference index from
+                :meth:`collect_descriptor_references`. When omitted, the index is built by walking the directory tree.
+
+        Returns:
+            The list of :class:`DescriptorCandidate` objects, ordered by slot address.
+        """
+        if references is None:
+            references = self.collect_descriptor_references()
+
+        candidates: list[DescriptorCandidate] = []
+
+        for slot in self.resources.FD.iter_slots():
+            slot_references = references.get(slot.address, [])
+            metadata_valid, generation, _ = self._read_descriptor_metadata(slot.address)
+
+            matched_references: list[DescriptorReference] = []
+            for ref in slot_references:
+                matches = metadata_valid and ref.generation is not None and ref.generation == generation
+                matched_references.append(
+                    DescriptorReference(
+                        address=ref.address,
+                        name=ref.name,
+                        path=ref.path,
+                        generation=ref.generation,
+                        matches_generation=matches,
+                    )
+                )
+
+            state, reasons = classify_descriptor(
+                slot.address,
+                slot.allocated,
+                metadata_valid,
+                matched_references,
+            )
+
+            descriptor = None
+            if metadata_valid:
+                descriptor = self.file_descriptor(slot.address)
+
+            candidates.append(
+                DescriptorCandidate(
+                    address=slot.address,
+                    cluster=slot.cluster,
+                    resource=slot.resource,
+                    allocated=slot.allocated,
+                    state=state,
+                    reasons=reasons,
+                    references=matched_references,
+                    generation=generation,
+                    metadata_valid=metadata_valid,
+                    descriptor=descriptor,
+                )
+            )
+
+        return sorted(candidates, key=lambda candidate: candidate.address)
 
 
 def _get_sfd_offset(vmfs: VMFS, address: int) -> int:

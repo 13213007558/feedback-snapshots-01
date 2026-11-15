@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import stat
 import struct
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import cached_property
 from textwrap import dedent
 from typing import TYPE_CHECKING, BinaryIO
@@ -33,6 +35,114 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from dissect.vmfs.vmfs import VMFS
+
+
+class DescriptorState(Enum):
+    """Classification of a file descriptor slot discovered during residual enumeration.
+
+    The classification combines the resource allocation bitmap with directory references; it never infers a
+    deletion event or deletion time on its own:
+
+    - :attr:`ALLOCATED_REFERENCED`: allocated slot whose metadata is referenced by a current directory entry with a
+      matching generation. This is a reachable, current object.
+    - :attr:`ALLOCATED_ORPHAN`: allocated slot with parseable metadata but no matching directory reference.
+      A candidate residual object, but not proof of a recent deletion.
+    - :attr:`UNALLOCATED_RESIDUAL`: free slot that still holds parseable metadata. A candidate residual of a
+      previously released descriptor, but the slot is free and the metadata may be stale.
+    - :attr:`REUSED_ADDRESS`: free slot with parseable metadata that is still referenced by a directory entry whose
+      generation does not match. The address has been (or is being) reused; the old name must not be associated with
+      the current contents.
+    - :attr:`UNKNOWN`: a slot whose metadata cannot be parsed or does not describe the slot's own address. This is the
+      common state of an empty, zeroed free slot, but also covers an allocated slot with corrupted metadata.
+    - :attr:`CONTRADICTORY`: a free, unparseable slot that still has a directory reference, or a free slot that has a
+      supposedly matching reference, i.e. an internally inconsistent combination of evidence.
+    """
+
+    ALLOCATED_REFERENCED = "allocated_referenced"
+    ALLOCATED_ORPHAN = "allocated_orphan"
+    UNALLOCATED_RESIDUAL = "unallocated_residual"
+    REUSED_ADDRESS = "reused_address"
+    UNKNOWN = "unknown"
+    CONTRADICTORY = "contradictory"
+
+
+@dataclass(frozen=True)
+class DescriptorReference:
+    """A directory entry reference to a file descriptor address.
+
+    A reference only establishes a name association while its ``generation`` matches the generation stored in the
+    referenced slot. A generation mismatch means the directory entry is stale and the address has been reused.
+
+    Args:
+        address: The file descriptor address referenced by the directory entry.
+        name: The name component of the directory entry.
+        path: The full path of the directory that contains the entry.
+        generation: The generation recorded in the directory entry.
+        matches_generation: Whether the directory entry generation matches the generation of the slot metadata.
+    """
+
+    address: int
+    name: str
+    path: str
+    generation: int | None
+    matches_generation: bool
+
+    def __repr__(self) -> str:
+        relation = "current" if self.matches_generation else "stale"
+        return f"<DescriptorReference path={self.path + self.name!r} generation={self.generation} {relation}>"
+
+
+@dataclass
+class DescriptorCandidate:
+    """A read-only candidate object produced during residual file descriptor enumeration.
+
+    This object deliberately keeps evidence separate from interpretation. It preserves the slot address, the
+    recorded generation, the allocation state and every directory reference, while :attr:`state` only classifies the
+    combination of those facts. No deletion time is inferred.
+
+    Args:
+        address: The file descriptor address (slot) that was inspected.
+        cluster: The cluster part of the address.
+        resource: The resource (slot) part of the address.
+        allocated: Whether the slot is marked allocated in the file descriptor resource bitmap.
+        state: The classified state of this candidate.
+        reasons: Human readable reasons explaining why the slot was classified this way.
+        references: The directory entry references that point at the address, including stale ones.
+        generation: The generation stored in the slot metadata, or ``None`` if the metadata is not parseable.
+        metadata_valid: Whether the slot holds parseable, self-consistent file metadata.
+        descriptor: A :class:`FileDescriptor` for parseable slots, or ``None`` when the metadata is not parseable.
+    """
+
+    address: int
+    cluster: int
+    resource: int
+    allocated: bool
+    state: DescriptorState
+    reasons: list[str] = field(default_factory=list)
+    references: list[DescriptorReference] = field(default_factory=list)
+    generation: int | None = None
+    metadata_valid: bool = False
+    descriptor: FileDescriptor | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"<DescriptorCandidate address={address_fmt(self.address)} state={self.state.value} "
+            f"allocated={self.allocated} generation={self.generation}>"
+        )
+
+    @property
+    def current_references(self) -> list[DescriptorReference]:
+        """Directory references whose generation matches the slot, establishing a valid name association."""
+        return [ref for ref in self.references if ref.matches_generation]
+
+    @property
+    def stale_references(self) -> list[DescriptorReference]:
+        """Directory references whose generation does not match the slot.
+
+        These names belonged to a previous occupant of the address and must not be associated with the current slot
+        contents.
+        """
+        return [ref for ref in self.references if not ref.matches_generation]
 
 
 class DirEntry:
@@ -1051,3 +1161,74 @@ _S64 = struct.Struct("<Q")
 def _get_uint64_index(buf: bytes, index: int) -> int:
     """Convenience function to index into a ``uint64`` sized array."""
     return _S64.unpack(buf[index * 8 : (index * 8) + 8])[0]
+
+
+def classify_descriptor(
+    address: int,
+    allocated: bool,
+    metadata_valid: bool,
+    references: list[DescriptorReference],
+) -> tuple[DescriptorState, list[str]]:
+    """Classify a file descriptor slot from its allocation state and directory references.
+
+    This is a pure function so the classification rules can be tested independently of a live filesystem. It only
+    combines the given evidence and never infers a deletion time:
+
+    - A matching reference requires a directory entry whose generation equals the slot generation.
+    - A reference with a mismatching generation means the address has been reused and does not bind its name to the
+      current contents.
+    - Parseable metadata in a slot does not by itself prove the slot is a current file, nor that it was just deleted.
+
+    Args:
+        address: The file descriptor address that was inspected.
+        allocated: Whether the resource bitmap marks the slot as allocated.
+        metadata_valid: Whether the slot holds parseable, self-consistent metadata.
+        references: All directory references (current and stale) pointing at the address.
+
+    Returns:
+        A tuple of the classified :class:`DescriptorState` and a list of human readable reasons.
+    """
+    current_refs = [ref for ref in references if ref.matches_generation]
+    stale_refs = [ref for ref in references if not ref.matches_generation]
+    reasons: list[str] = []
+
+    if allocated:
+        if not metadata_valid:
+            reasons.append("slot is allocated according to the resource bitmap but contains no parseable metadata")
+            if references:
+                reasons.append("directory entries reference an unparseable slot")
+            return DescriptorState.UNKNOWN, reasons
+
+        if current_refs:
+            reasons.append("slot is allocated and referenced by a directory entry with a matching generation")
+            return DescriptorState.ALLOCATED_REFERENCED, reasons
+
+        reasons.append(
+            "slot is allocated with parseable metadata but has no directory reference with a matching generation"
+        )
+        if stale_refs:
+            reasons.append("only stale directory references with a mismatching generation point at this address")
+        return DescriptorState.ALLOCATED_ORPHAN, reasons
+
+    if not metadata_valid:
+        if references:
+            reasons.append("slot is free and unparseable, yet directory entries still reference the address")
+            return DescriptorState.CONTRADICTORY, reasons
+
+        reasons.append("slot is free and contains no parseable metadata")
+        return DescriptorState.UNKNOWN, reasons
+
+    if stale_refs:
+        reasons.append(
+            "slot is free and still holds parseable metadata, while a directory entry with a mismatching generation "
+            "references the address; the address has been or is being reused and the old name is not bound to the "
+            "current contents"
+        )
+        return DescriptorState.REUSED_ADDRESS, reasons
+
+    if current_refs:
+        reasons.append("slot is free but a directory entry with a matching generation references it")
+        return DescriptorState.CONTRADICTORY, reasons
+
+    reasons.append("slot is free but still holds parseable metadata with no directory reference")
+    return DescriptorState.UNALLOCATED_RESIDUAL, reasons

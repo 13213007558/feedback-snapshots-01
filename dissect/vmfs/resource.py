@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from textwrap import dedent
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -21,7 +22,29 @@ from dissect.vmfs.c_vmfs import FS3_Config, FS3_DescriptorType, FS3_ResourceType
 from dissect.vmfs.util import bsf
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from dissect.vmfs.vmfs import VMFS, FileDescriptor
+
+
+@dataclass(frozen=True)
+class ResourceSlot:
+    """A single slot (resource) in a resource file.
+
+    The allocation state is derived from the resource cluster allocation bitmap. VMFS resource bitmaps use an
+    inverted convention: a set bit marks a *free* resource, while a cleared bit marks an *allocated* resource.
+
+    Args:
+        address: The address that identifies this slot.
+        cluster: The cluster part of the address.
+        resource: The resource (slot) part of the address within the cluster.
+        allocated: Whether the slot is marked as allocated in the resource bitmap.
+    """
+
+    address: int
+    cluster: int
+    resource: int
+    allocated: bool
 
 
 class ResourceFile:
@@ -211,6 +234,64 @@ class ResourceFile:
         self.fh.seek(offset)
         return self.fh.read(self.metadata.resourceSize)
 
+    @property
+    def num_resources(self) -> int:
+        """The total number of resources tracked by this resource file."""
+        return (self.metadata.numResourcesHi << 32) | self.metadata.numResourcesLo
+
+    def read_cluster_bitmap(self, cluster: int) -> bytes:
+        """Read the raw allocation bitmap of a resource cluster.
+
+        The bitmap uses an inverted convention: a set bit marks a free resource, a cleared bit marks an allocated
+        resource.
+        """
+        metadata_block_offset = 512 if self.vmfs.is_vmfs5 else self.vmfs.md_alignment
+        bitmap_offset_in_block = 16 if self.vmfs.is_vmfs5 else 0x80
+        offset = self._cluster_header_offset(cluster) + metadata_block_offset + bitmap_offset_in_block
+        self.fh.seek(offset)
+        return self.fh.read(self.metadata.resourcesPerCluster // 8)
+
+    def is_allocated(self, address: int) -> bool:
+        """Return whether the resource at the given address is marked as allocated.
+
+        Resource bitmaps use an inverted convention, so a cleared bit means allocated.
+        """
+        cluster, resource = self.parse_address(address)
+        bitmap = self.read_cluster_bitmap(cluster)
+        return not bool((bitmap[resource >> 3] >> (resource & 7)) & 1)
+
+    def iter_slots(self) -> Iterator[ResourceSlot]:
+        """Iterate all resource slots tracked by this resource file.
+
+        Iteration is bounded by the number of resources declared in the resource metadata. Bits beyond this count
+        belong to the unused tail of the last cluster bitmap and are not interpreted as slots.
+
+        Yields:
+            A :class:`ResourceSlot` for every tracked resource, including slots that are currently free.
+        """
+        resources_per_cluster = self.metadata.resourcesPerCluster
+        num_resources = self.num_resources
+        num_clusters = (num_resources + resources_per_cluster - 1) // resources_per_cluster
+
+        for cluster in range(num_clusters):
+            bitmap = self.read_cluster_bitmap(cluster)
+            for resource in range(resources_per_cluster):
+                if (cluster * resources_per_cluster) + resource >= num_resources:
+                    return
+
+                allocated = not bool((bitmap[resource >> 3] >> (resource & 7)) & 1)
+                yield ResourceSlot(
+                    address=self._make_address(cluster, resource),
+                    cluster=cluster,
+                    resource=resource,
+                    allocated=allocated,
+                )
+
+    @staticmethod
+    def _make_address(cluster: int, resource: int) -> int:
+        """Construct an address for a slot from a cluster and resource."""
+        raise NotImplementedError
+
 
 class FileBlockResourceVMFS5(ResourceFile):
     """(Small) file block resource (``.fbb.sf``)."""
@@ -277,12 +358,20 @@ class FileDescriptorResourceVMFS5(ResourceFile):
     def parse_address(self, address: int) -> tuple[int, int]:
         return FileDescriptorAddr.parse(address)
 
+    @staticmethod
+    def _make_address(cluster: int, resource: int) -> int:
+        return FileDescriptorAddr.make(cluster, resource)
+
 
 class FileDescriptorResourceVMFS6(ResourceFile):
     """File descriptor resource (``.fdc.sf``) for VMFS6."""
 
     def parse_address(self, address: int) -> tuple[int, int]:
         return FileDescriptorAddr.parse(address)
+
+    @staticmethod
+    def _make_address(cluster: int, resource: int) -> int:
+        return FileDescriptorAddr.make(cluster, resource)
 
 
 class PointerBlock2ResourceVMFS5(ResourceFile):
