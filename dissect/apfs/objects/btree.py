@@ -199,6 +199,28 @@ class BTree(Object):
             oid: The base object ID to use for resolving virtual child objects.
             xid: The transaction ID to use for resolving virtual child objects.
         """
+        return self.search_entry(key, exact=exact, cmp=cmp, omap=omap, oid=oid, xid=xid)[1]
+
+    def search_entry(
+        self,
+        key: Any,
+        *,
+        exact: bool = False,
+        cmp: Callable[[Any, bytes], Literal[-1, 0, 1]] = cmp_default,
+        omap: ObjectMap | None = None,
+        oid: int = 0,
+        xid: int | None = None,
+    ) -> tuple[bytes, bytes]:
+        """Search for a key in the B-tree and return the found key and value.
+
+        Args:
+            key: Key to search for.
+            exact: If ``True``, only return if an exact match is found.
+            cmp: Comparison function to use. Should return -1, 0, or 1.
+            omap: The object map to use for resolving virtual child objects.
+            oid: The base object ID to use for resolving virtual child objects.
+            xid: The transaction ID to use for resolving virtual child objects.
+        """
         node = self.root
 
         while node.is_nonleaf:
@@ -209,4 +231,4 @@ class BTree(Object):
         if idx >= node.nkeys or idx == -1:
             raise KeyError(f"Key not found: {key!r}")
 
-        return self._read_value(node, idx)
+        return self._read_key(node, idx), self._read_value(node, idx)
