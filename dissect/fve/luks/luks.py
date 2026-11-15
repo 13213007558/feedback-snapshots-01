@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
@@ -24,13 +25,31 @@ if TYPE_CHECKING:
 class LUKS:
     """LUKS disk encryption.
 
+    Supports both the classic layout, where the LUKS header and the encrypted data live in
+    the same file-like object, and detached layouts, where a separate LUKS header is paired
+    with a separate encrypted data image.
+
+    Header and keyslot area offsets are always relative to the start of ``fh``, while
+    segment (encrypted payload) offsets are relative to the start of ``data_fh``. Key
+    material is only ever read from ``fh`` and segment data only from ``data_fh``, so the
+    two sources are never mixed.
+
+    This class does not take ownership of the passed file-like objects: they are only read
+    from, never closed, and remain the caller's responsibility.
+
+    Args:
+        fh: File-like object to read the LUKS header, metadata and keyslot areas from.
+        data_fh: Optional file-like object to read the encrypted segments from.
+            If ``None``, ``fh`` is used (classic single-file layout).
+
     References:
         - https://gitlab.com/cryptsetup/cryptsetup
         - https://gitlab.com/cryptsetup/cryptsetup/-/blob/main/docs/on-disk-format-luks2.pdf
     """
 
-    def __init__(self, fh: BinaryIO):
+    def __init__(self, fh: BinaryIO, data_fh: BinaryIO | None = None):
         self.fh = fh
+        self.data_fh = data_fh if data_fh is not None else fh
         self.header = None
         self.header1 = None
         self.header2 = None
@@ -88,8 +107,20 @@ class LUKS:
 
             self.metadata = self.metadata1 or self.metadata2
 
+        self._validate_keyslot_areas()
+
         self._active_volume_key = None
         self._active_keyslot_id = None
+
+    def _validate_keyslot_areas(self) -> None:
+        """Validate that the header source is large enough to hold all keyslot areas."""
+        header_size = _stream_size(self.fh)
+        for keyslot_id, keyslot in self.metadata.keyslots.items():
+            required = keyslot.area.offset + keyslot.key_size * keyslot.af.stripes
+            if required > header_size:
+                raise ValueError(
+                    f"LUKS header source too small for keyslot {keyslot_id}: need {required} bytes, have {header_size}"
+                )
 
     @property
     def unlocked(self) -> bool:
@@ -158,8 +189,15 @@ class LUKS:
         """Unlock the volume key using the given encryption key and keyslot."""
         keyslot_obj = self.metadata.keyslots[keyslot]
 
-        self.fh.seek(keyslot_obj.area.offset)
-        area = self.fh.read(keyslot_obj.key_size * keyslot_obj.af.stripes)
+        offset = keyslot_obj.area.offset
+        size = keyslot_obj.key_size * keyslot_obj.af.stripes
+        self.fh.seek(offset)
+        area = self.fh.read(size)
+        if len(area) != size:
+            raise ValueError(
+                f"LUKS header source too small for keyslot {keyslot}: need {size} bytes at offset {offset}, "
+                f"got {len(area)}"
+            )
 
         cipher = create_cipher(keyslot_obj.area.encryption, key, keyslot_obj.area.key_size * 8)
         return af.merge(
@@ -209,8 +247,16 @@ class LUKS:
         # Don't bother with supporting multiple segments for now
         segment = self.find_segment(self._active_keyslot_id)
 
+        data_size = _stream_size(self.data_fh)
+        if isinstance(segment.size, int):
+            required = segment.offset + segment.size
+            if required > data_size:
+                raise ValueError(f"LUKS data image too small for segment: need {required} bytes, have {data_size}")
+        elif segment.offset > data_size:
+            raise ValueError(f"LUKS data image too small for segment: offset {segment.offset} beyond size {data_size}")
+
         return CryptStream(
-            self.fh,
+            self.data_fh,
             segment.encryption,
             self._active_volume_key,
             self.metadata.keyslots[self._active_keyslot_id].key_size * 8,
@@ -219,6 +265,14 @@ class LUKS:
             segment.iv_tweak,
             segment.sector_size,
         )
+
+
+def _stream_size(fh: BinaryIO) -> int:
+    """Return the size of a file-like object, restoring the current position."""
+    position = fh.tell()
+    size = fh.seek(0, io.SEEK_END)
+    fh.seek(position)
+    return size
 
 
 def derive_passphrase_key(passphrase: bytes, keyslot: Keyslot) -> bytes:
