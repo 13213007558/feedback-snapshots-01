@@ -31,3 +31,7 @@ class NotASymlinkError(Error):
 
 class NotAnRDMFileError(Error):
     pass
+
+
+class InvalidResourceError(Error):
+    """Raised when an address does not reference a valid resource in a resource file."""

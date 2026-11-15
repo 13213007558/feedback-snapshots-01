@@ -18,6 +18,7 @@ from dissect.vmfs.address import (
     address_type,
 )
 from dissect.vmfs.c_vmfs import FS3_Config, FS3_DescriptorType, FS3_ResourceTypeID, c_vmfs
+from dissect.vmfs.exception import InvalidResourceError
 from dissect.vmfs.util import bsf
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class ResourceFile:
         self.address = address
         self.fh = fh
         self.fd = fd
+        self.metadata_offset = metadata_offset
 
         self.fh.seek(metadata_offset)
         self.metadata = c_vmfs.FS3_ResFileMetadata(self.fh)
@@ -70,6 +72,12 @@ class ResourceFile:
             raise ValueError("Invalid resource metadata signature")
 
         self._resource_per_cluster_shift = bsf(self.metadata.resourcesPerCluster)
+
+        # Whether this is a "child" resource file that shares its storage with a parent resource file.
+        # In this layout the cluster groups of this resource are embedded in the parent cluster groups,
+        # rather than being laid out as a contiguous array of equally sized groups.
+        # The parent flag (0x2) is only meaningful on VMFS6 resource files.
+        self._has_parent = bool(self.vmfs.is_vmfs6 and self.metadata.flags & 2)
 
         # Resource clusters contain an array of lock and metadata headers for each cluster in the group
         # Roughly looks like this:
@@ -90,6 +98,29 @@ class ResourceFile:
         # The offset from a cluster group start to the resource data is the combined size of all cluster headers
         self._cluster_data_offset = self.metadata.clustersPerGroup * self._cluster_header_size
         self._cluster_size = self.metadata.resourcesPerCluster * self.metadata.resourceSize
+
+    @property
+    def num_resources(self) -> int:
+        """The total number of resources declared by this resource file."""
+        return (self.metadata.numResourcesHi << 32) | self.metadata.numResourcesLo
+
+    def _validate_address(self, cluster: int, resource: int) -> None:
+        """Validate that a parsed cluster/resource pair references a declared resource.
+
+        Addresses that fall outside of the resources declared by the metadata must be rejected explicitly.
+        Without this check an out-of-range address could land on another valid resource (or cluster header)
+        and be parsed as if it were the requested data.
+        """
+        if resource >= self.metadata.resourcesPerCluster:
+            raise InvalidResourceError(
+                f"Resource index {resource} exceeds resources per cluster {self.metadata.resourcesPerCluster}"
+            )
+
+        if cluster < 0 or (cluster * self.metadata.resourcesPerCluster) + resource >= self.num_resources:
+            raise InvalidResourceError(
+                f"Resource (cluster={cluster}, resource={resource}) is outside of the {self.num_resources} "
+                f"declared resources"
+            )
 
     def debug(self) -> str:
         """Return a debug string for this resource file.
@@ -115,16 +146,24 @@ class ResourceFile:
 
     def resolve_address(self, address: int) -> int:
         """Resolve an address to a volume address."""
+        self._validate_address(*self.parse_address(address))
         offset_in_file = self._resource_offset_from_address(address)
         if not self.fd:
             raise ValueError("Need a file descriptor to resolve to a volume address")
         return self.fd._resolve_offset(offset_in_file)[0]
 
     def _cluster_group_offset(self, group: int) -> int:
-        """Calculate the offset of a cluster group in the resource file."""
+        """Calculate the offset of a cluster group in the resource file.
+
+        For a regular layout every cluster group is a fixed ``clusterGroupSize`` region placed back-to-back.
+
+        For a child resource (``_has_parent``) the cluster groups are embedded in the cluster groups of a parent
+        resource file. Each parent cluster group starts with its own array of parent cluster headers, after which
+        its parent cluster data is subdivided into the (smaller) cluster groups of this child resource.
+        """
         md = self.metadata
 
-        if self.vmfs.is_vmfs5 or (self.vmfs.is_vmfs6 and md.flags & 2 == 0):
+        if not self._has_parent:
             return (
                 # Base offset for cluster groups
                 md.clusterGroupOffset
@@ -132,8 +171,11 @@ class ResourceFile:
                 + (group * md.clusterGroupSize)
             )
 
-        parent_resources_per_group = (md.parentClustersPerGroup * md.parentResourcesPerCluster) // md.clustersPerGroup
-        parent_group, parent_cluster_in_group = divmod(group, parent_resources_per_group)
+        # Number of child cluster groups that fit in a single parent cluster group
+        child_groups_per_parent_group = (
+            md.parentClustersPerGroup * md.parentResourcesPerCluster
+        ) // md.clustersPerGroup
+        parent_group, child_group_in_parent = divmod(group, child_groups_per_parent_group)
 
         return (
             # Base offset for cluster groups
@@ -142,53 +184,38 @@ class ResourceFile:
             + (parent_group * md.parentClusterGroupSize)
             # Skip the cluster headers for the parent cluster group
             + (md.parentClustersPerGroup * self._cluster_header_size)
-            # Offset for the cluster group within the parent cluster group
-            + (parent_cluster_in_group * md.clusterGroupSize)
+            # Offset for the child cluster group within the parent cluster group
+            + (child_group_in_parent * md.clusterGroupSize)
         )
 
     def _cluster_header_offset(self, cluster: int) -> int:
-        """Calculate the offset of a cluster header in the resource file."""
+        """Calculate the offset of a cluster header in the resource file.
+
+        Cluster headers are always stored at the start of their cluster group. In a parent/child layout the
+        child headers are simply located at the start of each embedded child cluster group, so the same
+        calculation applies to both layouts.
+        """
         md = self.metadata
-
-        if self.vmfs.is_vmfs5 or (self.vmfs.is_vmfs6 and md.flags & 2 == 0):
-            group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
-            return (
-                # Base offset for cluster groups
-                md.clusterGroupOffset
-                # Offset for the cluster group
-                + (group * md.clusterGroupSize)
-                # Offset for the cluster header within the group
-                + (cluster_in_group * self._cluster_header_size)
-            )
-
-        parent_resources_per_group = md.parentClustersPerGroup * md.parentResourcesPerCluster
-        parent_group, parent_cluster_in_group = divmod(cluster, parent_resources_per_group)
-
-        return (
-            # Base offset for cluster groups
-            md.clusterGroupOffset
-            # Offset for the parent cluster group
-            + (parent_group * md.parentClusterGroupSize)
-            # Skip the cluster headers for the parent cluster group
-            + (md.parentClustersPerGroup * self._cluster_header_size)
-            # Offset to the cluster in the parent cluster group
-            + parent_cluster_in_group
-        )
+        group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
+        return self._cluster_group_offset(group) + (cluster_in_group * self._cluster_header_size)
 
     def _resource_offset(self, cluster: int, resource: int) -> int:
-        """Calculate the offset of a specific resource into the resource file based on its address."""
+        """Calculate the offset of a specific resource into the resource file based on its address.
+
+        Resource data always starts after the cluster headers of the containing cluster group.
+        This is true for both regular and parent/child layouts, the difference is fully encapsulated in
+        :meth:`_cluster_group_offset`.
+        """
         md = self.metadata
         group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
 
         return (
-            # Base offset for cluster groups
-            md.clusterGroupOffset
-            # Offset for the cluster group
-            + (group * md.clusterGroupSize)
-            # Offset for the cluster header within the group
-            + (cluster_in_group * self._cluster_size)
-            # Offset for the resource data of the cluster
+            # Offset of the cluster group
+            self._cluster_group_offset(group)
+            # Offset for the cluster data within the group
             + self._cluster_data_offset
+            # Offset for the cluster within the group
+            + (cluster_in_group * self._cluster_size)
             # Offset for the specific resource within the cluster
             + (resource * md.resourceSize)
         )
@@ -196,6 +223,7 @@ class ResourceFile:
     def _resource_offset_from_address(self, address: int) -> int:
         """Calculate the offset of a specific resource into the resource file based on its address."""
         cluster, resource = self.parse_address(address)
+        self._validate_address(cluster, resource)
         return self._resource_offset(cluster, resource)
 
     def read(self, address: int) -> bytes:
@@ -222,6 +250,7 @@ class FileBlockResourceVMFS5(ResourceFile):
     def resolve_address(self, address: int) -> int:
         """Resolve a file block address to a volume address."""
         block = FileBlockAddr.parse(address)
+        self._validate_address(*divmod(block, self.metadata.resourcesPerCluster))
         return block * self.fd.block_size
 
 
@@ -234,6 +263,7 @@ class SmallFileBlockResourceVMFS6(ResourceFile):
     def resolve_address(self, address: int) -> int:
         """Resolve a small file block address to a volume address."""
         cluster, resource = self.parse_address(address)
+        self._validate_address(cluster, resource)
         return ((cluster * self.metadata.resourcesPerCluster) + resource) << self.vmfs._file_block_size_shift
 
 
@@ -321,6 +351,7 @@ class LargeFileBlockResourceVMFS6(ResourceFile):
     def resolve_address(self, address: int) -> int:
         """Resolve a large file block address to a volume address."""
         cluster, resource = self.parse_address(address)
+        self._validate_address(cluster, resource)
         block_shift = self.vmfs._file_block_size_shift + self.vmfs.descriptor.sfbToLfbShift
         return ((cluster << self._resource_per_cluster_shift) + resource) << block_shift
 
