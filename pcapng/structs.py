@@ -5,7 +5,6 @@ Module providing facilities for handling struct-like data.
 import abc
 import struct
 import warnings
-from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
 from pcapng import strictness as strictness
@@ -572,35 +571,47 @@ def read_options(stream, endianness):
 
 def write_options(stream, options):
     """
+    Write the options of an :py:class:`Options` object to a stream, in the
+    exact order in which they are stored.
+
     Each option is composed by:
 
     - option_code (uint16)
     - value_length (uint16)
-    - value (value_length-sized binary data)
+    - value (value_length-sized binary data, padded to 32 bits)
 
-    The end marker is simply an option with code ``0x0000``, length 0,
-    and no payload
+    The end marker is an option with code ``0x0000``, length 0 and no
+    payload. It is only emitted when at least one option is present.
+
+    Options whose code is not in the schema are written back byte-for-byte
+    from the raw payload captured while reading; known options are
+    re-encoded using the section endianness.
     """
 
     if not options:
         # Options are optional; if there are none we don't need opt_endofopt
         return
 
-    for key in options:
-        code = options._field_names[key]
-        values = options.get_all_raw(key)
-        if len(values) > 1 and not options.schema[code].multiple:
-            strictness.problem(
-                "writing repeated option {} '{}' not permitted by pcapng spec".format(
-                    code, options._get_name_alias(code)
+    repeated_seen = set()
+    entries = []
+    for entry in options.entries():
+        if entry.code in options.schema:
+            if not options.schema[entry.code].multiple and entry.code in repeated_seen:
+                strictness.problem(
+                    "writing repeated option {} '{}' not permitted by pcapng "
+                    "spec".format(entry.code, options._get_name_alias(entry.code))
                 )
-            )
-            if strictness.should_fix():
-                values = values[:1]
-        for value in values:
-            write_int(code, stream, 16, False, options.endianness)
-            write_int(len(value), stream, 16, False, options.endianness)
-            write_bytes_padded(stream, value)
+                if strictness.should_fix():
+                    # Drop every occurrence of this code after the first
+                    continue
+            repeated_seen.add(entry.code)
+        entries.append(entry)
+
+    for entry in entries:
+        value = options._encode_entry(entry)
+        write_int(entry.code, stream, 16, False, options.endianness)
+        write_int(len(value), stream, 16, False, options.endianness)
+        write_bytes_padded(stream, value)
     # Write the end marker
     write_int(0, stream, 32, False, options.endianness)
 
@@ -651,21 +662,62 @@ Option = namedtuple(
 )
 
 
+# A single option as stored in an :py:class:`Options` object.
+#
+# ``code`` is the numeric option code, as it appears in the file.
+# ``value`` is the decoded value when the code is known (see the schema),
+# or the untouched raw payload bytes when the code is unknown.
+OptionEntry = namedtuple("OptionEntry", ("code", "value"))
+
+
 class Options(Mapping):
     """
     Wrapper object used to easily access the contents of an "options"
     field.
 
+    Options are stored as an ordered list of :py:class:`OptionEntry`
+    objects (see :py:meth:`entries`). This preserves three properties of
+    the original file that a plain dictionary would lose:
+
+    - the exact order of options, including options of different codes
+      interleaved with each other;
+    - repeated options carrying the same code (each is a separate entry);
+    - options whose code is not in the schema, whose raw payload bytes
+      are kept untouched and written back verbatim.
+
     Fields can be accessed either by numerical id or by name (if one was
-    specified in the schema).
+    specified in the schema). When the same code appears more than once,
+    only the first value is accessible using subscript ``options[code]``;
+    the others can be accessed using :py:meth:`get_all` and related
+    methods, or by index through :py:meth:`entries` / :py:meth:`get_entry`.
 
     .. note::
 
         When iterating the object (or calling :py:meth:`keys` /
-        :py:meth:`iterkeys` / :py:meth:`viewkeys`) string keys will be
-        returned if possible in place of numeric keys.  (The purpose of this
+        :py:meth:`iterkeys` / :py:meth:`viewkeys`) each distinct option
+        code is yielded once, in order of first appearance, using string
+        keys if possible in place of numeric keys. (The purpose of this
         is to achieve better readability, for example, when converting
         to a dictionary).
+
+    Mapping return rules (the object is a read-only-style
+    :py:class:`collections.abc.Mapping` view over the ordered entries):
+
+    - ``options[name]`` / :py:meth:`get` return the first value for the
+      given option, or raise :py:exc:`KeyError` when the code is absent;
+    - ``name in options`` / :py:meth:`__contains__` reports whether at
+      least one entry with that code exists;
+    - :py:meth:`keys` / iteration yield each present code once, in order
+      of first appearance;
+    - :py:meth:`values` yields the first value of each present code;
+    - :py:meth:`items` yields ``(key, first_value)`` pairs;
+    - :py:meth:`len` is the number of distinct codes present;
+    - :py:meth:`get_all` / :py:meth:`get_all_raw` return a (possibly
+      empty) list of every value for the code without raising.
+
+    Mutations are available through the dedicated methods below rather
+    than through the Mapping interface; :py:meth:`__setitem__` and
+    :py:meth:`__delitem__` are provided for backwards compatibility.
 
     :param schema:
         Definition of the known options: a list of Option objects.
@@ -688,10 +740,12 @@ class Options(Mapping):
           section 3.5.1)
 
     :param data:
-        Initial data for the options. A dict of ``code: value`` items.
-        Items with the same code may be repeated; only the first one will be
-        accessible using subscript ``options[code]``; the others can be
-        accessed using :py:meth:`get_all` and related methods
+        Initial data for the options, as an ordered iterable of
+        ``(code, raw_value)`` pairs (as produced by
+        :py:func:`read_options`). Items with the same code may be
+        repeated and interleaved with other codes; their order is kept.
+        A mapping of ``code: value`` items is also accepted for backwards
+        compatibility, in which case insertion order applies.
 
     :param endianness:
         The current endianness of the section these options came from.
@@ -701,14 +755,14 @@ class Options(Mapping):
     __slots__ = [
         "schema",
         "_field_names",
-        "data",
+        "_entries",
         "endianness",
     ]
 
     def __init__(self, schema, data, endianness):
         self.schema = {}  # Schema of option fields: {<code>: Option(...)}
         self._field_names = {}  # Map names to codes
-        self.data = defaultdict(list)  # option data, with numeric option IDs as keys
+        self._entries = []  # Ordered list of OptionEntry objects
         self.endianness = endianness  # one of '<>!='
 
         # This is the default schema, common to all objects
@@ -733,24 +787,46 @@ class Options(Mapping):
     # -------------------- Nice interface :) --------------------
 
     def __eq__(self, other):
-        return self.data == other.data
+        if not isinstance(other, Options):
+            return NotImplemented
+        return self._entries == other._entries
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
 
     def __getitem__(self, name):
+        # First value for the given code; KeyError if the code is absent.
         code = self._resolve_name(name)
-        if code not in self.data:
-            # The defaultdict would create an empty entry if we just let this slide.
-            # `tests/test_structs.py` expects a KeyError to be raised here instead.
-            raise KeyError(name)
-        return self.data[code][0]
+        for entry in self._entries:
+            if entry.code == code:
+                return entry.value
+        # `tests/test_structs.py` expects a KeyError to be raised here.
+        raise KeyError(name)
 
     def __len__(self):
-        return len(self.data)
+        # Number of distinct option codes, not number of entries.
+        return len(self._distinct_codes())
 
     def __iter__(self):
-        for key in self.data:
-            yield self._get_name_alias(key)
+        for code in self._distinct_codes():
+            yield self._get_name_alias(code)
+
+    def __contains__(self, name):
+        try:
+            code = self._resolve_name(name)
+        except KeyError:
+            return False
+        return any(entry.code == code for entry in self._entries)
 
     def __setitem__(self, name, value):
+        # Replace the value of an option. If one or more entries with this
+        # code already exist, the first one keeps its position and receives
+        # the new value while all later occurrences are removed; if the code
+        # is new, a single entry is appended at the end.
+        #
         # This also gets called for ``block.options[name] += value``
         # as if ``block.options[name] = block.options[name] + value``
         # which means that, if value is a string, each character gets added
@@ -759,44 +835,103 @@ class Options(Mapping):
         if isinstance(value, Iterable) and not isinstance(
             value, (str, bytes, bytearray)
         ):
-            # We're being assigned a list/iterable, use its values for our list
-            self.data[code] = list(value)
-            self._check_multiples(code)
+            # We're being assigned a list/iterable of values. The first value
+            # replaces the current first entry, remaining values become extra
+            # entries right after it (equivalent to replace + add calls).
+            values = list(value)
         else:
-            # We're being assigned a single value, store as a one-item list
-            self.data[code] = [value]
+            values = [value]
+        self._replace_all(code, values)
 
     def __delitem__(self, name):
+        # Remove every entry carrying this code. KeyError if absent.
         code = self._resolve_name(name)
-        del self.data[code]
+        if not any(entry.code == code for entry in self._entries):
+            raise KeyError(name)
+        self._entries = [entry for entry in self._entries if entry.code != code]
+
+    def entries(self):
+        """
+        Return the ordered list of :py:class:`OptionEntry` objects, one per
+        option occurrence in the file (repeated codes and unknown codes
+        included). The list reflects the exact on-disk order.
+        """
+        return list(self._entries)
+
+    def get_entry(self, index):
+        """
+        Return the :py:class:`OptionEntry` at the given position within the
+        ordered option list (see :py:meth:`entries`).
+        """
+        return self._entries[index]
+
+    def set_value_at(self, index, value):
+        """
+        Replace the value of the option entry at the given position (see
+        :py:meth:`entries`), keeping the entry's code and position. For a
+        known code the value is encoded through the schema on write; for an
+        unknown code the value must be raw ``bytes`` and is written as-is.
+        """
+        entry = self._entries[index]
+        if entry.code not in self.schema and not isinstance(
+            value, (bytes, bytearray)
+        ):
+            raise TypeError(
+                "unknown option {} requires raw bytes, not {!r}".format(
+                    entry.code, value
+                )
+            )
+        self._entries[index] = OptionEntry(entry.code, value)
 
     def get_all(self, name):
-        """Get all values for the given option"""
+        """
+        Get all decoded values for the given option, in storage order.
+        Returns an empty list when the code is absent (no exception).
+        """
         code = self._resolve_name(name)
-        return self.data[code]
+        return [entry.value for entry in self._entries if entry.code == code]
 
     def get_raw(self, name):
-        """Get raw value for the given option"""
+        """
+        Get the raw (encoded) bytes of the first value for the given option.
+        Raises :py:exc:`KeyError` when the code is absent.
+        """
         code = self._resolve_name(name)
-        return self._encode_value(self.data[code][0], self.schema[code].ftype)
+        for entry in self._entries:
+            if entry.code == code:
+                return self._encode_entry(entry)
+        raise KeyError(name)
 
     def get_all_raw(self, name):
-        """Get all raw values for the given option"""
+        """
+        Get the raw (encoded) bytes for every value of the given option,
+        in storage order. Returns an empty list when the code is absent.
+        """
         code = self._resolve_name(name)
-        return [self._encode_value(x, self.schema[code].ftype) for x in self.data[code]]
+        return [
+            self._encode_entry(entry)
+            for entry in self._entries
+            if entry.code == code
+        ]
 
     def iter_all_items(self):
         """
-        Similar to :py:meth:`iteritems` but will yield a list of values
-        as the second tuple field.
+        Similar to :py:meth:`iteritems` but will yield a list of all values
+        (in storage order) as the second tuple field. Each distinct code is
+        yielded once, in order of first appearance.
         """
-        for key in self:
-            yield key, self.get_all(key)
+        for code in self._distinct_codes():
+            yield self._get_name_alias(code), self.get_all(code)
 
     def add(self, name, value):
-        """Add a value to the given-named option"""
+        """
+        Append a value to the given-named option. A new entry is always added
+        at the end of the option list, even when entries with the same code
+        already exist. Repeating an option whose schema does not allow
+        multiples is reported through the strictness machinery.
+        """
         code = self._resolve_name(name)
-        self.data[code].append(value)
+        self._entries.append(OptionEntry(code, value))
         self._check_multiples(code)
 
     def __repr__(self):
@@ -806,33 +941,82 @@ class Options(Mapping):
 
     # -------------------- Internal methods --------------------
 
+    def _distinct_codes(self):
+        # Distinct option codes, in order of first appearance.
+        seen = set()
+        codes = []
+        for entry in self._entries:
+            if entry.code not in seen:
+                seen.add(entry.code)
+                codes.append(entry.code)
+        return codes
+
+    def _replace_all(self, code, values):
+        new_entries = [OptionEntry(code, value) for value in values]
+        replaced = False
+        remaining = []
+        for entry in self._entries:
+            if entry.code == code:
+                if not replaced:
+                    remaining.extend(new_entries)
+                    replaced = True
+                # Later occurrences of the same code are dropped.
+            else:
+                remaining.append(entry)
+        if not replaced:
+            remaining.extend(new_entries)
+        self._entries = remaining
+        self._check_multiples(code)
+
     def _update_data(self, data):
         if data is None:
             return
 
+        # Accept the historical ``{code: value}`` mapping form as well.
+        if isinstance(data, Mapping):
+            data = data.items()
+
+        seen_counts = set()
         for code, value in data:
-            self.data[code].append(self._decode(code, value))
-            if len(self.data[code]) > 1 and not self.schema[code].multiple:
-                try:
-                    name = "{} '{}'".format(code, self.schema[code].name)
-                except KeyError:
-                    name = "{} (unknown)".format(code)
-                # This code gets called when reading a file. We don't want
-                # to potentially abort in this case, just warn
-                strictness.warn(
-                    "repeated option {} not permitted by pcapng spec".format(name)
-                )
+            code = self._resolve_name(code)
+            self._entries.append(OptionEntry(code, self._decode(code, value)))
+            if code in seen_counts:
+                self._warn_if_repeated(code)
+            seen_counts.add(code)
+
+    def _warn_if_repeated(self, code):
+        if code in self.schema and not self.schema[code].multiple:
+            name = "{} '{}'".format(code, self.schema[code].name)
+        elif code in self.schema:
+            return
+        else:
+            name = "{} (unknown)".format(code)
+        # This code gets called when reading a file. We don't want
+        # to potentially abort in this case, just warn
+        strictness.warn(
+            "repeated option {} not permitted by pcapng spec".format(name)
+        )
 
     def _check_multiples(self, code):
         """Check if a non-repeatable option is repeated"""
-        if len(self.data[code]) > 1 and not self.schema[code].multiple:
+        count = sum(1 for entry in self._entries if entry.code == code)
+        if count > 1 and code in self.schema and not self.schema[code].multiple:
             strictness.problem(
                 "repeated option {} '{}' not permitted by pcapng spec".format(
                     code, self._get_name_alias(code)
                 )
             )
             if strictness.should_fix():
-                self.data[code] = self.data[code][:1]
+                first = True
+                kept = []
+                for entry in self._entries:
+                    if entry.code == code:
+                        if first:
+                            kept.append(entry)
+                            first = False
+                    else:
+                        kept.append(entry)
+                self._entries = kept
 
     def _resolve_name(self, name):
         code = self._field_names.get(name, name)
@@ -850,15 +1034,16 @@ class Options(Mapping):
         code = self._resolve_name(code)
         if code in self.schema:
             return self._decode_value(value, self.schema[code].ftype)
+        # Unknown option: keep the raw payload bytes untouched so they can be
+        # written back verbatim, including any vendor-specific data.
         return value
 
-    def _decode_all(self, code, values):
-        code = self._resolve_name(code)
-        if code in self.schema:
-            return [
-                self._decode_value(value, self.schema[code].ftype) for value in values
-            ]
-        return values
+    def _encode_entry(self, entry):
+        """Return the on-wire payload bytes for a stored entry."""
+        if entry.code in self.schema:
+            return self._encode_value(entry.value, self.schema[entry.code].ftype)
+        # Unknown option: pass the raw payload through unchanged.
+        return entry.value
 
     def _decode_value(self, value, ftype):
         assert isinstance(value, (bytes, bytearray))
