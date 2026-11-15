@@ -212,9 +212,21 @@ class SQLite3:
             raise InvalidPageNumber("Page number exceeds boundaries")
 
         data = None
-        if self.checkpoint is not None and (frame := self.checkpoint.get(num)):
-            # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
-            data = frame.data
+        if self.checkpoint is not None:
+            # If a specific WAL checkpoint was provided, restrict the view to the commits up to
+            # and including that checkpoint. Frames from later commits must not leak into this
+            # historical view, otherwise future schema or row versions would be mixed in.
+            commits = [self.checkpoint]
+            if self.wal is not None:
+                for idx, commit in enumerate(self.wal.commits):
+                    if commit is self.checkpoint:
+                        commits = self.wal.commits[: idx + 1]
+                        break
+
+            for commit in reversed(commits):
+                if frame := commit.get(num):
+                    data = frame.data
+                    break
 
         elif self.wal:
             # Check if the latest valid instance of the page is committed (either the frame itself

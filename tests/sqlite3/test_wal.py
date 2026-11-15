@@ -198,3 +198,66 @@ def test_wal_page_count() -> None:
     assert db.wal.highest_page_num == 4
     assert db.header.page_count == 2
     assert db.page_count == 4
+
+
+def test_wal_checkpoint_view_isolation(tmp_path: Path) -> None:
+    """A checkpoint view must not leak pages from later commits.
+
+    When a specific WAL checkpoint is requested, pages not contained in that
+    checkpoint must be resolved from earlier commits or the main database file,
+    never from commits that came after the checkpoint. Otherwise future schema
+    versions (e.g. columns added by a later ALTER TABLE) would be mixed into a
+    historical view.
+    """
+    import shutil
+    import sqlite3 as pysqlite3
+
+    from dissect.database.sqlite3.wal import WAL
+
+    db_path = tmp_path / "evidence.db"
+    con = pysqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA wal_autocheckpoint=0;")
+    con.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT);")
+    con.execute("INSERT INTO t VALUES (1, 'old');")
+    con.commit()
+    con.execute("ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'dflt';")
+    con.commit()
+    con.execute("INSERT INTO t VALUES (2, 'new', 'real');")
+    con.commit()
+
+    # Freeze the database and WAL before closing checkpoints the WAL away.
+    frozen_db = tmp_path / "frozen.db"
+    shutil.copy(db_path, frozen_db)
+    shutil.copy(db_path.with_name(f"{db_path.name}-wal"), frozen_db.with_name(f"{frozen_db.name}-wal"))
+    con.close()
+
+    wal = WAL(frozen_db.with_name(f"{frozen_db.name}-wal"))
+    commits = wal.commits
+    # Commits: 1) CREATE TABLE, 2) first INSERT, 3) ALTER TABLE, 4) second INSERT
+    assert len(commits) == 4
+
+    # View at commit #2 (before the ALTER TABLE): the future column "c" must not appear.
+    db = sqlite3.SQLite3(frozen_db, wal=wal, checkpoint=commits[1])
+    table = db.table("t")
+    assert [column.name for column in table.columns] == ["id", "b"]
+    rows = list(table.rows())
+    assert len(rows) == 1
+    assert rows[0].id == 1
+    assert rows[0].b == "old"
+    assert {key: value for key, value in rows[0]} == {"id": 1, "b": "old"}
+
+    # View at commit #3 (right after the ALTER TABLE): one row, "c" filled from the
+    # schema default because the old record physically stores only two values.
+    db = sqlite3.SQLite3(frozen_db, wal=wal, checkpoint=commits[2])
+    table = db.table("t")
+    assert [column.name for column in table.columns] == ["id", "b", "c"]
+    rows = list(table.rows())
+    assert len(rows) == 1
+    assert rows[0].c == "dflt"
+    assert len(rows[0]._cell.values) == 2  # the default is not in the record bytes
+
+    # Latest view: both rows, default only for the old record.
+    db = sqlite3.SQLite3(frozen_db, wal=wal)
+    rows = list(db.table("t").rows())
+    assert [(row.id, row.b, row.c) for row in rows] == [(1, "old", "dflt"), (2, "new", "real")]
