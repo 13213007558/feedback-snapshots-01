@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import warnings
 from io import BytesIO
 
 import pytest
 from dissect.util.stream import MappingStream
 
+from dissect.fve.veracrypt.key import (
+    Pkcs5HmacSha256,
+    Pkcs5HmacSha256_Boot,
+    Pkcs5HmacSha512,
+    Pkcs5HmacSha512_Boot,
+)
 from dissect.fve.veracrypt.veracrypt import VeraCrypt, is_veracrypt_volume
 from tests._util import absolute_path
 
@@ -14,21 +21,21 @@ from tests._util import absolute_path
     [
         pytest.param(
             "aes256-sha512",
-            "unlock_with_passphrase",
+            "unlock_with_text_passphrase",
             "password",
             True,
             id="aes256-sha512-passphrase",
         ),
         pytest.param(
             "aes256-sha512",
-            "unlock_with_passphrase",
+            "unlock_with_text_passphrase",
             "invalid-password",
             False,
             id="aes256-sha512-passphrase-invalid",
         ),
         pytest.param(
             "aes256-sha256",
-            "unlock_with_passphrase",
+            "unlock_with_text_passphrase",
             "password",
             True,
             id="aes256-sha256-passphrase",
@@ -88,7 +95,7 @@ def test_veracrypt_file_container(mode: str, type: str, value: str | bytes, vali
     [
         pytest.param(
             "aes256-sha512",
-            "unlock_with_passphrase",
+            "unlock_with_text_passphrase",
             "password",
             id="aes256-sha512-passphrase",
         ),
@@ -122,3 +129,119 @@ def test_veracrypt_system_partition(mode: str, type: str, value: str) -> None:
     assert vc.version == 5
     assert vc.client_version == 267
     assert vc.size == 0xFC4600000  # 63 GB
+
+
+def _open_container(mode: str) -> VeraCrypt:
+    file = absolute_path(f"_data/veracrypt/{mode}.hc")
+    return VeraCrypt(file.open("rb"))
+
+
+def _open_system() -> VeraCrypt:
+    file = absolute_path("_data/veracrypt/aes256-sha512.system")
+    stream = MappingStream(size=31744 + 512 + 64)
+    stream.add(offset=0, size=31744, fh=BytesIO(b"\x01" * 31744))
+    stream.add(offset=0x7C00, size=512 + 64, fh=BytesIO(file.read_bytes() + (64 * b"\x01")))
+    return VeraCrypt(stream, is_system=True)  # type: ignore
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_kdf"),
+    [
+        ("aes256-sha512", Pkcs5HmacSha512),
+        ("aes256-sha256", Pkcs5HmacSha256),
+    ],
+)
+def test_unlock_with_text_passphrase_records_contract(mode: str, expected_kdf: type) -> None:
+    """Text entry point uses UTF-8 and records the KDF and iteration count actually used."""
+    vc = _open_container(mode)
+    vc.unlock_with_text_passphrase("password")
+
+    assert vc.unlocked
+    assert vc.passphrase_encoding == "utf-8"
+    assert vc.kdf is expected_kdf
+    assert vc.kdf_iterations == 500_000
+    assert b"FAT12" in vc.open().read(512)
+
+
+def test_unlock_with_raw_passphrase_uses_bytes_verbatim() -> None:
+    """Raw entry point feeds the exact byte sequence without any encoding step."""
+    vc = _open_container("aes256-sha512")
+    vc.unlock_with_raw_passphrase("password".encode("utf-8"))
+
+    assert vc.unlocked
+    assert vc.passphrase_encoding == "raw bytes"
+    assert vc.kdf is Pkcs5HmacSha512
+    assert vc.kdf_iterations == 500_000
+
+
+def test_text_and_raw_entry_points_are_equivalent_for_utf8() -> None:
+    text_vc = _open_container("aes256-sha256")
+    raw_vc = _open_container("aes256-sha256")
+
+    text_vc.unlock_with_text_passphrase("password")
+    raw_vc.unlock_with_raw_passphrase(b"password")
+
+    assert text_vc.unlocked and raw_vc.unlocked
+    assert text_vc.header.master_keys == raw_vc.header.master_keys
+
+
+def test_entry_points_reject_wrong_types() -> None:
+    vc = _open_container("aes256-sha512")
+    with pytest.raises(TypeError):
+        vc.unlock_with_text_passphrase(b"password")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        vc.unlock_with_raw_passphrase("password")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        vc.unlock_with_passphrase(123)  # type: ignore[arg-type]
+
+
+def test_legacy_entry_point_keeps_latin1_semantics() -> None:
+    """The legacy str path must keep latin-1 byte semantics and warn about them."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        vc = _open_container("aes256-sha512")
+        vc.unlock_with_passphrase("password")
+
+    assert vc.unlocked
+    assert vc.passphrase_encoding == "latin-1 (legacy)"
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_legacy_bytes_input_is_passed_through_without_warning() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        vc = _open_container("aes256-sha512")
+        vc.unlock_with_passphrase(b"password")
+    assert vc.unlocked
+    assert vc.passphrase_encoding == "raw bytes (legacy passthrough)"
+
+
+def test_system_partition_uses_boot_kdf_candidates() -> None:
+    vc = _open_system()
+    vc.unlock_with_text_passphrase("password")
+
+    assert vc.unlocked
+    assert vc.is_system
+    assert vc.kdf is Pkcs5HmacSha512_Boot
+    assert vc.kdf_iterations == 500_000
+
+
+@pytest.mark.parametrize("pim", [0, -1, 2**31])
+def test_invalid_pim_raises_before_derivation(pim: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    import dissect.fve.veracrypt.key as keymod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("PBKDF2 must not run for invalid PIM input")
+
+    monkeypatch.setattr(keymod.hashlib, "pbkdf2_hmac", boom)
+
+    vc = _open_container("aes256-sha512")
+    with pytest.raises(ValueError):
+        vc.unlock_with_text_passphrase("password", pim)
+    assert not vc.unlocked
+
+
+def test_system_pim_below_minimum_is_rejected() -> None:
+    vc = _open_system()
+    with pytest.raises(ValueError, match=r"minimum PIM of"):
+        vc.unlock_with_text_passphrase("password", 1)
