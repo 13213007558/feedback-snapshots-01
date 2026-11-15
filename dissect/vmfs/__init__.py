@@ -9,10 +9,12 @@ from dissect.vmfs.exception import (
     NotASymlinkError,
 )
 from dissect.vmfs.lvm import LVM, Device, Volume
+from dissect.vmfs.rdm import RDM
 from dissect.vmfs.vmfs import VMFS
 
 __all__ = [
     "LVM",
+    "RDM",
     "VMFS",
     "Device",
     "DirEntry",

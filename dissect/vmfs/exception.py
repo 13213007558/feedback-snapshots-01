@@ -31,3 +31,15 @@ class NotASymlinkError(Error):
 
 class NotAnRDMFileError(Error):
     pass
+
+
+class RDMError(Error):
+    pass
+
+
+class RDMDeviceMismatchError(RDMError):
+    pass
+
+
+class RDMCapacityError(RDMError):
+    pass

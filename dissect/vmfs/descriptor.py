@@ -26,6 +26,7 @@ from dissect.vmfs.exception import (
     NotASymlinkError,
     VolumeNotAvailableError,
 )
+from dissect.vmfs.rdm import RDM
 from dissect.vmfs.util import vmfs_uuid
 
 if TYPE_CHECKING:
@@ -208,6 +209,11 @@ class FileDescriptor:
         return c_vmfs.FS3_RawDiskMap(self.data)
 
     @property
+    def rdm(self) -> RDM:
+        """The parsed RDM mapping of this file, if this file is an RDM file."""
+        return RDM(self)
+
+    @property
     def parent(self) -> FileDescriptor | None:
         """The parent file descriptor of this file, if it has one."""
         parent_fd = self.metadata.parentFD
@@ -332,9 +338,10 @@ class FileDescriptor:
     def open(self) -> BlockStream:
         """Open a read-only stream for this file descriptor."""
         if self.is_rdm():
-            # TODO: if we're running on the ESXi host, can we open the RDM file directly?
-            # Something to look into later
-            raise NotImplementedError(f"Can't open RDM file {self}")
+            # An RDM file only contains a mapping to an external device, not disk data.
+            # We deliberately never resolve device paths from the image to local devices.
+            # Use dissect.vmfs.rdm.RDM to inspect the mapping and bind a caller-provided image.
+            raise NotImplementedError(f"Can't open RDM file {self}: use RDM.bind() with an explicitly provided image")
 
         if self.vmfs.fh is None:
             return BestEffortBlockStream(self)
