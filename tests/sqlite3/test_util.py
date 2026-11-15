@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.util import parse_table_columns_constraints, parse_table_definition, split_sql_list
 
 testdata = [
     pytest.param(
@@ -176,3 +176,106 @@ testdata = [
 @pytest.mark.parametrize(("sql", "result"), testdata)
 def test_parse_table_columns_constraints(sql: str, result: tuple) -> None:
     assert parse_table_columns_constraints(sql) == result
+
+
+@pytest.mark.parametrize(
+    ("sql", "columns", "primary_key", "without_rowid"),
+    [
+        pytest.param(
+            "CREATE TABLE foo (payload TEXT, k INTEGER, extra TEXT, PRIMARY KEY (k)) WITHOUT ROWID",
+            ["payload", "k", "extra"],
+            ["k"],
+            True,
+            id="without-rowid-single-key",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (payload TEXT, k INTEGER PRIMARY KEY, extra TEXT) WITHOUT ROWID",
+            ["payload", "k", "extra"],
+            ["k"],
+            True,
+            id="without-rowid-column-key",
+        ),
+        pytest.param(
+            'CREATE TABLE foo (note TEXT, "quoted key" INTEGER, body TEXT, PRIMARY KEY ("quoted key", note))'
+            " WITHOUT ROWID",
+            ["note", "quoted key", "body"],
+            ["quoted key", "note"],
+            True,
+            id="without-rowid-quoted-column-name",
+        ),
+        pytest.param(
+            'CREATE TABLE foo ("weird ""name" TEXT, z TEXT, PRIMARY KEY (z, "weird ""name")) WITHOUT ROWID',
+            ['weird "name', "z"],
+            ["z", 'weird "name'],
+            True,
+            id="without-rowid-escaped-quote",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (a TEXT, b INTEGER, c TEXT, PRIMARY KEY (b DESC, a ASC)) WITHOUT ROWID",
+            ["a", "b", "c"],
+            ["b", "a"],
+            True,
+            id="without-rowid-key-order-and-sort-order",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (a TEXT, b INTEGER DEFAULT 7, PRIMARY KEY (a)) WITHOUT ROWID, STRICT",
+            ["a", "b"],
+            ["a"],
+            True,
+            id="without-rowid-table-options",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (x INTEGER PRIMARY KEY, y TEXT)",
+            ["x", "y"],
+            ["x"],
+            False,
+            id="rowid-integer-primary-key",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (x INTEGER, y TEXT, PRIMARY KEY (x DESC))",
+            ["x", "y"],
+            ["x"],
+            False,
+            id="rowid-table-constraint-desc",
+        ),
+        pytest.param(
+            "CREATE TABLE foo (x INTEGER PRIMARY KEY DESC, y TEXT)",
+            ["x", "y"],
+            ["x"],
+            False,
+            id="rowid-column-constraint-desc",
+        ),
+    ],
+)
+def test_parse_table_definition(sql: str, columns: list[str], primary_key: list[str], without_rowid: bool) -> None:
+    definition = parse_table_definition(sql)
+
+    assert [column[0] for column in definition.columns] == columns
+    assert definition.primary_key == primary_key
+    assert definition.without_rowid is without_rowid
+
+
+@pytest.mark.parametrize(
+    ("sql", "rowid_alias"),
+    [
+        pytest.param("CREATE TABLE foo (id INTEGER PRIMARY KEY, value TEXT)", "id", id="integer-primary-key"),
+        pytest.param("CREATE TABLE foo (value TEXT, id INTEGER, PRIMARY KEY (id))", "id", id="table-constraint"),
+        pytest.param("CREATE TABLE foo (id INTEGER, value TEXT, PRIMARY KEY (id DESC))", "id", id="descending"),
+        pytest.param("CREATE TABLE foo (id INTEGER, value TEXT, PRIMARY KEY (id COLLATE NOCASE))", "id", id="collate"),
+        pytest.param("CREATE TABLE foo (id INT PRIMARY KEY, value TEXT)", None, id="not-integer-type"),
+        pytest.param("CREATE TABLE foo (id INTEGER(8) PRIMARY KEY, value TEXT)", None, id="integer-with-size"),
+        pytest.param("CREATE TABLE foo (id INTEGER PRIMARY KEY DESC, value TEXT)", None, id="column-desc"),
+        pytest.param(
+            "CREATE TABLE foo (id INTEGER PRIMARY KEY, value TEXT) WITHOUT ROWID",
+            None,
+            id="without-rowid",
+        ),
+        pytest.param("CREATE TABLE foo (a INTEGER, b INTEGER, PRIMARY KEY (a, b))", None, id="composite"),
+    ],
+)
+def test_parse_table_definition_rowid_alias(sql: str, rowid_alias: str | None) -> None:
+    assert parse_table_definition(sql).rowid_alias == rowid_alias
+
+
+def test_split_sql_list_keeps_quoted_commas() -> None:
+    assert list(split_sql_list('a, "b,c", (d, e), [f,g]')) == ["a", '"b,c"', "(d, e)", "[f,g]"]

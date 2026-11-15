@@ -14,7 +14,7 @@ from dissect.database.sqlite3.exception import (
     InvalidPageType,
     NoCellData,
 )
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.util import parse_table_definition
 from dissect.database.sqlite3.wal import WAL
 
 if TYPE_CHECKING:
@@ -328,6 +328,13 @@ class Column:
 
 
 class Table:
+    """A SQLite table.
+
+    Rows are always presented in declared column order. For ``WITHOUT ROWID`` tables, the row
+    identity is the (possibly composite) primary key in :attr:`primary_keys`; those tables are
+    stored as index b-trees and have no rowid.
+    """
+
     def __init__(self, sqlite: SQLite3, type_: str, name: str, table_name: str, page: int, sql: str):
         self.sqlite = sqlite
         self.type = type_
@@ -338,8 +345,13 @@ class Table:
         self.columns = []
         self.primary_key = None
 
-        self.primary_key, columns, _ = parse_table_columns_constraints(sql)
-        self.columns = [Column(name, description) for name, description in columns]
+        definition = parse_table_definition(sql)
+        self.definition = definition
+        self.columns = [Column(name, description) for name, description in definition.columns]
+        self.primary_key = definition.primary_key[0] if len(definition.primary_key) == 1 else None
+        self.primary_keys = definition.primary_key
+        self.without_rowid = definition.without_rowid
+        self.rowid_alias = definition.rowid_alias
 
     def __repr__(self) -> str:
         return f"<Table name={self.name} page={self.page}>"
@@ -372,14 +384,67 @@ class Row:
     def __init__(self, table: Table, cell: Cell):
         self._table = table
         self._cell = cell
-        self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
 
-        # If there is no primary key or the primary key is a compound key,
-        # primary_key will be None, but then all (primary key) columns will
-        # already have a value assigned.
-        primary_key = table.primary_key
-        if primary_key and self._values.get(primary_key, None) is None and self._cell.key is not None:
-            self._values[primary_key] = self._cell.key
+        if getattr(table, "without_rowid", False) is True:
+            # WITHOUT ROWID tables are stored in an index B-tree. The record payload contains the
+            # primary key columns first, in primary key order, followed by the remaining columns in
+            # declaration order. The cell has no rowid key.
+            self._values, self._unknowns = self._match_without_rowid(table, cell.values)
+        else:
+            self._values, self._unknowns = self._match_columns_to_values(self._stored_columns(table), cell.values)
+
+            # Only a genuine INTEGER PRIMARY KEY column is an alias for the rowid. Values of the
+            # rowid alias are stored as NULL in the record and need to be filled from the cell key.
+            rowid_alias = getattr(table, "rowid_alias", None)
+            if isinstance(rowid_alias, str) and cell.key is not None and self._values.get(rowid_alias) is None:
+                self._values[rowid_alias] = cell.key
+
+    def _stored_columns(self, table: Table) -> list[Column]:
+        """Return the columns that occupy a slot in a stored record.
+
+        Virtual generated columns are computed on read and therefore have no value in the record.
+        """
+        definition = getattr(table, "definition", None)
+        virtual_generated = getattr(definition, "column_definitions", None)
+        if not isinstance(virtual_generated, list):
+            return table.columns
+
+        virtual_names = {
+            column.name.lower() for column in virtual_generated if getattr(column, "virtual_generated", False)
+        }
+        if not virtual_names:
+            return table.columns
+
+        stored_columns = [column for column in table.columns if column.name.lower() not in virtual_names]
+        return stored_columns or table.columns
+
+    def _match_without_rowid(self, table: Table, values: list[Any]) -> tuple[dict[str, Any], list[Any]]:
+        """Match the values of a WITHOUT ROWID record to the declared table columns.
+
+        The on-disk order of a WITHOUT ROWID record is the primary key order followed by the
+        non-primary key columns in declaration order. The resulting row is nevertheless presented
+        in declaration order.
+        """
+        stored_columns = self._stored_columns(table)
+        columns_by_name = {column.name.lower(): column for column in stored_columns}
+        primary_keys = getattr(table, "primary_keys", None) or []
+        storage_columns = []
+
+        for primary_key in primary_keys:
+            column = columns_by_name.get(primary_key.lower())
+            if column is not None:
+                storage_columns.append(column)
+
+        if len(storage_columns) != len(primary_keys):
+            # The primary key could not be matched to the declared columns (for example due to an
+            # unusual or corrupt schema). Fall back to declaration order rather than misattributing values.
+            return self._match_columns_to_values(stored_columns, values)
+
+        primary_key_names = {column.name.lower() for column in storage_columns}
+        storage_columns.extend(column for column in stored_columns if column.name.lower() not in primary_key_names)
+
+        matched, unknowns = self._match_columns_to_values(storage_columns, values)
+        return {column.name: matched[column.name] for column in table.columns if column.name in matched}, unknowns
 
     def _match_columns_to_values(self, columns: list[Column], values: list[Any]) -> tuple[dict[str, Any], list[Any]]:
         """Match all table columns to the cell values in this row.
@@ -493,11 +558,11 @@ class Cell:
 
         if page.header.flags == c_sqlite3.PAGE_TYPE_LEAF_TABLE:
             self.size = varint(cell_buf)
-            self.key = varint(cell_buf)
+            self.key = parse_rowid(cell_buf)
             self.max_payload_size = sqlite.usable_page_size - 35
         elif page.header.flags == c_sqlite3.PAGE_TYPE_INTERIOR_TABLE:
             self.left_page = c_sqlite3.uint32(cell_buf)
-            self.key = varint(cell_buf)
+            self.key = parse_rowid(cell_buf)
         elif page.header.flags == c_sqlite3.PAGE_TYPE_LEAF_INDEX:
             self.size = varint(cell_buf)
         elif page.header.flags == c_sqlite3.PAGE_TYPE_INTERIOR_INDEX:
@@ -545,17 +610,15 @@ class Cell:
                 overflow_page = c_sqlite3.uint32(local_buf[-4:])
                 overflow_size = self.size - local_size
 
-                while overflow_page:
-                    # page_size is the total page size, including the 4 bytes
-                    # for the next overflow page in front of the page data.
-                    # overflow_size is the size of the page data without the
-                    # extra 4 bytes for the next overflow page, so it needs to
-                    # be added.
-                    data_size = min(overflow_size + 4, self.page.sqlite.usable_page_size)
-                    page_buf = self.page.sqlite.raw_page(overflow_page)[:data_size]
+                while overflow_page and overflow_size > 0:
+                    # Each overflow page starts with a 4-byte pointer to the next overflow page,
+                    # followed by up to (usable_page_size - 4) bytes of payload.
+                    data_size = min(overflow_size, self.page.sqlite.usable_page_size - 4)
+                    page_buf = self.page.sqlite.raw_page(overflow_page)
 
                     overflow_page = c_sqlite3.uint32(page_buf[:4])
-                    result.append(page_buf[4:])
+                    result.append(page_buf[4 : 4 + data_size])
+                    overflow_size -= data_size
 
                 buf = b"".join(result)
 
@@ -582,21 +645,31 @@ class Cell:
 
 
 def walk_tree(sqlite: SQLite3, page: Page) -> Iterator[Cell]:
-    if page.header.flags in (
+    """Walk a b-tree and yield its cells in key order."""
+    flags = page.header.flags
+
+    if flags in (
         c_sqlite3.PAGE_TYPE_LEAF_TABLE,
         c_sqlite3.PAGE_TYPE_LEAF_INDEX,
     ):
-        for cell in page.cells():
-            yield cell
-    else:
-        for cell in page.cells():
-            left_page = sqlite.page(cell.left_page)
-            for cell in walk_tree(sqlite, left_page):
-                yield cell
+        yield from page.cells()
+        return
 
-        right_page = sqlite.page(page.right_page)
-        for cell in walk_tree(sqlite, right_page):
-            yield cell
+    if flags == c_sqlite3.PAGE_TYPE_INTERIOR_TABLE:
+        for cell in page.cells():
+            yield from walk_tree(sqlite, sqlite.page(cell.left_page))
+
+        yield from walk_tree(sqlite, sqlite.page(page.right_page))
+        return
+
+    # Interior index b-tree pages contain a full record for every key (this is how WITHOUT ROWID
+    # tables and regular indexes are stored). The record sits between the left child page pointer
+    # and the right child page pointer, so visit it after the left subtree and before the next key.
+    for cell in page.cells():
+        yield from walk_tree(sqlite, sqlite.page(cell.left_page))
+        yield cell
+
+    yield from walk_tree(sqlite, sqlite.page(page.right_page))
 
 
 def read_record(fh: BinaryIO, encoding: str) -> tuple[list[int], list[int | float | str | bytes | None]]:
@@ -626,20 +699,39 @@ def read_record(fh: BinaryIO, encoding: str) -> tuple[list[int], list[int | floa
     return types, values
 
 
+def parse_rowid(fh: BinaryIO) -> int:
+    """Read a signed 64-bit rowid from a table b-tree cell.
+
+    SQLite stores rowids as a nine-byte varint that encodes a signed 64-bit integer.
+    Reading it as an unsigned varint turns negative rowids into large positive numbers.
+    """
+    value = varint(fh)
+    if value >= 1 << 63:
+        value -= 1 << 64
+
+    return value
+
+
 def varint(fh: BinaryIO) -> int:
-    byte_num = 0
+    """Read a variable length integer.
+
+    See https://sqlite.org/fileformat2.html#varint. A varint uses up to nine bytes: the first
+    eight bytes each contain seven bits of the value and the ninth byte contains the remaining
+    eight bits.
+    """
     value = 0
 
-    while True:
-        val = ord(fh.read(1))
+    for _ in range(8):
+        byte = fh.read(1)
+        if not byte:
+            raise ValueError("Unexpected end of varint")
 
-        if byte_num == 8:
-            value |= val
+        value = (value << 7) | (ord(byte) & 0x7F)
+        if not ord(byte) & 0x80:
             return value
 
-        value |= val & 0x7F
-        if val & 0x80:
-            value = value << 7
-            byte_num += 1
-        else:
-            return value
+    last = fh.read(1)
+    if not last:
+        raise ValueError("Unexpected end of varint")
+
+    return (value << 8) | ord(last)
