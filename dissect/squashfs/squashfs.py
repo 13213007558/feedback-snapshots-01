@@ -17,10 +17,12 @@ from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
 from dissect.squashfs.exceptions import (
     FileNotFoundError,
+    InvalidIDError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
 )
+from dissect.squashfs.identity import IdLookup
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -53,6 +55,7 @@ class SquashFS:
 
         self._read_block = lru_cache(1024)(self._read_block)
         self._lookup_id = lru_cache(1024)(self._lookup_id)
+        self._resolve_id = lru_cache(1024)(self._resolve_id)
         self._lookup_inode = lru_cache(1024)(self._lookup_inode)
         self._lookup_fragment = lru_cache(1024)(self._lookup_fragment)
 
@@ -62,7 +65,16 @@ class SquashFS:
 
         self._compression = compression.initialize(self.sb.compression, self._compression_options)
 
-        self.id_table = self._read_table(self.sb.id_table_start, self.sb.no_ids, 4)
+        self.id_table_error = None
+        self.id_table_truncated = False
+        try:
+            self.id_table = self._read_table(self.sb.id_table_start, self.sb.no_ids, 4, tolerant=True)
+        except Exception as e:
+            # A damaged id-table pointer array must not prevent the rest of the
+            # filesystem (and its permission bits) from being inspected.
+            self.id_table = []
+            self.id_table_error = f"{type(e).__name__}: {e}"
+
         self.lookup_table = self._read_table(self.sb.lookup_table_start, self.sb.inodes, 8)
         self.fragment_table = self._read_table(
             self.sb.fragment_table_start, self.sb.fragments, len(c_squashfs.squashfs_fragment_entry)
@@ -113,7 +125,7 @@ class SquashFS:
 
         return node
 
-    def _read_table(self, offset: int, count: int, entry_size: int) -> list[int]:
+    def _read_table(self, offset: int, count: int, entry_size: int, tolerant: bool = False) -> list[int]:
         if not count or offset == c_squashfs.SQUASHFS_INVALID_BLK:
             return []
 
@@ -121,23 +133,47 @@ class SquashFS:
         num_blocks = (num_bytes + c_squashfs.SQUASHFS_METADATA_SIZE - 1) // c_squashfs.SQUASHFS_METADATA_SIZE
 
         self.fh.seek(offset)
-        return c_squashfs.uint64[num_blocks](self.fh)
+        try:
+            return c_squashfs.uint64[num_blocks](self.fh)
+        except EOFError:
+            if not tolerant:
+                raise
+
+            # Preserve only the valid prefix.  Index resolution reports
+            # "id_table_truncated" for entries whose pointer is missing, so a
+            # damaged pointer array can never fabricate a numeric identity.
+            self.id_table_truncated = True
+            self.fh.seek(offset)
+            available = len(self.fh.read(num_blocks * 8)) // 8
+            self.fh.seek(offset)
+            return list(c_squashfs.uint64[available](self.fh)) if available else []
 
     def _read_metadata(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
         result = []
         while length:
+            previous_block = block
             next_block, data = self._read_block(block)
+            if not data:
+                raise EOFError(f"Empty metadata block at {block} while reading {length} more byte(s)")
+
             remaining = len(data) - offset
 
-            if remaining <= length:
-                result.append(data[offset:])
-                length -= remaining
+            if remaining > 0:
+                if remaining <= length:
+                    result.append(data[offset:])
+                    length -= remaining
+                    block = next_block
+                    offset = 0
+                else:
+                    result.append(data[offset : offset + length])
+                    offset += length
+                    break
+            else:
                 block = next_block
                 offset = 0
-            else:
-                result.append(data[offset : offset + length])
-                offset += length
-                break
+
+            if length and block == previous_block:
+                raise EOFError(f"Malformed metadata block chain at {block}")
 
         return block, offset, b"".join(result)
 
@@ -171,10 +207,79 @@ class SquashFS:
         _, data = self._read_block(entry.start_block, entry.size)
         return data[offset : offset + length]
 
+    def _resolve_id(self, index: int, table: str, raw_field: str) -> IdLookup:
+        """Resolve one inode id-table index with full source evidence.
+
+        Both "basic" and "extended" inode headers use the same two 16-bit
+        indexes, so every caller goes through this function.  The result keeps
+        the raw index even when the identity cannot be resolved; an unresolved
+        identity is never coerced to uid/gid 0.
+        """
+        if index < 0 or index >= self.sb.no_ids:
+            return IdLookup(
+                table=table,
+                index=index,
+                raw_field=raw_field,
+                reason="id_index_out_of_range",
+                detail=f"index {index} is outside id table (0..{self.sb.no_ids - 1})",
+            )
+
+        entry_offset = index * 4
+        pointer_index, metadata_offset = divmod(entry_offset, c_squashfs.SQUASHFS_METADATA_SIZE)
+
+        lookup = {
+            "table": table,
+            "index": index,
+            "raw_field": raw_field,
+            "pointer_index": pointer_index,
+            "metadata_offset": metadata_offset,
+            "metadata_length": 4,
+        }
+
+        if pointer_index >= len(self.id_table):
+            return IdLookup(
+                **lookup,
+                reason="id_table_truncated",
+                detail=f"id table has {len(self.id_table)} block pointer(s), need index {pointer_index}",
+            )
+
+        metadata_block = self.id_table[pointer_index]
+        if metadata_block < 0 or metadata_block >= self.size:
+            return IdLookup(
+                **lookup,
+                reason="id_pointer_invalid",
+                detail=f"id table pointer {pointer_index} is {metadata_block}",
+            )
+
+        lookup["metadata_block"] = metadata_block
+
+        try:
+            _, _, data = self._read_metadata(metadata_block, metadata_offset, 4)
+        except Exception as e:
+            return IdLookup(**lookup, reason="id_table_read_error", detail=f"{type(e).__name__}: {e}")
+
+        if len(data) != 4:
+            return IdLookup(
+                **lookup,
+                reason="id_table_truncated",
+                detail=f"only {len(data)} of 4 id bytes available",
+            )
+
+        resolved_id = struct.unpack("<I", data)[0]
+        return IdLookup(**lookup, resolved_id=resolved_id)
+
     def _lookup_id(self, id: int) -> int:
-        block, offset = divmod(id * 4, c_squashfs.SQUASHFS_METADATA_SIZE)
-        _, _, data = self._read_metadata(self.id_table[block], offset, 4)
-        return struct.unpack("<I", data)[0]
+        """Return the numeric ID for an id-table index.
+
+        Raises:
+            InvalidIDError: If the index is out of range or the id table entry
+                cannot be read.  Callers that need to distinguish unknown
+                identities should use :meth:`_resolve_id`.
+        """
+        result = self._resolve_id(id, "id", "id_table.index")
+        if result.resolved_id is None:
+            raise InvalidIDError(f"Unresolved id table index {id}: {result.reason} ({result.detail})")
+        return result.resolved_id
 
     def _lookup_inode(self, inode_number: int) -> INode:
         if inode_number <= 0 or inode_number > self.sb.inodes:
@@ -294,15 +399,45 @@ class INode:
         return self.header.mode | self.type
 
     @property
-    def uid(self) -> int:
-        return self.fs._lookup_id(self.header.uid)
+    def uid_index(self) -> int:
+        """The raw uid id-table index from the inode header."""
+        return self.header.uid
 
     @property
-    def guid(self) -> int:
-        return self.fs._lookup_id(self.header.guid)
+    def gid_index(self) -> int:
+        """The raw gid id-table index from the inode header (stored as ``guid``)."""
+        return self.header.guid
 
     @property
-    def gid(self) -> int:
+    def uid_lookup(self) -> IdLookup:
+        """Full uid identity resolution evidence."""
+        return self.fs._resolve_id(self.header.uid, "uid", "squashfs_base_inode_header.uid")
+
+    @property
+    def gid_lookup(self) -> IdLookup:
+        """Full gid identity resolution evidence.
+
+        SquashFS names this on-disk field ``guid``; it is a gid id-table index.
+        """
+        return self.fs._resolve_id(self.header.guid, "gid", "squashfs_base_inode_header.guid")
+
+    @property
+    def uid(self) -> int | None:
+        """The numeric uid, or ``None`` when the identity is unknown.
+
+        ``None`` is an explicit unknown sentinel; it is never confused with
+        the valid root identity ``0``.
+        """
+        return self.uid_lookup.resolved_id
+
+    @property
+    def guid(self) -> int | None:
+        """The numeric gid, or ``None`` when the identity is unknown."""
+        return self.gid_lookup.resolved_id
+
+    @property
+    def gid(self) -> int | None:
+        """The numeric gid, or ``None`` when the identity is unknown."""
         return self.guid
 
     @property

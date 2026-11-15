@@ -23,3 +23,7 @@ class NotAFileError(Error):
 
 class NotASymlinkError(Error):
     pass
+
+
+class InvalidIDError(Error, ValueError):
+    """An id-table index could not be resolved to a numeric identity."""

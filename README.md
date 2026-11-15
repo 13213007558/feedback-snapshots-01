@@ -56,3 +56,36 @@ Dissect is released as open source by Fox-IT (<https://www.fox-it.com>) part of 
 Developed by the Dissect Team (<dissect@fox-it.com>) and made available at <https://github.com/fox-it/dissect>.
 
 License terms: AGPL3 (<https://www.gnu.org/licenses/agpl-3.0.html>). For more information, see the LICENSE file.
+
+## Permission evidence inventory
+
+`dissect.squashfs` includes a read-only inventory for permission-sensitive
+firmware objects. It reports setuid, setgid, sticky and world-writable inodes
+while keeping the identity evidence separate from the permission bits.
+
+SquashFS inode headers store 16-bit indexes into a filesystem-wide id table,
+not numeric uid/gid values. The inventory therefore always reports both the raw
+index (`squashfs_base_inode_header.uid` / `.guid`) and the numeric ID resolved
+from the id table. It never consults local account databases.
+
+```python
+from dissect.squashfs import build_permission_manifest
+
+manifest = build_permission_manifest("firmware.sqfs")
+
+for entry in manifest:
+    print(entry.paths, oct(entry.raw_mode), entry.owner_id, entry.group_id, entry.classification)
+```
+
+The manifest de-duplicates hard links by underlying inode while retaining every
+path that references the object; `object_count` counts inodes and `path_count`
+counts path references. A missing or corrupt id-table entry produces an unknown
+identity (`owner_id is None`, `owner_known is False`) rather than uid/gid 0.
+Use `entry.definitely_root_owned_setuid` only for a setuid object whose index
+actually resolves to numeric uid 0.
+
+For a machine-readable report including raw field evidence:
+
+```bash
+python -m dissect.squashfs.manifest --json firmware.sqfs
+```
