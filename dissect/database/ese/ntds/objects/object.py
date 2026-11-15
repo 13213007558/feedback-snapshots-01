@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from dissect.database.ese.ntds.database import Database
+    from dissect.database.ese.ntds.identity.model import DisplayPath, ObjectIdentity
     from dissect.database.ese.ntds.sd import SecurityDescriptor
     from dissect.database.ese.ntds.util import DN
     from dissect.database.ese.record import Record
@@ -264,6 +265,20 @@ class Object:
         return self.get("distinguishedName")
 
     dn = distinguished_name
+
+    @property
+    def identity(self) -> ObjectIdentity:
+        """Return the stable, per-record identity view of this object.
+
+        The returned :class:`ObjectIdentity` keeps the DNT (row locator), GUID, name, RDN type
+        and parent reference as separate fields and preserves the lifecycle state (live,
+        deleted or phantom) instead of presenting every record as a normal live object.
+        """
+        return self.db.data.identity_source.from_object(self)
+
+    def display_path(self) -> DisplayPath:
+        """Return the display path with parent-chain diagnostics and retraceable segments."""
+        return self.db.data.identity_builder.build(self.dnt)
 
     @cached_property
     def sd(self) -> SecurityDescriptor | None:

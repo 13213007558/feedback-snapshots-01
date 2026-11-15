@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.database.ese.ese import ESE
 from dissect.database.ese.exception import KeyNotFoundError
+from dissect.database.ese.ntds.identity.builder import DisplayPathBuilder
+from dissect.database.ese.ntds.identity.ntds_source import NTDSObjectSource
 from dissect.database.ese.ntds.objects import Object
 from dissect.database.ese.ntds.pek import PEK
 from dissect.database.ese.ntds.query import Query
@@ -113,6 +115,16 @@ class DataTable:
         # Cache frequently used and "expensive" methods
         self.get = lru_cache(4096)(self.get)
         self._make_dn = lru_cache(4096)(self._make_dn)
+
+    @cached_property
+    def identity_source(self) -> NTDSObjectSource:
+        """Return the ObjectSource adapter exposing stable identity records for this table."""
+        return NTDSObjectSource(self.db)
+
+    @cached_property
+    def identity_builder(self) -> DisplayPathBuilder:
+        """Return the iterative display-path builder backed by :attr:`identity_source`."""
+        return DisplayPathBuilder(self.identity_source)
 
     def root(self) -> Top:
         """Return the top-level object in the NTDS database."""
@@ -224,25 +236,36 @@ class DataTable:
     def _make_dn(self, dnt: int) -> DN:
         """Construct Distinguished Name (DN) from a Directory Number Tag (DNT) value.
 
-        This method walks up the parent hierarchy to build the full DN path.
+        The parent chain is walked iteratively through the identity layer so that:
+
+        - RDN values are fully RFC 4514 escaped rather than only escaping commas (this matters
+          for tombstone names that contain literal newlines);
+        - a parent-chain cycle is diagnosed on the :class:`DisplayPath` instead of exhausting
+          the recursion limit (this method itself never recurses);
+        - a missing parent or RDN yields a partial path plus diagnostics instead of silently
+          collapsing to an empty string.
+
+        The returned :class:`DN` keeps the historical upper-case presentation and remains a
+        ``str`` subclass carrying the originating object.
 
         Args:
             dnt: The DNT to construct the DN for.
         """
-        obj = self.get(dnt)
-
-        if obj.dnt in (0, 2):  # Root object
+        if dnt in (0, 2):  # Root object
             return ""
 
-        rdn_key = obj.get("RdnType")
-        rdn_value = obj.get("name").replace(",", "\\,")
-        if not rdn_key or not rdn_value:
-            return ""
+        path = self.identity_builder.build(dnt)
+        rdn_segments = [segment for segment in path.segments if segment.rdn]
 
-        parent_dn = self._make_dn(obj.pdnt)
-        dn = f"{rdn_key}={rdn_value}".upper() + (f",{parent_dn}" if parent_dn else "")
-
-        return DN(dn, obj, parent_dn if parent_dn else None)
+        # Build the DN objects from the highest ancestor down to the target so every DN keeps
+        # a fully linked ``.parent`` chain, mirroring the historical recursive behaviour without
+        # actually recursing (a cycle is bounded by the finite, already-resolved segment list).
+        parent_dn = None
+        for segment in reversed(rdn_segments):
+            rendered = segment.rdn.upper()
+            full_dn = f"{rendered},{parent_dn}" if parent_dn else rendered
+            parent_dn = DN(full_dn, self.get(segment.dnt), parent_dn)
+        return parent_dn
 
     def _get_index(self, attribute: str) -> Index:
         """Get the index for a given attribute name.

@@ -387,13 +387,16 @@ def test_organizational_units(goad: NTDS) -> None:
         "OU=DOMAIN CONTROLLERS,DC=NORTH,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=DOMAIN CONTROLLERS,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=DORNE,DC=SEVENKINGDOMS,DC=LOCAL",
-        "OU=IRONISLANDS\nDEL:D58E6F7A-DA60-40AE-88C1-27A4FCEE1190,CN=DELETED OBJECTS,DC=SEVENKINGDOMS,DC=LOCAL",
+        # The tombstone name contains a literal newline, which must be RFC 4514 escaped as \0A
+        "OU=IRONISLANDS\\0ADEL:D58E6F7A-DA60-40AE-88C1-27A4FCEE1190,CN=DELETED OBJECTS,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=REACH,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=RIVERLANDS,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=STORMLANDS,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=VALE,DC=SEVENKINGDOMS,DC=LOCAL",
         "OU=WESTERLANDS,DC=SEVENKINGDOMS,DC=LOCAL",
     ]
+    # No rendered DN may carry a raw control character regardless of the underlying name.
+    assert all(all(ord(char) >= 0x20 and char != "\x7f" for char in str(ou.distinguished_name)) for ou in ous)
 
     dc_ou = ous[2]
     assert (
