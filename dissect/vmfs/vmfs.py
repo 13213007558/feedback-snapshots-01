@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.vmfs.address import FileDescriptorAddr, address_fmt, address_type
 from dissect.vmfs.c_vmfs import (
@@ -21,6 +21,11 @@ from dissect.vmfs.exception import (
 )
 from dissect.vmfs.resource import ResourceManager
 from dissect.vmfs.util import bsf, vmfs_uuid
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from dissect.vmfs.residual import DescriptorRecord, DirectoryReference, ResidualCandidate
 
 
 class VMFS:
@@ -311,6 +316,43 @@ class VMFS:
                 raise FileNotFoundError(f"File not found: {path}")
 
         return node
+
+    def directory_references(self) -> dict[int, list[DirectoryReference]]:
+        """Collect all directory references to file descriptor slots, grouped by target address.
+
+        This is a read-only view over the raw directory entries, including stale entries whose
+        generation no longer matches the slot they point at. It does not alter directory listings.
+        """
+        from dissect.vmfs.residual import collect_directory_references
+
+        return collect_directory_references(self)
+
+    def descriptor_records(self) -> Iterator[DescriptorRecord]:
+        """Iterate read-only records for every slot in the file descriptor resource.
+
+        Each record combines the allocation bitmap state with the parsable metadata and the directory
+        references observed for that slot, without interpreting either as a deletion event.
+        """
+        from dissect.vmfs.residual import iter_descriptor_records
+
+        yield from iter_descriptor_records(self)
+
+    def residual_candidates(self) -> Iterator[ResidualCandidate]:
+        """Enumerate possible residual file descriptor objects, read-only.
+
+        Candidates are classified from the resource allocation state and directory references:
+
+        - allocated and currently reachable descriptors;
+        - unallocated slots that still hold parsable metadata (possible residuals);
+        - allocated slots whose address was reused while a stale directory name still references it;
+        - slots in unknown or contradictory states.
+
+        No deletion time is inferred and stale names are never associated with reused slot contents.
+        This enumeration does not affect :meth:`get` or regular directory listings.
+        """
+        from dissect.vmfs.residual import iter_residual_candidates
+
+        yield from iter_residual_candidates(self)
 
 
 def _get_sfd_offset(vmfs: VMFS, address: int) -> int:

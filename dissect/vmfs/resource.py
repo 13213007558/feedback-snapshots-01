@@ -21,6 +21,8 @@ from dissect.vmfs.c_vmfs import FS3_Config, FS3_DescriptorType, FS3_ResourceType
 from dissect.vmfs.util import bsf
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from dissect.vmfs.vmfs import VMFS, FileDescriptor
 
 
@@ -210,6 +212,67 @@ class ResourceFile:
         offset = self._resource_offset_from_address(address)
         self.fh.seek(offset)
         return self.fh.read(self.metadata.resourceSize)
+
+    def num_clusters(self) -> int:
+        """Return the number of resource clusters described by this resource file."""
+        num_resources = (self.metadata.numResourcesHi << 32) | self.metadata.numResourcesLo
+        return (num_resources + self.metadata.resourcesPerCluster - 1) // self.metadata.resourcesPerCluster
+
+    def _cluster_header(self, cluster: int) -> bytes:
+        """Read the raw cluster header (lock and metadata blocks) of a resource cluster."""
+        offset = self._cluster_header_offset(cluster)
+        self.fh.seek(offset)
+        return self.fh.read(self._cluster_header_size)
+
+    def _cluster_meta_block(self, cluster: int) -> bytes:
+        """Return the metadata block (the second disk block) of a resource cluster header."""
+        return self._cluster_header(cluster)[self._cluster_header_size // 2 :]
+
+    def cluster_total_resources(self, cluster: int) -> int:
+        """Return the number of resources in a cluster according to its cluster header."""
+        meta = self._cluster_meta_block(cluster)
+        if self.vmfs.is_vmfs5:
+            return c_vmfs.FS3_ResourceClusterMD(meta).totalResources
+        return int.from_bytes(meta[0x20:0x22], "little")
+
+    def cluster_bitmap(self, cluster: int) -> bytes:
+        """Return the raw allocation bitmap of a resource cluster.
+
+        The bitmap uses one bit per resource, indexed by the resource number within the cluster.
+        A set bit means the resource is free, a cleared bit means the resource is allocated.
+        This is the on-disk convention used by both VMFS5 and VMFS6 resource files.
+        """
+        meta = self._cluster_meta_block(cluster)
+        if self.vmfs.is_vmfs5:
+            return bytes(c_vmfs.FS3_ResourceClusterMD(meta).bitmap)
+
+        # On VMFS6 the cluster metadata is the Res3_ClusterMetaVMFS6 structure, which is not fully
+        # modelled in c_vmfs. The allocation bitmap lives at a fixed offset in that structure.
+        return meta[0x80 : 0x80 + (self.metadata.resourcesPerCluster + 7) // 8]
+
+    def is_allocated(self, cluster: int, resource: int) -> bool:
+        """Return whether the resource at the given cluster and resource is marked allocated.
+
+        The allocation bitmap tracks resource bookkeeping, not liveness of any data stored in the
+        resource. A freed slot can therefore still contain parsable metadata, and an allocated slot
+        is not automatically reachable from any directory.
+        """
+        bitmap = self.cluster_bitmap(cluster)
+        bit = (bitmap[resource >> 3] >> (resource & 7)) & 1
+        return bit == 0
+
+    def iter_slots(self) -> Iterator[tuple[int, int, bool]]:
+        """Iterate over every resource slot described by this resource file.
+
+        Yields tuples of ``(cluster, resource, allocated)``, where ``allocated`` reflects the
+        allocation bitmap only. This performs no writes and does not modify any allocation state.
+        """
+        for cluster in range(self.num_clusters()):
+            bitmap = self.cluster_bitmap(cluster)
+            total_resources = min(self.cluster_total_resources(cluster), self.metadata.resourcesPerCluster)
+            for resource in range(total_resources):
+                allocated = ((bitmap[resource >> 3] >> (resource & 7)) & 1) == 0
+                yield cluster, resource, allocated
 
 
 class FileBlockResourceVMFS5(ResourceFile):

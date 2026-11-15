@@ -9,9 +9,17 @@ from dissect.vmfs.exception import (
     NotASymlinkError,
 )
 from dissect.vmfs.lvm import LVM, Device, Volume
+from dissect.vmfs.residual import (
+    DescriptorRecord,
+    DirectoryReference,
+    ResidualCandidate,
+    ResidualState,
+)
 from dissect.vmfs.vmfs import VMFS
 
 __all__ = [
+    "DescriptorRecord",
+    "DirectoryReference",
     "LVM",
     "VMFS",
     "Device",
@@ -22,5 +30,7 @@ __all__ = [
     "InvalidHeader",
     "NotADirectoryError",
     "NotASymlinkError",
+    "ResidualCandidate",
+    "ResidualState",
     "Volume",
 ]
