@@ -149,6 +149,27 @@ task :console do
   exec 'irb -I lib -r liquid'
 end
 
+namespace :strict2 do
+  report_dir = File.expand_path("test/support/strict2_differential", __dir__)
+
+  desc "Write the strict2 differential report and migration checklist"
+  task :report do
+    $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
+    require_relative "test/support/strict2_differential_report"
+    require 'fileutils'
+
+    FileUtils.mkdir_p(report_dir)
+    File.write(File.join(report_dir, "report.md"), Strict2DifferentialReport.markdown + "\n")
+    File.write(File.join(report_dir, "checklist.md"), Strict2DifferentialReport.checklist_markdown + "\n")
+
+    counts = Strict2DifferentialReport.summary
+    puts "strict2 differential: #{Strict2DifferentialReport.results.length} templates " \
+      "(#{counts.map { |category, count| "#{category}=#{count}" }.join(', ')})"
+    puts "wrote #{File.join(report_dir, 'report.md')}"
+    puts "wrote #{File.join(report_dir, 'checklist.md')}"
+  end
+end
+
 desc('run liquid-spec suite across all adapters')
 task :spec do
   Dir['./spec/*.rb'].sort.each do |adapter|
