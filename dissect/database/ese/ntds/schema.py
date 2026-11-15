@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from io import BytesIO
 from typing import TYPE_CHECKING, NamedTuple
 
 from dissect.database.ese.ntds.c_ds import c_ds
+from dissect.database.ese.ntds.util import SYNTAX_ENCODE_DECODE_MAP
 
 if TYPE_CHECKING:
     from dissect.database.ese.ntds.database import Database
@@ -105,10 +107,46 @@ BOOTSTRAP_OID_PREFIXES = {
 }
 
 
+class SchemaSource:
+    """Where a schema entry originated from."""
+
+    BOOTSTRAP_COLUMN = "bootstrap_column"
+    BOOTSTRAP_ATTRIBUTE = "bootstrap_attribute"
+    BOOTSTRAP_CLASS = "bootstrap_class"
+    DATABASE = "database"
+    SYNTHETIC = "synthetic"
+
+
+class DeficiencyReason:
+    """Machine-readable reasons describing why a schema entry cannot fully explain a value."""
+
+    NAME_COLLISION = "name_collision"
+    ATTRTYP_COLLISION = "attrtyp_collision"
+    COLUMN_COLLISION = "column_collision"
+    DNT_COLLISION = "dnt_collision"
+    UNKNOWN_SYNTAX = "unknown_syntax"
+    NO_SYNTAX_DECODER = "no_syntax_decoder"
+    UNKNOWN_ATTRIBUTE = "unknown_attribute"
+    UNKNOWN_CLASS = "unknown_class"
+    UNRESOLVED_REFERENCE = "unresolved_reference"
+    MALFORMED_VALUE = "malformed_value"
+
+
+class SchemaConflict(NamedTuple):
+    """A record of one schema entry replacing or failing to replace another."""
+
+    index: str
+    key: object
+    previous: NamedTuple
+    current: NamedTuple
+    reason: str
+
+
 class ClassEntry(NamedTuple):
     dnt: int
     id: int
     name: str
+    source: str = SchemaSource.BOOTSTRAP_CLASS
 
 
 class AttributeEntry(NamedTuple):
@@ -122,6 +160,7 @@ class AttributeEntry(NamedTuple):
     is_single_valued: bool
     link_id: int | None
     search_flags: SearchFlag | None
+    source: str = SchemaSource.BOOTSTRAP_ATTRIBUTE
 
 
 class Schema:
@@ -145,6 +184,22 @@ class Schema:
         self._class_id_index: dict[int, ClassEntry] = {}
         self._class_name_index: dict[str, ClassEntry] = {}
 
+        # Entries that could not be indexed under their preferred key because another entry already claimed it.
+        # The displaced entry is retained here so no schema information is silently lost.
+        self.conflicts: list[SchemaConflict] = []
+
+        # Records of database entries superseding the built-in bootstrap definitions. This is expected behavior,
+        # but kept explicit so callers can see exactly when a bootstrap definition stops being authoritative.
+        self.overrides: list[SchemaConflict] = []
+
+        # Attribute entries indexed by the physical ESE column name, including columns that are not described by
+        # any schema entry. These are synthesized on demand so their raw values remain inspectable.
+        self._unknown_column_index: dict[str, AttributeEntry] = {}
+
+        # Class ATTRTYP values encountered on objects without a classSchema definition. Populated lazily while
+        # resolving objectClass values so unregistered custom classes remain visible in the deficiency report.
+        self._unknown_class_ids: set[int] = set()
+
         # OID prefixes
         self._oid_idx_to_prefix_index: dict[int, str] = {
             idx: decode_oid(prefix) for idx, prefix in BOOTSTRAP_OID_PREFIXES.items()
@@ -167,6 +222,7 @@ class Schema:
                     is_single_valued=True,
                     link_id=None,
                     search_flags=None,
+                    source=SchemaSource.BOOTSTRAP_COLUMN,
                 )
             )
 
@@ -182,6 +238,7 @@ class Schema:
                 is_single_valued=is_single_valued,
                 link_id=None,
                 search_flags=None,
+                source=SchemaSource.BOOTSTRAP_ATTRIBUTE,
             )
 
         # Bootstrap initial object classes
@@ -190,6 +247,7 @@ class Schema:
                 dnt=-1,
                 id=id,
                 name=name,
+                source=SchemaSource.BOOTSTRAP_CLASS,
             )
 
     def load(self, db: Database) -> None:
@@ -222,6 +280,7 @@ class Schema:
                     is_single_valued=obj.get("isSingleValued"),
                     link_id=obj.get("linkId"),
                     search_flags=obj.get("searchFlags"),
+                    source=SchemaSource.DATABASE,
                 )
 
             elif class_schema.id in classes:
@@ -229,6 +288,7 @@ class Schema:
                     dnt=obj.dnt,
                     id=obj.get("governsID", raw=True),
                     name=obj.get("lDAPDisplayName"),
+                    source=SchemaSource.DATABASE,
                 )
 
         # Load user-defined OID prefixes
@@ -237,11 +297,12 @@ class Schema:
             # Rebuild the reverse index
             self._oid_prefix_to_idx_index = {prefix: idx for idx, prefix in self._oid_idx_to_prefix_index.items()}
 
-    def _add_class(self, dnt: int, id: int, name: str) -> None:
+    def _add_class(self, dnt: int, id: int, name: str, source: str) -> None:
         entry = ClassEntry(
             dnt=dnt,
             id=id,
             name=name,
+            source=source,
         )
         self._add(entry)
 
@@ -256,6 +317,7 @@ class Schema:
         is_single_valued: bool,
         link_id: int | None,
         search_flags: SearchFlag | None,
+        source: str,
     ) -> None:
         entry = AttributeEntry(
             dnt=dnt,
@@ -268,27 +330,90 @@ class Schema:
             is_single_valued=is_single_valued,
             link_id=link_id,
             search_flags=search_flags,
+            source=source,
         )
         self._add(entry)
 
+    def _replace_index(
+        self,
+        index: dict,
+        key: object,
+        entry: ClassEntry | AttributeEntry,
+        reason: str,
+        index_name: str,
+    ) -> None:
+        """Place ``entry`` in ``index`` under ``key``, recording genuine schema collisions.
+
+        A bootstrap entry being superseded by a database entry is the normal, expected flow (the database is
+        the authoritative source) and is not recorded as a conflict. A database entry replacing another
+        database entry under the same key means the extended schema is ambiguous and is retained for
+        inspection instead of being silently overwritten without a trace.
+        """
+        previous = index.get(key)
+        if previous is not None and previous != entry:
+            is_bootstrap_replacement = (
+                previous.source != SchemaSource.DATABASE and entry.source == SchemaSource.DATABASE
+            )
+            if is_bootstrap_replacement:
+                self.overrides.append(
+                    SchemaConflict(index=index_name, key=key, previous=previous, current=entry, reason=reason)
+                )
+            else:
+                self.conflicts.append(
+                    SchemaConflict(index=index_name, key=key, previous=previous, current=entry, reason=reason)
+                )
+        index[key] = entry
+
     def _add(self, entry: ClassEntry | AttributeEntry) -> None:
         if entry.dnt != -1:
-            self._dnt_index[entry.dnt] = entry
+            self._replace_index(self._dnt_index, entry.dnt, entry, DeficiencyReason.DNT_COLLISION, index_name="dnt")
         if entry.id != -1:
-            self._attrtyp_index[entry.id] = entry
+            self._replace_index(
+                self._attrtyp_index, entry.id, entry, DeficiencyReason.ATTRTYP_COLLISION, index_name="attrtyp"
+            )
 
         if isinstance(entry, ClassEntry):
-            self._class_name_index[entry.name.lower()] = entry
+            self._replace_index(
+                self._class_name_index,
+                entry.name.lower(),
+                entry,
+                DeficiencyReason.NAME_COLLISION,
+                index_name="class_name",
+            )
 
             if entry.id != -1:
-                self._class_id_index[entry.id] = entry
+                self._replace_index(
+                    self._class_id_index,
+                    entry.id,
+                    entry,
+                    DeficiencyReason.ATTRTYP_COLLISION,
+                    index_name="class_id",
+                )
 
         if isinstance(entry, AttributeEntry):
-            self._attribute_name_index[entry.name.lower()] = entry
-            self._attribute_column_index[entry.column] = entry
+            self._replace_index(
+                self._attribute_name_index,
+                entry.name.lower(),
+                entry,
+                DeficiencyReason.NAME_COLLISION,
+                index_name="attribute_name",
+            )
+            self._replace_index(
+                self._attribute_column_index,
+                entry.column,
+                entry,
+                DeficiencyReason.COLUMN_COLLISION,
+                index_name="attribute_column",
+            )
 
             if entry.id != -1:
-                self._attribute_id_index[entry.id] = entry
+                self._replace_index(
+                    self._attribute_id_index,
+                    entry.id,
+                    entry,
+                    DeficiencyReason.ATTRTYP_COLLISION,
+                    index_name="attribute_id",
+                )
             if entry.link_id is not None:
                 self._attribute_link_index[entry.link_id] = entry
 
@@ -353,6 +478,179 @@ class Schema:
             return self._class_name_index.get(name.lower())
 
         return None
+
+    # Physical NTDS columns are named "ATT<syntax-letter><ATTRTYP>", e.g. ATTm590012 or ATTq999.
+    # Fixed internal columns (DNT_col, ...) do not match this pattern and are always bootstrapped.
+    _ATT_COLUMN_PATTERN = re.compile(r"^ATT([a-z])(\d+)$")
+
+    def entry_for_column(self, column: str) -> AttributeEntry | None:
+        """Resolve a physical ESE column name to a schema entry, synthesizing one for unknown columns.
+
+        Extended schemas can introduce attributes that have no corresponding ``attributeSchema`` object in a
+        stripped-down offline database. Instead of discarding such a column, a synthetic :class:`AttributeEntry`
+        is reconstructed from the column name itself (the syntax letter encodes the syntax, the number is the
+        ATTRTYP), so the raw value remains inspectable and the gap in the schema is reported explicitly.
+
+        Args:
+            column: The physical ESE column name (e.g. ``ATTm590012``).
+
+        Returns:
+            The registered or synthesized attribute entry, or ``None`` if the column name does not encode an
+            ATTRTYP and is not otherwise known.
+        """
+        entry = self._attribute_column_index.get(column) or self._unknown_column_index.get(column)
+        if entry is not None:
+            return entry
+
+        match = self._ATT_COLUMN_PATTERN.match(column)
+        if match is None:
+            return None
+
+        letter, attrtyp_text = match.groups()
+        syntax = ord(letter) - ord("a")
+        attrtyp = int(attrtyp_text)
+
+        entry = AttributeEntry(
+            dnt=-1,
+            id=attrtyp,
+            # There is no lDAPDisplayName for this attribute; keep the physical column name as a stable label
+            # rather than inventing a misleading display name.
+            name=column,
+            column=column,
+            syntax=syntax,
+            om_syntax=None,
+            om_object_class=None,
+            # We cannot tell single- from multi-valued without the schema entry; treat it as multi-valued so a
+            # list value is never truncated and the raw value is preserved losslessly.
+            is_single_valued=False,
+            link_id=None,
+            search_flags=None,
+            source=SchemaSource.SYNTHETIC,
+        )
+        self._unknown_column_index[column] = entry
+        return entry
+
+    def unknown_attributes(self) -> list[AttributeEntry]:
+        """Return the attribute entries synthesized from columns without a schema definition."""
+        return list(self._unknown_column_index.values())
+
+    def is_known_syntax(self, syntax: int) -> bool:
+        """Return whether the syntax has a registered value decoder.
+
+        A syntax may be a valid AD syntax but still lack a decoder (e.g. presentation-address), which is a
+        different deficiency from encountering a syntax number that is not part of AD at all.
+        """
+        return syntax in SYNTAX_ENCODE_DECODE_MAP
+
+    def syntax_deficiency_reason(self, syntax: int) -> str | None:
+        """Return the specific reason a syntax cannot be decoded, or ``None`` if it can."""
+        if syntax not in SYNTAX_ENCODE_DECODE_MAP:
+            return DeficiencyReason.UNKNOWN_SYNTAX
+
+        if SYNTAX_ENCODE_DECODE_MAP[syntax][1] is None:
+            return DeficiencyReason.NO_SYNTAX_DECODER
+
+        return None
+
+    def explain_attribute(self, name: str) -> dict | None:
+        """Explain which definition backs an attribute name and how values are (or cannot be) decoded.
+
+        Args:
+            name: The LDAP display name to explain.
+
+        Returns:
+            A dictionary describing the ATTRTYP/OID, physical column, syntax, provenance (bootstrap versus
+            database) and any decoding deficiency, or ``None`` if the name is not known.
+        """
+        entry = self.lookup_attribute(name=name)
+        if entry is None:
+            return None
+
+        return self._explain(entry)
+
+    def explain_column(self, column: str) -> dict | None:
+        """Explain the definition behind a physical ESE column name, synthesizing one if necessary."""
+        entry = self.entry_for_column(column)
+        if entry is None:
+            return None
+
+        return self._explain(entry)
+
+    def _explain(self, entry: AttributeEntry) -> dict:
+        reason = None
+        if entry.source == SchemaSource.SYNTHETIC:
+            reason = DeficiencyReason.UNKNOWN_ATTRIBUTE
+        else:
+            reason = self.syntax_deficiency_reason(entry.syntax)
+
+        return {
+            "name": entry.name,
+            "attrtyp": entry.id if entry.id != -1 else None,
+            "oid": self.attrtyp_to_oid(entry.id) if entry.id != -1 else None,
+            "column": entry.column,
+            "syntax": entry.syntax,
+            "om_syntax": entry.om_syntax,
+            "om_object_class": entry.om_object_class,
+            "is_single_valued": entry.is_single_valued,
+            "link_id": entry.link_id,
+            "search_flags": entry.search_flags,
+            "source": entry.source,
+            "dnt": entry.dnt if entry.dnt != -1 else None,
+            "deficiency_reason": reason,
+        }
+
+    def name_conflicts(self) -> list[SchemaConflict]:
+        """Return conflicts where two attribute or class definitions claimed the same display name."""
+        return [conflict for conflict in self.conflicts if conflict.reason == DeficiencyReason.NAME_COLLISION]
+
+    def deficiencies(self) -> list[dict]:
+        """Return every schema deficiency that prevents a fully explained read.
+
+        Each item names the exact definition that is insufficient (the conflicting entries, the unknown
+        attribute or the unsupported syntax), so callers never have to guess behind a generic error string.
+        """
+        result = []
+        for conflict in self.conflicts:
+            result.append(
+                {
+                    "reason": conflict.reason,
+                    "index": conflict.index,
+                    "key": conflict.key,
+                    "previous": _entry_reference(conflict.previous),
+                    "current": _entry_reference(conflict.current),
+                }
+            )
+
+        for entry in self._unknown_column_index.values():
+            result.append(
+                {
+                    "reason": DeficiencyReason.UNKNOWN_ATTRIBUTE,
+                    "column": entry.column,
+                    "attrtyp": entry.id,
+                    "oid": self.attrtyp_to_oid(entry.id),
+                    "syntax": entry.syntax,
+                }
+            )
+
+        result.extend(self.unknown_classes())
+
+        for entry in self._attribute_id_index.values():
+            # Synthetic entries are already reported as unknown attributes above
+            if entry.source == SchemaSource.SYNTHETIC:
+                continue
+            if (reason := self.syntax_deficiency_reason(entry.syntax)) is not None:
+                result.append(
+                    {
+                        "reason": reason,
+                        "name": entry.name,
+                        "attrtyp": entry.id,
+                        "column": entry.column,
+                        "syntax": entry.syntax,
+                        "source": entry.source,
+                    }
+                )
+
+        return result
 
     def lookup_oid(self, oid: str) -> ClassEntry | AttributeEntry | None:
         """Lookup a schema entry by OID.
@@ -447,6 +745,58 @@ class Schema:
             return self._class_name_index.get(name) or self._attribute_name_index.get(name)
 
         return None
+
+    def resolve_class_ids(self, class_ids: list[int]) -> tuple[list[str | int], list[int]]:
+        """Resolve objectClass ATTRTYP values to display names, retaining any unregistered class IDs.
+
+        Custom schema extensions may add structural or auxiliary classes that are not present in an offline
+        database's class schema. The known classes are returned by name while the unknown IDs are kept verbatim
+        (never dropped or guessed), together with the list of unresolved IDs.
+
+        Args:
+            class_ids: The raw objectClass ATTRTYP values stored on an object.
+
+        Returns:
+            A tuple of (resolved names-or-ids in original order, the subset of unregistered IDs).
+        """
+        resolved: list[str | int] = []
+        unresolved: list[int] = []
+
+        for class_id in class_ids:
+            entry = self.lookup_class(id=class_id)
+            if entry is None:
+                resolved.append(class_id)
+                unresolved.append(class_id)
+                self._unknown_class_ids.add(class_id)
+            else:
+                resolved.append(entry.name)
+
+        return resolved, unresolved
+
+    def unknown_classes(self) -> list[dict]:
+        """Return the class ATTRTYPs seen on objects without a registered classSchema definition."""
+        return [
+            {
+                "reason": DeficiencyReason.UNKNOWN_CLASS,
+                "attrtyp": class_id,
+                "oid": self.attrtyp_to_oid(class_id),
+            }
+            for class_id in sorted(self._unknown_class_ids)
+        ]
+
+
+def _entry_reference(entry: ClassEntry | AttributeEntry) -> dict:
+    """Return a compact, comparable description of a schema entry for deficiency reporting."""
+    reference = {
+        "source": entry.source,
+        "dnt": entry.dnt if entry.dnt != -1 else None,
+        "id": entry.id if entry.id != -1 else None,
+        "name": entry.name,
+    }
+    if isinstance(entry, AttributeEntry):
+        reference["column"] = entry.column
+        reference["syntax"] = entry.syntax
+    return reference
 
 
 def parse_prefix_map(buf: bytes) -> dict[int, str]:

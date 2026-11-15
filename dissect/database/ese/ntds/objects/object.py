@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 from uuid import UUID
 
+from dissect.database.ese.ntds.schema import SchemaSource
 from dissect.database.ese.ntds.util import InstanceType, SystemFlag, decode_value
 
 if TYPE_CHECKING:
@@ -119,13 +120,53 @@ class Object:
             value = self.__decoders__[name](self.db, value)
         return value
 
+    def get_raw(self, name: str) -> Any:
+        """Return the undecoded value of an attribute, even if the schema cannot explain it."""
+        return self.get(name, raw=True)
+
+    def explain(self, name: str) -> dict | None:
+        """Explain which schema definition backs an attribute and why a value may remain undecoded.
+
+        Args:
+            name: The LDAP display name (or, for unknown attributes, the physical column name) to explain.
+
+        Returns:
+            The schema explanation dictionary, or ``None`` if the name does not map to any column.
+        """
+        schema = self.db.data.schema
+        explanation = schema.explain_attribute(name)
+        if explanation is None:
+            # The name may itself be an unknown physical column name
+            explanation = schema.explain_column(name)
+        return explanation
+
+    def unknown_attributes(self) -> list[dict]:
+        """Return explanations for every populated column that has no registered schema definition."""
+        result = []
+        for column in self.record.as_dict():
+            entry = self.db.data.schema.entry_for_column(column)
+            if entry is not None and entry.source == SchemaSource.SYNTHETIC:
+                result.append(self.db.data.schema.explain_column(column))
+        return result
+
     def as_dict(self) -> dict[str, Any]:
-        """Return the object's attributes as a dictionary."""
+        """Return the object's attributes as a dictionary.
+
+        Every populated physical column is included. Known columns are keyed by their LDAP display name and
+        decoded; columns without a schema definition are keyed by their physical column name and returned
+        losslessly (raw, or wrapped in :class:`UndecodedValue` when decoded) rather than dropped.
+        """
         result = {}
-        for key in self.record.as_dict():
-            if (schema := self.db.data.schema.lookup_attribute(column=key)) is not None:
-                key = schema.name
-                result[key] = self.get(key)
+        for column in self.record.as_dict():
+            entry = self.db.data.schema.entry_for_column(column)
+            if entry is None:
+                # A fixed internal column without any schema information; keep it under its physical name
+                result[column] = self.record.get(column)
+                continue
+
+            # Synthetic entries carry no lDAPDisplayName, so address them by their physical column name
+            lookup_key = entry.column if entry.source == SchemaSource.SYNTHETIC else entry.name
+            result[entry.name] = self.get(lookup_key)
         return result
 
     def parent(self) -> Object | None:
@@ -192,9 +233,22 @@ class Object:
         return self.get("objectCategory")
 
     @property
-    def object_class(self) -> list[str] | None:
-        """Return the object's objectClass."""
+    def object_class(self) -> list[str | int] | None:
+        """Return the object's objectClass.
+
+        Registered classes are returned by LDAP display name. Classes introduced by a schema extension that is
+        not present in the offline database are returned as their raw ATTRTYP integer, so unregistered classes
+        are never silently dropped.
+        """
         return self.get("objectClass")
+
+    def unresolved_object_classes(self) -> list[int]:
+        """Return the raw ATTRTYP values of objectClasses that have no registered class definition."""
+        raw_classes = self.get("objectClass", raw=True)
+        if not raw_classes:
+            return []
+        _, unresolved = self.db.data.schema.resolve_class_ids(raw_classes)
+        return unresolved
 
     @property
     def sid(self) -> str | None:
@@ -288,26 +342,42 @@ class Object:
 def _get_attribute(db: Database, record: Record, name: str, *, raw: bool = False) -> Any:
     """Get an attribute value by name. Decodes the value based on the schema.
 
+    Attributes that are not described by an attributeSchema entry (for example columns introduced by a schema
+    extension in a stripped offline database) are not discarded: the physical column name is reverse-mapped to a
+    synthetic schema entry so the raw value stays accessible. Looking up a name that does not correspond to any
+    column at all still raises :class:`AttributeError`.
+
     Args:
         db: The database instance.
         record: The :class:`Record` instance representing the object.
-        name: The attribute name to retrieve.
+        name: The attribute name (LDAP display name) or physical column name to retrieve.
         raw: Whether to return the raw value without decoding.
     """
-    if (schema := db.data.schema.lookup_attribute(name=name)) is None:
+    schema = db.data.schema
+    entry = schema.lookup_attribute(name=name)
+    if entry is None:
+        # Fall back to treating the requested name as a physical column (e.g. ATTq999 for an unknown attribute)
+        entry = schema.entry_for_column(name)
+
+    if entry is None:
         raise AttributeError(f"Attribute not found: {name!r}")
 
-    value = record.get(schema.column)
+    value = record.get(entry.column)
 
-    if schema.is_single_valued and isinstance(value, list):
+    if entry.is_single_valued and isinstance(value, list):
         # There are a few attributes that have the flag IsSingleValued but are marked as MultiValue in ESE
         value = value[0]
 
-    if not schema.is_single_valued and value is None:
+    if not entry.is_single_valued and value is None:
         # Return an empty list for multi-valued attributes that are not set
         value = []
 
     if raw:
         return value
 
-    return decode_value(db, schema, value)
+    if entry.name == "objectClass" and isinstance(value, list):
+        # Resolve the ATTRTYP values to class names, but keep any unregistered class IDs verbatim
+        resolved, _ = schema.resolve_class_ids(value)
+        return resolved
+
+    return decode_value(db, entry, value)

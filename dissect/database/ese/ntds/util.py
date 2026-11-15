@@ -4,10 +4,9 @@ import struct
 from enum import Flag, IntEnum, IntFlag, auto
 from typing import TYPE_CHECKING, Any
 
+from dissect.database.ese.ntds.c_ds import c_ds
 from dissect.util.sid import read_sid, write_sid
 from dissect.util.ts import wintimestamp
-
-from dissect.database.ese.ntds.c_ds import c_ds
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -15,6 +14,69 @@ if TYPE_CHECKING:
     from dissect.database.ese.ntds.database import Database
     from dissect.database.ese.ntds.objects import Object
     from dissect.database.ese.ntds.schema import AttributeEntry
+
+
+class DeficiencyReason:
+    """Reasons describing why a value cannot be fully decoded.
+
+    String values must stay in sync with ``schema.DeficiencyReason``. They are duplicated here because
+    ``util`` cannot import ``schema`` at runtime without creating an import cycle.
+    """
+
+    UNKNOWN_SYNTAX = "unknown_syntax"
+    NO_SYNTAX_DECODER = "no_syntax_decoder"
+    UNRESOLVED_REFERENCE = "unresolved_reference"
+    MALFORMED_VALUE = "malformed_value"
+
+
+class UndecodedValue:
+    """A value that could not be decoded, kept together with the exact reason and the raw bytes.
+
+    The original value is always available through :attr:`raw`, so unknown syntaxes never cause data loss.
+    The class deliberately does not masquerade as ``bytes`` or ``str``: comparing or printing it surfaces the
+    deficiency instead of silently treating an opaque blob as a generic string.
+
+    Args:
+        raw: The original, untouched value as stored in the record.
+        reason: A machine-readable reason from :class:`DeficiencyReason`.
+        schema: The attribute schema entry used when decoding was attempted.
+        detail: A human-readable explanation of what definition is missing.
+    """
+
+    __slots__ = ("raw", "reason", "schema", "detail")
+
+    def __init__(self, raw: Any, reason: str, schema: AttributeEntry, detail: str):
+        self.raw = raw
+        self.reason = reason
+        self.schema = schema
+        self.detail = detail
+
+    def __repr__(self) -> str:
+        return (
+            f"<UndecodedValue reason={self.reason!r} attribute={self.schema.name!r} "
+            f"column={self.schema.column!r} syntax={self.syntax} raw={self.raw!r}>"
+        )
+
+    def __str__(self) -> str:
+        return repr(self)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, UndecodedValue):
+            return NotImplemented
+        return self.raw == other.raw and self.reason == other.reason and self.schema.column == other.schema.column
+
+    def __hash__(self) -> int:
+        return hash((self.reason, self.schema.column))
+
+    @property
+    def syntax(self) -> int:
+        """Return the syntax value that could not be decoded."""
+        return self.schema.syntax
+
+    @property
+    def is_multi_valued(self) -> bool:
+        """Return whether the undecoded attribute is defined as multi-valued."""
+        return not self.schema.is_single_valued
 
 
 class DatabaseFlag(Flag):
@@ -443,19 +505,27 @@ def _oid_to_attrtyp(db: Database, value: str) -> int:
 
 
 def _attrtyp_to_oid(db: Database, value: int) -> str:
-    """Convert ATTRTYP integer value to attribute name.
+    """Convert ATTRTYP integer value to attribute name or OID string.
 
-    For convenience, we return the attribute or class name instead of the OID string.
+    For convenience, a registered attribute or class returns its name. When the ATTRTYP has no schema entry
+    (for example a syntax OID referenced by an extended schema) but still encodes a valid OID through the
+    prefix table, that OID string is returned so the reference remains interpretable.
 
     Args:
         db: The associated NTDS database instance.
         value: The ATTRTYP integer value.
 
     Returns:
-        The attribute name or the original value if not found.
+        The attribute/class name, or the OID string for an unregistered but valid ATTRTYP.
+
+    Raises:
+        ValueError: If the ATTRTYP has neither a schema entry nor a decodable OID.
     """
     if (schema := db.data.schema.lookup(attrtyp=value)) is not None:
         return schema.name
+
+    if (oid := db.data.schema.attrtyp_to_oid(value)) is not None:
+        return oid
 
     raise ValueError(f"Attribute not found for ATTRTYP value: {value!r}")
 
@@ -541,13 +611,18 @@ def encode_value(db: Database, schema: AttributeEntry, value: str) -> int | byte
 def decode_value(db: Database, schema: AttributeEntry, value: Any) -> Any:
     """Decode a value according to the attribute's type.
 
+    When the schema cannot explain a value, the raw value is wrapped in an :class:`UndecodedValue` together
+    with the precise reason instead of being returned as an opaque, generic string. The raw value itself is
+    always preserved for lossless offline inspection.
+
     Args:
         db: The associated NTDS database instance.
         schema: The LDAP attribute schema.
         value: The value to decode.
 
     Returns:
-        The decoded value in the appropriate Python type for the attribute.
+        The decoded value in the appropriate Python type for the attribute, or an :class:`UndecodedValue`
+        (possibly inside a list for multi-valued attributes).
     """
     if value is None:
         return value
@@ -567,6 +642,52 @@ def decode_value(db: Database, schema: AttributeEntry, value: Any) -> Any:
         _, decode = SYNTAX_ENCODE_DECODE_MAP.get(schema.syntax, (None, None))
 
     if decode is None:
-        return value
+        return _undecoded(db, schema, value)
 
-    return [decode(db, v) for v in value] if isinstance(value, list) else decode(db, value)
+    try:
+        return [decode(db, v) for v in value] if isinstance(value, list) else decode(db, value)
+    except (ValueError, EOFError, struct.error) as exc:
+        # Decoders can fail on a stripped or malformed offline database: a reference syntax may point at an
+        # ATTRTYP/DNT that has no schema entry, or a structured blob (e.g. a security descriptor) may be
+        # truncated. Keep the raw value and name the precise failure instead of aborting the whole object read.
+        reason, detail = _decode_failure(schema, exc)
+        if isinstance(value, list):
+            return [UndecodedValue(item, reason, schema, detail) for item in value]
+        return UndecodedValue(value, reason, schema, detail)
+
+
+def _decode_failure(schema: AttributeEntry, exc: Exception) -> tuple[str, str]:
+    """Translate a decoder exception into a specific deficiency reason and human-readable detail."""
+    if isinstance(exc, ValueError):
+        reason = DeficiencyReason.UNRESOLVED_REFERENCE
+        detail = (
+            f"Attribute {schema.name!r} ({schema.column}) references a value with no registered schema "
+            f"definition: {exc}"
+        )
+    else:
+        reason = DeficiencyReason.MALFORMED_VALUE
+        detail = (
+            f"Attribute {schema.name!r} ({schema.column}) could not be parsed with syntax {schema.syntax} "
+            f"({type(exc).__name__}: {exc}); the raw value is retained"
+        )
+    return reason, detail
+
+
+def _undecoded(db: Database, schema: AttributeEntry, value: Any) -> UndecodedValue | list[UndecodedValue]:
+    """Wrap one or more raw values in :class:`UndecodedValue` with the specific deficiency reason."""
+    reason = db.data.schema.syntax_deficiency_reason(schema.syntax) or DeficiencyReason.UNKNOWN_SYNTAX
+
+    if reason == DeficiencyReason.NO_SYNTAX_DECODER:
+        detail = (
+            f"Syntax {schema.syntax} for attribute {schema.name!r} ({schema.column}) is recognized but has no "
+            "registered value decoder"
+        )
+    else:
+        detail = (
+            f"Syntax {schema.syntax} for attribute {schema.name!r} ({schema.column}) is not a known AD attribute "
+            "syntax; the raw value is retained without interpretation"
+        )
+
+    if isinstance(value, list):
+        return [UndecodedValue(item, reason, schema, detail) for item in value]
+    return UndecodedValue(value, reason, schema, detail)
