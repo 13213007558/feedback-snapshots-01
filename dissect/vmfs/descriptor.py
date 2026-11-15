@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 import struct
+from enum import Enum
 from functools import cached_property
 from textwrap import dedent
 from typing import TYPE_CHECKING, BinaryIO
@@ -69,6 +70,45 @@ class DirEntry:
         return self.vmfs.file_descriptor(self.address)
 
     fd = file_descriptor
+
+
+class DirEntryExclusionReason(Enum):
+    """Why a still-parseable directory entry is excluded from the active directory listing.
+
+    These entries are leftovers (for example from a deleted file) and must not be treated as
+    current files, regardless of how complete their name structure looks. They are only exposed
+    through the forensic :meth:`FileDescriptor6.iterdir_residual` view, never through
+    :meth:`FileDescriptor.iterdir`.
+    """
+
+    FREE_SLOT = "slot marked free in the block slot bitmap"
+    BLOCK_NOT_WRITTEN = "directory block marked not-written in the allocation map"
+
+
+class ResidualDirEntry:
+    """A parseable directory entry that the allocation state excludes from the active directory.
+
+    Deleted names can linger in freed directory slots or freed directory blocks. The on-disk
+    name and descriptor structure may still be fully parseable, but the slot bitmap or the
+    allocation map proves the entry is no longer active. This object preserves the location and
+    the exclusion reason so the residual content can be inspected forensics without polluting
+    the normal directory listing.
+
+    Args:
+        entry: The parsed, but inactive, directory entry.
+        block: The directory buffer block number the entry resides in.
+        slot: The slot number within that block.
+        reason: The allocation state that excludes the entry from the active listing.
+    """
+
+    def __init__(self, entry: DirEntry, block: int, slot: int, reason: DirEntryExclusionReason):
+        self.entry = entry
+        self.block = block
+        self.slot = slot
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"<ResidualDirEntry name={self.entry.name!r} block={self.block} slot={self.slot} reason={self.reason}>"
 
 
 class FileDescriptor:
@@ -306,7 +346,13 @@ class FileDescriptor:
         return {n.name: n for n in self.iterdir()}
 
     def iterdir(self) -> Iterator[DirEntry]:
-        """Iterate file descriptors of the directory entries, if this file descriptor is a directory."""
+        """Iterate file descriptors of the directory entries, if this file descriptor is a directory.
+
+        Only entries that are active according to the on-disk allocation state are yielded.
+        Residual entries (for example deleted names left behind in freed slots or blocks) are
+        never part of this listing; use :meth:`FileDescriptor6.iterdir_residual` on VMFS6 to
+        inspect them separately.
+        """
         if not self.is_dir():
             raise NotADirectoryError(repr(self))
 
@@ -532,7 +578,10 @@ class FileDescriptor6(FileDescriptor):
 
         All other blocks start after the directory header block (offset ``0x10000``), and are of size ``mdAlignment``.
         All blocks start with a 64 byte block header, which contains some allocation information and an entry bitmap.
-        This bitmap can be used to determine which entries in the block are allocated and which are free.
+        A set bit in this bitmap marks a slot as free, a cleared bit marks it as allocated. The bitmap is the
+        authoritative evidence for whether a slot holds an active entry; the header and block counters
+        (``numEntries`` and ``totalSlots``/``freeSlots``) are advisory and must never be used to walk past the
+        actual directory boundary.
 
         The first block type (``1``) is the directory entry block. These blocks contain the actual directory entries.
         Each entry is a fixed size struct, which contains the address, name, type and some other metadata.
@@ -548,66 +597,98 @@ class FileDescriptor6(FileDescriptor):
 
         The last block type (``3``) is the allocation map block. These are used to track which blocks in the directory
         buffer are used and which type they are. This information is stored in a bitmap, where each entry is 4 bits.
-        See :func:`_iter_dir_allocation_map` for more information.
+        See :func:`_iter_dir_allocation_map` for more information. In addition to the block type, each nibble carries a
+        ``hasFreeSlots`` and a ``notWritten`` flag. ``hasFreeSlots`` merely indicates that an active block still has
+        free slots, while ``notWritten`` marks a block that was never written and holds no live data at all. A
+        not-written block is skipped by the regular listing even if it contains fully parseable leftover entries;
+        such leftovers are only surfaced, with the exclusion reason, through :meth:`iterdir_residual`.
         Iterating the allocation map block allows you to find allocated blocks of a specific type quickly.
 
         Reading directory contents should be done in the following manner:
-            - Read the directory header to get the number of entries and allocation map blocks
+            - Read the directory header to get the allocation map blocks
             - Yield the self (``.``) and parent (``..``) entries from the header
-            - Iterate the allocation map blocks to find all directory entry blocks
+            - Iterate the allocation map blocks to find written directory entry blocks
             - For each directory entry block
-                - Read the block header to get the number of entries and the entry bitmap
-                - Iterate the bitmap to find allocated entries
-                - For each allocated entry, read the directory entry struct
+                - Read the block header to get the entry bitmap
+                - Iterate the bitmap to find allocated (cleared) slots
+                - For each allocated slot, read the directory entry struct
+
+        The header ``numEntries`` counter is deliberately not used to bound the scan: a corrupted counter must not
+        let the traversal cross the real directory boundary, nor hide active entries. Residual entries that remain in
+        free slots or not-written blocks are available separately through :meth:`iterdir_residual`.
 
         References:
             - ``Fil3_ReaddirVMFS6``
             - ``Fil3LookupIntVMFS6``
             - ``voma``
         """
+        for entry, _, _, _ in self._scan_dir(include_residual=False):
+            yield entry
+
+    def iterdir_residual(self) -> Iterator[ResidualDirEntry]:
+        """Iterate residual (deleted) directory entries kept for forensic inspection.
+
+        This yields entries whose name and descriptor structure are still parseable, but which the on-disk
+        allocation state proves to be inactive: either their slot bitmap bit is set (a free slot), or the containing
+        directory block is marked ``notWritten`` in the allocation map. Each result records its block, slot and
+        :class:`DirEntryExclusionReason` so it can never be confused with an active :meth:`iterdir` entry.
+
+        A complete-looking name is never sufficient to consider an entry current; the allocation state always wins.
+        Empty (zeroed) free slots contain no parseable entry and are therefore not reported.
+        """
+        for entry, block, slot, reason in self._scan_dir(include_residual=True):
+            if reason is not None:
+                yield ResidualDirEntry(entry, block, slot, reason)
+
+    def _scan_dir(self, include_residual: bool) -> Iterator[tuple[DirEntry, int, int, DirEntryExclusionReason | None]]:
+        """Scan the directory buffer, yielding each parseable entry with its location and allocation status.
+
+        The allocation map and the per-block slot bitmap are the only evidence used to decide whether an entry is
+        active. Header counters are ignored for boundary purposes. When ``include_residual`` is set, inactive but
+        parseable entries are also yielded, with their :class:`DirEntryExclusionReason` in the fourth tuple element.
+
+        Yields:
+            Tuples of ``(entry, block, slot, exclusion_reason)`` where ``exclusion_reason`` is ``None`` for active
+            entries. For active entries the tuple is always emitted; residual entries are only emitted when
+            ``include_residual`` is set.
+        """
         block_size = self.vmfs.md_alignment
+        dirent_size = len(c_vmfs.FS6_DirEntry)
+        # A directory block can never hold more slots than physically fit after its header
+        max_slots = (block_size - len(c_vmfs.FS6_DirBlockHeader)) // dirent_size
+        # The allocation map describes a fixed capacity, but the directory buffer only physically contains this many
+        # blocks. Never-written blocks beyond the real buffer must not be read, regardless of what the map or counters
+        # claim. Logical block numbers are zero based, so the highest valid number is block_count - 1.
+        block_count = max(0, (self.size - c_vmfs.FS6_DIR_HEADER_BLOCK_SIZE) // block_size)
+        max_logical_block = block_count - 1
 
         with self.open() as fh:
             header = c_vmfs.FS6_DirHeader(fh)
             if header.version not in (c_vmfs.FS6_DIR_HEADER_VERSION, c_vmfs.FS6_DIR_HEADER_DEBUG_VERSION):
                 raise NotADirectoryError(f"Invalid directory version for {self}: {header.version:#x}")
 
-            remaining_entries = header.numEntries
-
-            # Yield the . and .. entries, which are stored in the header
+            # The . and .. entries are stored directly in the header and always considered active when present
             if header.selfEntry.address:
-                yield DirEntry(
-                    self.vmfs,
-                    header.selfEntry.address,
-                    header.selfEntry.name.decode().strip("\x00"),
-                    header.selfEntry.type,
-                    raw=header.selfEntry,
-                )
-                remaining_entries -= 1
-
-            if remaining_entries == 0:
-                return
+                yield self._make_dir_entry(header.selfEntry), -1, -1, None
 
             if header.parentEntry.address:
-                yield DirEntry(
-                    self.vmfs,
-                    header.parentEntry.address,
-                    header.parentEntry.name.decode().strip("\x00"),
-                    header.parentEntry.type,
-                    raw=header.parentEntry,
-                )
-                remaining_entries -= 1
+                yield self._make_dir_entry(header.parentEntry), -1, -1, None
 
-            if remaining_entries == 0:
-                return
-
-            for type, block in _iter_dir_blocks(
+            for entry_type, block, _has_free_slots, block_not_written in _iter_dir_blocks(
                 fh,
                 header.allocationMapBlocks[: header.numAllocationMapBlocks],
                 block_size,
             ):
-                if type != FS6_DirBlockType.DIRENT:
-                    # We only care about directory entry blocks, skip the others
+                if block > max_logical_block:
+                    # Outside the directory buffer; this is allocation-map capacity, not on-disk data
+                    continue
+
+                if (
+                    entry_type != FS6_DirBlockType.DIRENT
+                    # Link and allocation map blocks do not hold named directory entries. A never-written block has
+                    # no type set either; without the forensic view there is nothing to look at.
+                    and (not include_residual or not block_not_written)
+                ):
                     continue
 
                 fh.seek(c_vmfs.FS6_DIR_HEADER_BLOCK_SIZE + (block * block_size))
@@ -615,23 +696,36 @@ class FileDescriptor6(FileDescriptor):
                 block_header = c_vmfs.FS6_DirBlockHeader(block_buf)
                 block_entries = block_buf[len(c_vmfs.FS6_DirBlockHeader) :]
 
-                for i in range(block_header.totalSlots):
-                    # Test if the entry is allocated
-                    # i >> 3 gets us the byte index, i & 7 gets us the bit index
-                    if (block_header.bitmap[i >> 3] >> (i & 7)) & 1 == 0:
-                        dirent = c_vmfs.FS6_DirEntry(block_entries[i * len(c_vmfs.FS6_DirEntry) :])
-                        yield DirEntry(
-                            self.vmfs,
-                            dirent.address,
-                            dirent.name.decode().strip("\x00"),
-                            dirent.type,
-                            raw=dirent,
-                        )
+                # The bitmap, not totalSlots/freeSlots counters, bounds the slot scan
+                for slot in range(min(block_header.totalSlots, max_slots)):
+                    # slot >> 3 gets us the byte index, slot & 7 gets us the bit index; set means free
+                    slot_free = ((block_header.bitmap[slot >> 3] >> (slot & 7)) & 1) == 1
+                    if block_not_written:
+                        reason = DirEntryExclusionReason.BLOCK_NOT_WRITTEN
+                    elif slot_free:
+                        reason = DirEntryExclusionReason.FREE_SLOT
+                    else:
+                        reason = None
 
-                        remaining_entries -= 1
+                    if reason is not None and not include_residual:
+                        continue
 
-                    if remaining_entries == 0:
-                        return
+                    dirent = c_vmfs.FS6_DirEntry(block_entries[slot * dirent_size :])
+                    if not dirent.address and not dirent.name.strip(b"\x00"):
+                        # A zeroed free slot has no parseable entry, so there is nothing to report
+                        continue
+
+                    entry = self._make_dir_entry(dirent)
+                    yield entry, block, slot, reason
+
+    def _make_dir_entry(self, dirent: c_vmfs.FS6_DirEntry) -> DirEntry:
+        return DirEntry(
+            self.vmfs,
+            dirent.address,
+            dirent.name.decode().strip("\x00"),
+            dirent.type,
+            raw=dirent,
+        )
 
     def _get(self, name: str) -> DirEntry:
         """Get a child directory entry by name for VMFS6.
@@ -799,8 +893,13 @@ def _iter_dir_allocation_map(buf: bytes) -> Iterator[tuple[int, bool, bool]]:
     .. code-block:: text
 
         0b0011 (type)
-        0b0100 (free)
+        0b0100 (hasFreeSlots)
         0b1000 (notWritten)
+
+    The low two bits carry the :class:`FS6_DirBlockType`. The ``hasFreeSlots`` bit is set on an allocated block that
+    still contains one or more free slots (for example a partially filled directory entry block); the block itself
+    remains active and must still be traversed. The ``notWritten`` bit marks a block that was never written and holds
+    no live data at all, so it must never be traversed as part of the directory regardless of any leftover bytes.
 
     References:
         - ``Fil3_ReaddirVMFS6``
@@ -810,25 +909,31 @@ def _iter_dir_allocation_map(buf: bytes) -> Iterator[tuple[int, bool, bool]]:
         buf: The buffer containing the allocation map data.
 
     Yields:
-        Tuples containing the entry type, free status and not written status.
+        Tuples containing the entry type, has-free-slots status and not-written status.
     """
     for byte in buf:
         for entry in (byte >> 4, byte & 0x0F):
             yield (
                 entry & 0b0011,  # type
-                bool(entry & 0b0100),  # free
+                bool(entry & 0b0100),  # hasFreeSlots
                 bool(entry & 0b1000),  # notWritten
             )
 
 
-def _iter_dir_blocks(fh: BinaryIO, allocation_map_blocks: list[int], block_size: int) -> Iterator[int, int]:
+def _iter_dir_blocks(
+    fh: BinaryIO, allocation_map_blocks: list[int], block_size: int
+) -> Iterator[tuple[int, int, bool, bool]]:
     """Iterate over directory allocation map blocks to find blocks of a specific type.
 
     Args:
         fh: The file-like object of a directory.
         allocation_map_blocks: The list of allocation map blocks to iterate over.
-        type: The type of directory block to find.
         block_size: The size of a directory block in bytes.
+
+    Yields:
+        Tuples of ``(entry_type, block_number, has_free_slots, not_written)`` straight from the allocation map
+        nibble. A ``not_written`` block holds no live data and must not be traversed; ``has_free_slots`` only signals
+        free slots inside an otherwise active block.
     """
     entries_per_alloc_block = (2 * block_size) - (len(c_vmfs.FS6_DirBlockHeader) * 2)
 
@@ -839,8 +944,8 @@ def _iter_dir_blocks(fh: BinaryIO, allocation_map_blocks: list[int], block_size:
 
         # Skip the block header
         allocation_map = memoryview(block_buf)[len(c_vmfs.FS6_DirBlockHeader) :]
-        for entry_idx, (entry_type, _, _) in enumerate(_iter_dir_allocation_map(allocation_map)):
-            yield entry_type, ((i * entries_per_alloc_block) + entry_idx)
+        for entry_idx, (entry_type, has_free_slots, not_written) in enumerate(_iter_dir_allocation_map(allocation_map)):
+            yield entry_type, ((i * entries_per_alloc_block) + entry_idx), has_free_slots, not_written
 
 
 def _dir_hash_get_location(fh: BinaryIO, key: int) -> tuple[int, int, int]:
