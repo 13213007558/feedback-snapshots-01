@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 BLOCK_SIZE = 1024 * 1024
 
 
+class UnsupportedChecksumError(NotImplementedError):
+    """Raised when a checksum uses an algorithm this reader does not support."""
+
+
 class XVA:
     """XVA reader.
 
@@ -64,7 +68,9 @@ class XVAStream(AlignedStream):
         self.ref = ref
         self.verify = verify
 
-        index = 0
+        # Block file names follow the block number, but the tar member order is not guaranteed to match it.
+        # Collect the members by their actual block number first, then build the offset lookup in order.
+        index = -1
         offset = 0
         self._lookup = []
         self._members = []
@@ -85,56 +91,101 @@ class XVAStream(AlignedStream):
 
     def _read(self, offset: int, length: int) -> bytes:
         result = []
+        end = min(offset + length, self.size)
+        position = offset
 
-        while length > 0:
-            # This method is probably sub-optimal, but it's fairly low effort and we rarely encounter XVA anyway
-            block_idx = bisect_right(self._lookup, offset)
-            nearest_offset = self._lookup[block_idx - 1]
+        while position < end:
+            # Find the block that contains (or precedes) the current position. Blocks are sorted by their
+            # logical offset, so a negative index means we're still in a leading hole.
+            block_idx = bisect_right(self._lookup, position) - 1
 
-            if offset >= nearest_offset + BLOCK_SIZE:
-                result.append(b"\x00" * BLOCK_SIZE)
-            else:
-                block_member, checksum_member = self._members[block_idx - 1]
-                buf = self.xva.tar.extractfile(block_member).read()
+            if block_idx < 0:
+                next_offset = self._lookup[0] if self._lookup else end
+                hole_end = min(next_offset, end)
+                result.append(b"\x00" * (hole_end - position))
+                position = hole_end
+                continue
 
-                if self.verify:
-                    if checksum_member is None:
-                        raise ValueError(f"No checksum for {block_member.name}")
+            block_member, checksum_member = self._members[block_idx]
+            block_offset = self._lookup[block_idx]
+            block_end = block_offset + block_member.size
 
-                    if (
-                        checksum_member.name.endswith("checksum")
-                        and hashlib.sha1(buf).hexdigest() != self.xva.tar.extractfile(checksum_member).read().decode()
-                    ):
-                        raise ValueError(f"Invalid checksum for {checksum_member.name}")
+            if position >= block_end:
+                # We're in a hole after this block. Skip to the next block, or to the end of the read.
+                next_offset = self._lookup[block_idx + 1] if block_idx + 1 < len(self._lookup) else end
+                hole_end = min(next_offset, end)
+                result.append(b"\x00" * (hole_end - position))
+                position = hole_end
+                continue
 
-                    raise NotImplementedError(f"Unsupported checksum: {checksum_member.name}")
+            read_end = min(block_end, end)
+            buf = self.xva.tar.extractfile(block_member).read()
 
-                result.append(buf)
+            if self.verify:
+                self._verify(block_member, checksum_member, buf)
 
-            offset += BLOCK_SIZE
-            length -= BLOCK_SIZE
+            result.append(buf[position - block_offset : read_end - block_offset])
+            position = read_end
 
         return b"".join(result)
 
+    def _verify(self, block_member: tarfile.TarInfo, checksum_member: tarfile.TarInfo | None, buf: bytes) -> None:
+        if checksum_member is None:
+            raise ValueError(f"No checksum for {block_member.name}")
 
-def _iter_block_files(xva: XVA, ref: str) -> Iterator[tuple[int, tarfile.TarInfo, tarfile.TarInfo]]:
-    member_index = None
-    block_member = None
-    checksum_member = None
+        suffix = checksum_member.name.rsplit(".", 1)[-1]
+        if suffix in ("checksum", "sha1"):
+            try:
+                expected = self.xva.tar.extractfile(checksum_member).read().decode().strip().lower()
+            except UnicodeDecodeError:
+                raise ValueError(f"Invalid checksum for {checksum_member.name}") from None
+
+            if hashlib.sha1(buf).hexdigest() != expected:
+                raise ValueError(f"Invalid checksum for {checksum_member.name}")
+            return
+
+        raise UnsupportedChecksumError(f"Unsupported checksum: {checksum_member.name}")
+
+
+def _iter_block_files(xva: XVA, ref: str) -> Iterator[tuple[int, tarfile.TarInfo, tarfile.TarInfo | None]]:
+    """Yield block members and their checksum member, sorted by the actual block number.
+
+    A checksum member does not have to be adjacent to its block member (or even come after it) in the tar
+    file, and the tar member order is not necessarily the logical block order. Group the members by block
+    number and member identity instead, so each disk only reads members below its own ``ref/`` prefix.
+
+    Duplicate members are resolved by tar order: the last occurrence wins. If a block has more than one
+    checksum member, a supported algorithm is preferred over an unsupported one.
+    """
+    prefix = ref if ref.endswith("/") else f"{ref}/"
+    blocks: dict[int, tarfile.TarInfo] = {}
+    checksums: dict[int, dict[str, tarfile.TarInfo]] = {}
 
     for member in xva.tar.getmembers():
-        if not member.name.startswith(ref):
+        # Check the trailing slash so a ref that is a prefix of another ref (``Ref:1`` vs ``Ref:10``)
+        # can never read the other disk's members.
+        if not member.isfile() or not member.name.startswith(prefix):
             continue
 
-        index = int(member.name.split("/")[-1].split(".")[0])
-        if member_index is None:
-            member_index = index
+        name = member.name[len(prefix) :]
+        if "/" in name:
+            continue
 
-        if member_index != index:
-            yield (member_index, block_member, checksum_member)
-            member_index = index
+        block, _, suffix = name.partition(".")
+        try:
+            index = int(block)
+        except ValueError:
+            continue
 
-        if member.name.endswith(("checksum", "xxhash")):
-            checksum_member = member
-        else:
-            block_member = member
+        if suffix in ("checksum", "sha1", "xxhash"):
+            checksums.setdefault(index, {})[suffix] = member
+        elif not suffix:
+            blocks[index] = member
+
+    for index in sorted(blocks):
+        block_checksums = checksums.get(index, {})
+        supported = next(
+            (block_checksums[suffix] for suffix in ("checksum", "sha1") if suffix in block_checksums),
+            None,
+        )
+        yield index, blocks[index], supported or next(iter(block_checksums.values()), None)
