@@ -15,6 +15,8 @@ import itertools
 
 from pcapng import strictness as strictness
 from pcapng.constants import link_types
+from pcapng.constants.block_types import is_reserved_block_type
+from pcapng.exceptions import OpaqueBlockError
 from pcapng.structs import (
     IntField,
     ListField,
@@ -659,19 +661,157 @@ class InterfaceStatistics(
     ]
 
 
-class UnknownBlock(Block):
+class UnknownBlock(SectionMemberBlock):
     """
-    Class used to represent an unknown block.
+    Class used to represent a block whose type is not known / supported.
 
-    Its block type and raw data will be stored directly with no further
-    processing.
+    The block is stored *opaquely*: its block type and the raw block body
+    bytes (the body between the two block total length fields, already padded
+    to a 32-bit boundary) are kept verbatim, with no schema decoding.
+
+    Because the payload has no schema, the library cannot know where the
+    multi-byte numeric fields are and therefore cannot byte-swap it. The block
+    instead remembers the section it was read from (its "home" section) and
+    that section's byte order. This provenance is carried all the way to the
+    writer instead of being reconstructed from broad exception handling:
+
+    * Writing the block back into its home section is always supported and
+      reproduces the payload bytes unchanged (only the framing block type and
+      length fields are re-emitted).
+    * Relocating the block into another section of the *same* byte order is
+      supported for standardized block types (MSB of the type clear) through
+      the explicit :meth:`move_to_section` call. Local-use block types (MSB
+      set) are refused, because the pcapng format defines them as private to
+      the writing implementation and does not allow generic copying.
+    * Any write that would encode the payload under a different byte order
+      than the one it was read with is refused with :class:`OpaqueBlockError`.
+      Re-emitting the framing fields in the new order while copying the body
+      verbatim would produce a block whose numeric payload fields are now
+      misinterpreted; correctly swapping them would require a schema we do not
+      have.
     """
 
-    __slots__ = ["block_type", "data"]
+    __slots__ = ["block_type", "data", "source_endianness"]
 
-    def __init__(self, block_type, data):
+    def __init__(self, section, block_type, data, endianness=None):
+        if is_reserved_block_type(block_type):
+            # The scanner already rejects these; refuse them here as well so
+            # an opaque block can never be used to launder a reserved type.
+            raise ValueError(
+                "block type 0x{0:08X} is reserved and cannot be stored "
+                "opaquely".format(block_type)
+            )
+        if endianness is None:
+            endianness = section.endianness
+        if endianness not in "<>":
+            raise ValueError(
+                "endianness must be '<' or '>', got {0!r}".format(endianness)
+            )
         self.block_type = block_type
-        self.data = data
+        self.data = bytes(data)
+        self.source_endianness = endianness
+        super(UnknownBlock, self).__init__(section, endianness=endianness)
+
+    @property
+    def is_local_use(self):
+        """True if the block type is in the MSB-set local-use range."""
+        return bool(self.block_type & 0x80000000)
+
+    def _write(self, outstream):
+        """
+        Emit the opaque block into ``outstream``.
+
+        The body bytes are copied verbatim. The block type and the two block
+        total length fields are framing integers and are re-encoded in the
+        target section's byte order; that is only sound when the target
+        section uses the same byte order as the section the payload came from,
+        which is enforced here.
+        """
+        target_endianness = self.section.endianness
+        if target_endianness != self.source_endianness:
+            raise OpaqueBlockError(
+                "cannot write opaque block type 0x{block_type:08X} into a "
+                "{target}-endian section: it was read from a {source}-endian "
+                "section and its payload has no schema, so its numeric fields "
+                "cannot be byte-swapped".format(
+                    block_type=self.block_type,
+                    target="big" if target_endianness == ">" else "little",
+                    source="big" if self.source_endianness == ">" else "little",
+                )
+            )
+        block_length = 12 + len(self.data)
+        write_int(self.block_type, outstream, 32, endianness=target_endianness)
+        write_int(block_length, outstream, 32, endianness=target_endianness)
+        write_bytes_padded(outstream, self.data)
+        write_int(block_length, outstream, 32, endianness=target_endianness)
+
+    def move_to_section(self, target_section):
+        """
+        Re-home this opaque block into another section.
+
+        The operation is deliberately explicit and narrow:
+
+        * A different byte order is always refused. The opaque payload cannot
+          be byte-swapped without a schema.
+        * A local-use block type (MSB set) is refused even with matching byte
+          order. The format reserves these types for private implementation
+          use; generic "keep unknown blocks" handling must not copy them into
+          a section they did not originate in.
+        * Standardized unknown types (MSB clear) may be relocated between
+          sections of the same byte order. Note the format still cannot verify
+          that such a block is self-contained: a block that references an
+          Interface ID (e.g. a packet-like extension) is only meaningful if
+          the target section defines an equivalent interface, which the
+          caller is responsible for ensuring.
+
+        :param target_section: the :class:`SectionHeader` to attach to.
+        :raises OpaqueBlockError: if the relocation cannot be done safely.
+        """
+        if target_section is self.section:
+            return self
+        if target_section.endianness != self.source_endianness:
+            raise OpaqueBlockError(
+                "cannot move opaque block type 0x{block_type:08X} to a "
+                "{target}-endian section: payload was captured in a "
+                "{source}-endian section and cannot be byte-swapped without a "
+                "schema".format(
+                    block_type=self.block_type,
+                    target="big" if target_section.endianness == ">" else "little",
+                    source="big" if self.source_endianness == ">" else "little",
+                )
+            )
+        if self.is_local_use:
+            raise OpaqueBlockError(
+                "cannot copy local-use block type 0x{block_type:08X} between "
+                "sections: MSB-set block types are private implementation "
+                "extensions and are not portable; keeping it in its home "
+                "section is the only supported operation".format(
+                    block_type=self.block_type
+                )
+            )
+        self.section = target_section
+        return self
+
+    def __eq__(self, other):
+        if self.__class__ != other.__class__:
+            return False
+        return (
+            self.block_type == other.block_type
+            and self.data == other.data
+            and self.source_endianness == other.source_endianness
+        )
+
+    def __hash__(self):
+        return hash(
+            (self.__class__, self.block_type, self.data, self.source_endianness)
+        )
 
     def __repr__(self):
-        return "UnknownBlock(0x{0:08X}, {1!r})".format(self.block_type, self.data)
+        return (
+            "UnknownBlock(0x{block_type:08X}, {data!r}, "
+            "endianness={endianness!r})".format(
+                block_type=self.block_type,
+                data=self.data,
+                endianness=self.source_endianness,
+            )
+        )

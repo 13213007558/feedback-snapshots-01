@@ -1,5 +1,8 @@
 import pcapng.blocks as blocks
-from pcapng.constants.block_types import BLK_RESERVED, BLK_RESERVED_CORRUPTED
+from pcapng.constants.block_types import (
+    BLK_RESERVED,
+    is_corruption_detection_block_type,
+)
 from pcapng.exceptions import CorruptedFile, StreamEmpty
 from pcapng.structs import (
     SECTION_HEADER_MAGIC,
@@ -90,7 +93,7 @@ class FileScanner(object):
                 blocks.KNOWN_BLOCKS[block_type], raw=data
             )
 
-        if block_type in BLK_RESERVED_CORRUPTED:
+        if is_corruption_detection_block_type(block_type):
             raise CorruptedFile(
                 "Block type 0x{0:08X} is reserved to detect a corrupted file".format(
                     block_type
@@ -103,7 +106,16 @@ class FileScanner(object):
                 "in capture files!"
             )
 
-        return blocks.UnknownBlock(block_type, data)
+        # Attach the block to the section it was read from and remember the
+        # section byte order. The UnknownBlock keeps this provenance so the
+        # writer can guarantee byte-exact preservation and refuse unsafe
+        # cross-section / cross-endianness operations.
+        return blocks.UnknownBlock(
+            self.current_section,
+            block_type,
+            data,
+            endianness=self.endianness,
+        )
 
     def _read_int(self, size, signed=False):
         """

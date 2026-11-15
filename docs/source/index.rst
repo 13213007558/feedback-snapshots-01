@@ -12,6 +12,7 @@ Contents:
    :maxdepth: 2
 
    library-usage
+   opaque-blocks
    api/index
 
 

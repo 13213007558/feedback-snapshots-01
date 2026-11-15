@@ -22,6 +22,20 @@ class PcapngDumpError(PcapngException):
     pass
 
 
+class OpaqueBlockError(PcapngDumpError):
+    """
+    Exception raised when an opaque (unknown / uninterpreted) block cannot be
+    written or relocated safely.
+
+    This is *not* a strictness issue that a "keep unknown blocks" option could
+    override: the refused operation would either silently byte-swap a payload
+    whose numeric layout is not known, or move a block the pcapng format does
+    not allow to be copied between sections.
+    """
+
+    pass
+
+
 class PcapngStrictnessError(PcapngException):
     """Indicate a condition about poorly formed pcapng files"""
 
