@@ -21,6 +21,14 @@ def load_etl_definition() -> cstruct:
     return cstruct().load(etl_def)
 
 
+@pytest.fixture(autouse=True)
+def restore_c_etl() -> Iterator[None]:
+    """Undo the module-level c_etl mock so it does not leak into other test modules."""
+    original = etl.c_etl
+    yield
+    etl.c_etl = original
+
+
 def setup_mocked_etlfile(start_offset: int = 0) -> MagicMock:
     mocked_etlfile = MagicMock()
     mocked_etlfile.fh.read.return_value = RAW_BUFFER_HEADER
