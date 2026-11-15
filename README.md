@@ -20,6 +20,24 @@ pip install dissect.etl
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Offline activity correlation
+
+Besides parsing, this module can correlate activities offline. Events are grouped by their `ActivityId`, linked
+through the `RelatedActivityId` extended data item and attributed to process instances using the process start key,
+so a reused PID does not merge two different processes. Only events carrying actual evidence are connected; missing
+parent activities and ambiguous process attributions are reported separately, and cycles or multiple parents in the
+activity graph are surfaced as anomalies instead of being forced into a tree. Every edge keeps the raw record
+locations (buffer index, record offset and file offset) of both endpoints for manual review.
+
+```python
+from dissect.etl import ETL, correlate_etl
+
+with open("dissect.etl", "rb") as fh:
+    result = correlate_etl(ETL(fh))
+
+print(result.render())
+```
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
