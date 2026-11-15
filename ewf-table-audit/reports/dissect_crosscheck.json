@@ -1,0 +1,430 @@
+[
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "00_baseline_uncompressed.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "01_baseline_compressed.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x5ae",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x62a",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x6a6",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x6f2",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "213d67cbf7691d0f71fb33358d884648379f1311d07e854efe55444390f0355c",
+    "dissect_size": 2616,
+    "file": "02_primary_entry_tampered_checksums_valid.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "03_backup_flag_flipped_checksums_valid.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "04_tables_divergent_both_valid.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1b31",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1bad",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1bf9",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "05_primary_stale_checksums.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": false,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "dissect_size": 2680,
+    "file": "06_both_tables_stale_checksums.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": false,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": false,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "ca1d35d31baba4d36230830b3ef8976170f05dc7685712ce2b3b66b4d4ed91ed",
+    "dissect_size": 2676,
+    "file": "07_primary_wrong_base_offset.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  },
+  {
+    "dissect_read": "ok",
+    "dissect_sha256": "089ee9e2451e912d40441a3ff67446805a6c1b376b7322639847815dce46b964",
+    "dissect_size": 2680,
+    "file": "08_primary_last_chunk_overflow.E01",
+    "sections": [
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xd",
+        "type": "header"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x97",
+        "type": "volume"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x4ff",
+        "type": "sectors"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0xfdb",
+        "type": "table"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x1057",
+        "type": "table2"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x10d3",
+        "type": "data"
+      },
+      {
+        "descriptor_checksum_ok": true,
+        "offset": "0x111f",
+        "type": "done"
+      }
+    ],
+    "segment_number": 1,
+    "tables_seen_by_dissect": [
+      "table"
+    ]
+  }
+]

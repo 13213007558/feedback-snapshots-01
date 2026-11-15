@@ -1,0 +1,74 @@
+{
+  "00_baseline_uncompressed": {
+    "reason": "both tables valid, identical maps and identical candidate output",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "RECOVERABLE_CONSISTENT"
+  },
+  "01_baseline_compressed": {
+    "reason": "both tables valid, identical maps and identical candidate output",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "RECOVERABLE_CONSISTENT"
+  },
+  "02_primary_entry_tampered_checksums_valid": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "03_backup_flag_flipped_checksums_valid": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": null,
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "04_tables_divergent_both_valid": {
+    "reason": "both tables are structurally valid and fully readable but point at different blocks",
+    "table2_candidate": "18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "CONFLICT"
+  },
+  "05_primary_stale_checksums": {
+    "reason": "maps agree and only table2 passes structural validation and reads completely",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": false,
+    "verdict": "RECOVERABLE_SINGLE_TABLE"
+  },
+  "06_both_tables_stale_checksums": {
+    "reason": "both tables fail structural checksums; readable bytes cannot be attributed to a trusted map",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": false,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": false,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "07_primary_wrong_base_offset": {
+    "reason": "only table2 passes validation but the maps disagree; the survivor cannot be authenticated",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": false,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "08_primary_last_chunk_overflow": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  }
+}

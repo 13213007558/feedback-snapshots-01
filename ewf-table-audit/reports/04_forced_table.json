@@ -1,0 +1,74 @@
+{
+  "chunk_provenance": [
+    {
+      "absolute_offset": "0x54b",
+      "chunk": 0,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000000",
+      "end_offset": "0x74f",
+      "logical_sha256": "32beecb58a128af8248504600bd203dcc676adf41045300485655e6b8780a01d",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    },
+    {
+      "absolute_offset": "0x74f",
+      "chunk": 1,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000204",
+      "end_offset": "0x953",
+      "logical_sha256": "4391da166394eb9d592a66cdb937c0aa011b9fd54cb2fa0e7f5c7a6648c6625a",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    },
+    {
+      "absolute_offset": "0x953",
+      "chunk": 2,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000408",
+      "end_offset": "0xb57",
+      "logical_sha256": "2ab0e56ff48de274010e5f0c4dc6ce87c401f118a9f505fccb828856d078d0d2",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    },
+    {
+      "absolute_offset": "0xb57",
+      "chunk": 3,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x0000060c",
+      "end_offset": "0xd5b",
+      "logical_sha256": "fa381301af1b62fa259addbe7ae427fd54486abc7604ea7619e7a9c47965606d",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    },
+    {
+      "absolute_offset": "0xd5b",
+      "chunk": 4,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000810",
+      "end_offset": "0xf5f",
+      "logical_sha256": "e4b0d4324dd30703dafa59e883b377855a978255e650aa78790ae8b05abd7242",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    },
+    {
+      "absolute_offset": "0xf5f",
+      "chunk": 5,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000a14",
+      "end_offset": "0xfdb",
+      "logical_sha256": "53a41580d3f0ea23862477371165070dc66cae87d3af1e2389344d794ef8ce94",
+      "table": "table",
+      "table_section_offset": "0xfdb"
+    }
+  ],
+  "file": "04_tables_divergent_both_valid.E01",
+  "forced_table": "table",
+  "logical_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+  "logical_size": 2680
+}

@@ -1,0 +1,74 @@
+{
+  "chunk_provenance": [
+    {
+      "absolute_offset": "0x10a3",
+      "chunk": 0,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000000",
+      "end_offset": "0x12a7",
+      "logical_sha256": "471be6558b665e4f6dd49f1184814d1491b0315d466beea768c153cc5500c836",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    },
+    {
+      "absolute_offset": "0x12a7",
+      "chunk": 1,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000204",
+      "end_offset": "0x14ab",
+      "logical_sha256": "0a7aaaf5d4f94087a8b8f340e064331f290002943ff2517bfa0248b8199c4c89",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    },
+    {
+      "absolute_offset": "0x14ab",
+      "chunk": 2,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000408",
+      "end_offset": "0x16af",
+      "logical_sha256": "7e2bbc751b0718df20893e1920872df5ef8f6703b4ecb9535f1556a94796b3cf",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    },
+    {
+      "absolute_offset": "0x16af",
+      "chunk": 3,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x0000060c",
+      "end_offset": "0x18b3",
+      "logical_sha256": "640440dcc02502c89db14bf0879ab06eee6a114d0aca31974805eead4ebfdb98",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    },
+    {
+      "absolute_offset": "0x18b3",
+      "chunk": 4,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000810",
+      "end_offset": "0x1ab7",
+      "logical_sha256": "c76681257c327e2bbb5c90712fdc4ab31905b6292581bbee628fcc2ec1c1eb55",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    },
+    {
+      "absolute_offset": "0x1ab7",
+      "chunk": 5,
+      "chunk_checksum_ok": true,
+      "compressed": false,
+      "descriptor_word": "0x00000a14",
+      "end_offset": "0x1b31",
+      "logical_sha256": "7d13608d2b7eb7fe1f9fe1972af96a65789024e7fd4ac7b48cb0bd92807f7060",
+      "table": "table2",
+      "table_section_offset": "0x1b31"
+    }
+  ],
+  "file": "04_tables_divergent_both_valid.E01",
+  "forced_table": "table2",
+  "logical_sha256": "18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7",
+  "logical_size": 2678
+}

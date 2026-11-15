@@ -1,0 +1,88 @@
+{
+  "images": {
+    "00_baseline_uncompressed.E01": {
+      "sha256": "f8292e3463ba663b82595e2a1fd60a6a01b06f88d393dd54da31cfcc90dc3c53",
+      "size": 4459
+    },
+    "01_baseline_compressed.E01": {
+      "sha256": "d2b169c0be27bdf6837dda0746bb63069de3dc1f6889c76f0a403c64fc5c8221",
+      "size": 1854
+    },
+    "02_primary_entry_tampered_checksums_valid.E01": {
+      "sha256": "c235082d4d3f0205ae2d67fe8f28fe19946a36ece61bee94a5bdc240ffa8508c",
+      "size": 4459
+    },
+    "03_backup_flag_flipped_checksums_valid.E01": {
+      "sha256": "0bac660bb5a5daddcc63c92dfb4fc25008a7babf35002291dbc614ef3b19991e",
+      "size": 4459
+    },
+    "04_tables_divergent_both_valid.E01": {
+      "sha256": "0588719fa2201975d45a26d334e2a8c93a3b61c28920c2f5d8b0050687c998d6",
+      "size": 7237
+    },
+    "05_primary_stale_checksums.E01": {
+      "sha256": "7061814ed6d3591cc0311a81986ec74d685202ad97fc29f42ecbf0191c268214",
+      "size": 4459
+    },
+    "06_both_tables_stale_checksums.E01": {
+      "sha256": "3cb0efd7c14bf533c3730a7d089406afb76723e021e46ddec1a3a860b3f88d2d",
+      "size": 4459
+    },
+    "07_primary_wrong_base_offset.E01": {
+      "sha256": "eb1c4afeb034d2d1400b2033579a8b74eb1b2767ef636fed38e8a8a6b5934a5c",
+      "size": 4459
+    },
+    "08_primary_last_chunk_overflow.E01": {
+      "sha256": "7de36ed65539fcab6bf2dc8e97b2dd6eeceb2ef2dbdd3709ce8cec9e9f3d802c",
+      "size": 4459
+    }
+  },
+  "scenarios": {
+    "02": {
+      "mutation": "table entry[2] 0x00000408 -> 0x00000448; no checksum covers entries",
+      "name": "primary entry tampered, checksums valid",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "03": {
+      "mutation": "table2 entry[3] 0x0000060c -> 0x8000060c",
+      "name": "backup compression flag flipped, checksums valid",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "04": {
+      "alternate_logical_sha256": "18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7",
+      "base_a": "0x54b",
+      "base_b": "0x10a3",
+      "baseline_logical_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+      "mutation": "table maps chunk set A via first sectors section; table2 maps set B via a second sectors section",
+      "name": "both tables structurally valid, different block maps",
+      "table_a_offset": "0xfdb",
+      "table_b_offset": "0x1b31"
+    },
+    "05": {
+      "mutation": "table header and section descriptor Adler-32 each XOR 0xDEADBEEF; bytes otherwise unchanged",
+      "name": "primary table stale Adler-32 values",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "06": {
+      "mutation": "table and table2 header/descriptor checksums invalidated",
+      "name": "both tables stale Adler-32 values",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "07": {
+      "mutation": "table base_offset 0x54b -> 0x5cb",
+      "name": "primary table wrong base offset, checksums recomputed",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "08": {
+      "mutation": "table entry[5] -> 0xa90; absolute target equals table offset",
+      "name": "primary last chunk crosses section boundary",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    }
+  }
+}

@@ -1,0 +1,509 @@
+{
+  "images": {
+    "00_baseline_uncompressed.E01": {
+      "sha256": "f8292e3463ba663b82595e2a1fd60a6a01b06f88d393dd54da31cfcc90dc3c53",
+      "size": 4459
+    },
+    "01_baseline_compressed.E01": {
+      "sha256": "d2b169c0be27bdf6837dda0746bb63069de3dc1f6889c76f0a403c64fc5c8221",
+      "size": 1854
+    },
+    "02_primary_entry_tampered_checksums_valid.E01": {
+      "sha256": "c235082d4d3f0205ae2d67fe8f28fe19946a36ece61bee94a5bdc240ffa8508c",
+      "size": 4459
+    },
+    "03_backup_flag_flipped_checksums_valid.E01": {
+      "sha256": "0bac660bb5a5daddcc63c92dfb4fc25008a7babf35002291dbc614ef3b19991e",
+      "size": 4459
+    },
+    "04_tables_divergent_both_valid.E01": {
+      "sha256": "0588719fa2201975d45a26d334e2a8c93a3b61c28920c2f5d8b0050687c998d6",
+      "size": 7237
+    },
+    "05_primary_stale_checksums.E01": {
+      "sha256": "7061814ed6d3591cc0311a81986ec74d685202ad97fc29f42ecbf0191c268214",
+      "size": 4459
+    },
+    "06_both_tables_stale_checksums.E01": {
+      "sha256": "3cb0efd7c14bf533c3730a7d089406afb76723e021e46ddec1a3a860b3f88d2d",
+      "size": 4459
+    },
+    "07_primary_wrong_base_offset.E01": {
+      "sha256": "eb1c4afeb034d2d1400b2033579a8b74eb1b2767ef636fed38e8a8a6b5934a5c",
+      "size": 4459
+    },
+    "08_primary_last_chunk_overflow.E01": {
+      "sha256": "7de36ed65539fcab6bf2dc8e97b2dd6eeceb2ef2dbdd3709ce8cec9e9f3d802c",
+      "size": 4459
+    }
+  },
+  "scenarios": {
+    "02": {
+      "mutation": "table entry[2] 0x00000408 -> 0x00000448; no checksum covers entries",
+      "name": "primary entry tampered, checksums valid",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "03": {
+      "mutation": "table2 entry[3] 0x0000060c -> 0x8000060c",
+      "name": "backup compression flag flipped, checksums valid",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "04": {
+      "alternate_logical_sha256": "18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7",
+      "base_a": "0x54b",
+      "base_b": "0x10a3",
+      "baseline_logical_sha256": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+      "mutation": "table maps chunk set A via first sectors section; table2 maps set B via a second sectors section",
+      "name": "both tables structurally valid, different block maps",
+      "table_a_offset": "0xfdb",
+      "table_b_offset": "0x1b31"
+    },
+    "05": {
+      "mutation": "table header and section descriptor Adler-32 each XOR 0xDEADBEEF; bytes otherwise unchanged",
+      "name": "primary table stale Adler-32 values",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "06": {
+      "mutation": "table and table2 header/descriptor checksums invalidated",
+      "name": "both tables stale Adler-32 values",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "07": {
+      "mutation": "table base_offset 0x54b -> 0x5cb",
+      "name": "primary table wrong base offset, checksums recomputed",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    },
+    "08": {
+      "mutation": "table entry[5] -> 0xa90; absolute target equals table offset",
+      "name": "primary last chunk crosses section boundary",
+      "table2_offset": "0x1057",
+      "table_offset": "0xfdb"
+    }
+  }
+}
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/00_baseline_uncompressed.E01
+file sha256: f8292e3463ba663b82595e2a1fd60a6a01b06f88d393dd54da31cfcc90dc3c53
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: RECOVERABLE_CONSISTENT - both tables valid, identical maps and identical candidate output
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/01_baseline_compressed.E01
+file sha256: d2b169c0be27bdf6837dda0746bb63069de3dc1f6889c76f0a403c64fc5c8221
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x0005ae size=0x0000af cksum=0x17f30466
+  [ok ] table    off=0x0005ae next=0x00062a size=0x00007c cksum=0xb04502b5
+  [ok ] table2   off=0x00062a next=0x0006a6 size=0x00007c cksum=0xd87b0363
+  [ok ] data     off=0x0006a6 next=0x0006f2 size=0x00004c cksum=0xb5a602df
+  [ok ] done     off=0x0006f2 next=0x0006f2 size=0x000000 cksum=0xaab8029f
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0x5ae ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x80000000 abs=0x54b end=0x559 compressed=True status=ok sha=32beecb58a12
+  chunk 01 word=0x8000000e abs=0x559 end=0x567 compressed=True status=ok sha=4391da166394
+  chunk 02 word=0x8000001c abs=0x567 end=0x575 compressed=True status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x8000002a abs=0x575 end=0x583 compressed=True status=ok sha=fa381301af1b
+  chunk 04 word=0x80000038 abs=0x583 end=0x591 compressed=True status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x80000046 abs=0x591 end=0x5ae compressed=True status=ok sha=53a41580d3f0
+
+== table2 @ 0x62a ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x80000000 abs=0x54b end=0x559 compressed=True status=ok sha=32beecb58a12
+  chunk 01 word=0x8000000e abs=0x559 end=0x567 compressed=True status=ok sha=4391da166394
+  chunk 02 word=0x8000001c abs=0x567 end=0x575 compressed=True status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x8000002a abs=0x575 end=0x583 compressed=True status=ok sha=fa381301af1b
+  chunk 04 word=0x80000038 abs=0x583 end=0x591 compressed=True status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x80000046 abs=0x591 end=0x5ae compressed=True status=ok sha=53a41580d3f0
+
+VERDICT: RECOVERABLE_CONSISTENT - both tables valid, identical maps and identical candidate output
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/02_primary_entry_tampered_checksums_valid.E01
+file sha256: c235082d4d3f0205ae2d67fe8f28fe19946a36ece61bee94a5bdc240ffa8508c
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=False candidate_sha256=None
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x993 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 02 word=0x00000448 abs=0x993 end=0xb57 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: INSUFFICIENT_EVIDENCE - valid tables diverge and at least one candidate read is incomplete
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/03_backup_flag_flipped_checksums_valid.E01
+file sha256: 0bac660bb5a5daddcc63c92dfb4fc25008a7babf35002291dbc614ef3b19991e
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=False candidate_sha256=None
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x8000060c abs=0xb57 end=0xd5b compressed=True status=error sha=None  Error -3 while decompressing data: incorrect header check
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: INSUFFICIENT_EVIDENCE - valid tables diverge and at least one candidate read is incomplete
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/04_tables_divergent_both_valid.E01
+file sha256: 0588719fa2201975d45a26d334e2a8c93a3b61c28920c2f5d8b0050687c998d6
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] sectors  off=0x001057 next=0x001b31 size=0x000ada cksum=0x0b3b0434
+  [ok ] table2   off=0x001b31 next=0x001bad size=0x00007c cksum=0xde86037f
+  [ok ] data     off=0x001bad next=0x001bf9 size=0x00004c cksum=0xbbb102fb
+  [ok ] done     off=0x001bf9 next=0x001bf9 size=0x000000 cksum=0xb0c302bb
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1b31 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x10a3 base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7
+  chunk 00 word=0x00000000 abs=0x10a3 end=0x12a7 compressed=False status=ok sha=471be6558b66
+  chunk 01 word=0x00000204 abs=0x12a7 end=0x14ab compressed=False status=ok sha=0a7aaaf5d4f9
+  chunk 02 word=0x00000408 abs=0x14ab end=0x16af compressed=False status=ok sha=7e2bbc751b07
+  chunk 03 word=0x0000060c abs=0x16af end=0x18b3 compressed=False status=ok sha=640440dcc025
+  chunk 04 word=0x00000810 abs=0x18b3 end=0x1ab7 compressed=False status=ok sha=c76681257c32
+  chunk 05 word=0x00000a14 abs=0x1ab7 end=0x1b31 compressed=False status=ok sha=7d13608d2b7e
+
+VERDICT: CONFLICT - both tables are structurally valid and fully readable but point at different blocks
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/05_primary_stale_checksums.E01
+file sha256: 7061814ed6d3591cc0311a81986ec74d685202ad97fc29f42ecbf0191c268214
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [BAD] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0x62eebc03
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=False header_checksum_ok=False entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=False complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  ISSUE: section descriptor Adler-32 mismatch
+  ISSUE: table header Adler-32 mismatch (first 16 header bytes)
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: RECOVERABLE_SINGLE_TABLE - maps agree and only table2 passes structural validation and reads completely
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/06_both_tables_stale_checksums.E01
+file sha256: 3cb0efd7c14bf533c3730a7d089406afb76723e021e46ddec1a3a860b3f88d2d
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [BAD] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0x62eebc03
+  [BAD] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0x3ad4bd75
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=False header_checksum_ok=False entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=False complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  ISSUE: section descriptor Adler-32 mismatch
+  ISSUE: table header Adler-32 mismatch (first 16 header bytes)
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+== table2 @ 0x1057 ==
+descriptor_ok=False header_checksum_ok=False entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=False complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  ISSUE: section descriptor Adler-32 mismatch
+  ISSUE: table header Adler-32 mismatch (first 16 header bytes)
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: INSUFFICIENT_EVIDENCE - both tables fail structural checksums; readable bytes cannot be attributed to a trusted map
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/07_primary_wrong_base_offset.E01
+file sha256: eb1c4afeb034d2d1400b2033579a8b74eb1b2767ef636fed38e8a8a6b5934a5c
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x5cb base_matches_data=False
+structurally_valid=False complete_candidate=False candidate_sha256=None
+  ISSUE: base_offset 0x5cb matches no chunk-data section body (starts: 0x54b, 0x111f)
+  chunk 00 word=0x00000000 abs=0x5cb end=0x7cf compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 01 word=0x00000204 abs=0x7cf end=0x9d3 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 02 word=0x00000408 abs=0x9d3 end=0xbd7 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 03 word=0x0000060c abs=0xbd7 end=0xddb compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 04 word=0x00000810 abs=0xddb end=0xfdf compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 05 word=0x00000a14 abs=0xfdf end=0x1057 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: INSUFFICIENT_EVIDENCE - only table2 passes validation but the maps disagree, so the survivor cannot be authenticated
+EWF table audit: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace/ewf-table-audit/images/08_primary_last_chunk_overflow.E01
+file sha256: 7de36ed65539fcab6bf2dc8e97b2dd6eeceb2ef2dbdd3709ce8cec9e9f3d802c
+chunk size: 512  declared chunks: 6
+
+sections:
+  [ok ] header   off=0x00000d next=0x000097 size=0x00008a cksum=0xe297038b
+  [ok ] volume   off=0x000097 next=0x0004ff size=0x000468 cksum=0x01a40408
+  [ok ] sectors  off=0x0004ff next=0x000fdb size=0x000adc cksum=0x2e3704d4
+  [ok ] table    off=0x000fdb next=0x001057 size=0x00007c cksum=0xbc4302ec
+  [ok ] table2   off=0x001057 next=0x0010d3 size=0x00007c cksum=0xe479039a
+  [ok ] data     off=0x0010d3 next=0x00111f size=0x00004c cksum=0x89db0217
+  [ok ] done     off=0x00111f next=0x00111f size=0x000000 cksum=0x7eed01d7
+
+volume: chunks=6 chunk_size=512 checksum_ok=True
+
+== table @ 0xfdb ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=False candidate_sha256=None
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xfdb compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+  chunk 05 word=0x00000a90 abs=0xfdb end=0x1057 compressed=False status=error sha=None  chunk trailer Adler-32 mismatch
+
+== table2 @ 0x1057 ==
+descriptor_ok=True header_checksum_ok=True entries=6 base_offset=0x54b base_matches_data=True
+structurally_valid=True complete_candidate=True candidate_sha256=5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e
+  chunk 00 word=0x00000000 abs=0x54b end=0x74f compressed=False status=ok sha=32beecb58a12
+  chunk 01 word=0x00000204 abs=0x74f end=0x953 compressed=False status=ok sha=4391da166394
+  chunk 02 word=0x00000408 abs=0x953 end=0xb57 compressed=False status=ok sha=2ab0e56ff48d
+  chunk 03 word=0x0000060c abs=0xb57 end=0xd5b compressed=False status=ok sha=fa381301af1b
+  chunk 04 word=0x00000810 abs=0xd5b end=0xf5f compressed=False status=ok sha=e4b0d4324dd3
+  chunk 05 word=0x00000a14 abs=0xf5f end=0xfdb compressed=False status=ok sha=53a41580d3f0
+
+VERDICT: INSUFFICIENT_EVIDENCE - valid tables diverge and at least one candidate read is incomplete
+00_baseline_uncompressed.E01                     dissect=ok    sha=5887c01c29f9c845 err=
+01_baseline_compressed.E01                       dissect=ok    sha=5887c01c29f9c845 err=
+02_primary_entry_tampered_checksums_valid.E01    dissect=ok    sha=213d67cbf7691d0f err=
+03_backup_flag_flipped_checksums_valid.E01       dissect=ok    sha=5887c01c29f9c845 err=
+04_tables_divergent_both_valid.E01               dissect=ok    sha=5887c01c29f9c845 err=
+05_primary_stale_checksums.E01                   dissect=ok    sha=5887c01c29f9c845 err=
+06_both_tables_stale_checksums.E01               dissect=ok    sha=5887c01c29f9c845 err=
+07_primary_wrong_base_offset.E01                 dissect=ok    sha=ca1d35d31baba4d3 err=
+08_primary_last_chunk_overflow.E01               dissect=ok    sha=089ee9e2451e912d err=
+
+=== generate_scenarios.py ===
+
+=== cross_check_dissect.py ===
+
+=== verdict summary ===
+{
+  "00_baseline_uncompressed": {
+    "reason": "both tables valid, identical maps and identical candidate output",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "RECOVERABLE_CONSISTENT"
+  },
+  "01_baseline_compressed": {
+    "reason": "both tables valid, identical maps and identical candidate output",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "RECOVERABLE_CONSISTENT"
+  },
+  "02_primary_entry_tampered_checksums_valid": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "03_backup_flag_flipped_checksums_valid": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": null,
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "04_tables_divergent_both_valid": {
+    "reason": "both tables are structurally valid and fully readable but point at different blocks",
+    "table2_candidate": "18b72a931fe05a5b5a2e0f41697c8abb349dc532b425fc3bcd575f0c627188d7",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": true,
+    "verdict": "CONFLICT"
+  },
+  "05_primary_stale_checksums": {
+    "reason": "maps agree and only table2 passes structural validation and reads completely",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": false,
+    "verdict": "RECOVERABLE_SINGLE_TABLE"
+  },
+  "06_both_tables_stale_checksums": {
+    "reason": "both tables fail structural checksums; readable bytes cannot be attributed to a trusted map",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": false,
+    "table_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table_valid": false,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "07_primary_wrong_base_offset": {
+    "reason": "only table2 passes validation but the maps disagree, so the survivor cannot be authenticated",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": false,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  "08_primary_last_chunk_overflow": {
+    "reason": "valid tables diverge and at least one candidate read is incomplete",
+    "table2_candidate": "5887c01c29f9c8451ec682113ff11367b63ff145ffa2b6f3434dc9393776742e",
+    "table2_valid": true,
+    "table_candidate": null,
+    "table_valid": true,
+    "verdict": "INSUFFICIENT_EVIDENCE"
+  }
+}
