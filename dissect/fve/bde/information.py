@@ -169,9 +169,16 @@ class Dataset:
         buf = BytesIO(memoryview(self._buf)[self.header.StartOffset :])
         remaining = self.header.EndOffset - self.header.StartOffset
         while remaining >= Datum.MINIMAL_SIZE:
-            datum = Datum.from_fh(buf)
-            result.append(datum)
+            try:
+                datum = Datum.from_fh(buf)
+            except EOFError:
+                break
 
+            if datum.size < Datum.MINIMAL_SIZE or datum.size > remaining:
+                # Corrupt datum, stop parsing instead of consuming neighbouring datums
+                break
+
+            result.append(datum)
             remaining -= datum.size
 
         return result
@@ -318,9 +325,17 @@ class Datum:
             remaining = self.data_size - len(self.__struct__)
             buf = BytesIO(memoryview(self._data)[len(self.__struct__) :])
             while remaining >= self.MINIMAL_SIZE:
-                nested = Datum.from_fh(buf)
-                result.append(nested)
+                try:
+                    nested = Datum.from_fh(buf)
+                except EOFError:
+                    break
 
+                if nested.size < self.MINIMAL_SIZE or nested.size > remaining or nested.role != FVE_DATUM_ROLE.PROPERTY:
+                    # Corrupt or non-property datum, stop parsing instead of
+                    # attributing neighbouring datums to this datum
+                    break
+
+                result.append(nested)
                 remaining -= nested.size
 
         return result
@@ -479,7 +494,15 @@ class AesCcmEncryptedDatum(Datum):
         key = key.data if isinstance(key, KeyDatum) else key
         cipher = AES.new(key, AES.MODE_CCM, nonce=self.nonce)
         decrypted_data = cipher.decrypt_and_verify(self.data, self.mac)
-        return Datum.from_bytes(decrypted_data)
+        if len(decrypted_data) < Datum.MINIMAL_SIZE:
+            raise ValueError(f"Unboxed datum too small: {len(decrypted_data)}")
+        try:
+            datum = Datum.from_bytes(decrypted_data)
+        except EOFError as e:
+            raise ValueError("Unboxed datum is truncated") from e
+        if datum.size != len(decrypted_data):
+            raise ValueError(f"Unboxed datum size mismatch: {datum.size} != {len(decrypted_data)}")
+        return datum
 
 
 class TpmEncryptedBlobDatum(Datum):
