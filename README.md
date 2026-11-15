@@ -20,6 +20,44 @@ pip install dissect.etl
 
 This module is also automatically installed if you install the `dissect` package.
 
+## WPP MessageTrace records
+
+WPP `MessageTrace` records start with an 8 byte `MESSAGE_HEADER` and are followed by an optional header whose contents
+are selected by the record's `EventProperty` flags. `MessageTraceHeader` parses those values in the declared order
+(sequence number, GUID, component id, timestamp, performance timestamp, system information) and exposes the untouched
+message bytes after them:
+
+```python
+from dissect.etl import ETL
+from dissect.etl.headers.headers import MessageTraceHeader
+
+with open("sample.etl", "rb") as fh:
+    for record in ETL(fh):
+        header = record.header
+        if not isinstance(header, MessageTraceHeader):
+            continue
+
+        print(header.sequence_number, header.process_id, header.thread_id)
+        print(header.timestamp)  # None when the record carries no timestamp
+        print(header.message)  # bytes after the optional header
+        if header.truncated_fields:
+            print("missing:", header.truncated_fields, header.truncation)
+```
+
+`timestamp` is only set when the record declares `TRACE_MESSAGE_TIMESTAMP`; the value is an absolute FILETIME and is
+never anchored to the start of the logfile. A truncated optional header or record is reported through
+`truncated_fields`, `truncation` and `record_truncated`, and `message_offset` stays `None` because the message boundary
+cannot be established. `limitations` lists flags or values that are preserved but not interpreted, such as
+conflicting pointer flags.
+
+A runnable example that prints an investigation summary for a file, or a generated two-record demo, is available at
+`examples/message_trace_investigation.py`:
+
+```bash
+python examples/message_trace_investigation.py sample.etl
+python examples/message_trace_investigation.py --demo
+```
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
