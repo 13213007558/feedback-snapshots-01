@@ -1003,3 +1003,190 @@ def test_find_split_parts_orders_numerically_and_ignores_other_stems(tmp_path: P
     (tmp_path / "Backup2-0001.tibx").write_bytes(b"")
 
     assert find_split_parts(parts[1]) == parts
+
+
+def _classified(tibx: TIBX) -> dict[int, tuple[str, str, tuple[str, ...]]]:
+    return {entry.stream.volume_id: (entry.kind, entry.confidence, entry.evidence) for entry in tibx.classify()}
+
+
+def test_classify_confirms_named_partitions_and_supersedes_older_generations() -> None:
+    tibx = _two_generations(
+        ImapItem(2, b"disk1/part1", 4, 0x3000000),
+        ImapItem(3, b"disk1/part1", 8, 0x3000000),
+        ImapItem(3, b"meta", 9, 49),
+    )
+    classified = _classified(tibx)
+
+    kind, confidence, evidence = classified[8]
+    assert (kind, confidence) == ("partition", "confirmed")
+    assert evidence == ("imap:disk1/part1 (slice 3)",)
+
+    kind, confidence, evidence = classified[4]
+    assert (kind, confidence) == ("superseded", "confirmed")
+    assert "imap:disk1/part1 (slice 2)" in evidence
+
+    kind, confidence, evidence = classified[9]
+    assert (kind, confidence) == ("metadata", "confirmed")
+    assert evidence == ("imap:meta (slice 3)",)
+
+    # volumes() lists exactly the confirmed partitions
+    assert [volume.volume_id for volume in tibx.volumes()] == [8]
+
+
+def test_classify_named_partition_without_data() -> None:
+    # A partition that was never formatted stores no data_map stream: still confirmed
+    tibx = _two_generations(
+        ImapItem(3, b"disk1/part1", 8, 0x3000000),
+        ImapItem(3, b"disk1/part2", 0, 0),
+    )
+    classified = _classified(tibx)
+
+    kind, confidence, evidence = classified[0]
+    assert (kind, confidence) == ("partition", "confirmed")
+    assert evidence == ("imap:disk1/part2 (slice 3)", "stores no data: the partition reads as zeros")
+    assert [volume.volume_id for volume in tibx.volumes()] == [8, 0]
+
+
+def test_classify_tells_a_bitmap_from_a_similarly_sized_partition() -> None:
+    # The bitmap of a 160 GiB volume with 4 KiB clusters is 5,242,880 bytes, a whole
+    # number of sectors -- as partition-sized as a small volume
+    volume_span = 41_943_039 * 0x1000
+    bitmap = b"\xff" * 16 + b"\x7f" + b"\xff" * 0x1EF
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(6, 0, _ntfs_boot(volume_span // 512) + b"\x00" * 512),
+            ExtentSpec(6, volume_span - 512, b"\x00" * 512),
+            ExtentSpec(8, 0, bitmap),
+            ExtentSpec(8, 5_242_880 - 512, b"\x00" * 512),
+            ExtentSpec(3, MIN_VOLUME_SIZE, b"\x00" * 512),  # unformatted, all zeros
+            ExtentSpec(2, 0, b"\x00" * 16),  # small metadata
+        ]
+    )
+    tibx = TIBX(io.BytesIO(archive))
+    classified = _classified(tibx)
+
+    kind, confidence, evidence = classified[6]
+    assert (kind, confidence) == ("partition", "heuristic")
+    assert evidence == ("boot-sector:ntfs",)
+
+    kind, confidence, evidence = classified[8]
+    assert (kind, confidence) == ("bitmap", "heuristic")
+    assert evidence == ("span matches an allocation bitmap of stream 0x6 at 4096-byte clusters",)
+
+    # An all-zero partition stays a legitimate (heuristic) volume
+    kind, confidence, evidence = classified[3]
+    assert (kind, confidence) == ("partition", "heuristic")
+    assert "head is all zeros" in evidence[1]
+
+    kind, confidence, evidence = classified[2]
+    assert (kind, confidence) == ("metadata", "heuristic")
+    assert "below the" in evidence[0]
+
+
+def test_classify_disk_bootstrap_region() -> None:
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+            ExtentSpec(1, 0, _mbr((0x80, 0x07, 2048, 0x18000))),
+            ExtentSpec(1, MIN_VOLUME_SIZE - 512, b"\x00" * 512),
+        ]
+    )
+    tibx = TIBX(io.BytesIO(archive))
+    kind, confidence, evidence = _classified(tibx)[1]
+    assert (kind, confidence) == ("bootstrap", "heuristic")
+    assert "bootstrap region" in evidence[0]
+
+
+def test_classify_file_level_backup_marks_large_files_as_files() -> None:
+    # A backed-up file can be exactly as partition-sized and sector-aligned as a volume
+    tibx = _two_generations(
+        ImapItem(2, b"C:/Users/user/disk.vhd", 4, 0x3000000),
+        ImapItem(3, b"C:/Users/user/disk.vhd", 8, 0x3000000),
+        ImapItem(3, b"C:/Users/user/notes.xml", 9, 49),
+        meta=b"file\x00",
+    )
+    classified = _classified(tibx)
+
+    assert tibx.volumes() == []
+    for volume_id, name in ((4, "disk.vhd"), (8, "disk.vhd"), (9, "notes.xml")):
+        kind, confidence, evidence = classified[volume_id]
+        assert (kind, confidence) == ("file", "confirmed")
+        assert evidence[0] == "archive-type:file"
+        assert any(name in entry for entry in evidence[1:])
+
+
+def test_classify_unnamed_lookalike_is_not_a_confirmed_partition() -> None:
+    # The imap names the recovery point's partition; a further partition-looking stream
+    # it has no record for stays inspectable, but cannot be confirmed
+    tibx = _two_generations(
+        ImapItem(3, b"disk1/part1", 8, 0x3000000),
+        ImapItem(3, b"meta", 9, 49),
+    )
+    classified = _classified(tibx)
+
+    kind, confidence, evidence = classified[4]  # an NTFS boot sector the imap does not name
+    assert (kind, confidence) == ("unknown", "unconfirmed")
+    assert evidence[0] == "boot-sector:ntfs"
+    assert "imap names no record" in evidence[-1]
+
+    assert [volume.volume_id for volume in tibx.volumes()] == [8]
+    assert {stream.volume_id for stream in tibx.streams()} == {4, 8, 9}
+
+
+def test_classify_locked_archive_marks_span_only_streams_unconfirmed() -> None:
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(10, 0, b"encrypted head".ljust(0x1000, b"\x00")),
+            ExtentSpec(10, MIN_VOLUME_SIZE, b"encrypted tail".ljust(512, b"\x00")),
+        ],
+        password=b"dissect",
+        alg=7,
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    ((kind, confidence, evidence),) = _classified(tibx).values()
+    assert (kind, confidence) == ("partition", "unconfirmed")
+    assert "judged by its span alone" in evidence[1]
+    # Inspectable as a candidate volume, but no confirmed partition
+    assert [volume.volume_id for volume in tibx.volumes()] == [10]
+
+
+def test_classify_after_unlock_explains_the_change() -> None:
+    # The imap of an encrypted archive is encrypted too: locked, a partition-sized stream
+    # is judged by its span; unlocked, the imap confirms it -- and says so
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(10, 0, b"encrypted head".ljust(0x1000, b"\x00")),
+            ExtentSpec(10, MIN_VOLUME_SIZE, b"encrypted tail".ljust(512, b"\x00")),
+        ],
+        password=b"dissect",
+        alg=7,
+        extra_slots={0: imap([ImapItem(2, b"disk1/part1", 10, 0x3000000)], data_key=bytes(range(32)))},
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    ((kind, confidence, _),) = _classified(tibx).values()
+    assert (kind, confidence) == ("partition", "unconfirmed")
+
+    tibx.unlock(b"dissect")
+    ((kind, confidence, evidence),) = _classified(tibx).values()
+    assert (kind, confidence) == ("partition", "confirmed")
+    assert evidence[0] == "imap:disk1/part1 (slice 2)"
+    assert "reclassified after unlock" in evidence[1]
+    assert "unconfirmed" in evidence[1]
+
+
+def test_volumes_are_the_partition_classifications() -> None:
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, _ntfs_boot(0x18000) + b"\x00" * 512),
+            ExtentSpec(8, 0, b'\xef\xbb\xbf<?xml version="1.0"?><metainfo/>'),
+            ExtentSpec(5, 0, b"\xff" * 520),
+            ExtentSpec(2, 0, b"\x00" * 16),
+            ExtentSpec(9, MIN_VOLUME_SIZE, b"unformatted tail".ljust(512, b"\x00")),
+        ]
+    )
+    tibx = TIBX(io.BytesIO(archive))
+
+    partitions = [entry.stream.volume_id for entry in tibx.classify() if entry.kind == "partition"]
+    assert sorted(volume.volume_id for volume in tibx.volumes()) == sorted(partitions)

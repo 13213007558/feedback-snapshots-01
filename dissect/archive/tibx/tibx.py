@@ -148,6 +148,51 @@ class ItemStream(NamedTuple):
     size: int
 
 
+# The kinds a stream is classified as (Classification.kind)
+KIND_PARTITION = "partition"
+KIND_BITMAP = "bitmap"
+KIND_BOOTSTRAP = "bootstrap"
+KIND_METADATA = "metadata"
+KIND_FILE = "file"
+KIND_SUPERSEDED = "superseded"
+KIND_UNKNOWN = "unknown"
+
+# How sure a classification is (Classification.confidence)
+CONFIRMED = "confirmed"
+HEURISTIC = "heuristic"
+UNCONFIRMED = "unconfirmed"
+
+
+class Classification(NamedTuple):
+    """How one data_map stream is classified, with the evidence for it.
+
+    ``kind`` is one of:
+
+    -   ``"partition"``: a backed-up volume.
+    -   ``"bitmap"``: a volume's allocation bitmap, stored as a stream of its own.
+    -   ``"bootstrap"``: a disk's MBR/GPT bootstrap region.
+    -   ``"metadata"``: Acronis's own metadata (the metainfo XML, small index tables).
+    -   ``"file"``: a backed-up file of a file-level archive.
+    -   ``"superseded"``: a partition stream of an older backup generation than the
+        selected recovery point.
+    -   ``"unknown"``: a stream the evidence cannot place.
+
+    ``confidence`` is ``"confirmed"`` when the archive itself says what the stream is
+    (the imap names it, or the archive type does), ``"heuristic"`` when content and
+    span evidence say so, and ``"unconfirmed"`` when the stream cannot be read -- a
+    locked archive -- and its span alone has to do. An unconfirmed stream stays
+    inspectable through :meth:`TIBX.streams`, but is no confirmed partition.
+
+    ``evidence`` lists what the classification rests on, so a forensic report can show
+    *why* a stream is (not) a volume rather than just *that* it is.
+    """
+
+    stream: TibxVolume
+    kind: str
+    confidence: str
+    evidence: tuple[str, ...]
+
+
 class TIBX:
     """An Acronis TIBX ("archive3") backup archive.
 
@@ -180,6 +225,7 @@ class TIBX:
         self._recovery_points: list[RecoveryPoint] | None = None
         self._slice_limit: int | None = None
         self._data_key = None
+        self._locked_classifications: dict[int, Classification] | None = None
         self._reset_snapshot_caches()
 
     def _reset_snapshot_caches(self) -> None:
@@ -203,6 +249,7 @@ class TIBX:
         self._streams: list[TibxVolume] | None = None
         self._volumes: list[TibxVolume] | None = None
         self._stream_sizes: dict[int, int] | None = None
+        self._classifications: list[Classification] | None = None
 
     def _clear_segment_cache(self) -> None:
         self._segment_cache: OrderedDict[int, bytes] = OrderedDict()
@@ -364,6 +411,12 @@ class TIBX:
 
         self._data_key = unwrap_data_key(self.header, password)
         self._clear_segment_cache()
+        if self._classifications is not None:
+            # Keep the locked view, so classify() can explain what the stronger imap
+            # evidence changed instead of silently replacing a stream's identity
+            self._locked_classifications = {
+                classification.stream.volume_id: classification for classification in self._classifications
+            }
         self._reset_imap_caches()
 
     def recovery_points(self) -> list[RecoveryPoint]:
@@ -502,7 +555,8 @@ class TIBX:
         recognises, or if it is at least :data:`MIN_VOLUME_SIZE`, a whole number of sectors
         and does not start with a partition table -- which keeps an unformatted or
         unrecognised partition, something ``acrocmd list content`` reports as a partition of
-        type ``None``. Use :meth:`streams` for the unfiltered list.
+        type ``None``. Use :meth:`streams` for the unfiltered list, and :meth:`classify`
+        for the evidence and confidence behind every stream's classification.
         """
         if self._volumes is None:
             if self.archive_type == "file":
@@ -533,6 +587,138 @@ class TIBX:
                 volumes = [stream for stream in streams if self._is_volume(stream, bitmap_spans)]
             self._volumes = volumes
         return self._volumes
+
+    def classify(self) -> list[Classification]:
+        """Classify every data_map stream, with the evidence and confidence for it.
+
+        This is :meth:`volumes` with its reasoning exposed: every stream of the archive
+        -- backed-up partitions, Acronis metadata, allocation bitmaps, the disk's
+        bootstrap region, a file-level backup's files -- classified as a
+        :class:`Classification` that says what the stream is, how sure that is, and
+        which evidence it rests on. Explicitly imap-named partitions come back
+        ``"confirmed"``; heuristic candidates carry the content and span checks that
+        make them look like partitions; a stream that cannot be confirmed -- the
+        archive is locked, or the imap names other partitions for the selected
+        recovery point -- stays inspectable but is not labelled a confirmed partition.
+
+        When the archive was classified while locked and :meth:`unlock` then brings
+        stronger imap evidence, a stream whose classification changed carries a
+        ``"reclassified after unlock"`` evidence entry that explains the change
+        rather than silently replacing the stream's identity.
+        """
+        if self._classifications is None:
+            streams = self.streams()
+            partitions = self._partitions()
+            named = {partition.id: partition for partition in partitions}
+            classifications = []
+            if self.archive_type == "file":
+                names = self._item_names()
+                for stream in streams:
+                    evidence = ["archive-type:file"]
+                    evidence += _name_evidence(names.get(stream.volume_id, ()))
+                    classifications.append(Classification(stream, KIND_FILE, CONFIRMED, tuple(evidence)))
+            elif named:
+                names = self._item_names()
+                bitmap_spans = _bitmap_spans(streams)
+                for stream in streams:
+                    record = named.get(stream.volume_id)
+                    if record is not None:
+                        classifications.append(
+                            Classification(stream, KIND_PARTITION, CONFIRMED, (_imap_evidence(record),))
+                        )
+                    else:
+                        classifications.append(self._classify_unnamed(stream, names, bitmap_spans))
+                stored = {stream.volume_id for stream in streams}
+                classifications.extend(
+                    Classification(
+                        TibxVolume(self, partition.id, self.extents, 0, 0),
+                        KIND_PARTITION,
+                        CONFIRMED,
+                        (_imap_evidence(partition), "stores no data: the partition reads as zeros"),
+                    )
+                    for partition in partitions
+                    if partition.id not in stored
+                )
+            else:
+                bitmap_spans = _bitmap_spans(streams)
+                classifications = [
+                    Classification(stream, *_classify(stream, bitmap_spans)) for stream in streams
+                ]
+            self._classifications = self._explain_reclassified(classifications)
+        return self._classifications
+
+    def _classify_unnamed(
+        self,
+        stream: TibxVolume,
+        names: dict[int, list[tuple[bytes, int]]],
+        bitmap_spans: dict[int, list[tuple[int, int]]],
+    ) -> Classification:
+        """Classify a stream the imap does not name as a partition of the selected recovery point."""
+        records = names.get(stream.volume_id, ())
+        if records:
+            # The imap says what this stream is; a partition name that lost to a newer
+            # backup's record is an older generation of that partition
+            name, slice_id = max(records, key=lambda record: record[1])
+            if PARTITION_NAME_RE.fullmatch(name):
+                return Classification(
+                    stream,
+                    KIND_SUPERSEDED,
+                    CONFIRMED,
+                    (
+                        f"imap:{name.decode('utf-8', 'replace')} (slice {slice_id})",
+                        "the selected recovery point names another stream for this partition",
+                    ),
+                )
+            return Classification(
+                stream,
+                KIND_METADATA,
+                CONFIRMED,
+                (f"imap:{name.decode('utf-8', 'replace')} (slice {slice_id})",),
+            )
+        kind, _, evidence = _classify(stream, bitmap_spans)
+        evidence = (*evidence, "the imap names no record for this stream")
+        if kind == KIND_PARTITION:
+            # The imap names this recovery point's partitions and this stream is none of
+            # them: a look-alike stays inspectable, but is no confirmed partition
+            return Classification(stream, KIND_UNKNOWN, UNCONFIRMED, evidence)
+        return Classification(stream, kind, HEURISTIC, evidence)
+
+    def _explain_reclassified(self, classifications: list[Classification]) -> list[Classification]:
+        """Annotate classifications that the imap evidence of an :meth:`unlock` changed."""
+        locked = self._locked_classifications
+        if not locked:
+            return classifications
+        explained = []
+        for classification in classifications:
+            before = locked.get(classification.stream.volume_id)
+            if before is not None and (before.kind, before.confidence) != (
+                classification.kind,
+                classification.confidence,
+            ):
+                was = f"was {before.kind} ({before.confidence}: {'; '.join(before.evidence)})"
+                classification = classification._replace(
+                    evidence=(*classification.evidence, f"reclassified after unlock: {was}")
+                )
+            explained.append(classification)
+        return explained
+
+    def _item_names(self) -> dict[int, list[tuple[bytes, int]]]:
+        """The imap names of each data_map stream, as ``(name, slice_id)``, at the selected recovery point.
+
+        Empty if the imap is encrypted and the archive locked.
+        """
+        try:
+            records = self._item_streams()
+        except InvalidPasswordError:
+            return {}
+        names: dict[int, list[tuple[bytes, int]]] = defaultdict(list)
+        for record in records:
+            if self._slice_limit is not None and record.slice_id > self._slice_limit:
+                continue
+            if record.flags & c_tibx.ItemFlags.DELETED:
+                continue
+            names[record.id].append((record.name, record.slice_id))
+        return names
 
     def _partitions(self) -> list[ItemStream]:
         """The partitions of the selected recovery point, as the imap names them, by the record of their data stream.
@@ -618,38 +804,13 @@ class TIBX:
         return self._stream_sizes.get(volume_id)
 
     @staticmethod
-    def _is_volume(stream: TibxVolume, bitmap_spans: set[int]) -> bool:
+    def _is_volume(stream: TibxVolume, bitmap_spans: dict[int, list[tuple[int, int]]]) -> bool:
         """Whether a data_map stream is a backed-up volume rather than Acronis metadata.
 
-        Size alone does not tell the two apart on real disks. A volume's allocation bitmap
-        holds a bit per cluster, so it reaches :data:`MIN_VOLUME_SIZE` for any volume over
-        32 GiB, and the bootstrap region before a disk's first partition is a whole 1 MiB
-        on a disk partitioned the Windows way. But a partition is imaged in whole sectors,
-        so its span is sector-aligned where a bitmap's mostly is not, and the bootstrap
-        region starts with the disk's partition table. A bitmap that is a whole number of
-        sectors after all, like that of a 100 GiB volume with 4 KiB clusters, still has
-        the span of a bit per cluster of another stream, rounded up to a byte (see
-        :func:`_bitmap_spans`), or starts with a sector of set bits, which no partition,
-        formatted or not, does.
-
-        The size tests run on :attr:`TibxVolume.span`, which comes from the data_map and
-        needs no read. That matters for an encrypted archive that has not been unlocked:
-        listing what a locked archive contains must not require the password, so a stream
-        that cannot be read is judged by its span alone.
+        Thin wrapper over :func:`_classify`, which carries the evidence; see there for
+        why size alone does not tell the two apart on real disks.
         """
-        try:
-            head = stream.read(0, 2048)
-        except Error:
-            # Locked, or unreadable for any other reason
-            head = None
-
-        if head is not None and _boot_sector_size(head):
-            return True
-        if stream.span < MIN_VOLUME_SIZE or stream.span % SECTOR_SIZE or stream.span in bitmap_spans:
-            return False
-        if head is None:
-            return True
-        return head[:SECTOR_SIZE] != b"\xff" * SECTOR_SIZE and not _is_partition_table(head, stream.span)
+        return _classify(stream, bitmap_spans)[0] == KIND_PARTITION
 
     def extent_base(self, extent: Extent) -> int:
         """The within-segment byte offset where ``extent``'s data starts.
@@ -1070,18 +1231,103 @@ def _stream_order(stream: TibxVolume) -> tuple[int, int]:
     return stream._newest_slice, stream.span
 
 
-def _bitmap_spans(streams: list[TibxVolume]) -> set[int]:
+def _imap_evidence(record: ItemStream) -> str:
+    """The evidence string for an imap record: the item's name and the backup that recorded it."""
+    return f"imap:{record.name.decode('utf-8', 'replace')} (slice {record.slice_id})"
+
+
+def _name_evidence(records: list[tuple[bytes, int]] | tuple[tuple[bytes, int], ...]) -> list[str]:
+    """The evidence strings for the imap names of one stream, newest record last."""
+    return [
+        f"imap:{name.decode('utf-8', 'replace')} (slice {slice_id})"
+        for name, slice_id in sorted(records, key=itemgetter(1))
+    ]
+
+
+def _classify(stream: TibxVolume, bitmap_spans: dict[int, list[tuple[int, int]]]) -> tuple[str, str, tuple[str, ...]]:
+    """Classify a data_map stream by its content and span, with the evidence for it.
+
+    Size alone does not tell a volume and Acronis metadata apart on real disks. A
+    volume's allocation bitmap holds a bit per cluster, so it reaches
+    :data:`MIN_VOLUME_SIZE` for any volume over 32 GiB, and the bootstrap region before
+    a disk's first partition is a whole 1 MiB on a disk partitioned the Windows way.
+    But a partition is imaged in whole sectors, so its span is sector-aligned where a
+    bitmap's mostly is not, and the bootstrap region starts with the disk's partition
+    table. A bitmap that is a whole number of sectors after all, like that of a 100 GiB
+    volume with 4 KiB clusters, still has the span of a bit per cluster of another
+    stream, rounded up to a byte (see :func:`_bitmap_spans`), or starts with a sector
+    of set bits, which no partition, formatted or not, does.
+
+    The size tests run on :attr:`TibxVolume.span`, which comes from the data_map and
+    needs no read. That matters for an encrypted archive that has not been unlocked:
+    listing what a locked archive contains must not require the password, so a stream
+    that cannot be read is judged by its span alone -- and comes back
+    ``"unconfirmed"`` rather than silently confirmed.
+    """
+    try:
+        head = stream.read(0, 2048)
+    except Error:
+        # Locked, or unreadable for any other reason
+        head = None
+
+    if head is not None:
+        filesystem, _ = _sniff_boot_sector(head)
+        if filesystem:
+            return KIND_PARTITION, HEURISTIC, (f"boot-sector:{filesystem}",)
+    if stream.span < MIN_VOLUME_SIZE:
+        return KIND_METADATA, HEURISTIC, (f"span {stream.span} below the {MIN_VOLUME_SIZE}-byte minimum volume size",)
+    if stream.span % SECTOR_SIZE:
+        return (
+            KIND_BITMAP,
+            HEURISTIC,
+            (
+                f"span {stream.span} is not a whole number of {SECTOR_SIZE}-byte sectors;"
+                " a partition is imaged in whole sectors",
+            ),
+        )
+    if stream.span in bitmap_spans:
+        sources = ", ".join(
+            f"stream {volume_id:#x} at {cluster_size}-byte clusters"
+            for volume_id, cluster_size in bitmap_spans[stream.span]
+        )
+        return KIND_BITMAP, HEURISTIC, (f"span matches an allocation bitmap of {sources}",)
+    span_evidence = f"span {stream.span} is a whole number of sectors and at least {MIN_VOLUME_SIZE} bytes"
+    if head is None:
+        return (
+            KIND_PARTITION,
+            UNCONFIRMED,
+            (span_evidence, "content unreadable (locked or damaged): judged by its span alone"),
+        )
+    if head[:SECTOR_SIZE] == b"\xff" * SECTOR_SIZE:
+        return (
+            KIND_BITMAP,
+            HEURISTIC,
+            ("first sector is all set bits, as an allocation bitmap starts; no partition does",),
+        )
+    if _is_partition_table(head, stream.span):
+        return KIND_BOOTSTRAP, HEURISTIC, ("head is a partition table: a disk's bootstrap region, not a partition",)
+    if not any(head[:SECTOR_SIZE]):
+        return KIND_PARTITION, HEURISTIC, (span_evidence, "head is all zeros (an unformatted or wiped partition)")
+    return KIND_PARTITION, HEURISTIC, (span_evidence, "no recognised filesystem (unformatted or unknown)")
+
+
+def _bitmap_spans(streams: list[TibxVolume]) -> dict[int, list[tuple[int, int]]]:
     """The spans an allocation bitmap of one of ``streams`` would have, one per cluster size.
 
     Acronis stores a bit per cluster, rounded up to a whole byte. Across 187 real archives,
     171 metadata streams had that span for an NTFS volume of the same archive and 4 KiB
     clusters, and none of the 572 volumes had it for another one.
+
+    Maps each such span to the ``(volume_id, cluster_size)`` pairs that produce it, so a
+    classification can name the stream whose bitmap a span matches.
     """
-    spans = set()
+    spans: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for stream in streams:
         for cluster_size in CLUSTER_SIZES:
             clusters = -(-stream.span // cluster_size)
-            spans.add(-(-clusters // 8))
+            span = -(-clusters // 8)
+            if (stream.volume_id, cluster_size) not in spans[span]:
+                spans[span].append((stream.volume_id, cluster_size))
     return spans
 
 
@@ -1104,28 +1350,33 @@ def _is_partition_table(head: bytes, span: int) -> bool:
     return bool(used) and min(entry.lba_start for entry in used) * SECTOR_SIZE >= span
 
 
-def _boot_sector_size(boot: bytes) -> int:
-    """Parse the volume size from a boot sector, or 0 if it is not a known filesystem.
+def _sniff_boot_sector(boot: bytes) -> tuple[str, int]:
+    """The filesystem a boot sector belongs to and the volume size it records, or ``("", 0)``.
 
     The total-sectors field differs per filesystem, so the filesystem must be sniffed
     first -- reading the wrong offset yields garbage sizes.
     """
     if len(boot) < 512:
-        return 0
+        return "", 0
     try:
         ntfs = c_boot.ntfs_boot_sector(boot)
         if ntfs.oem_id == b"NTFS    ":
-            return (ntfs.bytes_per_sector or 512) * ntfs.total_sectors
+            return "ntfs", (ntfs.bytes_per_sector or 512) * ntfs.total_sectors
         exfat = c_boot.exfat_boot_sector(boot)
         if exfat.fs_name == b"EXFAT   ":
-            return exfat.volume_length << exfat.bytes_per_sector_shift
+            return "exfat", exfat.volume_length << exfat.bytes_per_sector_shift
         fat = c_boot.fat_boot_sector(boot)
         if fat.fs_type_32.startswith(b"FAT32") or fat.fs_type_16.startswith(b"FAT"):
-            return (fat.bytes_per_sector or 512) * (fat.total_sectors_16 or fat.total_sectors_32)
+            return "fat", (fat.bytes_per_sector or 512) * (fat.total_sectors_16 or fat.total_sectors_32)
         if len(boot) >= EXT_SUPERBLOCK_OFFSET + len(c_boot.ext_superblock):
             ext = c_boot.ext_superblock(boot[EXT_SUPERBLOCK_OFFSET:])
             if ext.magic == EXT_MAGIC:
-                return ext.blocks_count << (10 + ext.log_block_size)
+                return "ext", ext.blocks_count << (10 + ext.log_block_size)
     except EOFError:
-        return 0
-    return 0
+        return "", 0
+    return "", 0
+
+
+def _boot_sector_size(boot: bytes) -> int:
+    """Parse the volume size from a boot sector, or 0 if it is not a known filesystem."""
+    return _sniff_boot_sector(boot)[1]

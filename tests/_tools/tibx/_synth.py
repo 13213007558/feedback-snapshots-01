@@ -622,8 +622,12 @@ class ImapItem(NamedTuple):
     flags: int = c_tibx.ItemFlags.COMPLETE | c_tibx.ItemFlags.LINKED
 
 
-def imap(items: list[ImapItem]) -> bytes:
-    """The TLV[0] imap of ``items``, in its mem-tree."""
+def imap(items: list[ImapItem], data_key: bytes | None = None) -> bytes:
+    """The TLV[0] imap of ``items``, in its mem-tree.
+
+    With ``data_key`` set, the mem-tree blob is AES-GCM-encrypted under it and the
+    encoding carries the encrypted bit, as real encrypted archives store the imap.
+    """
     cells = [
         Cell(
             c_tibx.imap_key(slice_id=item.slice_id, flags=item.flags, type=0).dumps() + item.name,
@@ -632,7 +636,14 @@ def imap(items: list[ImapItem]) -> bytes:
         )
         for item in items
     ]
-    return lsb(0, 0, memtree_cells=cells, memtree_blob=variable_cells(cells))
+    blob = variable_cells(cells)
+    if data_key is not None:
+        from Crypto.Cipher import AES
+
+        iv = bytes(range(16))
+        ciphertext, tag = AES.new(data_key, AES.MODE_GCM, nonce=iv).encrypt_and_digest(blob)
+        return lsb(0, 0, memtree_cells=cells, memtree_blob=iv + tag + ciphertext, memtree_encoding=0x80)
+    return lsb(0, 0, memtree_cells=cells, memtree_blob=blob)
 
 
 def build_lsm_archive(
