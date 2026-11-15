@@ -8,6 +8,7 @@ import stat
 import struct
 from bisect import bisect_right
 from functools import cache, cached_property, lru_cache
+from io import RawIOBase
 from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.util import ts
@@ -20,6 +21,7 @@ from dissect.squashfs.exceptions import (
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
+    OutOfBoundsError,
 )
 
 if TYPE_CHECKING:
@@ -27,11 +29,119 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 
-class SquashFS:
-    def __init__(self, fh: BinaryIO):
-        self.fh = fh
+class _BoundedStream(RawIOBase):
+    """A read-only, zero-based view on a fixed region of another file-like object.
 
-        sb = c_squashfs.squashfs_super_block(fh)
+    All positions are relative to ``base``. Every seek and read is constrained to the half-open region
+    ``[base, base + size)`` of the underlying file handle. The underlying handle is owned by the caller: it is
+    never closed or written to.
+
+    Args:
+        fh: The underlying file-like object, held by the caller.
+        base: The absolute offset in ``fh`` where the sub-image starts.
+        size: The number of bytes that belong to the sub-image.
+    """
+
+    def __init__(self, fh: BinaryIO, base: int, size: int):
+        if base < 0:
+            raise ValueError(f"base must be non-negative: {base}")
+        if size < 0:
+            raise ValueError(f"size must be non-negative: {size}")
+
+        self._fh = fh
+        self.base = base
+        self.region_size = size
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        if whence == 0:
+            target = pos
+        elif whence == 1:
+            target = self._pos + pos
+        elif whence == 2:
+            target = self.region_size + pos
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+
+        if target < 0:
+            raise ValueError(f"negative seek position: {target}")
+        if target > self.region_size:
+            raise OutOfBoundsError("sub-image stream", target, self.region_size)
+
+        self._pos = target
+        return target
+
+    def read(self, length: int = -1) -> bytes:
+        if length is None or length < 0:
+            length = self.region_size - self._pos
+
+        if self._pos + length > self.region_size:
+            raise OutOfBoundsError(
+                "sub-image stream",
+                self._pos,
+                self.region_size,
+                length,
+            )
+
+        if length == 0:
+            return b""
+
+        self._fh.seek(self.base + self._pos)
+        data = self._fh.read(length)
+        if len(data) != length:
+            raise EOFError(f"short read at sub-image offset {self._pos}: expected {length} bytes, got {len(data)}")
+
+        self._pos += length
+        return data
+
+    def readinto(self, buffer: bytearray) -> int:
+        data = self.read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def write(self, data: bytes) -> int:
+        raise OSError("the sub-image stream is read-only")
+
+    def close(self) -> None:
+        # The underlying file handle is owned by the caller, so it must not be closed here.
+        super().close()
+
+
+class SquashFS:
+    def __init__(self, fh: BinaryIO, base: int = 0, size: int | None = None):
+        if base < 0:
+            raise ValueError(f"base must be non-negative: {base}")
+
+        if size is None:
+            fh.seek(0, 2)
+            size = fh.tell() - base
+            fh.seek(base)
+
+        if size < 0:
+            raise ValueError(f"size must be non-negative: {size}")
+
+        # All filesystem access goes through this bounded view. Pointers are interpreted relative to the
+        # filesystem start and can never reach bytes outside of the region provided by the caller.
+        self.base = base
+        self.region_size = size
+        self.fh = _BoundedStream(fh, base, size)
+
+        if size < len(c_squashfs.squashfs_super_block):
+            raise OutOfBoundsError("superblock", 0, size, len(c_squashfs.squashfs_super_block))
+
+        sb = c_squashfs.squashfs_super_block(self.fh)
         if sb.s_magic != c_squashfs.SQUASHFS_MAGIC:
             if sb.s_magic == c_squashfs.SQUASHFS_MAGIC_SWAP:
                 raise NotImplementedError("Unsupported squashfs pre-4.0 big-endian filesystem")
@@ -42,6 +152,11 @@ class SquashFS:
         if sb.s_major != 4:
             raise NotImplementedError("Unsupported squashfs version")
 
+        # bytes_used describes how many bytes the filesystem itself uses. It can never extend the region the
+        # caller made available, although the region may be larger to account for trailing partition padding.
+        if sb.bytes_used <= 0 or sb.bytes_used > size:
+            raise OutOfBoundsError("superblock bytes_used", sb.bytes_used, size)
+
         self.sb = sb
         self.mkfs_time = ts.from_unix(self.sb.mkfs_time)
         self.block_size = self.sb.block_size
@@ -51,6 +166,9 @@ class SquashFS:
         self.minor = self.sb.s_minor
         self.size = self.sb.bytes_used
 
+        # Every structure pointer must point within the bytes claimed by the filesystem.
+        self._validate_superblock_pointers()
+
         self._read_block = lru_cache(1024)(self._read_block)
         self._lookup_id = lru_cache(1024)(self._lookup_id)
         self._lookup_inode = lru_cache(1024)(self._lookup_inode)
@@ -58,17 +176,59 @@ class SquashFS:
 
         self._compression_options = None
         if (self.sb.flags >> c_squashfs.SQUASHFS_COMP_OPT) & 1:
-            self._compression_options = self._read_block(len(self.sb))[1]
+            self._compression_options = self._read_block(len(self.sb), reference="compression options")[1]
 
         self._compression = compression.initialize(self.sb.compression, self._compression_options)
 
-        self.id_table = self._read_table(self.sb.id_table_start, self.sb.no_ids, 4)
-        self.lookup_table = self._read_table(self.sb.lookup_table_start, self.sb.inodes, 8)
+        self.id_table = self._read_table(self.sb.id_table_start, self.sb.no_ids, 4, "ID table")
+        self.lookup_table = self._read_table(self.sb.lookup_table_start, self.sb.inodes, 8, "inode lookup table")
         self.fragment_table = self._read_table(
-            self.sb.fragment_table_start, self.sb.fragments, len(c_squashfs.squashfs_fragment_entry)
+            self.sb.fragment_table_start,
+            self.sb.fragments,
+            len(c_squashfs.squashfs_fragment_entry),
+            "fragment table",
         )
 
         self.root = self.inode(self.sb.root_inode >> 16, self.sb.root_inode & 0xFFFF, name="/")
+
+    @classmethod
+    def from_subimage(cls, fh: BinaryIO, base: int, size: int) -> SquashFS:
+        """Open a SquashFS filesystem embedded at a fixed offset inside a larger file or firmware image.
+
+        Only the half-open region ``[base, base + size)`` of ``fh`` is exposed to the filesystem. SquashFS
+        pointers are still interpreted relative to ``base``, so the same filesystem can be embedded behind any
+        prefix without changing its contents. The caller retains ownership of ``fh``; it is never closed or
+        written to.
+
+        Args:
+            fh: The file-like object containing the embedded filesystem.
+            base: The absolute offset in ``fh`` where the SquashFS superblock starts.
+            size: The number of readable bytes that belong to this sub-image.
+
+        Returns:
+            The opened SquashFS filesystem.
+        """
+        return cls(fh, base=base, size=size)
+
+    def _validate_superblock_pointers(self) -> None:
+        # Optional tables may legitimately use the SQUASHFS_INVALID_BLK sentinel to signal that they are absent.
+        optional = {"xattr ID table", "fragment table", "inode lookup table"}
+        pointers = [
+            ("ID table", self.sb.id_table_start),
+            ("inode table", self.sb.inode_table_start),
+            ("directory table", self.sb.directory_table_start),
+            ("fragment table", self.sb.fragment_table_start),
+            ("inode lookup table", self.sb.lookup_table_start),
+            ("xattr ID table", self.sb.xattr_id_table_start),
+        ]
+        for reference, offset in pointers:
+            if reference in optional and offset == c_squashfs.SQUASHFS_INVALID_BLK:
+                continue
+            self._check_extent(reference, offset, 1)
+
+    def _check_extent(self, reference: str, offset: int, length: int) -> None:
+        if offset < 0 or offset + length > self.size:
+            raise OutOfBoundsError(reference, offset, self.size, length)
 
     def inode(
         self,
@@ -113,20 +273,29 @@ class SquashFS:
 
         return node
 
-    def _read_table(self, offset: int, count: int, entry_size: int) -> list[int]:
+    def _read_table(self, offset: int, count: int, entry_size: int, reference: str) -> list[int]:
         if not count or offset == c_squashfs.SQUASHFS_INVALID_BLK:
             return []
 
         num_bytes = count * entry_size
         num_blocks = (num_bytes + c_squashfs.SQUASHFS_METADATA_SIZE - 1) // c_squashfs.SQUASHFS_METADATA_SIZE
 
-        self.fh.seek(offset)
-        return c_squashfs.uint64[num_blocks](self.fh)
+        # The table itself is an array of metadata block pointers and must stay within the filesystem.
+        self._check_extent(reference, offset, num_blocks * 8)
 
-    def _read_metadata(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
+        self.fh.seek(offset)
+        block_pointers = c_squashfs.uint64[num_blocks](self.fh)
+
+        # Every metadata block the table points at must stay within the filesystem as well.
+        for block_pointer in block_pointers:
+            self._check_extent(reference, block_pointer, 1)
+
+        return block_pointers
+
+    def _read_metadata(self, block: int, offset: int, length: int, reference: str) -> tuple[int, int, bytes]:
         result = []
         while length:
-            next_block, data = self._read_block(block)
+            next_block, data = self._read_block(block, reference=reference)
             remaining = len(data) - offset
 
             if remaining <= length:
@@ -141,19 +310,22 @@ class SquashFS:
 
         return block, offset, b"".join(result)
 
-    def _read_block(self, block: int, length: int | None = None) -> tuple[int, bytes]:
+    def _read_block(self, block: int, length: int | None = None, reference: str = "data block") -> tuple[int, bytes]:
         if length is not None:
             # Data block
             compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK == 0
             length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
+            self._check_extent(reference, block, length)
         else:
-            # Metadata block
+            # Metadata block: the 2-byte header precedes the block data.
+            self._check_extent(reference, block, 2)
             self.fh.seek(block)
-            length = c_squashfs.uint16(self.fh)
+            header = c_squashfs.uint16(self.fh)
 
-            compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT == 0
-            length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT
+            compressed = header & c_squashfs.SQUASHFS_COMPRESSED_BIT == 0
+            length = header & ~c_squashfs.SQUASHFS_COMPRESSED_BIT
             block += 2
+            self._check_extent(reference, block, length)
 
         self.fh.seek(block)
         data = self.fh.read(length)
@@ -168,27 +340,36 @@ class SquashFS:
 
     def _read_fragment(self, fragment: int, offset: int, length: int) -> bytes:
         entry = self._lookup_fragment(fragment)
-        _, data = self._read_block(entry.start_block, entry.size)
+        _, data = self._read_block(entry.start_block, entry.size, reference="fragment data block")
         return data[offset : offset + length]
 
     def _lookup_id(self, id: int) -> int:
         block, offset = divmod(id * 4, c_squashfs.SQUASHFS_METADATA_SIZE)
-        _, _, data = self._read_metadata(self.id_table[block], offset, 4)
+        _, _, data = self._read_metadata(self.id_table[block], offset, 4, reference="ID table")
         return struct.unpack("<I", data)[0]
 
     def _lookup_inode(self, inode_number: int) -> INode:
         if inode_number <= 0 or inode_number > self.sb.inodes:
             raise IndexError(f"inode number out of bounds (1, {self.sb.inodes}): {inode_number}")
         block, offset = divmod((inode_number - 1) * 8, c_squashfs.SQUASHFS_METADATA_SIZE)
-        _, _, data = self._read_metadata(self.lookup_table[block], offset, 8)
+        _, _, data = self._read_metadata(self.lookup_table[block], offset, 8, reference="inode lookup table")
         return self.get(struct.unpack("<Q", data)[0])
 
     def _lookup_fragment(self, fragment: int) -> c_squashfs.squashfs_fragment_entry:
         fragment_offset = fragment * len(c_squashfs.squashfs_fragment_entry)
         block, offset = divmod(fragment_offset, c_squashfs.SQUASHFS_METADATA_SIZE)
 
-        _, _, data = self._read_metadata(self.fragment_table[block], offset, len(c_squashfs.squashfs_fragment_entry))
-        return c_squashfs.squashfs_fragment_entry(data)
+        _, _, data = self._read_metadata(
+            self.fragment_table[block],
+            offset,
+            len(c_squashfs.squashfs_fragment_entry),
+            reference="fragment table",
+        )
+        entry = c_squashfs.squashfs_fragment_entry(data)
+        # The fragment entry itself points at the data block. Reject it if that block lives past the
+        # filesystem boundary, for example inside a partition that follows the SquashFS image.
+        self._check_extent("fragment table", entry.start_block, 1)
+        return entry
 
     def iter_inodes(self) -> Iterator[INode]:
         for inum in range(1, self.sb.inodes + 1):
@@ -237,13 +418,17 @@ class INode:
         base_struct = c_squashfs.squashfs_base_inode_header
 
         block = self.fs.sb.inode_table_start + self.block
-        data_block, data_offset, data = self.fs._read_metadata(block, self.offset, len(base_struct))
+        data_block, data_offset, data = self.fs._read_metadata(
+            block, self.offset, len(base_struct), reference="inode table"
+        )
 
         header = base_struct(data)
         actual_struct = INODE_STRUCT_MAP.get(header.inode_type)
 
         if len(actual_struct) != len(base_struct):
-            data_block, data_offset, data = self.fs._read_metadata(block, self.offset, len(actual_struct))
+            data_block, data_offset, data = self.fs._read_metadata(
+                block, self.offset, len(actual_struct), reference="inode table"
+            )
 
         if actual_struct != base_struct:
             header = actual_struct(data)
@@ -353,6 +538,7 @@ class INode:
             self.data_block,
             self.data_offset,
             self.header.symlink_size,
+            reference="inode table",
         )
         return data.decode(errors="surrogateescape")
 
@@ -377,16 +563,22 @@ class INode:
 
         bytes_read = 0
         while bytes_read < self.size - 3:
-            start, offset, data = self.fs._read_metadata(start, offset, len(c_squashfs.squashfs_dir_header))
+            start, offset, data = self.fs._read_metadata(
+                start, offset, len(c_squashfs.squashfs_dir_header), reference="directory table"
+            )
             dir_header = c_squashfs.squashfs_dir_header(data)
             bytes_read += len(data)
 
             for _ in range(dir_header.count + 1):
-                start, offset, data = self.fs._read_metadata(start, offset, len(c_squashfs.squashfs_dir_entry))
+                start, offset, data = self.fs._read_metadata(
+                    start, offset, len(c_squashfs.squashfs_dir_entry), reference="directory table"
+                )
                 dir_entry = c_squashfs.squashfs_dir_entry(data)
                 bytes_read += len(data)
 
-                start, offset, data = self.fs._read_metadata(start, offset, dir_entry.size + 1)
+                start, offset, data = self.fs._read_metadata(
+                    start, offset, dir_entry.size + 1, reference="directory table"
+                )
                 bytes_read += len(data)
 
                 yield self.fs.inode(
@@ -413,6 +605,7 @@ class INode:
                 self.data_block,
                 self.data_offset,
                 blocks * 4,
+                reference="inode table",
             )
             block_list = [(block, 1) for block in c_squashfs.uint32[blocks](data)]
         else:
@@ -479,7 +672,7 @@ class FileStream(RunlistStream):
                 if run_block_size == 0:
                     result.append(b"\x00" * read_count)
                 else:
-                    start_block, data = self.fs._read_block(start_block, run_block_size)
+                    start_block, data = self.fs._read_block(start_block, run_block_size, reference="file data block")
                     result.append(data[:read_count])
 
                 offset += read_count

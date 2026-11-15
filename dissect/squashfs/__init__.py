@@ -6,6 +6,7 @@ from dissect.squashfs.exceptions import (
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
+    OutOfBoundsError,
 )
 from dissect.squashfs.squashfs import FileStream, INode, SquashFS
 
@@ -17,5 +18,6 @@ __all__ = [
     "NotADirectoryError",
     "NotAFileError",
     "NotASymlinkError",
+    "OutOfBoundsError",
     "SquashFS",
 ]
