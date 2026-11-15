@@ -39,9 +39,16 @@ class WAL:
             raise InvalidDatabase("Invalid WAL header magic")
 
         self.checksum_endian = "<" if self.header.magic == WAL_HEADER_MAGIC_LE else ">"
-        self.highest_page_num = max(fr.page_number for commit in self.commits for fr in commit.frames if fr.valid)
+        self.highest_page_num = max(
+            (fr.page_number for commit in self.commits for fr in commit.frames if fr.valid), default=0
+        )
 
         self.frame = lru_cache(1024)(self.frame)
+
+    @property
+    def frame_size(self) -> int:
+        """Return the size of a single WAL frame, including its header."""
+        return len(c_sqlite3.wal_frame) + self.header.page_size
 
     def close(self) -> None:
         """Close the WAL."""
@@ -50,9 +57,11 @@ class WAL:
             self.fh.close()
 
     def frame(self, frame_idx: int) -> Frame:
-        frame_size = len(c_sqlite3.wal_frame) + self.header.page_size
-        offset = len(c_sqlite3.wal_header) + frame_idx * frame_size
-        return Frame(self, offset)
+        return Frame(self, len(c_sqlite3.wal_header) + frame_idx * self.frame_size)
+
+    def frame_index(self, frame: Frame) -> int:
+        """Return the zero-based index of ``frame`` in this WAL file."""
+        return (frame.offset - len(c_sqlite3.wal_header)) // self.frame_size
 
     def frames(self) -> Iterator[Frame]:
         frame_idx = 0
@@ -88,7 +97,29 @@ class WAL:
             # TODO: Do we want to track these somewhere?
             log.warning("Found leftover %d frames after the last WAL commit", len(frames))
 
+        # Assign every usable commit a stable index once, so Commit objects remain usable on their own.
+        for index, commit in enumerate(commits):
+            if not commit.valid:
+                break
+            commit.index = index
+
         return commits
+
+    @cached_property
+    def valid_commits(self) -> list[Commit]:
+        """Return all usable commits of the current WAL generation, oldest first.
+
+        A WAL reset overwrites the file from the start with frames of a new generation. Frames that
+        remain after the last frame of the new generation belong to an older, superseded generation and
+        cannot be used to reconstruct a historical view from the current database file. Valid frames are
+        therefore a prefix of the WAL: a commit that contains an invalid frame ends the usable history.
+
+        Every usable commit is assigned an ``index`` that is relative to this list.
+
+        References:
+            - https://sqlite.org/wal.html#wal_reset
+        """
+        return [commit for commit in self.commits if commit.index >= 0]
 
     @cached_property
     def checkpoints(self) -> list[Checkpoint]:
@@ -124,7 +155,7 @@ class Frame:
         self.header = c_sqlite3.wal_frame(self.fh)
 
     def __repr__(self) -> str:
-        return f"<Frame page_number={self.page_number} page_count={self.page_count}>"
+        return f"<Frame index={self.wal.frame_index(self)} page_number={self.page_number} page_count={self.page_count}>"
 
     @property
     def valid(self) -> bool:
@@ -153,6 +184,7 @@ class _FrameCollection:
     def __init__(self, wal: WAL, frames: list[Frame]):
         self.wal = wal
         self.frames = frames
+        self.index = -1
 
     def __contains__(self, page: int) -> bool:
         return page in self.page_map
@@ -186,6 +218,16 @@ class Commit(_FrameCollection):
     References:
         - https://sqlite.org/fileformat2.html#wal_file_format
     """
+
+    @property
+    def valid(self) -> bool:
+        """Return whether all frames in this commit belong to the current WAL generation."""
+        return bool(self.frames) and all(frame.valid for frame in self.frames)
+
+    @property
+    def page_count(self) -> int:
+        """Return the size of the database file in pages after this commit."""
+        return self.frames[-1].page_count
 
 
 def checksum(buf: bytes, endian: str = ">") -> tuple[int, int]:

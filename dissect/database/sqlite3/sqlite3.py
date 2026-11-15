@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.database.sqlite3.c_sqlite3 import c_sqlite3
 from dissect.database.sqlite3.exception import (
+    InvalidCommit,
     InvalidDatabase,
     InvalidPageNumber,
     InvalidPageType,
     NoCellData,
+    NoWriteAheadLog,
 )
 from dissect.database.sqlite3.util import parse_table_columns_constraints
 from dissect.database.sqlite3.wal import WAL
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
-    from dissect.database.sqlite3.wal import Checkpoint
+    from dissect.database.sqlite3.wal import Checkpoint, Commit, Frame
 
 ENCODING = {
     1: "utf-8",
@@ -64,14 +66,28 @@ class SQLite3:
     Optionally a WAL file-like object or path can be directly provided to read changes from the WAL (this takes
     priority over the aforementioned WAL lookup). Additionally, a specific checkpoint from the WAL can be applied.
 
+    A read-only view of the database as it was after a specific WAL commit can be created with ``commit``.
+    Such a view resolves every page to the newest version that was visible at that commit: frames from the
+    target commit and all commits before it are applied in order, pages that were not changed by any of those
+    commits are read from the database file, and pages beyond the page count of the target commit are not
+    part of the view. Use :meth:`commit_views` to iterate over all available commit views.
+
+    A commit view starts from the assumption that the database file represents the state at the start of the
+    WAL generation that the target commit belongs to. This is the case for a WAL that accumulated all commits
+    since the last checkpoint. If a checkpoint has written later commits back into the database file while the
+    WAL kept appending, pages that no visible commit changed cannot be proven to be the historical version.
+
     Args:
         fh: The path or file-like object to open a SQLite3 database on.
         wal: The path or file-like object to open a SQLite3 WAL file on.
         checkpoint: The checkpoint to apply from the WAL file. Can be a :class:`Checkpoint` object or an integer index.
+        commit: The commit to create a view for. Can be a :class:`Commit` object or an integer index.
 
     Raises:
         ~dissect.database.sqlite3.exception.InvalidDatabase: If the file-like object does not look like a SQLite3
             database based on the header magic.
+        ~dissect.database.sqlite3.exception.NoWriteAheadLog: If a commit view is requested without a WAL.
+        ~dissect.database.sqlite3.exception.InvalidCommit: If the requested commit is not usable.
 
     References:
         - https://sqlite.org/fileformat2.html
@@ -82,6 +98,7 @@ class SQLite3:
         fh: Path | BinaryIO,
         wal: WAL | Path | BinaryIO | None = None,
         checkpoint: Checkpoint | int | None = None,
+        commit: Commit | int | None = None,
     ):
         if isinstance(fh, Path):
             path = fh
@@ -93,7 +110,12 @@ class SQLite3:
         self.path = path
         self.wal = None
         self.checkpoint = None
+        self.commit = None
+        self._commit_pages: dict[int, tuple[Frame, int]] = {}
+        self._shared = False
 
+        # Always start at the beginning of the file, also when a shared file handle is passed in.
+        self.fh.seek(0)
         self.header = c_sqlite3.header(self.fh)
         if self.header.magic != SQLITE3_HEADER_MAGIC:
             raise InvalidDatabase("Invalid header magic")
@@ -132,8 +154,44 @@ class SQLite3:
         else:
             self.checkpoint = checkpoint
 
-        # Determine the highest page count we have encountered while parsing the SQLite3 header and optionally WAL.
-        self.page_count = max(self.header.page_count, self.wal.highest_page_num) if self.wal else self.header.page_count
+        if checkpoint is not None and commit is not None:
+            raise ValueError("Cannot combine a checkpoint and a commit in one view")
+
+        # If a commit was provided, resolve it and collect the page versions that were visible at that commit.
+        if commit is not None:
+            if not self.wal:
+                raise NoWriteAheadLog("A WAL file is required to create a commit view")
+
+            if isinstance(commit, int):
+                if commit < 0 or commit >= len(self.wal.valid_commits):
+                    raise IndexError("WAL commit index out of range")
+                commit = self.wal.valid_commits[commit]
+
+            if commit.wal is not self.wal:
+                raise ValueError("Commit does not belong to the provided WAL")
+
+            if commit.index < 0:
+                raise InvalidCommit("Commit has no valid index")
+
+            if not commit.valid:
+                raise InvalidCommit("Commit contains frames from a different WAL generation")
+
+            # Commits are only additive within one WAL generation. A newer generation replaces the database
+            # file contents rather than extending an older generation, so a view can only be built from the
+            # frames of the target commit's own generation. Older generations in the WAL were superseded by a
+            # checkpoint and are not reconstructable from the current database file.
+            self.commit = commit
+            for current in self.wal.valid_commits[: commit.index + 1]:
+                for frame in current.frames:
+                    self._commit_pages[frame.page_number] = (frame, current.index)
+
+            # A commit that shrinks the database removes all pages beyond its page count from this view.
+            self.page_count = commit.page_count
+        else:
+            # Determine the highest page count we have encountered while parsing the SQLite3 header and optionally WAL.
+            self.page_count = (
+                max(self.header.page_count, self.wal.highest_page_num) if self.wal else self.header.page_count
+            )
 
         self.page = lru_cache(256)(self.page)
 
@@ -148,13 +206,18 @@ class SQLite3:
         self.close()
         return False
 
+    def _share(self, view: SQLite3) -> SQLite3:
+        """Mark a view as sharing this database's file handles, so it does not close them."""
+        view._shared = True
+        return view
+
     def close(self) -> None:
         """Close the database and WAL."""
-        # Only close DB handle if we opened it using a path
-        if self.path is not None:
+        # Only close DB handle if we opened it using a path, and not when this is a view sharing a parent's handles.
+        if self.path is not None and not self._shared:
             self.fh.close()
 
-        if self.wal is not None:
+        if self.wal is not None and not self._shared:
             self.wal.close()
 
     def checkpoints(self) -> Iterator[SQLite3]:
@@ -163,7 +226,90 @@ class SQLite3:
             return
 
         for checkpoint in self.wal.checkpoints:
-            yield SQLite3(self.fh, self.wal, checkpoint)
+            yield self._share(SQLite3(self.fh, self.wal, checkpoint))
+
+    def commit_view(self, commit: Commit | int) -> SQLite3:
+        """Return a read-only view of the database as it was after the given WAL commit.
+
+        Args:
+            commit: The commit to create a view for. Can be a :class:`Commit` object or an integer index.
+
+        Raises:
+            ~dissect.database.sqlite3.exception.NoWriteAheadLog: If this database has no WAL.
+            ~dissect.database.sqlite3.exception.InvalidCommit: If the commit is not part of a valid history.
+            IndexError: If an integer index is out of range.
+        """
+        if not self.wal:
+            raise NoWriteAheadLog("A WAL file is required to create a commit view")
+
+        return self._share(SQLite3(self.fh, self.wal, commit=commit))
+
+    def commit_views(self) -> Iterator[SQLite3]:
+        """Yield a read-only view of the database for every usable commit in the WAL file, oldest first.
+
+        Commits from a superseded WAL generation (for example before a WAL reset) cannot be reconstructed
+        against the current database file and are skipped.
+        """
+        if not self.wal:
+            return
+
+        for index in range(len(self.wal.valid_commits)):
+            yield self.commit_view(index)
+
+    def commits(self) -> Iterator[SQLite3]:
+        """Yield instances of the database at all available commits in the WAL file, if applicable.
+
+        This is the commit counterpart of :meth:`checkpoints`.
+        """
+        yield from self.commit_views()
+
+    def page_source(self, num: int) -> PageSource:
+        """Return where the data for the given page comes from in this view.
+
+        For a regular database this is the latest committed WAL frame, if any, or the database file.
+        For a commit view it is the newest visible frame at or before the target commit, or the database file.
+
+        Args:
+            num: The page number to describe.
+
+        Raises:
+            ~dissect.database.sqlite3.exception.InvalidPageNumber: If the page number is out of bounds for this view.
+        """
+        if (num < 1 or num > self.page_count) and self.page_count > 0:
+            raise InvalidPageNumber("Page number exceeds boundaries")
+
+        frame = None
+        commit_index = None
+        if self.commit is not None:
+            if (source := self._commit_pages.get(num)) is not None:
+                frame, commit_index = source
+        elif self.checkpoint is not None:
+            if (candidate := self.checkpoint.get(num)) is not None:
+                frame = candidate
+                if self.checkpoint.index >= 0:
+                    commit_index = self.checkpoint.index
+        elif self.wal:
+            for commit in reversed(self.wal.valid_commits):
+                if (candidate := commit.get(num)) is not None:
+                    frame, commit_index = candidate, commit.index
+                    break
+
+        if frame is None:
+            return PageSource(page_number=num, kind=PageSource.DATABASE, page_count=self.page_count)
+
+        return PageSource(
+            page_number=num,
+            kind=PageSource.WAL,
+            page_count=self.page_count,
+            frame_index=self.wal.frame_index(frame) if self.wal else None,
+            commit_index=commit_index,
+            frame=frame,
+        )
+
+    def page_sources(self) -> Iterator[PageSource]:
+        """Yield the source of every page that is part of this view, in page order."""
+        for num in range(1, self.page_count + 1):
+            yield self.page_source(num)
 
     def table(self, name: str) -> Table | None:
         name = name.lower()
@@ -199,6 +345,7 @@ class SQLite3:
         """Retrieve the raw frame data for the given page number.
 
         Reads the page from a checkpoint, if this class was initialized with a WAL checkpoint.
+        Reads the page as it was visible at a specific commit, if this class was initialized with a WAL commit.
 
         If a WAL is available, will first check if the WAL contains a more recent version of the page,
         otherwise it will read the page from the database file.
@@ -212,7 +359,12 @@ class SQLite3:
             raise InvalidPageNumber("Page number exceeds boundaries")
 
         data = None
-        if self.checkpoint is not None and (frame := self.checkpoint.get(num)):
+        if self.commit is not None:
+            # A commit view only sees page versions from the target commit and the commits before it.
+            if (source := self._commit_pages.get(num)) is not None:
+                data = source[0].data
+
+        elif self.checkpoint is not None and (frame := self.checkpoint.get(num)):
             # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
             data = frame.data
 
@@ -231,11 +383,8 @@ class SQLite3:
             return data
 
         # Else we read the page from the database file.
-        if num == 1:  # Page 1 is root, skip header
-            self.fh.seek(len(c_sqlite3.header))
-        else:
-            self.fh.seek((num - 1) * self.page_size)
-        return self.fh.read(self.header.page_size)
+        self.fh.seek(len(c_sqlite3.header) if num == 1 else (num - 1) * self.page_size)
+        return self.fh.read(self.page_size)
 
     def page(self, num: int) -> Page:
         return Page(self, num)
@@ -424,11 +573,75 @@ class Empty:
     pass
 
 
+class PageSource:
+    """Describes where the data of a page in a database view comes from.
+
+    Attributes:
+        page_number: The page number this source describes.
+        kind: Either ``PageSource.WAL`` when the page comes from a WAL frame, or ``PageSource.DATABASE``
+            when it comes from the database file.
+        page_count: The number of pages that are part of the view this source was requested from.
+        frame_index: The zero-based index of the WAL frame that provided this page, if ``kind`` is
+            ``PageSource.WAL``, otherwise ``None``.
+        commit_index: The zero-based index of the WAL commit that made this frame visible, if ``kind`` is
+            ``PageSource.WAL``, otherwise ``None``.
+        frame: The WAL frame that provided this page, if ``kind`` is ``PageSource.WAL``, otherwise ``None``.
+    """
+
+    WAL = "wal"
+    DATABASE = "database"
+
+    def __init__(
+        self,
+        page_number: int,
+        kind: str,
+        page_count: int | None = None,
+        frame_index: int | None = None,
+        commit_index: int | None = None,
+        frame: Frame | None = None,
+    ):
+        self.page_number = page_number
+        self.kind = kind
+        self.page_count = page_count
+        self.frame_index = frame_index
+        self.commit_index = commit_index
+        self.frame = frame
+
+    @property
+    def from_wal(self) -> bool:
+        """Return whether this page comes from a WAL frame."""
+        return self.kind == self.WAL
+
+    @property
+    def from_database(self) -> bool:
+        """Return whether this page comes from the database file."""
+        return self.kind == self.DATABASE
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PageSource):
+            return NotImplemented
+        return (
+            self.page_number == other.page_number
+            and self.kind == other.kind
+            and self.frame_index == other.frame_index
+            and self.commit_index == other.commit_index
+        )
+
+    def __repr__(self) -> str:
+        if self.kind == self.WAL:
+            return (
+                f"<PageSource page={self.page_number} kind={self.kind} "
+                f"frame={self.frame_index} commit={self.commit_index}>"
+            )
+        return f"<PageSource page={self.page_number} kind={self.kind}>"
+
+
 class Page:
     def __init__(self, sqlite: SQLite3, num: int):
         self.sqlite = sqlite
         self.num = num
 
+        self.source = sqlite.page_source(num)
         self.data = sqlite.raw_page(num)
         self.offset = (num - 1) * sqlite.page_size
         buf = memoryview(self.data)

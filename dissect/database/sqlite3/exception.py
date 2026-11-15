@@ -7,6 +7,10 @@ class InvalidDatabase(Error):
     pass
 
 
+class InvalidCommit(Error):
+    pass
+
+
 class InvalidPageNumber(Error):
     pass
 
