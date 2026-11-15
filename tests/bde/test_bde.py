@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import struct
+from binascii import crc32
+from io import BytesIO
 from typing import BinaryIO
 
 import pytest
 
 from dissect.fve.bde import bde, c_bde, is_bde_volume
 from dissect.fve.bde.information import KeyDatum
-from tests._util import open_file, open_file_gz
+from dissect.fve.bde.key import derive_user_key, stretch
+from dissect.fve.exception import InvalidHeaderError, InvalidIntegrityError
+from tests._util import absolute_path, open_file, open_file_gz
+
+
+def _read_gz(name: str) -> bytes:
+    with absolute_path(name).open("rb") as fh:
+        return gzip.decompress(fh.read())
 
 
 def _verify_crypto_stream(bde_obj: bde.BDE) -> None:
@@ -345,3 +355,182 @@ def test_bde_wrong_keys() -> None:
 
         with pytest.raises(ValueError, match="Unable to unlock with BEK"):
             bde_obj.unlock_with_bek(bek_fh)
+
+
+def _corrupt_information_buffer(raw: bytes) -> BytesIO:
+    """Return a copy whose Information buffer is tampered with while the outer CRC32 stays valid.
+
+    The flipped byte lives in the trailing padding of the Information buffer: it is covered by
+    both the CRC32 and the authenticated SHA256 integrity digest, but is not part of any datum
+    and is not inside an AES-CCM ciphertext. Recomputing only the outer CRC32 therefore produces
+    a volume with a valid checksum but a mismatching inner integrity digest.
+    """
+    buf = bytearray(raw)
+    probe = bde.BDE(BytesIO(raw))
+    info = probe.information
+    information_offset = info.offset
+    validation_offset = information_offset + info.size
+
+    # The dataset starts right after the FVE_INFORMATION header; its Size leaves a small,
+    # parser-invisible padding tail that is still part of the hashed Information buffer.
+    tail_offset = information_offset + len(c_bde.c_bde.FVE_INFORMATION) + info.dataset.header.Size
+    buf[tail_offset] ^= 0xFF
+
+    new_crc = crc32(bytes(buf[information_offset : information_offset + info.size])) & 0xFFFFFFFF
+    # FVE_VALIDATION layout: USHORT Size, USHORT Version, ULONG Crc32
+    struct.pack_into("<I", buf, validation_offset + 4, new_crc)
+    return BytesIO(buf)
+
+
+def _corrupt_integrity_datum_mac(raw: bytes) -> BytesIO:
+    """Return a copy whose integrity datum MAC is corrupted while the outer CRC32 stays valid.
+
+    The integrity datum sits after the FVE_VALIDATION structure and is not part of the hashed
+    Information buffer, so corrupting its MAC keeps the outer CRC valid but makes the AES-CCM
+    authenticated decryption of the integrity datum fail.
+    """
+    buf = bytearray(raw)
+    probe = bde.BDE(BytesIO(raw))
+    info = probe.information
+    validation_offset = info.offset + info.size
+
+    integrity_offset = validation_offset + len(c_bde.c_bde.FVE_VALIDATION)
+    # FVE_DATUM header (8 bytes) followed by FVE_NONCE (12 bytes), then the 16-byte MAC
+    mac_offset = integrity_offset + len(c_bde.c_bde.FVE_DATUM) + len(c_bde.c_bde.FVE_NONCE)
+    buf[mac_offset] ^= 0x01
+    return BytesIO(buf)
+
+
+def _decrypted_vmk(bde_obj: bde.BDE, passphrase: str) -> KeyDatum:
+    user_key = derive_user_key(passphrase)
+    vmk = next(bde_obj.information.dataset.find_passphrase_vmk())
+    aes_key = stretch(user_key, vmk.stretch_key(None).salt)
+    return vmk.decrypt(aes_key)
+
+
+@pytest.mark.parametrize(
+    "corruptor",
+    [_corrupt_information_buffer, _corrupt_integrity_datum_mac],
+    ids=["digest_mismatch", "auth_decrypt_failure"],
+)
+def test_bde_integrity_failure_rejected_at_public_entrypoints(corruptor) -> None:
+    """A valid outer CRC32 must not unlock a volume that fails the inner integrity check."""
+    raw = _read_gz("_data/bde/aes_128.bin.gz")
+
+    corrupted = corruptor(raw)
+    bde_obj = bde.BDE(corrupted)
+
+    # The outer checksum is deliberately kept valid, proving the rejection comes from the
+    # cryptographic integrity check rather than the CRC32.
+    assert bde_obj.information.is_valid()
+    assert not bde_obj.unlocked
+
+    vmk = _decrypted_vmk(bde_obj, "password12!@")
+
+    # The low-level entry point, exercised with the correctly derived VMK.
+    with pytest.raises(InvalidIntegrityError):
+        bde_obj.unlock(vmk)
+    assert not bde_obj.unlocked
+
+    # The passphrase entry point must report metadata corruption, never a wrong passphrase.
+    with pytest.raises(InvalidIntegrityError):
+        bde_obj.unlock_with_passphrase("password12!@")
+    assert not bde_obj.unlocked
+
+    # A failed unlock must not leave an openable, half-unlocked volume behind.
+    with pytest.raises(ValueError, match="Volume is locked"):
+        bde_obj.open()
+
+
+def test_bde_integrity_failure_not_misreported_as_wrong_credential() -> None:
+    """Corruption diagnostics must not be rewritten into a generic 'wrong key/password' error."""
+    raw = _read_gz("_data/bde/aes_128.bin.gz")
+
+    # A genuine wrong passphrase still raises the existing, distinct ValueError.
+    good = bde.BDE(BytesIO(raw))
+    with pytest.raises(ValueError, match="Unable to unlock with given passphrase"):
+        good.unlock_with_passphrase("wrongpassword")
+    assert not good.unlocked
+
+    # Metadata corruption raises InvalidIntegrityError, a distinct type from ValueError so it can
+    # never be confused with the wrong-passphrase failure exercised above.
+    corrupted = bde.BDE(_corrupt_information_buffer(raw))
+    with pytest.raises(InvalidIntegrityError):
+        corrupted.unlock_with_passphrase("password12!@")
+    assert not corrupted.unlocked
+
+
+def test_bde_external_key_integrity_failure_propagates() -> None:
+    """The external key path must surface integrity corruption instead of swallowing it."""
+    raw = _read_gz("_data/bde/recovery_key.bin.gz")
+
+    external_key = bytes.fromhex("48a608e5cd6f2112e4b390e38a086a5ec62a1a014afaf092c9117630deecd805")
+    corrupted = bde.BDE(_corrupt_information_buffer(raw))
+
+    with pytest.raises(InvalidIntegrityError):
+        corrupted.unlock_with_external_key(external_key)
+    assert not corrupted.unlocked
+
+
+def test_bde_valid_sample_still_unlocks_after_corruption_rejection() -> None:
+    """Rejecting a corrupted copy must not affect an independently parsed, valid sample."""
+    raw = _read_gz("_data/bde/aes_128.bin.gz")
+
+    # First, a corrupted instance is rejected through the public entry point.
+    corrupted = bde.BDE(_corrupt_information_buffer(raw))
+    with pytest.raises(InvalidIntegrityError):
+        corrupted.unlock_with_passphrase("password12!@")
+    assert not corrupted.unlocked
+
+    # A fresh, independent instance of the unmodified sample still reads the original plaintext.
+    valid = bde.BDE(BytesIO(raw))
+    valid.unlock_with_passphrase("password12!@")
+    assert valid.unlocked
+
+    stream = valid.open()
+    assert stream.read(512)[3:11] == b"NTFS    "
+    stream.seek(0x2000)
+    assert stream.read(512)[:8] == b"FILE0\x00\x03\x00"
+
+
+def test_bde_legacy_volume_without_integrity_datum_uses_crc() -> None:
+    """Legacy (version 1) volumes have no integrity datum and keep relying on the CRC32."""
+    raw = _read_gz("_data/bde/vista.bin.gz")
+    legacy = bde.BDE(BytesIO(raw))
+
+    assert legacy.version == 1
+    assert legacy.information.validation.integrity_check is None
+
+    legacy.unlock_with_recovery_password("517506-503998-044583-576191-587004-635965-501270-087802")
+    assert legacy.unlocked
+    assert legacy.open().read(512)[3:11] == b"NTFS    "
+
+    # Without an integrity datum the CRC32 is the only guard. Recompute it after tampering so the
+    # volume still parses, then confirm the legacy path cannot detect the change: this documents
+    # that old formats genuinely lack the stronger authenticated check (CRC-only), while modern
+    # volumes are protected by the integrity datum tests above.
+    info = legacy.information
+    tampered = bytearray(raw)
+    tampered[info.offset + 0x80] ^= 0xFF
+    fixed_crc = crc32(bytes(tampered[info.offset : info.offset + info.size])) & 0xFFFFFFFF
+    validation_offset = info.offset + info.size
+    struct.pack_into("<I", tampered, validation_offset + 4, fixed_crc)
+
+    legacy_tampered = bde.BDE(BytesIO(tampered))
+    assert legacy_tampered.information.is_valid()
+    assert legacy_tampered.information.validation.integrity_check is None
+
+    # With a valid CRC the legacy integrity entry point passes (it has no authenticated digest to
+    # compare against); a failed CRC instead raises InvalidIntegrityError.
+    legacy_tampered.information.check_integrity(b"\x00" * 32)
+
+    info_broken = bde.BDE(BytesIO(bytearray(raw))).information
+    info_broken._valid_checksum = False
+    with pytest.raises(InvalidIntegrityError, match="CRC32 validation failed"):
+        info_broken.check_integrity(b"\x00" * 32)
+
+    # A genuinely broken CRC (left unfixed) is rejected up front as an invalid information block.
+    broken = bytearray(raw)
+    broken[info.offset + 0x80] ^= 0xFF
+    with pytest.raises(InvalidHeaderError):
+        bde.BDE(BytesIO(broken))

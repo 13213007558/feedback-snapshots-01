@@ -32,7 +32,7 @@ from dissect.fve.bde.eow import EowInformation
 from dissect.fve.bde.information import Dataset, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
 from dissect.fve.crypto import create_cipher
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidHeaderError, InvalidIntegrityError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -153,6 +153,9 @@ class BDE:
 
     def unlock(self, key: KeyDatum | bytes) -> BDE:
         """Unlock this volume with the specified encryption key."""
+        # Validate metadata integrity before touching any key material or state. This raises
+        # InvalidIntegrityError on a digest mismatch or failed authenticated decryption, so a
+        # volume whose outer CRC is valid but whose inner integrity check fails never unlocks.
         self.information.check_integrity(key)
 
         if not (fvek := self.information.dataset.find_fvek()):
@@ -162,6 +165,8 @@ class BDE:
         if not isinstance(fvek, KeyDatum):
             raise TypeError("Invalid unboxed FVEK")
 
+        # Only commit the unlocked state once every validation and decryption step has succeeded,
+        # so a failure can never leave a partially unlocked, openable volume behind.
         if isinstance(key, KeyDatum):
             self._vmk_datum = key
             self._vmk = key.data
@@ -219,7 +224,11 @@ class BDE:
             try:
                 decrypted_key = vmk.decrypt(key)
                 return self.unlock(decrypted_key)
-            except Exception:  # noqa: PERF203
+            except InvalidIntegrityError:
+                # Metadata corruption must surface as such, not as a wrong external key.
+                raise
+            except ValueError:  # noqa: PERF203
+                # This VMK could not be decrypted with the supplied key; try the next one.
                 pass
         raise ValueError("Unable to unlock with external key")
 

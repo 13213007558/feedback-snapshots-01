@@ -21,7 +21,7 @@ from dissect.fve.bde.c_bde import (
     c_bde,
 )
 from dissect.fve.bde.c_tpm import c_tpm
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidHeaderError, InvalidIntegrityError
 
 if TYPE_CHECKING:
     import datetime
@@ -70,12 +70,32 @@ class Information:
         # TODO add sha256 check
         return self._valid_checksum
 
-    def check_integrity(self, key: KeyDatum | bytes) -> bool:
-        """Check the integrity of this Information block."""
-        if self.validation.integrity_check:
+    def check_integrity(self, key: KeyDatum | bytes) -> None:
+        """Check the cryptographic integrity of this Information block.
+
+        On modern (version >= 2) volumes an AES-CCM encrypted integrity datum holds the SHA256
+        digest of the entire Information buffer. A correct outer CRC32 alone is not sufficient:
+        a tampered buffer can carry a recomputed CRC while its authenticated digest no longer
+        matches. This method therefore raises :class:`InvalidIntegrityError` when either the
+        authenticated decryption of the integrity datum fails or the resulting digest does not
+        match, so that a caller can never mistake metadata corruption for a wrong key.
+
+        On legacy volumes without an integrity datum, only the outer CRC32 is available.
+        """
+        if not self.validation.integrity_check:
+            if not self.is_valid():
+                raise InvalidIntegrityError("BDE information CRC32 validation failed")
+            return
+
+        try:
             datum = self.validation.integrity_check.unbox(key)
-            return hashlib.sha256(self._buf).digest() == datum.data
-        return self.is_valid()
+        except ValueError as e:
+            # A failed AES-CCM authentication means the integrity datum (or the supplied key)
+            # cannot be trusted; do not let this surface as a "wrong passphrase" error.
+            raise InvalidIntegrityError("BDE information integrity datum authentication failed") from e
+
+        if hashlib.sha256(self._buf).digest() != datum.data:
+            raise InvalidIntegrityError("BDE information integrity digest mismatch")
 
     @property
     def size(self) -> int:
