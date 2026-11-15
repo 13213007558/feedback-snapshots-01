@@ -1,0 +1,1250 @@
+{
+  "cases": [
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACcAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAnAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "valid NRB parses records, terminator, then options",
+      "endianness": "<",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "baseline",
+      "id": "le-nrb-records-and-options",
+      "name": "nrb-records-and-options"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAgAEAAAAAAADABEAAkFBQUFBQUFBQUFBQUFBQUEAAACXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB packet padding is not part of packet data nor options",
+      "endianness": "<",
+      "expect": {
+        "block_index": 2,
+        "kind": "ok",
+        "options": {
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": {
+            "__epbflags__": 0
+          },
+          "3": {
+            "__pair__": [
+              2,
+              {
+                "__bytes__": "QUFBQUFBQUFBQUFBQUFBQQ=="
+              }
+            ]
+          }
+        },
+        "packet_data": {
+          "__bytes__": "cGFja2V0LWRhdGEtMDEz"
+        }
+      },
+      "group": "baseline",
+      "id": "le-epb-padding-then-options",
+      "name": "epb-padding-then-options"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAQAAACcAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAnAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAgAEAAAAAAADABEAAkFBQUFBQUFBQUFBQUFBQUEAAACXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "a valid NRB does not consume the next block",
+      "endianness": "<",
+      "expect": {
+        "block_types": [
+          "SectionHeader",
+          "InterfaceDescription",
+          "NameResolution",
+          "EnhancedPacket"
+        ],
+        "kind": "ok"
+      },
+      "group": "baseline",
+      "id": "le-nrb-then-epb",
+      "name": "nrb-then-epb"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACoAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAQASlVOSwAAAAAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAqAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "end-of-records marker length must be zero; its value must not be consumed",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "group": "record-terminator",
+      "id": "le-end-record-length-4",
+      "name": "end-record-length-4"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACkAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAIAQUIAAAAAAAABAA8AbnJiIGNvbW1lbnQgMTA5AAIADwBkbnMtMTUxLmV4YW1wbGUAlzsJAFUqPSU6aS87KQAAAAAAAACkAAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "aligned 2-byte payload after a non-zero end record must not be skipped",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "group": "record-terminator",
+      "id": "le-end-record-length-2-aligned-payload",
+      "name": "end-record-length-2-aligned-payload"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABcAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwBcAAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record list must end with an explicit marker, not stream exhaustion",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "group": "record-terminator",
+      "id": "le-missing-end-record-at-body-end",
+      "name": "missing-end-record-at-body-end"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACYAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwABAA8AbnJiIGNvbW1lbnQgMTA5AAIADwBkbnMtMTUxLmV4YW1wbGUAlzsJAFUqPSU6aS87KQAAAAAAAACYAAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "option bytes have no record header shape and must not be decoded as name records",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution record names must be NUL-terminated"
+      },
+      "group": "record-terminator",
+      "id": "le-missing-end-record-options-as-records",
+      "name": "missing-end-record-options-as-records"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABgAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwB3dwAAYAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "a partial 3-byte record header is padded as an unknown record, then the still-unterminated list must fail",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "group": "record-terminator",
+      "id": "le-missing-end-record-partial-header",
+      "name": "missing-end-record-partial-header"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABkAAAAAQASAH8AAAFsb2NhbGhvc3QAAAAAAAAAAAAAAAEADwBucmIgY29tbWVudCAxMDkAAgAPAGRucy0xNTEuZXhhbXBsZQCXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record length that absorbs the terminator NULs must not fabricate names",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "record contains empty or extra trailing name"
+      },
+      "group": "record-length",
+      "id": "le-record-length-swallows-terminator",
+      "name": "record-length-swallows-terminator"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABgAAAAAQAPAH8AAAFsb2NhbGhvc3QAAAAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAYAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record length ending inside alignment padding leaves a stray NUL in the name",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "record contains empty or extra trailing name"
+      },
+      "group": "record-length",
+      "id": "le-record-length-ends-in-alignment",
+      "name": "record-length-ends-in-alignment"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAAAcAAAAAQABAH8AAAAAAAAAAAAAABwAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "IPv4 record must contain at least the address; no negative slicing",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv4 name resolution record is too short"
+      },
+      "group": "record-payload",
+      "id": "le-ipv4-record-too-short",
+      "name": "ipv4-record-too-short"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAAAcAAAAAgADACABAAAAAAAAAAAAABwAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "IPv6 record must contain at least the address; no negative slicing",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv6 name resolution record is too short"
+      },
+      "group": "record-payload",
+      "id": "le-ipv6-record-too-short",
+      "name": "ipv6-record-too-short"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAAAkAAAAAQAKAH8AAAH//mJhZAAAAAAAAAAAAAAAJAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "undecodable record names fail instead of becoming fake names",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Invalid UTF-8 name"
+      },
+      "group": "record-payload",
+      "id": "le-ipv4-name-not-utf8",
+      "name": "ipv4-name-not-utf8"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABsAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAHAGNvbW1lbnQAbAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "options must end with opt_endofopt, not stream exhaustion",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "option-terminator",
+      "id": "le-missing-opt-endofopt",
+      "name": "missing-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACsAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAABAAcAY29tbWVudAAAAAQASlVOS6wAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "opt_endofopt length must be zero; its value must not be consumed",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "opt_endofopt must have length 0"
+      },
+      "group": "option-terminator",
+      "id": "le-opt-endofopt-length-4",
+      "name": "opt-endofopt-length-4"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACkAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAlzsEAGxhdGWkAAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "everything after opt_endofopt is residual, not another option",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "group": "option-terminator",
+      "id": "le-bytes-after-opt-endofopt",
+      "name": "bytes-after-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAABwAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAgBAAGRucy5leGFtcGxlAHAAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "an option length cannot claim bytes outside the block body",
+      "endianness": "<",
+      "expect": {
+        "exception": "TruncatedFile",
+        "kind": "error",
+        "message": "only got"
+      },
+      "group": "option-length",
+      "id": "le-option-length-overruns-body",
+      "name": "option-length-overruns-body"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAAB0AAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAlzsDAGFiYwABAAQAbmV4dAAAAAB0AAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "alignment padding belongs to the declared length, not to the next option",
+      "endianness": "<",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "next",
+          "15255": {
+            "__bytes__": "YWJj"
+          }
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "option-length",
+      "id": "le-unknown-option-length-misaligned",
+      "name": "unknown-option-length-misaligned"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAACcAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAnAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "unknown record and option codes survive with their raw values",
+      "endianness": "<",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "unknown-items",
+      "id": "le-unknown-record-and-option-retained",
+      "name": "unknown-record-and-option-retained"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAQAAAB0AAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAlzsDAG9uZQCXOwMAdHdvAAAAAAB0AAAA",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "unknown options are not schema entries; repetition must not KeyError",
+      "endianness": "<",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options_all": {
+          "15255": [
+            {
+              "__bytes__": "b25l"
+            },
+            {
+              "__bytes__": "dHdv"
+            }
+          ]
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "unknown-items",
+      "id": "le-repeated-unknown-option-retained",
+      "name": "repeated-unknown-option-retained"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAgAEAAAAAAADABEAAkFBQUFBQUFBQUFBQUFBQUEAAACXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB options after the padded packet preserve unknown codes",
+      "endianness": "<",
+      "expect": {
+        "block_index": 2,
+        "kind": "ok",
+        "options": {
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          }
+        },
+        "packet_data": {
+          "__bytes__": "cGFja2V0LWRhdGEtMDEz"
+        }
+      },
+      "group": "epb-options",
+      "id": "le-epb-unknown-option-retained",
+      "name": "epb-unknown-option-retained"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAYAAAA8AAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAQAHAGNvbW1lbnQAPAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB options also require an explicit terminator",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "epb-options",
+      "id": "le-epb-missing-opt-endofopt",
+      "name": "epb-missing-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAYAAABIAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAQAHAGNvbW1lbnQAAAAAAJc7BABsYXRlSAAAAA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB alignment padding does not license bytes after opt_endofopt",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "group": "epb-options",
+      "id": "le-epb-bytes-after-opt-endofopt",
+      "name": "epb-bytes-after-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAQAAACcAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAPAG5yYiBjb21tZW50IDEwOQACAA8AZG5zLTE1MS5leGFtcGxlAJc7CQBVKj0lOmkvOykAAAAAAAAAnAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAgAEAAAAAAADABEAAkFBQUFBQUFBQUFBQUFBQUEAAACXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "valid NRB leaves the next block framed correctly",
+      "endianness": "<",
+      "expect": {
+        "block_types": [
+          "SectionHeader",
+          "InterfaceDescription",
+          "NameResolution",
+          "EnhancedPacket"
+        ],
+        "kind": "ok"
+      },
+      "group": "next-block",
+      "id": "le-valid-nrb-then-valid-epb",
+      "name": "valid-nrb-then-valid-epb"
+    },
+    {
+      "bytes": "Cg0NChwAAABNPCsaAQAAAP//////////HAAAAAEAAAAYAAAAAQAAAP//AAAAAAAAGAAAAAQAAABsAAAAAQAVAH8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAIAHgAgAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAABoqCwBabyZ2NDsxajw6YwAAAAAAAQAHAGNvbW1lbnQAbAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA8AAABwYWNrZXQtZGF0YS0wMTMAAgAEAAAAAAADABEAAkFBQUFBQUFBQUFBQUFBQUEAAACXOwkAVSo9JTppLzspAAAAAAAAAGQAAAA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "malformed NRB fails instead of yielding the following EPB as NRB data",
+      "endianness": "<",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "next-block",
+      "id": "le-bad-nrb-then-valid-epb",
+      "name": "bad-nrb-then-valid-epb"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACcAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAnA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "valid NRB parses records, terminator, then options",
+      "endianness": ">",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "baseline",
+      "id": "be-nrb-records-and-options",
+      "name": "nrb-records-and-options"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAIABAAAAAAAAwARAkFBQUFBQUFBQUFBQUFBQUEAAAA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB packet padding is not part of packet data nor options",
+      "endianness": ">",
+      "expect": {
+        "block_index": 2,
+        "kind": "ok",
+        "options": {
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": {
+            "__epbflags__": 0
+          },
+          "3": {
+            "__pair__": [
+              2,
+              {
+                "__bytes__": "QUFBQUFBQUFBQUFBQUFBQQ=="
+              }
+            ]
+          }
+        },
+        "packet_data": {
+          "__bytes__": "cGFja2V0LWRhdGEtMDEz"
+        }
+      },
+      "group": "baseline",
+      "id": "be-epb-padding-then-options",
+      "name": "epb-padding-then-options"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAQAAACcAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAnAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAIABAAAAAAAAwARAkFBQUFBQUFBQUFBQUFBQUEAAAA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "a valid NRB does not consume the next block",
+      "endianness": ">",
+      "expect": {
+        "block_types": [
+          "SectionHeader",
+          "InterfaceDescription",
+          "NameResolution",
+          "EnhancedPacket"
+        ],
+        "kind": "ok"
+      },
+      "group": "baseline",
+      "id": "be-nrb-then-epb",
+      "name": "nrb-then-epb"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACoAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAESlVOSwAAAAAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAqA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "end-of-records marker length must be zero; its value must not be consumed",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "group": "record-terminator",
+      "id": "be-end-record-length-4",
+      "name": "end-record-length-4"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACkAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAACQUIAAAAAAAAAAQAPbnJiIGNvbW1lbnQgMTA5AAACAA9kbnMtMTUxLmV4YW1wbGUAO5cACVUqPSU6aS87KQAAAAAAAAAAAACk",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "aligned 2-byte payload after a non-zero end record must not be skipped",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "group": "record-terminator",
+      "id": "be-end-record-length-2-aligned-payload",
+      "name": "end-record-length-2-aligned-payload"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABcAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAABc",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record list must end with an explicit marker, not stream exhaustion",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "group": "record-terminator",
+      "id": "be-missing-end-record-at-body-end",
+      "name": "missing-end-record-at-body-end"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACYAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAQAPbnJiIGNvbW1lbnQgMTA5AAACAA9kbnMtMTUxLmV4YW1wbGUAO5cACVUqPSU6aS87KQAAAAAAAAAAAACY",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "option bytes have no record header shape and must not be decoded as name records",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution record names must be NUL-terminated"
+      },
+      "group": "record-terminator",
+      "id": "be-missing-end-record-options-as-records",
+      "name": "missing-end-record-options-as-records"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABgAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwB3dwAAAAAAYA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "a partial 3-byte record header is padded as an unknown record, then the still-unterminated list must fail",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "group": "record-terminator",
+      "id": "be-missing-end-record-partial-header",
+      "name": "missing-end-record-partial-header"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABkAAEAEn8AAAFsb2NhbGhvc3QAAAAAAAAAAAAAAAABAA9ucmIgY29tbWVudCAxMDkAAAIAD2Rucy0xNTEuZXhhbXBsZQA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record length that absorbs the terminator NULs must not fabricate names",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "record contains empty or extra trailing name"
+      },
+      "group": "record-length",
+      "id": "be-record-length-swallows-terminator",
+      "name": "record-length-swallows-terminator"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABgAAEAD38AAAFsb2NhbGhvc3QAAAAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAYA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "record length ending inside alignment padding leaves a stray NUL in the name",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "record contains empty or extra trailing name"
+      },
+      "group": "record-length",
+      "id": "be-record-length-ends-in-alignment",
+      "name": "record-length-ends-in-alignment"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAAAcAAEAAX8AAAAAAAAAAAAAAAAAABw=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "IPv4 record must contain at least the address; no negative slicing",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv4 name resolution record is too short"
+      },
+      "group": "record-payload",
+      "id": "be-ipv4-record-too-short",
+      "name": "ipv4-record-too-short"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAAAcAAIAAyABAAAAAAAAAAAAAAAAABw=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "IPv6 record must contain at least the address; no negative slicing",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv6 name resolution record is too short"
+      },
+      "group": "record-payload",
+      "id": "be-ipv6-record-too-short",
+      "name": "ipv6-record-too-short"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAAAkAAEACn8AAAH//mJhZAAAAAAAAAAAAAAAAAAAJA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "undecodable record names fail instead of becoming fake names",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Invalid UTF-8 name"
+      },
+      "group": "record-payload",
+      "id": "be-ipv4-name-not-utf8",
+      "name": "ipv4-name-not-utf8"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABsAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAB2NvbW1lbnQAAAAAbA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "options must end with opt_endofopt, not stream exhaustion",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "option-terminator",
+      "id": "be-missing-opt-endofopt",
+      "name": "missing-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACsAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAQAHY29tbWVudAAAAAAESlVOSwAAAKw=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "opt_endofopt length must be zero; its value must not be consumed",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "opt_endofopt must have length 0"
+      },
+      "group": "option-terminator",
+      "id": "be-opt-endofopt-length-4",
+      "name": "opt-endofopt-length-4"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACkAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAO5cABGxhdGUAAACk",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "everything after opt_endofopt is residual, not another option",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "group": "option-terminator",
+      "id": "be-bytes-after-opt-endofopt",
+      "name": "bytes-after-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAABwAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAIAQGRucy5leGFtcGxlAAAAAHA=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "an option length cannot claim bytes outside the block body",
+      "endianness": ">",
+      "expect": {
+        "exception": "TruncatedFile",
+        "kind": "error",
+        "message": "only got"
+      },
+      "group": "option-length",
+      "id": "be-option-length-overruns-body",
+      "name": "option-length-overruns-body"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAAB0AAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAO5cAA2FiYwAAAQAEbmV4dAAAAAAAAAB0",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "alignment padding belongs to the declared length, not to the next option",
+      "endianness": ">",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "next",
+          "15255": {
+            "__bytes__": "YWJj"
+          }
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "option-length",
+      "id": "be-unknown-option-length-misaligned",
+      "name": "unknown-option-length-misaligned"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAACcAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAnA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "unknown record and option codes survive with their raw values",
+      "endianness": ">",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "unknown-items",
+      "id": "be-unknown-record-and-option-retained",
+      "name": "unknown-record-and-option-retained"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAQAAAB0AAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAO5cAA29uZQA7lwADdHdvAAAAAAAAAAB0",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "unknown options are not schema entries; repetition must not KeyError",
+      "endianness": ">",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options_all": {
+          "15255": [
+            {
+              "__bytes__": "b25l"
+            },
+            {
+              "__bytes__": "dHdv"
+            }
+          ]
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "group": "unknown-items",
+      "id": "be-repeated-unknown-option-retained",
+      "name": "repeated-unknown-option-retained"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAIABAAAAAAAAwARAkFBQUFBQUFBQUFBQUFBQUEAAAA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB options after the padded packet preserve unknown codes",
+      "endianness": ">",
+      "expect": {
+        "block_index": 2,
+        "kind": "ok",
+        "options": {
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          }
+        },
+        "packet_data": {
+          "__bytes__": "cGFja2V0LWRhdGEtMDEz"
+        }
+      },
+      "group": "epb-options",
+      "id": "be-epb-unknown-option-retained",
+      "name": "epb-unknown-option-retained"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAYAAAA8AAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAEAB2NvbW1lbnQAAAAAPA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB options also require an explicit terminator",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "epb-options",
+      "id": "be-epb-missing-opt-endofopt",
+      "name": "epb-missing-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAYAAABIAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAEAB2NvbW1lbnQAAAAAADuXAARsYXRlAAAASA==",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "EPB alignment padding does not license bytes after opt_endofopt",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "group": "epb-options",
+      "id": "be-epb-bytes-after-opt-endofopt",
+      "name": "epb-bytes-after-opt-endofopt"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAQAAACcAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAD25yYiBjb21tZW50IDEwOQAAAgAPZG5zLTE1MS5leGFtcGxlADuXAAlVKj0lOmkvOykAAAAAAAAAAAAAnAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAIABAAAAAAAAwARAkFBQUFBQUFBQUFBQUFBQUEAAAA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "valid NRB leaves the next block framed correctly",
+      "endianness": ">",
+      "expect": {
+        "block_types": [
+          "SectionHeader",
+          "InterfaceDescription",
+          "NameResolution",
+          "EnhancedPacket"
+        ],
+        "kind": "ok"
+      },
+      "group": "next-block",
+      "id": "be-valid-nrb-then-valid-epb",
+      "name": "valid-nrb-then-valid-epb"
+    },
+    {
+      "bytes": "Cg0NCgAAABwaKzxNAAEAAP//////////AAAAHAAAAAEAAAAYAAEAAAAA//8AAAAAAAAAGAAAAAQAAABsAAEAFX8AAAFob3N0LTIyOC5leGFtcGxlAAAAAAACAB4gAQ24AAAAAAAAAAAAAAABdjYtMzcuZXhhbXBsZQAAACoaAAtabyZ2NDsxajw6YwAAAAAAAAEAB2NvbW1lbnQAAAAAbAAAAAYAAABkAAAAAAAAAAEAAAACAAAADwAAAA9wYWNrZXQtZGF0YS0wMTMAAAIABAAAAAAAAwARAkFBQUFBQUFBQUFBQUFBQUEAAAA7lwAJVSo9JTppLzspAAAAAAAAAAAAAGQ=",
+      "contribution": {
+        "unknown_option_code": 15255,
+        "unknown_option_payload": "U*=%:i/;)",
+        "unknown_record_code": 10778,
+        "unknown_record_payload": "Zo&v4;1j<:c"
+      },
+      "criterion": "malformed NRB fails instead of yielding the following EPB as NRB data",
+      "endianness": ">",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "group": "next-block",
+      "id": "be-bad-nrb-then-valid-epb",
+      "name": "bad-nrb-then-valid-epb"
+    }
+  ],
+  "description": "NRB record/option and EPB padding/option boundary cases; every outer block length and trailer is valid",
+  "seed": 1592598566
+}

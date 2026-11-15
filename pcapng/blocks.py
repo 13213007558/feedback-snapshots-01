@@ -47,7 +47,10 @@ class Block(object):
     def __init__(self, **kwargs):
         if "raw" in kwargs:
             self._decoded = struct_decode(
-                self.schema, io.BytesIO(kwargs["raw"]), kwargs["endianness"]
+                self.schema,
+                io.BytesIO(kwargs["raw"]),
+                kwargs["endianness"],
+                require_exhausted=True,
             )
         else:
             self._decoded = {}

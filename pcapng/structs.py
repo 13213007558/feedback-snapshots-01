@@ -383,6 +383,18 @@ class OptionsField(StructField):
         return "{0}({1!r})".format(self.__class__.__name__, self.options_schema)
 
 
+class _EndOfList(StreamEmpty):
+    """
+    Internal marker raised by a list subfield when it has consumed the
+    explicit end-of-list marker.
+
+    This is a ``StreamEmpty`` subclass for backwards compatibility, but
+    :py:class:`ListField` only treats this specific marker as a normal end.
+    Actually running out of block data while an item is being decoded is a
+    structural error, not a terminator.
+    """
+
+
 class PacketBytes(StructField):
     """
     Field containing some "packet data", used in the Packet
@@ -429,10 +441,10 @@ class ListField(StructField):
     Used for packets containing multiple "items", such as
     :py:class:`~pcapng.blocks.NameResolution`.
 
-    It will keep loading data using a subfield until a
-    :py:exc:`~pcapng.exceptions.StreamEmpty` excaption is raised, indicating
-    we reached the end of data (note that a sub-field might even "simulate"
-    a stream end once it reaches some end marker in the file).
+    It keeps loading values using a subfield until the subfield encounters
+    its explicit end-of-list marker. Running out of block data instead of
+    finding that marker is a structural error: the following block fields
+    (options, for instance) must never be decoded as list items.
 
     Values are returned in a list.
 
@@ -452,8 +464,14 @@ class ListField(StructField):
         while True:
             try:
                 yield self.subfield.load(stream, endianness)
-            except StreamEmpty:
+            except _EndOfList:
                 return
+            except StreamEmpty:
+                # The end-of-list marker is required; an empty stream here
+                # means the list was unterminated and could otherwise be
+                # confused with the following block fields (e.g. options).
+                if _on_missing_record_terminator():
+                    return
 
     def encode(self, list_data, stream, endianness):
         for rec in list_data:
@@ -462,6 +480,102 @@ class ListField(StructField):
 
     def __repr__(self):
         return "{0}({1!r})".format(self.__class__.__name__, self.subfield)
+
+
+def _check_zero_length(kind, length):
+    """Reject a terminated list marker that claims a payload.
+
+    Kept as a named function on purpose: the structural tests disable each
+    check individually to prove the corpus actually pins the guard.
+    """
+    if length != 0:
+        raise CorruptedFile("{0} must have length 0, got {1}".format(kind, length))
+
+
+def _check_min_record_length(kind, length, minimum):
+    """Reject an address record too short to contain its address."""
+    if length < minimum:
+        raise CorruptedFile(
+            "{0} is too short: {1} bytes (need at least {2})".format(
+                kind, length, minimum
+            )
+        )
+
+
+def _on_missing_record_terminator():
+    """Handle a record list that ran out of data without its terminator.
+
+    Returning true would treat exhaustion as the end of the list (the old,
+    unsafe behaviour that lets option bytes be decoded as records). The
+    default refuses with a structural error.
+    """
+    raise CorruptedFile("Missing explicit end-of-list marker")
+
+
+def _on_unterminated_options():
+    """Handle an options list that ran out of data without opt_endofopt.
+
+    Returning true would treat exhaustion as the end of the list, which lets
+    the block trailer or alignment padding be decoded as further options. The
+    default refuses with a structural error.
+    """
+    raise CorruptedFile("Unterminated options list (missing opt_endofopt)")
+
+
+def _check_no_trailing_bytes(stream):
+    """Reject bytes left over after a block's last schema field."""
+    if stream.read(1):
+        raise CorruptedFile("Trailing bytes after the last block field")
+
+
+def _check_names_utf8(raw_name):
+    try:
+        return raw_name.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CorruptedFile(
+            "Invalid UTF-8 name in name resolution record"
+        ) from exc
+
+
+def _check_nrb_names_shape(data):
+    """Validate the names region of an IPv4/IPv6 name resolution record.
+
+    The spec requires one or more zero-terminated strings. Checking the
+    terminator is what stops a record length from absorbing the next option
+    header (or the record terminator) and producing a plausible fake name.
+    """
+    if not data:
+        raise CorruptedFile("Name resolution record contains no names")
+    if not data.endswith(b"\x00"):
+        raise CorruptedFile(
+            "Name resolution record names must be NUL-terminated"
+        )
+    if data.endswith(b"\x00\x00"):
+        raise CorruptedFile(
+            "Name resolution record contains empty or extra trailing name"
+        )
+
+
+def _decode_nrb_names(data):
+    """
+    Decode the zero-terminated DNS names in an NRB record payload.
+
+    The declared record length must cover exactly the names, not the
+    alignment padding that follows them or bytes from the next structure.
+    """
+    _check_nrb_names_shape(data)
+
+    names = []
+    for raw_name in data.split(b"\x00"):
+        if raw_name == b"":
+            continue
+        name = _check_names_utf8(raw_name)
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+            raise CorruptedFile(
+                "Name resolution record name contains control characters"
+            )
+        names.append(name)
+    return names
 
 
 class NameResolutionRecordField(StructField):
@@ -492,22 +606,31 @@ class NameResolutionRecordField(StructField):
         record_length = read_int(stream, 16, False, endianness)
 
         if record_type == NRB_RECORD_END:
-            raise StreamEmpty("End marker reached")
+            _check_zero_length("Name resolution end record", record_length)
+            raise _EndOfList("End marker reached")
 
         data = read_bytes_padded(stream, record_length)
 
         if record_type == NRB_RECORD_IPv4:
+            _check_min_record_length(
+                "IPv4 name resolution record", record_length, 4
+            )
+            address_data, names_data = data[:4], data[4:]
             return {
                 "type": record_type,
-                "address": unpack_ipv4(data[:4]),
-                "names": [x.decode() for x in data[4:].split(b"\x00") if x != b""],
+                "address": unpack_ipv4(address_data),
+                "names": _decode_nrb_names(names_data),
             }
 
         if record_type == NRB_RECORD_IPv6:
+            _check_min_record_length(
+                "IPv6 name resolution record", record_length, 16
+            )
+            address_data, names_data = data[:16], data[16:]
             return {
                 "type": record_type,
-                "address": unpack_ipv6(data[:16]),
-                "names": [x.decode() for x in data[16:].split(b"\x00") if x != b""],
+                "address": unpack_ipv6(address_data),
+                "names": _decode_nrb_names(names_data),
             }
 
         return {"type": record_type, "raw": data}
@@ -553,19 +676,32 @@ def read_options(stream, endianness):
     """
 
     def _iter_read_options(stream, endianness):
+        start_position = stream.tell()
         while True:
+            position = stream.tell()
             try:
                 option_code = read_int(stream, 16, False, endianness)
                 option_length = read_int(stream, 16, False, endianness)
 
                 if option_code == 0:  # End of options
+                    _check_zero_length("opt_endofopt", option_length)
                     return
 
                 payload = read_bytes_padded(stream, option_length)
                 yield option_code, payload
 
             except StreamEmpty:
-                return
+                if position == stream.tell():
+                    # No option header bytes were consumed at all. The options
+                    # field is optional, so a body that ends right after the
+                    # fixed-size fields is legal.
+                    if position == start_position:
+                        return
+                    if _on_unterminated_options():
+                        return
+                # A partially consumed header is never a legal terminator.
+                if _on_unterminated_options():
+                    return
 
     return list(_iter_read_options(stream, endianness))
 
@@ -812,11 +948,12 @@ class Options(Mapping):
 
         for code, value in data:
             self.data[code].append(self._decode(code, value))
-            if len(self.data[code]) > 1 and not self.schema[code].multiple:
-                try:
-                    name = "{} '{}'".format(code, self.schema[code].name)
-                except KeyError:
-                    name = "{} (unknown)".format(code)
+            if (
+                len(self.data[code]) > 1
+                and code in self.schema
+                and not self.schema[code].multiple
+            ):
+                name = "{} '{}'".format(code, self.schema[code].name)
                 # This code gets called when reading a file. We don't want
                 # to potentially abort in this case, just warn
                 strictness.warn(
@@ -825,7 +962,11 @@ class Options(Mapping):
 
     def _check_multiples(self, code):
         """Check if a non-repeatable option is repeated"""
-        if len(self.data[code]) > 1 and not self.schema[code].multiple:
+        if (
+            len(self.data[code]) > 1
+            and code in self.schema
+            and not self.schema[code].multiple
+        ):
             strictness.problem(
                 "repeated option {} '{}' not permitted by pcapng spec".format(
                     code, self._get_name_alias(code)
@@ -1004,7 +1145,7 @@ class Options(Mapping):
         raise ValueError("Unsupported field type: {0}".format(ftype))
 
 
-def struct_decode(schema, stream, endianness="="):
+def struct_decode(schema, stream, endianness="=", require_exhausted=False):
     """
     Decode structured data from a stream, following a schema.
 
@@ -1023,6 +1164,11 @@ def struct_decode(schema, stream, endianness="="):
         endianness specifier, as accepted by Python struct module
         (one of ``<>!=``, defaults to ``=``).
 
+    :param require_exhausted:
+        if true, raise :py:exc:`~pcapng.exceptions.CorruptedFile` when bytes
+        remain after the last schema field. Used when decoding a complete block
+        body, where leftover bytes would otherwise be mistaken for padding.
+
     :return:
         a dictionary mapping the field names to decoded data
     """
@@ -1030,6 +1176,14 @@ def struct_decode(schema, stream, endianness="="):
     decoded = {}
     for name, field, default in schema:
         decoded[name] = field.load(stream, endianness=endianness, seen=decoded)
+
+    # The block body is a closed, self-delimiting unit. Anything left over
+    # after the last field means a sub-structure (list / options) ended early
+    # and the remaining bytes were not accounted for. Allowing them to be
+    # silently ignored would let data from one layer masquerade as padding.
+    if require_exhausted:
+        _check_no_trailing_bytes(stream)
+
     return decoded
 
 

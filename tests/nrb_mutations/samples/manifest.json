@@ -1,0 +1,259 @@
+{
+  "samples": [
+    {
+      "criterion": "end-of-records marker length must be zero; its value must not be consumed",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "file": "le-end-record-length-4.pcapng.bin",
+      "group": "record-terminator",
+      "name": "end-record-length-4"
+    },
+    {
+      "criterion": "record list must end with an explicit marker, not stream exhaustion",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "file": "le-missing-end-record-at-body-end.pcapng.bin",
+      "group": "record-terminator",
+      "name": "missing-end-record-at-body-end"
+    },
+    {
+      "criterion": "option bytes have no record header shape and must not be decoded as name records",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution record names must be NUL-terminated"
+      },
+      "file": "le-missing-end-record-options-as-records.pcapng.bin",
+      "group": "record-terminator",
+      "name": "missing-end-record-options-as-records"
+    },
+    {
+      "criterion": "IPv4 record must contain at least the address; no negative slicing",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv4 name resolution record is too short"
+      },
+      "file": "le-ipv4-record-too-short.pcapng.bin",
+      "group": "record-payload",
+      "name": "ipv4-record-too-short"
+    },
+    {
+      "criterion": "options must end with opt_endofopt, not stream exhaustion",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "file": "le-missing-opt-endofopt.pcapng.bin",
+      "group": "option-terminator",
+      "name": "missing-opt-endofopt"
+    },
+    {
+      "criterion": "opt_endofopt length must be zero; its value must not be consumed",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "opt_endofopt must have length 0"
+      },
+      "file": "le-opt-endofopt-length-4.pcapng.bin",
+      "group": "option-terminator",
+      "name": "opt-endofopt-length-4"
+    },
+    {
+      "criterion": "everything after opt_endofopt is residual, not another option",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "file": "le-bytes-after-opt-endofopt.pcapng.bin",
+      "group": "option-terminator",
+      "name": "bytes-after-opt-endofopt"
+    },
+    {
+      "criterion": "unknown record and option codes survive with their raw values",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "file": "le-unknown-record-and-option-retained.pcapng.bin",
+      "group": "unknown-items",
+      "name": "unknown-record-and-option-retained"
+    },
+    {
+      "criterion": "EPB options also require an explicit terminator",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "file": "le-epb-missing-opt-endofopt.pcapng.bin",
+      "group": "epb-options",
+      "name": "epb-missing-opt-endofopt"
+    },
+    {
+      "criterion": "end-of-records marker length must be zero; its value must not be consumed",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution end record must have length 0"
+      },
+      "file": "be-end-record-length-4.pcapng.bin",
+      "group": "record-terminator",
+      "name": "end-record-length-4"
+    },
+    {
+      "criterion": "record list must end with an explicit marker, not stream exhaustion",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Missing explicit end-of-list marker"
+      },
+      "file": "be-missing-end-record-at-body-end.pcapng.bin",
+      "group": "record-terminator",
+      "name": "missing-end-record-at-body-end"
+    },
+    {
+      "criterion": "option bytes have no record header shape and must not be decoded as name records",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Name resolution record names must be NUL-terminated"
+      },
+      "file": "be-missing-end-record-options-as-records.pcapng.bin",
+      "group": "record-terminator",
+      "name": "missing-end-record-options-as-records"
+    },
+    {
+      "criterion": "IPv4 record must contain at least the address; no negative slicing",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "IPv4 name resolution record is too short"
+      },
+      "file": "be-ipv4-record-too-short.pcapng.bin",
+      "group": "record-payload",
+      "name": "ipv4-record-too-short"
+    },
+    {
+      "criterion": "options must end with opt_endofopt, not stream exhaustion",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "file": "be-missing-opt-endofopt.pcapng.bin",
+      "group": "option-terminator",
+      "name": "missing-opt-endofopt"
+    },
+    {
+      "criterion": "opt_endofopt length must be zero; its value must not be consumed",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "opt_endofopt must have length 0"
+      },
+      "file": "be-opt-endofopt-length-4.pcapng.bin",
+      "group": "option-terminator",
+      "name": "opt-endofopt-length-4"
+    },
+    {
+      "criterion": "everything after opt_endofopt is residual, not another option",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Trailing bytes after the last block field"
+      },
+      "file": "be-bytes-after-opt-endofopt.pcapng.bin",
+      "group": "option-terminator",
+      "name": "bytes-after-opt-endofopt"
+    },
+    {
+      "criterion": "unknown record and option codes survive with their raw values",
+      "expect": {
+        "block_index": 1,
+        "kind": "ok",
+        "options": {
+          "1": "nrb comment 109",
+          "15255": {
+            "__bytes__": "VSo9JTppLzsp"
+          },
+          "2": "dns-151.example"
+        },
+        "records": [
+          {
+            "address": "127.0.0.1",
+            "names": [
+              "host-228.example"
+            ],
+            "type": 1
+          },
+          {
+            "address": "2001:db8::1",
+            "names": [
+              "v6-37.example"
+            ],
+            "type": 2
+          },
+          {
+            "raw": {
+              "__bytes__": "Wm8mdjQ7MWo8OmM="
+            },
+            "type": 10778
+          }
+        ]
+      },
+      "file": "be-unknown-record-and-option-retained.pcapng.bin",
+      "group": "unknown-items",
+      "name": "unknown-record-and-option-retained"
+    },
+    {
+      "criterion": "EPB options also require an explicit terminator",
+      "expect": {
+        "exception": "CorruptedFile",
+        "kind": "error",
+        "message": "Unterminated options list"
+      },
+      "file": "be-epb-missing-opt-endofopt.pcapng.bin",
+      "group": "epb-options",
+      "name": "epb-missing-opt-endofopt"
+    }
+  ],
+  "seed": 1592598566
+}

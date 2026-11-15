@@ -397,13 +397,13 @@ def test_unpack_dummy_packet():
         b"Simple packet\x00\x00\x00"
         # List of name resolution items
         b"\x00\x01"  # IPv4
-        b"\x00\x13"  # Length: 19bytes
-        b"\x0a\x22\x33\x44www.example.com\x00"  # 19 bytes (10.34.51.68)
+        b"\x00\x14"  # Length: 20 bytes
+        b"\x0a\x22\x33\x44www.example.com\x00"  # 20 bytes (10.34.51.68)
         b"\x00\x01"  # IPv4
-        b"\x00\x13"  # Length: 19bytes
-        b"\xc0\xa8\x14\x01www.example.org\x00"  # 19 bytes (192.168.20.1)
+        b"\x00\x14"  # Length: 20 bytes
+        b"\xc0\xa8\x14\x01www.example.org\x00"  # 20 bytes (192.168.20.1)
         b"\x00\x02"  # IPv6
-        b"\x00\x1e"  # 30 bytes
+        b"\x00\x1f"  # 31 bytes
         b"\x00\x11\x22\x33\x44\x55\x66\x77"
         b"\x88\x99\xaa\xbb\xcc\xdd\xee\xff"
         b"v6.example.net\x00\x00"
