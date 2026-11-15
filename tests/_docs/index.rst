@@ -6,3 +6,8 @@ API Reference
     :glob:
 
     /api/*/*/index
+
+.. toctree::
+    :maxdepth: 1
+
+    asdf-identity

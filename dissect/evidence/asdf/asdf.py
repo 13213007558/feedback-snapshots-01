@@ -9,6 +9,7 @@ import tarfile
 import uuid
 from bisect import bisect_right
 from collections import defaultdict
+from functools import cached_property
 from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.util import ts
@@ -24,6 +25,8 @@ from dissect.evidence.exception import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from dissect.evidence.asdf.identity import EvidenceIndex
 
 SnapshotTableEntry = tuple[int, int, int, int]
 
@@ -386,6 +389,17 @@ class AsdfSnapshot:
                 entry_data_offset,
             ),
         )
+
+    @cached_property
+    def evidence(self) -> EvidenceIndex:
+        """Return the evidence identity index for this snapshot.
+
+        This is read-only and additive.  It never changes the stream indexes or
+        the meaning of :meth:`open`.
+        """
+        from dissect.evidence.asdf.identity import EvidenceIndex
+
+        return EvidenceIndex.from_snapshot(self)
 
     def contains(self, idx: int) -> bool:
         """Check whether this file contains the given stream index.

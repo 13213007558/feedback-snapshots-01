@@ -29,5 +29,9 @@ class InvalidBlock(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
 
 
+class InvalidEvidence(InvalidSnapshot):
+    """Related to the optional ASDF evidence identity manifest."""
+
+
 class UnsupportedVersion(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
