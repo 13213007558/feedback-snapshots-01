@@ -327,7 +327,7 @@ class ClassInstance:
     @property
     def key(self) -> InstanceKey:
         key = InstanceKey()
-        for prop_name in self.class_.class_definition.keys:
+        for prop_name in self.class_.keys:
             key[prop_name] = self.properties[prop_name].value
         return key
 

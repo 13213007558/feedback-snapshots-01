@@ -224,3 +224,9 @@ class Key:
 
     def IL(self, name: str | None = None) -> Key:
         return self._path("IL", name)
+
+    def KI(self, name: str | None = None) -> Key:
+        return self._path("KI", name)
+
+    def I(self, name: str | None = None) -> Key:
+        return self._path("I", name)
