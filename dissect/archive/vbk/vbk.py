@@ -792,9 +792,16 @@ class MetaBlob:
 
     def _read(self) -> Iterator[int, memoryview]:
         page = self.root
+        seen = set()
 
         while page != -1:
+            if page in seen:
+                raise VBKError(f"Circular meta blob page chain detected at page {page}")
+            seen.add(page)
+
             buf = self.slot.page(page)
+            if len(buf) < 8:
+                raise VBKError(f"Truncated meta blob page at page {page}")
             yield page, buf
 
             page = int.from_bytes(buf[:8], "little", signed=True)
@@ -864,7 +871,7 @@ class MetaVector(Generic[T]):
         Args:
             idx: The index of the entry to get.
         """
-        if idx >= self.count:
+        if idx < 0 or idx >= self.count:
             raise IndexError("MetaVector2 index out of range")
         return self.type.from_bytes(self.vbk, self.data(idx))
 
@@ -996,7 +1003,7 @@ class FibMetaSparseTable:
         Args:
             idx: The index of the block descriptor to get.
         """
-        if idx >= self.count:
+        if idx < 0 or idx >= self.count:
             raise IndexError("MetaSparseTable index out of range")
 
         table_idx, entry_idx = divmod(idx, self.MAX_ENTRIES_PER_TABLE)
