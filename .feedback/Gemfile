@@ -1,0 +1,10 @@
+source "https://rubygems.org"
+gem "ruby-saml", path: "..", require: "onelogin/ruby-saml"
+gem "logger"
+gem "minitest", "~> 5.18.0", require: false
+gem "mocha", "~> 0.14", require: false
+gem "simplecov", "< 0.22", require: false
+gem "simplecov-lcov", "> 0.7", require: false
+gem "timecop", "~> 0.9", require: false
+gem "shoulda", "~> 2.11", require: false
+gem "systemu", "~> 2", require: false
