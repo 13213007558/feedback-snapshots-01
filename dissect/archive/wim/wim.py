@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import struct
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -9,10 +10,14 @@ from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
 from dissect.util.ts import wintimestamp
 
 from dissect.archive.exception import (
+    EmptySecurityDescriptorError,
     FileNotFoundError,
+    InvalidDirectoryEntryError,
     InvalidHeaderError,
+    InvalidSecurityDataError,
     NotADirectoryError,
     NotAReparsePointError,
+    SecurityIdOutOfRangeError,
 )
 from dissect.archive.wim.c_wim import (
     DECOMPRESSOR_MAP,
@@ -30,6 +35,11 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
+
+# SecurityId 0xffffffff means that a directory entry has no security descriptor.
+SECURITY_ID_NONE = 0xFFFFFFFF
+# Size of the fixed part of a directory entry, excluding the variable name fields.
+DIRECTORY_ENTRY_MIN_SIZE = len(c_wim._DIRENTRY)
 
 
 class WIM:
@@ -76,7 +86,7 @@ class WIM:
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
         for resource in self._images:
-            yield Image(self, resource.open())
+            yield Image(self, resource.open(), resource)
 
 
 class Resource:
@@ -159,8 +169,10 @@ class Resource:
 
 
 class Image:
-    def __init__(self, wim: WIM, fh: BinaryIO):
+    def __init__(self, wim: WIM, fh: BinaryIO, resource: Resource | None = None):
         self.wim = wim
+        self.resource = resource
+        self.metadata = fh
         self.security = SecurityBlock(fh)
 
         offset = fh.tell()
@@ -203,14 +215,173 @@ class Image:
 
 
 class SecurityBlock:
-    def __init__(self, fh: BinaryIO):
-        self.header = c_wim._SECURITYBLOCK_DISK(fh)
-        self.descriptors = []
-        for size in self.header.EntryLength:
-            if size == 0:
-                continue
+    """Security data of an image.
 
-            self.descriptors.append(fh.read(size))
+    The security data starts with a header containing the number of security
+    descriptor slots and the size of each slot. The descriptor data directly
+    follows the header, without per-entry padding. Slot ``0`` is a valid index;
+    it is not a "no security descriptor" marker.
+
+    Every slot is kept in :attr:`entries` and :attr:`descriptors`, including
+    zero-length slots. This preserves the SecurityId index space used by
+    directory entries, so a later descriptor is never shifted to an earlier
+    index by an empty slot.
+
+    Args:
+        fh: A file-like object positioned at the start of the security data.
+
+    Attributes:
+        offset: Offset of the security data relative to the metadata stream.
+        header: The on-disk security data header.
+        entries: Index preserving list of :class:`SecurityEntry` objects.
+        entry_lengths: The raw per-slot lengths from the table header.
+        descriptors: Index preserving list of raw descriptor bytes. Entries
+            without descriptor data are ``None``.
+    """
+
+    def __init__(self, fh: BinaryIO):
+        self.fh = fh
+        self.offset = fh.tell()
+
+        raw_header = fh.read(8)
+        if len(raw_header) != 8:
+            raise InvalidSecurityDataError(
+                f"Truncated security data header at offset {self.offset}: expected 8 bytes, got {len(raw_header)}"
+            )
+
+        total_length, num_entries = struct.unpack("<II", raw_header)
+        header_length = 8 + (num_entries * 8)
+        if total_length < header_length:
+            raise InvalidSecurityDataError(
+                f"Security data at offset {self.offset} declares {num_entries} entries, "
+                f"requiring {header_length} bytes of header, but total length is {total_length}"
+            )
+
+        raw_lengths = fh.read(num_entries * 8)
+        if len(raw_lengths) != num_entries * 8:
+            raise InvalidSecurityDataError(
+                f"Truncated security data entry length array at offset {self.offset + 8}: "
+                f"expected {num_entries * 8} bytes, got {len(raw_lengths)}"
+            )
+
+        self.header = c_wim._SECURITYBLOCK_DISK(raw_header + raw_lengths)
+        self.entry_lengths = struct.unpack(f"<{num_entries}Q", raw_lengths)
+
+        payload_length = total_length - header_length
+        table_length = sum(self.entry_lengths)
+        if table_length != payload_length:
+            raise InvalidSecurityDataError(
+                f"Security data at offset {self.offset} has inconsistent table end: "
+                f"entry lengths sum to {table_length} bytes after the header, "
+                f"but total length leaves {payload_length} bytes"
+            )
+
+        entries = []
+        entry_offset = header_length
+        for index, size in enumerate(self.entry_lengths):
+            if size % 4:
+                raise InvalidSecurityDataError(
+                    f"Security descriptor {index} at offset {self.offset + entry_offset} is not 4-byte aligned: "
+                    f"{size} bytes"
+                )
+
+            data = fh.read(size) if size else None
+            if size and len(data) != size:
+                raise InvalidSecurityDataError(
+                    f"Truncated security descriptor {index} at offset {self.offset + entry_offset}: "
+                    f"expected {size} bytes, got {len(data)}"
+                )
+
+            entries.append(SecurityEntry(index=index, offset=entry_offset, length=size, data=data))
+            entry_offset += size
+
+        self.entries = entries
+        self.descriptors = [entry.data for entry in entries]
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self) -> Iterator[SecurityEntry]:
+        return iter(self.entries)
+
+    def __getitem__(self, index: int | slice) -> SecurityEntry | list[SecurityEntry]:
+        """Return the security entry or entries at ``index``, including empty slots."""
+        return self.entries[index]
+
+    def resolve(self, security_id: int) -> SecurityEntry | None:
+        """Resolve a directory entry SecurityId to its security table slot.
+
+        Args:
+            security_id: The SecurityId from a directory entry.
+
+        Returns:
+            The matching :class:`SecurityEntry` (which may be an empty
+            placeholder, check :attr:`SecurityEntry.is_empty`), or ``None`` if
+            the directory entry has no security descriptor (SecurityId
+            ``0xffffffff``).
+
+        Raises:
+            SecurityIdOutOfRangeError: If the SecurityId is not in the table.
+        """
+        if security_id == SECURITY_ID_NONE:
+            return None
+
+        if security_id >= len(self.entries):
+            raise SecurityIdOutOfRangeError(security_id, len(self.entries))
+
+        return self.entries[security_id]
+
+    def descriptor(self, security_id: int) -> bytes | None:
+        """Return the raw security descriptor bytes for a directory entry SecurityId.
+
+        Returns ``None`` if the directory entry has no security descriptor.
+
+        Raises:
+            SecurityIdOutOfRangeError: If the SecurityId is not in the table.
+            EmptySecurityDescriptorError: If the SecurityId refers to an empty
+                placeholder slot, which has no descriptor bytes to return.
+        """
+        entry = self.resolve(security_id)
+        if entry is None:
+            return None
+
+        if entry.is_empty:
+            raise EmptySecurityDescriptorError(security_id, self.offset + entry.offset)
+
+        return entry.data
+
+    @property
+    def end_offset(self) -> int:
+        """Return the metadata stream offset just past the security data."""
+        return self.offset + self.header.TotalLength
+
+
+@dataclass(frozen=True)
+class SecurityEntry:
+    """One slot in an image security table.
+
+    Attributes:
+        index: The SecurityId index of this slot.
+        offset: Offset of the slot data relative to the start of the security block.
+        length: Length of the slot in bytes. Zero means an empty placeholder slot.
+        data: Raw self-relative security descriptor bytes, or ``None`` for an
+            empty placeholder.
+    """
+
+    index: int
+    offset: int
+    length: int
+    data: bytes | None
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether this slot is an empty placeholder."""
+        return self.length == 0
+
+    @property
+    def descriptor(self) -> bytes | None:
+        """Return the raw security descriptor bytes of this slot."""
+        return self.data
 
 
 class DirectoryEntry:
@@ -219,36 +390,69 @@ class DirectoryEntry:
         self.fh = fh
 
         start = fh.tell()
-        self.entry = c_wim._DIRENTRY(fh)
+        try:
+            self.entry = c_wim._DIRENTRY(fh)
+        except EOFError as e:
+            raise InvalidDirectoryEntryError(f"Truncated directory entry header at offset {start}") from e
+
         self.name = None
         self.short_name = None
         self.extra = None
 
+        self._validate_header(start)
+
         if length := self.entry.FileNameLength:
-            self.name = _read_name(fh, length)
+            self.name = _read_name(fh, length, start)
             fh.read(2)
 
         if length := self.entry.ShortNameLength:
-            self.short_name = _read_name(fh, length)
+            self.short_name = _read_name(fh, length, start)
             fh.read(2)
 
         # If there's any trailing data after the aligned end, read it and store it
         end = fh.tell()
-        if (length := self.entry.Length - (((end + 7) & (-8)) - start)) > 0 or (
-            length := self.entry.Length - (end - start)
-        ) > 0:
+        consumed = end - start
+        if consumed > self.entry.Length:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} declares length {self.entry.Length}, "
+                f"but its name fields consume {consumed} bytes"
+            )
+
+        if length := self.entry.Length - consumed:
             self.extra = fh.read(length)
+            if len(self.extra) != length:
+                raise InvalidDirectoryEntryError(
+                    f"Truncated directory entry at offset {start}: expected {length} trailing bytes, "
+                    f"got {len(self.extra)}"
+                )
+        else:
+            # Keep the parse position inside the entry even when no trailing
+            # data was declared; streams may still start at the next boundary.
+            fh.seek(start + self.entry.Length)
 
         self.streams = {}
         if self.entry.Streams:
-            for _ in range(self.entry.Streams):
+            for index in range(self.entry.Streams):
                 # Stream entries are 8 byte aligned
-                fh.seek((fh.tell() + 7) & (-8))
+                stream_start = (fh.tell() + 7) & (-8)
+                fh.seek(stream_start)
+
+                try:
+                    stream = c_wim._STREAMENTRY(fh)
+                except EOFError as e:
+                    raise InvalidDirectoryEntryError(
+                        f"Truncated stream entry {index} at offset {stream_start}"
+                    ) from e
+
+                if stream.Length < len(c_wim._STREAMENTRY):
+                    raise InvalidDirectoryEntryError(
+                        f"Stream entry {index} at offset {stream_start} declares invalid length {stream.Length}"
+                    )
 
                 name = ""
-                stream = c_wim._STREAMENTRY(fh)
-                if name_length := stream.StreamNameLength:
-                    name = _read_name(fh, name_length)
+                name_length = stream.StreamNameLength
+                if name_length:
+                    name = _read_name(fh, name_length, stream_start)
                     name_length += 2
                     fh.read(2)
 
@@ -256,9 +460,84 @@ class DirectoryEntry:
 
                 if remaining := stream.Length - len(c_wim._STREAMENTRY) - name_length:
                     fh.read(remaining)
+
+                stream_end = stream_start + stream.Length
+                if fh.tell() != stream_end:
+                    raise InvalidDirectoryEntryError(
+                        f"Stream entry {index} at offset {stream_start} declares length {stream.Length}, "
+                        f"but parsing ended at offset {fh.tell()}"
+                    )
         else:
             # Add the entry hash as the default stream
             self.streams[""] = self.entry.Hash
+
+    def _validate_header(self, start: int) -> None:
+        length = self.entry.Length
+        if length < DIRECTORY_ENTRY_MIN_SIZE:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} has invalid length {length} "
+                f"(minimum {DIRECTORY_ENTRY_MIN_SIZE})"
+            )
+
+        if length % 8:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} has unaligned length {length} (must be a multiple of 8)"
+            )
+
+        header_size = DIRECTORY_ENTRY_MIN_SIZE
+        remaining = _stream_remaining(self.fh)
+        if remaining is not None and length - header_size > remaining:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} declares length {length}, "
+                f"but only {header_size + remaining} bytes are available"
+            )
+
+        if self.entry.FileNameLength % 2:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} has odd file name length {self.entry.FileNameLength}"
+            )
+        if self.entry.ShortNameLength % 2:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} has odd short name length {self.entry.ShortNameLength}"
+            )
+
+        name_size = 0
+        if self.entry.FileNameLength:
+            name_size += self.entry.FileNameLength + 2
+        if self.entry.ShortNameLength:
+            name_size += self.entry.ShortNameLength + 2
+
+        if header_size + name_size > length:
+            raise InvalidDirectoryEntryError(
+                f"Directory entry at offset {start} declares length {length}, "
+                f"but its name fields require at least {header_size + name_size} bytes"
+            )
+
+    @property
+    def security_id(self) -> int:
+        """Return the raw SecurityId of this directory entry.
+
+        ``0xffffffff`` means the entry has no security descriptor. Any other
+        value is an index into this image's own security table.
+        """
+        return self.entry.SecurityId
+
+    @property
+    def security_entry(self) -> SecurityEntry | None:
+        """Return this entry's security table slot, or ``None`` if it has no descriptor.
+
+        An empty placeholder slot is returned as-is; check
+        :attr:`SecurityEntry.is_empty` before using it as a descriptor.
+
+        Raises:
+            SecurityIdOutOfRangeError: If the SecurityId is not in this image's table.
+        """
+        return self.image.security.resolve(self.entry.SecurityId)
+
+    @property
+    def security_descriptor(self) -> bytes | None:
+        """Return the raw security descriptor bytes for this entry, if it has one."""
+        return self.image.security.descriptor(self.entry.SecurityId)
 
     def __repr__(self) -> str:
         return f"<DirectoryEntry name={self.name!r}>"
@@ -342,13 +621,28 @@ class DirectoryEntry:
             raise NotADirectoryError(f"{self!r} is not a directory")
 
         fh = self.fh
-        fh.seek(self.entry.SubdirOffset)
+        list_start = self.entry.SubdirOffset
+        fh.seek(list_start)
         while True:
-            length = int.from_bytes(fh.read(8), "little")
-            if length <= 8:
-                break
+            entry_start = fh.tell()
+            raw_length = fh.read(8)
+            if len(raw_length) != 8:
+                raise InvalidDirectoryEntryError(
+                    f"Truncated directory listing at offset {entry_start}: "
+                    "expected an entry length or list terminator"
+                )
 
-            fh.seek(-8, io.SEEK_CUR)
+            length = int.from_bytes(raw_length, "little")
+            if length == 0:
+                # A zero length terminates the directory listing
+                break
+            if length < DIRECTORY_ENTRY_MIN_SIZE:
+                raise InvalidDirectoryEntryError(
+                    f"Invalid directory entry length {length} at offset {entry_start} "
+                    f"(minimum {DIRECTORY_ENTRY_MIN_SIZE})"
+                )
+
+            fh.seek(entry_start)
             entry = DirectoryEntry(self.image, fh)
             offset = fh.tell()
 
@@ -496,10 +790,33 @@ class CompressedStream(AlignedStream):
         return self.decompressor(buf)
 
 
+def _stream_remaining(fh: BinaryIO) -> int | None:
+    """Return the number of unread bytes in ``fh`` if its size is known."""
+    size = getattr(fh, "size", None)
+    if not isinstance(size, int):
+        return None
+
+    try:
+        offset = fh.tell()
+    except (AttributeError, OSError):
+        return None
+
+    return max(size - offset, 0)
+
+
 def _ts_to_ns(ts: int) -> int:
     """Convert Windows timestamps to nanosecond timestamps."""
     return (ts * 100) - 11644473600000000000
 
 
-def _read_name(fh: BinaryIO, length: int) -> str:
-    return fh.read(length).decode("utf-16-le")
+def _read_name(fh: BinaryIO, length: int, offset: int) -> str:
+    data = fh.read(length)
+    if len(data) != length:
+        raise InvalidDirectoryEntryError(
+            f"Truncated name at offset {offset}: expected {length} bytes, got {len(data)}"
+        )
+
+    try:
+        return data.decode("utf-16-le")
+    except UnicodeDecodeError as e:
+        raise InvalidDirectoryEntryError(f"Invalid UTF-16 name at offset {offset}: {e}") from e
