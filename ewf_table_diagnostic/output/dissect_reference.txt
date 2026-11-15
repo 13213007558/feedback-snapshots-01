@@ -1,0 +1,5 @@
+baseline.E01                     READS primary-only, table2_present=True, first16=b'SET-A|chunk-00|A'
+case1_primary_corrupt.E01        RAISES ValueError: read length must be non-negative or -1
+case2_backup_corrupt.E01         READS primary-only, table2_present=True, first16=b'SET-A|chunk-00|A'
+case3_divergent_legal.E01        READS primary-only, table2_present=True, first16=b'SET-A|chunk-00|A'
+case4_both_tables_corrupt.E01    RAISES ValueError: read length must be non-negative or -1

@@ -1,0 +1,297 @@
+{
+  "blocks": {
+    "backup": [
+      {
+        "absolute_offset": 1341,
+        "chunk": 0,
+        "chunk_checksum_ok": true,
+        "compressed": false,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-00|AAA",
+        "payload_sha256": "cba728ea603fd9b4b3207100c74336f7142f8423645ad440cf3474d97677f51d",
+        "raw_entry": "0x53d",
+        "span_end": 5441,
+        "span_length": 4100,
+        "span_start": 1341,
+        "table": "table2"
+      },
+      {
+        "absolute_offset": 5441,
+        "chunk": 1,
+        "chunk_checksum_ok": null,
+        "compressed": true,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-01|BBB",
+        "payload_sha256": "02b7b39e778ba57f6777176202805923ddd5756db30a5cd2bedfbe68211e2b21",
+        "raw_entry": "0x80001541",
+        "span_end": 5488,
+        "span_length": 47,
+        "span_start": 5441,
+        "table": "table2"
+      },
+      {
+        "absolute_offset": 5488,
+        "chunk": 2,
+        "chunk_checksum_ok": true,
+        "compressed": false,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-02|CCC",
+        "payload_sha256": "01e68a582cf71d8250368678fdd5d488eb30035d65388774ea90093596218289",
+        "raw_entry": "0x1570",
+        "span_end": 9588,
+        "span_length": 4100,
+        "span_start": 5488,
+        "table": "table2"
+      },
+      {
+        "absolute_offset": 9588,
+        "chunk": 3,
+        "chunk_checksum_ok": null,
+        "compressed": true,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-03|DDD",
+        "payload_sha256": "99d46926dc91903505dfb6e49caa6019286ab23facf5e768fbe348eae6f00155",
+        "raw_entry": "0x80002574",
+        "span_end": 9755,
+        "span_length": 167,
+        "span_start": 9588,
+        "table": "table2"
+      }
+    ],
+    "primary": [
+      {
+        "absolute_offset": 8388607,
+        "chunk": 0,
+        "chunk_checksum_ok": null,
+        "compressed": false,
+        "decode_ok": false,
+        "errors": [
+          "block span [0x7fffff,0x1541) outside file of 0x4791"
+        ],
+        "in_bounds": false,
+        "payload_preview": null,
+        "payload_sha256": null,
+        "raw_entry": "0x7fffff",
+        "span_end": 5441,
+        "span_length": -8383166,
+        "span_start": 8388607,
+        "table": "table"
+      },
+      {
+        "absolute_offset": 5441,
+        "chunk": 1,
+        "chunk_checksum_ok": null,
+        "compressed": true,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-01|BBB",
+        "payload_sha256": "02b7b39e778ba57f6777176202805923ddd5756db30a5cd2bedfbe68211e2b21",
+        "raw_entry": "0x80001541",
+        "span_end": 5488,
+        "span_length": 47,
+        "span_start": 5441,
+        "table": "table"
+      },
+      {
+        "absolute_offset": 5488,
+        "chunk": 2,
+        "chunk_checksum_ok": true,
+        "compressed": false,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-02|CCC",
+        "payload_sha256": "01e68a582cf71d8250368678fdd5d488eb30035d65388774ea90093596218289",
+        "raw_entry": "0x1570",
+        "span_end": 9588,
+        "span_length": 4100,
+        "span_start": 5488,
+        "table": "table"
+      },
+      {
+        "absolute_offset": 9588,
+        "chunk": 3,
+        "chunk_checksum_ok": null,
+        "compressed": true,
+        "decode_ok": true,
+        "errors": [],
+        "in_bounds": true,
+        "payload_preview": "SET-A|chunk-03|DDD",
+        "payload_sha256": "99d46926dc91903505dfb6e49caa6019286ab23facf5e768fbe348eae6f00155",
+        "raw_entry": "0x80002574",
+        "span_end": 9635,
+        "span_length": 47,
+        "span_start": 9588,
+        "table": "table"
+      }
+    ]
+  },
+  "cross_table_comparison": {
+    "all_chunks_agree": false,
+    "chunks": [
+      {
+        "agree": false,
+        "backup_offset": 1341,
+        "backup_sha256": "cba728ea603fd9b4b3207100c74336f7142f8423645ad440cf3474d97677f51d",
+        "chunk": 0,
+        "primary_offset": 8388607,
+        "primary_sha256": null
+      },
+      {
+        "agree": true,
+        "backup_offset": 5441,
+        "backup_sha256": "02b7b39e778ba57f6777176202805923ddd5756db30a5cd2bedfbe68211e2b21",
+        "chunk": 1,
+        "primary_offset": 5441,
+        "primary_sha256": "02b7b39e778ba57f6777176202805923ddd5756db30a5cd2bedfbe68211e2b21"
+      },
+      {
+        "agree": true,
+        "backup_offset": 5488,
+        "backup_sha256": "01e68a582cf71d8250368678fdd5d488eb30035d65388774ea90093596218289",
+        "chunk": 2,
+        "primary_offset": 5488,
+        "primary_sha256": "01e68a582cf71d8250368678fdd5d488eb30035d65388774ea90093596218289"
+      },
+      {
+        "agree": true,
+        "backup_offset": 9588,
+        "backup_sha256": "99d46926dc91903505dfb6e49caa6019286ab23facf5e768fbe348eae6f00155",
+        "chunk": 3,
+        "primary_offset": 9588,
+        "primary_sha256": "99d46926dc91903505dfb6e49caa6019286ab23facf5e768fbe348eae6f00155"
+      }
+    ]
+  },
+  "dissect_note": "Segment.tables uses type(section) is TableSection, so dissect.evidence never reads table2",
+  "file_size": 18321,
+  "image": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/case1_primary_corrupt.E01",
+  "rationale": "only backup table2 verifies; primary table is structurally invalid or unreadable",
+  "sections": [
+    {
+      "checksum_ok": true,
+      "computed_checksum": 3922396065,
+      "next": 137,
+      "offset": 13,
+      "size": 124,
+      "stored_checksum": 3922396065,
+      "type": "header2"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 4270130170,
+      "next": 1265,
+      "offset": 137,
+      "size": 1128,
+      "stored_checksum": 4270130170,
+      "type": "volume"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 3288793909,
+      "next": 9635,
+      "offset": 1265,
+      "size": 8370,
+      "stored_checksum": 3288793909,
+      "type": "data"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 3005022914,
+      "next": 9755,
+      "offset": 9635,
+      "size": 120,
+      "stored_checksum": 3005022914,
+      "type": "table"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 3664970604,
+      "next": 9875,
+      "offset": 9755,
+      "size": 120,
+      "stored_checksum": 3664970604,
+      "type": "table2"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 3066364665,
+      "next": 18245,
+      "offset": 9875,
+      "size": 8370,
+      "stored_checksum": 3066364665,
+      "type": "data"
+    },
+    {
+      "checksum_ok": true,
+      "computed_checksum": 2702639743,
+      "next": 18245,
+      "offset": 18245,
+      "size": 76,
+      "stored_checksum": 2702639743,
+      "type": "done"
+    }
+  ],
+  "sha256": "733de25f130fb4c712e7f86d4fac24c1e5e213704844e07cef1973935e07e375",
+  "tables": {
+    "backup": {
+      "base_offset": 0,
+      "computed_entries_checksum": 326107831,
+      "computed_header_checksum": 6553605,
+      "descriptor_checksum_ok": true,
+      "descriptor_offset": 9755,
+      "entries": [
+        1341,
+        2147489089,
+        5488,
+        2147493236
+      ],
+      "entries_checksum_ok": true,
+      "header_checksum_ok": true,
+      "invalid_reasons": [],
+      "number_of_entries": 4,
+      "payload_offset": 9831,
+      "raw_section_size": 120,
+      "section_type": "table2",
+      "stored_entries_checksum": 326107831,
+      "stored_header_checksum": 6553605,
+      "structurally_valid": true
+    },
+    "primary": {
+      "base_offset": 0,
+      "computed_entries_checksum": 891815154,
+      "computed_header_checksum": 6553605,
+      "descriptor_checksum_ok": true,
+      "descriptor_offset": 9635,
+      "entries": [
+        8388607,
+        2147489089,
+        5488,
+        2147493236
+      ],
+      "entries_checksum_ok": false,
+      "header_checksum_ok": false,
+      "invalid_reasons": [
+        "table header checksum mismatch",
+        "table entries checksum mismatch"
+      ],
+      "number_of_entries": 4,
+      "payload_offset": 9711,
+      "raw_section_size": 120,
+      "section_type": "table",
+      "stored_entries_checksum": 326107831,
+      "stored_header_checksum": 4022250974,
+      "structurally_valid": false
+    }
+  },
+  "verdict": "RECOVERABLE"
+}

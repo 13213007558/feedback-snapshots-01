@@ -1,0 +1,159 @@
+image: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/baseline.E01
+sha256: 9ad18a2e3032f8582ece4f559b9087dc3a85e1c76ec99d0ebd66a43294d98248
+size: 18321 bytes
+sections:
+  header2  desc_off=0x00000d raw=0x7c next=0x89 checksum=ok
+  volume   desc_off=0x000089 raw=0x468 next=0x4f1 checksum=ok
+  data     desc_off=0x0004f1 raw=0x20b2 next=0x25a3 checksum=ok
+  table    desc_off=0x0025a3 raw=0x78 next=0x261b checksum=ok
+  table2   desc_off=0x00261b raw=0x78 next=0x2693 checksum=ok
+  data     desc_off=0x002693 raw=0x20b2 next=0x4745 checksum=ok
+  done     desc_off=0x004745 raw=0x4c next=0x4745 checksum=ok
+primary (table) at 0x25a3: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+backup (table2) at 0x261b: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+block traceability (table / chunk / entry -> offset,span / compressed / verify):
+  [primary] chunk=0 entry=0x53d offset=0x53d span=[0x53d,0x1541) compressed=False adler=True verify=ok sha256=cba728ea603fd9b4 preview='SET-A|chunk-00|AAA'
+  [primary] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [primary] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [primary] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x25a3) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+  [backup] chunk=0 entry=0x53d offset=0x53d span=[0x53d,0x1541) compressed=False adler=True verify=ok sha256=cba728ea603fd9b4 preview='SET-A|chunk-00|AAA'
+  [backup] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [backup] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [backup] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x261b) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+cross-table agreement: True
+VERDICT: RECOVERABLE - both tables valid and content identical; primary/backup corroborate each other
+
+========================================================================================
+
+image: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/case1_primary_corrupt.E01
+sha256: 733de25f130fb4c712e7f86d4fac24c1e5e213704844e07cef1973935e07e375
+size: 18321 bytes
+sections:
+  header2  desc_off=0x00000d raw=0x7c next=0x89 checksum=ok
+  volume   desc_off=0x000089 raw=0x468 next=0x4f1 checksum=ok
+  data     desc_off=0x0004f1 raw=0x20b2 next=0x25a3 checksum=ok
+  table    desc_off=0x0025a3 raw=0x78 next=0x261b checksum=ok
+  table2   desc_off=0x00261b raw=0x78 next=0x2693 checksum=ok
+  data     desc_off=0x002693 raw=0x20b2 next=0x4745 checksum=ok
+  done     desc_off=0x004745 raw=0x4c next=0x4745 checksum=ok
+primary (table) at 0x25a3: base_offset=0x0 entries=4 structurally_valid=False
+  checksums descriptor=True header=False entries=False
+  invalid_reasons=['table header checksum mismatch', 'table entries checksum mismatch']
+backup (table2) at 0x261b: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+block traceability (table / chunk / entry -> offset,span / compressed / verify):
+  [primary] chunk=0 entry=0x7fffff offset=0x7fffff span=[0x7fffff,0x1541) compressed=False adler=None verify=FAIL sha256=None preview=None
+      error: block span [0x7fffff,0x1541) outside file of 0x4791
+  [primary] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [primary] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [primary] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x25a3) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+  [backup] chunk=0 entry=0x53d offset=0x53d span=[0x53d,0x1541) compressed=False adler=True verify=ok sha256=cba728ea603fd9b4 preview='SET-A|chunk-00|AAA'
+  [backup] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [backup] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [backup] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x261b) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+cross-table agreement: False
+VERDICT: RECOVERABLE - only backup table2 verifies; primary table is structurally invalid or unreadable
+
+========================================================================================
+
+image: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/case2_backup_corrupt.E01
+sha256: e970030b3cc560304fe5560cdd731fa743c95974750d06344590e1da839230eb
+size: 18321 bytes
+sections:
+  header2  desc_off=0x00000d raw=0x7c next=0x89 checksum=ok
+  volume   desc_off=0x000089 raw=0x468 next=0x4f1 checksum=ok
+  data     desc_off=0x0004f1 raw=0x20b2 next=0x25a3 checksum=ok
+  table    desc_off=0x0025a3 raw=0x78 next=0x261b checksum=ok
+  table2   desc_off=0x00261b raw=0x78 next=0x2693 checksum=ok
+  data     desc_off=0x002693 raw=0x20b2 next=0x4745 checksum=ok
+  done     desc_off=0x004745 raw=0x4c next=0x4745 checksum=ok
+primary (table) at 0x25a3: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+backup (table2) at 0x261b: base_offset=0x0 entries=4 structurally_valid=False
+  checksums descriptor=True header=False entries=False
+  invalid_reasons=['table header checksum mismatch', 'table entries checksum mismatch']
+block traceability (table / chunk / entry -> offset,span / compressed / verify):
+  [primary] chunk=0 entry=0x53d offset=0x53d span=[0x53d,0x1541) compressed=False adler=True verify=ok sha256=cba728ea603fd9b4 preview='SET-A|chunk-00|AAA'
+  [primary] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [primary] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [primary] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x25a3) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+  [backup] chunk=0 entry=0x7fffff offset=0x7fffff span=[0x7fffff,0x1541) compressed=False adler=None verify=FAIL sha256=None preview=None
+      error: block span [0x7fffff,0x1541) outside file of 0x4791
+  [backup] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [backup] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [backup] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x261b) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+cross-table agreement: False
+VERDICT: RECOVERABLE - only primary table verifies; backup table2 is structurally invalid or unreadable
+
+========================================================================================
+
+image: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/case3_divergent_legal.E01
+sha256: a95729164b1556ad0cda390a1e39f4b9b787556408a01864e2a4f427d077b451
+size: 18321 bytes
+sections:
+  header2  desc_off=0x00000d raw=0x7c next=0x89 checksum=ok
+  volume   desc_off=0x000089 raw=0x468 next=0x4f1 checksum=ok
+  data     desc_off=0x0004f1 raw=0x20b2 next=0x25a3 checksum=ok
+  table    desc_off=0x0025a3 raw=0x78 next=0x261b checksum=ok
+  data     desc_off=0x00261b raw=0x20b2 next=0x46cd checksum=ok
+  table2   desc_off=0x0046cd raw=0x78 next=0x4745 checksum=ok
+  done     desc_off=0x004745 raw=0x4c next=0x4745 checksum=ok
+primary (table) at 0x25a3: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+backup (table2) at 0x46cd: base_offset=0x0 entries=4 structurally_valid=True
+  checksums descriptor=True header=True entries=True
+block traceability (table / chunk / entry -> offset,span / compressed / verify):
+  [primary] chunk=0 entry=0x53d offset=0x53d span=[0x53d,0x1541) compressed=False adler=True verify=ok sha256=cba728ea603fd9b4 preview='SET-A|chunk-00|AAA'
+  [primary] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [primary] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [primary] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x25a3) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+  [backup] chunk=0 entry=0x2667 offset=0x2667 span=[0x2667,0x366b) compressed=False adler=True verify=ok sha256=6b3244c5430aa22e preview='SET-B|chunk-00|AAA'
+  [backup] chunk=1 entry=0x8000366b offset=0x366b span=[0x366b,0x369a) compressed=True adler=None verify=ok sha256=70648b1d63690b78 preview='SET-B|chunk-01|BBB'
+  [backup] chunk=2 entry=0x369a offset=0x369a span=[0x369a,0x469e) compressed=False adler=True verify=ok sha256=43bc985dbfb35b1b preview='SET-B|chunk-02|CCC'
+  [backup] chunk=3 entry=0x8000469e offset=0x469e span=[0x469e,0x46cd) compressed=True adler=None verify=ok sha256=64a9fd3b8735ccee preview='SET-B|chunk-03|DDD'
+cross-table agreement: False
+VERDICT: CONFLICT - both tables structurally valid but point to different blocks/content
+
+========================================================================================
+
+image: /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-016/workspace-002/ewf_table_diagnostic/images/case4_both_tables_corrupt.E01
+sha256: f705a85562f6cd7d2d089be64c65afe1ce4d579bc314018c237000fb90bde9e5
+size: 18321 bytes
+sections:
+  header2  desc_off=0x00000d raw=0x7c next=0x89 checksum=ok
+  volume   desc_off=0x000089 raw=0x468 next=0x4f1 checksum=ok
+  data     desc_off=0x0004f1 raw=0x20b2 next=0x25a3 checksum=ok
+  table    desc_off=0x0025a3 raw=0x78 next=0x261b checksum=ok
+  table2   desc_off=0x00261b raw=0x78 next=0x2693 checksum=ok
+  data     desc_off=0x002693 raw=0x20b2 next=0x4745 checksum=ok
+  done     desc_off=0x004745 raw=0x4c next=0x4745 checksum=ok
+primary (table) at 0x25a3: base_offset=0x0 entries=4 structurally_valid=False
+  checksums descriptor=True header=False entries=False
+  invalid_reasons=['table header checksum mismatch', 'table entries checksum mismatch']
+backup (table2) at 0x261b: base_offset=0x0 entries=4 structurally_valid=False
+  checksums descriptor=True header=False entries=False
+  invalid_reasons=['table header checksum mismatch', 'table entries checksum mismatch']
+block traceability (table / chunk / entry -> offset,span / compressed / verify):
+  [primary] chunk=0 entry=0x7fffff offset=0x7fffff span=[0x7fffff,0x1541) compressed=False adler=None verify=FAIL sha256=None preview=None
+      error: block span [0x7fffff,0x1541) outside file of 0x4791
+  [primary] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [primary] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [primary] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x25a3) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+  [backup] chunk=0 entry=0x7fffff offset=0x7fffff span=[0x7fffff,0x1541) compressed=False adler=None verify=FAIL sha256=None preview=None
+      error: block span [0x7fffff,0x1541) outside file of 0x4791
+  [backup] chunk=1 entry=0x80001541 offset=0x1541 span=[0x1541,0x1570) compressed=True adler=None verify=ok sha256=02b7b39e778ba57f preview='SET-A|chunk-01|BBB'
+  [backup] chunk=2 entry=0x1570 offset=0x1570 span=[0x1570,0x2574) compressed=False adler=True verify=ok sha256=01e68a582cf71d82 preview='SET-A|chunk-02|CCC'
+  [backup] chunk=3 entry=0x80002574 offset=0x2574 span=[0x2574,0x261b) compressed=True adler=None verify=ok sha256=99d46926dc919035 preview='SET-A|chunk-03|DDD'
+cross-table agreement: False
+VERDICT: INSUFFICIENT - neither table yields fully verified, self-consistent blocks
+
+========================================================================================
+
+summary:
+  baseline.E01                     RECOVERABLE  both tables valid and content identical; primary/backup corroborate each other
+  case1_primary_corrupt.E01        RECOVERABLE  only backup table2 verifies; primary table is structurally invalid or unreadable
+  case2_backup_corrupt.E01         RECOVERABLE  only primary table verifies; backup table2 is structurally invalid or unreadable
+  case3_divergent_legal.E01        CONFLICT     both tables structurally valid but point to different blocks/content
+  case4_both_tables_corrupt.E01    INSUFFICIENT neither table yields fully verified, self-consistent blocks
