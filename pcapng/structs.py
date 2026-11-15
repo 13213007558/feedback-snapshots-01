@@ -587,9 +587,13 @@ def write_options(stream, options):
         return
 
     for key in options:
-        code = options._field_names[key]
+        # Options read from a file may contain codes that are not in the
+        # schema.  Those are exposed with their numeric code, so keep using
+        # the code as-is instead of trying to look up a name for it.
+        code = key if isinstance(key, int) else options._field_names[key]
         values = options.get_all_raw(key)
-        if len(values) > 1 and not options.schema[code].multiple:
+        option_schema = options.schema.get(code)
+        if option_schema is not None and len(values) > 1 and not option_schema.multiple:
             strictness.problem(
                 "writing repeated option {} '{}' not permitted by pcapng spec".format(
                     code, options._get_name_alias(code)
@@ -778,12 +782,12 @@ class Options(Mapping):
     def get_raw(self, name):
         """Get raw value for the given option"""
         code = self._resolve_name(name)
-        return self._encode_value(self.data[code][0], self.schema[code].ftype)
+        return self._encode_value(self.data[code][0], self._get_ftype(code))
 
     def get_all_raw(self, name):
         """Get all raw values for the given option"""
         code = self._resolve_name(name)
-        return [self._encode_value(x, self.schema[code].ftype) for x in self.data[code]]
+        return [self._encode_value(x, self._get_ftype(code)) for x in self.data[code]]
 
     def iter_all_items(self):
         """
@@ -812,7 +816,7 @@ class Options(Mapping):
 
         for code, value in data:
             self.data[code].append(self._decode(code, value))
-            if len(self.data[code]) > 1 and not self.schema[code].multiple:
+            if self._is_repeated_non_multiple(code):
                 try:
                     name = "{} '{}'".format(code, self.schema[code].name)
                 except KeyError:
@@ -823,9 +827,14 @@ class Options(Mapping):
                     "repeated option {} not permitted by pcapng spec".format(name)
                 )
 
+    def _is_repeated_non_multiple(self, code):
+        """Check whether an option known to be single-valued was repeated."""
+        option = self.schema.get(code)
+        return option is not None and not option.multiple and len(self.data[code]) > 1
+
     def _check_multiples(self, code):
         """Check if a non-repeatable option is repeated"""
-        if len(self.data[code]) > 1 and not self.schema[code].multiple:
+        if self._is_repeated_non_multiple(code):
             strictness.problem(
                 "repeated option {} '{}' not permitted by pcapng spec".format(
                     code, self._get_name_alias(code)
@@ -845,6 +854,12 @@ class Options(Mapping):
         if code in self.schema:
             return self.schema[code].name
         return code
+
+    def _get_ftype(self, code):
+        if code in self.schema:
+            return self.schema[code].ftype
+        # Options not described by the schema are kept as opaque bytes.
+        return TYPE_BYTES
 
     def _decode(self, code, value):
         code = self._resolve_name(code)

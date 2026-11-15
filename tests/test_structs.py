@@ -437,3 +437,21 @@ def test_unpack_dummy_packet():
             "names": ["v6.example.net"],
         },
     ]
+
+
+def test_options_unknown_codes_round_trip():
+    options = Options(
+        schema=[], data=[(20, b"something"), (20, b"else")], endianness=">"
+    )
+    assert options[20] == b"something"
+    assert options.get_all_raw(20) == [b"something", b"else"]
+
+    stream = io.BytesIO()
+    from pcapng.structs import write_options
+
+    write_options(stream, options)
+    assert stream.getvalue() == (
+        b"\x00\x14\x00\x09something\x00\x00\x00"
+        b"\x00\x14\x00\x04else"
+        b"\x00\x00\x00\x00"
+    )

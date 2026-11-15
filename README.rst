@@ -181,6 +181,68 @@ Circumstances that will result in strictness warnings include:
     * Writing EPB/SPB/PB/ISB before writing any IDBs
 
 
+Sanitizing captures for external analysis
+=========================================
+
+``pcapng.sanitizer`` produces a derived capture that keeps packet bytes and
+packet order but removes identifying metadata. The input is never modified.
+
+.. code-block:: python
+
+    from pcapng import SanitizationPolicy, sanitize_capture
+
+    report = sanitize_capture("capture.pcapng", "sanitized.pcapng")
+    print(report.format())
+
+The default policy removes all non-structural metadata, including:
+
+* Section hardware, OS, application and comment options
+* Interface name, description, OS, hardware, filter, addresses, MAC/EUI and
+  comment options
+* Name Resolution Block address/name records, DNS server names and addresses,
+  and comments
+* Packet and interface-statistics comments, hashes, flags, drop counts,
+  packet IDs, queues and verdicts
+* Every unknown block and every vendor-defined or otherwise unknown option
+  (including the pcapng ``opt_custom_*`` options)
+
+``if_tsresol``, ``if_tsoffset`` and ``if_fcslen`` are retained because they
+change how packet timestamps or frame lengths are interpreted. Interface IDs
+are never renumbered, and packet blocks are copied byte-for-byte whenever
+their own options do not change.
+
+Nothing is retained implicitly. To keep metadata, name it explicitly:
+
+.. code-block:: python
+
+    policy = SanitizationPolicy(
+        keep_metadata=("if_name", "opt_comment", "interface.addresses"),
+        keep_option_codes={"interface": [64999]},
+        keep_unknown_block_types=(0x00000BAD,),
+        name_resolution="records",
+        keep_unknown_name_resolution_records=True,
+    )
+    report = sanitize_capture("capture.pcapng", "sanitized.pcapng", policy)
+
+``keep_metadata`` accepts option names (``"if_name"``), block-qualified names
+(``"interface.if_name"``), or groups such as ``"interface.addresses"``,
+``"comments"`` and ``"packet.hash"``. ``keep_option_codes`` is required for
+option codes not known to this library. ``name_resolution="addresses"`` keeps
+numeric address records while dropping their host names; the default
+``"none"`` removes the records entirely.
+
+Unknown blocks and vendor-defined options are opaque: retaining one is
+recorded separately in ``report.retained_opaque``. Conservatively dropping
+them loses extension/future-block payloads, vendor annotations, packet ID or
+verdict metadata, and any analysis data carried only in those opaque fields.
+It does not affect the captured packet bytes.
+
+Every removal or change is recorded in ``report.changes`` with its original
+block index, block offset, item offset/length, option or record code and a
+reason note. Values are not copied into the report, so reading the report does
+not leak the metadata it describes. ``report.to_dict()`` and
+``report.to_json()`` provide the same information in machine-readable form.
+
 Creating a release
 ==================
 
