@@ -24,10 +24,17 @@ from dissect.archive.wim.c_wim import (
     WIM_IMAGE_TAG,
     c_wim,
 )
+from dissect.archive.wim.references import build_resource_references
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from datetime import datetime
+
+    from dissect.archive.wim.references.model import (
+        ResourceDescriptor,
+        ResourceVerificationResult,
+        StreamReference,
+    )
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
 
@@ -51,27 +58,51 @@ class WIM:
         if self.header.Flags & HEADER_FLAG.SPANNED:
             raise NotImplementedError("Spanned WIM files are not yet supported")
 
-        self._resource_table, self._images = self._read_resource_table()
+        self._resource_table, self._resource_index, self._images = self._read_resource_table()
 
-    def _read_resource_table(self) -> tuple[dict[bytes, Resource], list[Resource]]:
-        # Read the resource table in one go and separate images out
+    def _read_resource_table(self) -> tuple[list[Resource], dict[bytes, Resource], list[Resource]]:
+        # Read the resource table in one go and separate images out.
+        # The table keeps every descriptor, including duplicate hashes, while the index maps a
+        # hash to its first descriptor for stream lookups. Duplicate descriptors are a real
+        # conflict that the reverse-reference API must preserve instead of silently merging.
         # If this turns out to be slow for large WIM files, we can add some clever caching
-        table = {}
+        table = []
+        index = {}
         images = []
         with Resource.from_short_header(self, self.header.OffsetTable).open() as fh:
             for _ in range(fh.size // len(c_wim._RESHDR_DISK)):
                 resource = Resource.from_header(self, c_wim._RESHDR_DISK(fh))
-                table[resource.hash] = resource
+                table.append(resource)
+                index.setdefault(resource.hash, resource)
 
                 if resource.is_metadata:
                     images.append(resource)
 
-        return table, images
+        return table, index, images
+
+    @property
+    def resource_table(self) -> list[Resource]:
+        """Return all resource descriptors in the WIM, including duplicate hashes."""
+        return self._resource_table
 
     @property
     def resources(self) -> dict[bytes, Resource]:
-        """Return the table of resources in the WIM file."""
-        return self._resource_table
+        """Return a hash-to-resource index of the WIM resource table.
+
+        Only the first descriptor for each hash is exposed here; use
+        :meth:`reverse_references` to inspect duplicate descriptors as well.
+        """
+        return self._resource_index
+
+    @cached_property
+    def reverse_references(self) -> dict[bytes, ResourceDescriptor]:
+        """Map every resource hash to its descriptors and to all streams that reference it."""
+        return build_resource_references(self)
+
+    def stream_references(self) -> Iterator[StreamReference]:
+        """Iterate over every file stream reference in every image."""
+        for descriptor in self.reverse_references.values():
+            yield from descriptor.references
 
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
@@ -156,6 +187,14 @@ class Resource:
             )
 
         return RelativeStream(self.wim.fh, self.offset, self.size)
+
+    def verify_digest(self) -> ResourceVerificationResult:
+        """Recompute the resource hash and compare it to the stored descriptor hash.
+
+        The result states which uncompressed byte ranges were actually hashed, so evidence can
+        quote a verified range instead of assuming the whole resource was covered.
+        """
+        return self.wim.reverse_references[self.hash].verify()
 
 
 class Image:
