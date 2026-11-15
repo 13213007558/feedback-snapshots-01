@@ -20,6 +20,8 @@ from dissect.cim.c_cim import (
 from dissect.cim.classes import (
     ClassDefinition,
     ClassInstance,
+    InstanceIdentity,
+    InstanceKey,
     PropertyDefaultValues,
 )
 from dissect.cim.exceptions import Error, InvalidDatabaseError
@@ -39,7 +41,6 @@ if TYPE_CHECKING:
     from dissect.cim.classes import (
         ClassDefinitionProperty,
         ClassInstanceProperty,
-        InstanceKey,
         Qualifier,
     )
 
@@ -277,10 +278,22 @@ class Class:
                 off += len(prop.ctype)
         return off
 
-    def instance(self, key: str) -> Instance:
-        for instance in self.instances:
-            if instance.key == key:
-                return instance
+    def instance(self, key: str | dict[str, Any] | InstanceIdentity) -> Instance:
+        """Look up an instance by key.
+
+        Accepts an :class:`InstanceIdentity`, a mapping of key values or the
+        textual display form (``key1=value1;key2=value2``). Comparison is done
+        on the structured key, so key order does not matter.
+        """
+        if isinstance(key, InstanceIdentity):
+            for instance in self.instances:
+                if instance.identity == key:
+                    return instance
+        else:
+            lookup = InstanceKey.parse(key) if isinstance(key, str) else InstanceKey(key)
+            for instance in self.instances:
+                if instance.key.matches(lookup):
+                    return instance
 
         raise IndexError
 
@@ -293,11 +306,11 @@ class Class:
         for ref in q.references():
             class_instance = self.cim.get_class_instance(self, ref)
             instance = Instance(self.cim, self.namespace, self, class_instance)
-            ikey = str(instance.key)
+            identity = instance.identity
 
-            if ikey not in yielded:
+            if identity not in yielded:
                 yield instance
-                yielded.add(ikey)
+                yielded.add(identity)
 
 
 class Instance:
@@ -311,6 +324,11 @@ class Instance:
     @property
     def key(self) -> InstanceKey:
         return self.class_instance.key
+
+    @property
+    def identity(self) -> InstanceIdentity:
+        """Structured identity (namespace, class and key) used for comparison and deduplication."""
+        return InstanceIdentity(self.namespace.name, self.class_.name, self.key)
 
     @property
     def name(self) -> str:

@@ -332,10 +332,34 @@ class ClassInstance:
         return key
 
 
+def freeze_key_value(value: CimType | list[CimType]) -> tuple[str, Any]:
+    """Freeze a key value into a hashable, type-tagged structure for identity comparison.
+
+    The type tag ensures that e.g. the number 1 and the string "1" (or the boolean True)
+    are considered different, even though their textual representation may be identical.
+    """
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value)
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, (list, tuple)):
+        return ("array", tuple(freeze_key_value(item) for item in value))
+    return (type(value).__name__, value)
+
+
 class InstanceKey(dict):
     """A dictionary subclass that allows for attribute-style access and assignment.
 
     Is represented as a string in the format "key1=value1;key2=value2" or "default" if empty.
+
+    The string representation is for display only: it is not unique per instance
+    (values may contain ";" or "=", numbers and text can render identically and
+    key order may vary). Use :class:`InstanceIdentity` for comparison and
+    deduplication of instances.
 
     Example:
         >>> d = InstanceKey()
@@ -354,6 +378,95 @@ class InstanceKey(dict):
         if len(self) == 0:
             return "default"
         return ";".join([f"{key}={value}" for key, value in self.items()])
+
+    def identity_items(self) -> tuple[tuple[str, tuple[str, Any]], ...]:
+        """Return a canonical, order-independent tuple of key items for structured comparison."""
+        return tuple(sorted((name, freeze_key_value(value)) for name, value in self.items()))
+
+    def matches(self, other: InstanceKey | dict[str, Any]) -> bool:
+        """Compare against another key for lookup purposes.
+
+        Comparison is order-insensitive and tolerant of values that went through
+        the textual display form (e.g. the string "1" matches the number 1).
+        """
+        other = InstanceKey(other)
+        if set(self) != set(other):
+            return False
+        for name, value in self.items():
+            other_value = other[name]
+            if value != other_value and str(value) != str(other_value):
+                return False
+        return True
+
+    @classmethod
+    def parse(cls, text: str) -> InstanceKey:
+        """Best-effort parse of the textual display form back into a key.
+
+        Note that the display form is inherently ambiguous when values contain
+        ";" or "=", so prefer structured keys (:class:`InstanceIdentity`) whenever
+        they are available.
+        """
+        text = text.strip()
+        if not text or text == "default":
+            return cls()
+
+        key = cls()
+        for part in text.split(";"):
+            name, sep, value = part.partition("=")
+            if not sep:
+                raise ValueError(f"Invalid instance key component: {part!r}")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            key[name.strip()] = value
+        return key
+
+
+class InstanceIdentity:
+    """Structured identity of a CIM instance, binding namespace, class and key values.
+
+    Comparison and deduplication of instances should use this instead of the
+    textual representation of :class:`InstanceKey`, which is for display only and
+    may collide for distinct instances. Two identities are equal when their
+    namespace, class and (order-independent, type-aware) key items are equal.
+    """
+
+    __slots__ = ("namespace", "class_name", "key", "key_items")
+
+    def __init__(self, namespace: str, class_name: str, key: InstanceKey | dict[str, Any]):
+        self.namespace = namespace
+        self.class_name = class_name
+        self.key = InstanceKey(key)
+        self.key_items = self.key.identity_items()
+
+    def _cmp_key(self) -> tuple[str, str, tuple]:
+        return (self.namespace.lower(), self.class_name.lower(), self.key_items)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, InstanceIdentity):
+            return NotImplemented
+        return self._cmp_key() == other._cmp_key()
+
+    def __hash__(self) -> int:
+        return hash(self._cmp_key())
+
+    def __repr__(self) -> str:
+        if self.key_items:
+            keys = ", ".join(f"{name}={self.key[name]!r}" for name, _ in self.key_items)
+        else:
+            keys = "<no keys>"
+        return f"<InstanceIdentity {self.namespace}:{self.class_name}({keys})>"
+
+    def describe(self) -> str:
+        """Human-readable explanation of the components this identity (and thus
+        deduplication) is based on."""
+        parts = [f"namespace={self.namespace!r}", f"class={self.class_name!r}"]
+        if not self.key_items:
+            parts.append("keys=<none> (default keyless instance)")
+        else:
+            rendered = ", ".join(f"{name}={self.key[name]!r}:{frozen[0]}" for name, frozen in self.key_items)
+            parts.append(f"keys=({rendered})")
+        return f"InstanceIdentity({', '.join(parts)})"
 
 
 class Qualifier:
