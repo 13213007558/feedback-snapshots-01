@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dissect.vmfs.descriptor import DirEntry, FileDescriptor
+from dissect.vmfs.descriptor import DirEntry, FileDescriptor, StaleDirEntry, StaleEntryReason
 from dissect.vmfs.exception import (
     Error,
     FileNotFoundError,
@@ -22,5 +22,7 @@ __all__ = [
     "InvalidHeader",
     "NotADirectoryError",
     "NotASymlinkError",
+    "StaleDirEntry",
+    "StaleEntryReason",
     "Volume",
 ]
