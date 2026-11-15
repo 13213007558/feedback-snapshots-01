@@ -3,7 +3,8 @@
 # - Veeam agent
 from __future__ import annotations
 
-from functools import cached_property, lru_cache
+from collections import OrderedDict
+from functools import cached_property
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO, Generic, TypeVar
 from zlib import crc32
@@ -11,19 +12,114 @@ from zlib import crc32
 from dissect.util.compression import lz4
 from dissect.util.hash.crc32c import crc32c
 from dissect.util.stream import AlignedStream
-from dissect.util.xmemoryview import xmemoryview
 
 from dissect.archive.exception import Error, FileNotFoundError, IsADirectoryError, NotADirectoryError
 from dissect.archive.vbk.c_vbk import PAGE_SIZE, c_vbk
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+    from typing import Any
 
     from dissect.cstruct import Structure
 
 
 class VBKError(Error):
     pass
+
+
+# Metadata pages (bank headers, meta vector table pages, directory entries) are small and
+# repeatedly revisited while walking a directory tree or opening a file. Cache them per
+# VBK instance under a byte budget instead of a per-bank entry count: a bank header alone
+# is a full 4 KiB page, so a count of 128 per bank could hold half a megabyte for a single
+# bank that was only touched once. The budget is per instance, so opening several archives
+# at once cannot make the cache grow with the number of archives beyond each archive's share.
+PAGE_CACHE_BUDGET = 8 * 1024 * 1024
+
+# Meta vector entries are Python objects with their parsed cstruct entry, so they are billed
+# by construction size rather than by the 4 KiB page they came from. A directory listing of
+# a few entries should not keep an unbounded object graph alive after it is released.
+META_ITEM_CACHE_BUDGET = 1024 * 1024
+
+# Parsed property dictionaries can hold multi-megabyte binary values (block allocation
+# masks). They are cached separately from directory items so that a handful of large
+# dictionaries cannot evict the directory entries a concurrent walk is using.
+PROPERTY_CACHE_BUDGET = 2 * 1024 * 1024
+
+
+class _Cache:
+    """A byte-bounded LRU cache.
+
+    The cache belongs to one :class:`VBK` instance and holds no reference to the file handle
+    beyond the values it stores, so dropping the instance drops every cached value with it.
+    Values are billed by ``sizer`` so that caches of raw pages, parsed directory items and
+    property dictionaries can share one eviction policy.
+    """
+
+    def __init__(self, budget: int, sizer: Callable[[Any], int]):
+        self.budget = budget
+        self.sizer = sizer
+        self._values: OrderedDict[Any, Any] = OrderedDict()
+        self._sizes: dict[Any, int] = {}
+        self._bytes = 0
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: Any) -> Any | None:
+        value = self._values.get(key)
+        if value is None:
+            self.misses += 1
+            return None
+
+        self._values.move_to_end(key)
+        self.hits += 1
+        return value
+
+    def put(self, key: Any, value: Any) -> None:
+        if key in self._values:
+            self._bytes -= self._sizes.pop(key, 0)
+            del self._values[key]
+
+        size = self.sizer(value)
+        self._values[key] = value
+        self._sizes[key] = size
+        self._bytes += size
+
+        while self._bytes > self.budget and len(self._values) > 1:
+            evicted_key, _ = self._values.popitem(last=False)
+            self._bytes -= self._sizes.pop(evicted_key, 0)
+
+    def clear(self) -> None:
+        self._values.clear()
+        self._sizes.clear()
+        self._bytes = 0
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @property
+    def nbytes(self) -> int:
+        return self._bytes
+
+
+def _bytes_size(value: bytes) -> int:
+    return len(value)
+
+
+def _meta_item_size(item: MetaItem) -> int:
+    # Billing the raw buffer plus a small headroom covers the parsed cstruct entry without
+    # walking an arbitrary object graph on every insert. Directory records are 192 bytes and
+    # FIB block descriptors 8-24, so the headroom dominates for the latter -- deliberately,
+    # because the entry object and its dict are then the larger part.
+    return len(item.buf) + 192
+
+
+def _properties_size(props: PropertiesDictionary) -> int:
+    total = 0
+    for key, value in props.items():
+        total += len(key) + 64  # dict entry overhead is roughly constant
+        if isinstance(value, bytes | str):
+            total += len(value)
+    return total
 
 
 class VBK:
@@ -44,6 +140,14 @@ class VBK:
 
     def __init__(self, fh: BinaryIO, verify: bool = True):
         self.fh = fh
+
+        # Per-instance metadata caches. They are intentionally not module-level: a VBK object
+        # that is released must not leave parsed pages or directory items behind for the next
+        # archive that shares this process. Each cache is bounded in bytes (see the budgets
+        # above), so many archives opened at the same time have a bounded, predictable total.
+        self._pages = _Cache(PAGE_CACHE_BUDGET, _bytes_size)
+        self._meta_items = _Cache(META_ITEM_CACHE_BUDGET, _meta_item_size)
+        self._properties = _Cache(PROPERTY_CACHE_BUDGET, _properties_size)
 
         fh.seek(0)
         self.header = c_vbk.StorageHeader(fh)
@@ -77,6 +181,22 @@ class VBK:
             self.active_slot.descriptor.BlocksStore.RootPage,
             self.active_slot.descriptor.BlocksStore.Count,
         )
+
+    def close(self) -> None:
+        """Drop the metadata caches and per-bank state owned by this instance.
+
+        The file handle is owned by the caller and is left open. Releasing the instance is
+        enough to release the caches, but an explicit ``close`` lets a long-lived process free
+        a small archive's metadata without waiting for the cyclic garbage collector to break
+        the parent/child references between the directory items and their VBK.
+        """
+        self._pages.clear()
+        self._meta_items.clear()
+        self._properties.clear()
+        for slot in (self.slot1, self.slot2):
+            for bank in slot._bank_cache.values():
+                bank._header = None
+            slot._bank_cache.clear()
 
     def is_v7(self) -> bool:
         return self.format_version == 7 or self.format_version == 0x10008 or self.format_version >= 9
@@ -147,7 +267,11 @@ class SnapshotSlot:
         self.descriptor = None
         self.grain = None
         self.valid_max_banks = 0
-        self.banks = []
+        # Bank descriptors live in the slot header, but a Bank itself is just an offset and
+        # size. Constructing every Bank eagerly read a 4 KiB bank header for both slots even
+        # when nothing was opened; keep only the descriptors and build a Bank on first use.
+        self._bank_descriptors: list = []
+        self._bank_cache: dict[int, Bank] = {}
 
         if self.header.ContainsSnapshot:
             self.descriptor = c_vbk.SnapshotDescriptor(vbk.fh)
@@ -160,10 +284,20 @@ class SnapshotSlot:
             if self.grain.StoredBanks > self.grain.MaxBanks:
                 raise VBKError("Invalid SnapshotSlot: StoredBanks is greater than MaxBanks")
 
-            self.banks = [
-                Bank(self.vbk, entry.Offset, entry.Size)
-                for entry in c_vbk.BankDescriptor[self.grain.StoredBanks](vbk.fh)
-            ]
+            self._bank_descriptors = list(c_vbk.BankDescriptor[self.grain.StoredBanks](vbk.fh))
+
+    @property
+    def banks(self) -> list[Bank]:
+        """The banks described by this slot, constructed on first access."""
+        return [self.bank(idx) for idx in range(len(self._bank_descriptors))]
+
+    def bank(self, idx: int) -> Bank:
+        """Return the bank at ``idx``, constructing and caching it on first use."""
+        bank = self._bank_cache.get(idx)
+        if bank is None:
+            descriptor = self._bank_descriptors[idx]
+            bank = self._bank_cache[idx] = Bank(self.vbk, descriptor.Offset, descriptor.Size)
+        return bank
 
     def __repr__(self) -> str:
         return f"<SnapshotSlot offset={self.offset:#x}>"
@@ -206,7 +340,19 @@ class SnapshotSlot:
         Args:
             idx: The page number to read.
         """
-        return self.banks[page >> 32].page(page & 0xFFFFFFFF)
+        bank_idx = page >> 32
+        page_idx = page & 0xFFFFFFFF
+        # Include the slot offset: the two slots can describe different banks at the same
+        # bank index, and pages from the inactive slot must not be served from the active one.
+        cache_key = (self.offset, bank_idx, page_idx)
+
+        cached = self.vbk._pages.get(cache_key)
+        if cached is not None:
+            return cached
+
+        buf = bytes(self.bank(bank_idx).page(page_idx))
+        self.vbk._pages.put(cache_key, buf)
+        return buf
 
     def _get_meta_blob(self, page: int) -> MetaBlob:
         """Get a meta blob from the snapshot slot.
@@ -235,13 +381,24 @@ class Bank:
         self.offset = offset
         self.size = size
 
-        self.vbk.fh.seek(offset)
-        self.header = c_vbk.BankHeader(vbk.fh)
-
-        self.page = lru_cache(128)(self.page)
+        self._header = None
 
     def __repr__(self) -> str:
         return f"<Bank offset={self.offset:#x} size={self.size:#x}>"
+
+    @property
+    def header(self) -> c_vbk.BankHeader:
+        """The bank header, read on first access.
+
+        Constructing every :class:`Bank` used to read its full 4 KiB header even for slots
+        that were only being considered for selection, so opening a VBK retained one header
+        page per bank in both slots. The header is still available for callers that inspect
+        it, but it is not part of opening the archive.
+        """
+        if self._header is None:
+            self.vbk.fh.seek(self.offset)
+            self._header = c_vbk.BankHeader(self.vbk.fh)
+        return self._header
 
     def verify(self, crc: int) -> bool:
         """Verify the bank's CRC.
@@ -326,11 +483,21 @@ class DirItem(MetaItem):
 
     @cached_property
     def properties(self) -> PropertiesDictionary | None:
-        """The properties of the directory item, if it has them."""
+        """The properties of the directory item, if it has them.
+
+        Property dictionaries are cached per VBK instance and shared between item instances
+        for the same root page, so walking a directory twice does not re-read and re-parse
+        the same blob. The cache is byte-bounded and cleared with the instance.
+        """
         if self.entry.PropsRootPage == -1:
             return None
 
-        return PropertiesDictionary(self.vbk, self.entry.PropsRootPage)
+        page = self.entry.PropsRootPage
+        props = self.vbk._properties.get(page)
+        if props is None:
+            props = PropertiesDictionary(self.vbk, page)
+            self.vbk._properties.put(page, props)
+        return props
 
     def is_dir(self) -> bool:
         """Return whether the directory item is a directory."""
@@ -835,12 +1002,24 @@ class MetaVector(Generic[T]):
 
         self._entry_size = len(self.type.__struct__)
         self._entries_per_page = PAGE_SIZE // self._entry_size
-        self._pages = list(self.vbk.get_meta_blob(page).pages())
 
-        self.get = lru_cache(128)(self.get)
+        # The chain of pages that back this vector is followed on first access, not in the
+        # constructor. A 2 MB archive's directory root and block store fit in one page, but
+        # a large archive's block store table is thousands of pages; materializing it during
+        # ``VBK.__init__`` retained a full page list (and, for MetaVector2, a full table
+        # memoryview) for every archive, even when only one small file was queried.
+        self._pages: list[int] | None = None
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} type={self.type.__name__} count={self.count}>"
+
+    def _iter_pages(self) -> Iterator[int]:
+        yield from self.vbk.get_meta_blob(self.page).pages()
+
+    def _page_list(self) -> list[int]:
+        if self._pages is None:
+            self._pages = list(self._iter_pages())
+        return self._pages
 
     def __iter__(self) -> Iterator[T]:
         return (self.get(i) for i in range(self.count))
@@ -852,7 +1031,7 @@ class MetaVector(Generic[T]):
             idx: The index of the entry to read.
         """
         page_id, offset = divmod(idx, self._entries_per_page)
-        page = self._pages[page_id]
+        page = self._page_list()[page_id]
         offset = (offset * self._entry_size) + 8
 
         buf = self.vbk.page(page)
@@ -866,7 +1045,17 @@ class MetaVector(Generic[T]):
         """
         if idx >= self.count:
             raise IndexError("MetaVector2 index out of range")
-        return self.type.from_bytes(self.vbk, self.data(idx))
+
+        # Page numbers are slot-relative, so the root page alone does not identify a vector;
+        # include the slot offset to keep entries from the two slots apart.
+        key = (self.vbk.active_slot.offset, self.type, self.page, self.count, idx)
+        cached = self.vbk._meta_items.get(key)
+        if cached is not None:
+            return cached
+
+        item = self.type.from_bytes(self.vbk, self.data(idx))
+        self.vbk._meta_items.put(key, item)
+        return item
 
 
 class MetaVector2(MetaVector[T]):
@@ -893,13 +1082,33 @@ class MetaVector2(MetaVector[T]):
         _MAX_TABLE_ENTRIES_PER_PAGE - 1,
     )
 
+    # Entry-page lookups are recomputed only for pages this vector is actually indexing. A
+    # bounded LRU keeps that bookkeeping from growing with the table size; 128 entries is
+    # several of the 508/511-entry table pages, which is what repeated random access hits.
+    _LOOKUP_CACHE_SIZE = 128
+
     def __init__(self, vbk: VBK, type_: type[T], page: int, count: int):
         super().__init__(vbk, type_, page, count)
 
-        # It's not actually a meta blob, but the same mechanism is used (next page pointer in the header)
-        # The table itself is essentially a big array of 64 bit integers, so cast it to a memoryview of that
-        self._table = xmemoryview(self.vbk.get_meta_blob(page).data(), "<q")
-        self._lookup_page = lru_cache(128)(self._lookup_page)
+        # It's not actually a meta blob, but the same mechanism is used (next page pointer in
+        # the header). The table is an array of 64 bit integers spread over several pages, and
+        # a large block store's table can span thousands of pages. Joining it into one bytes
+        # object retained the whole index for as long as the vector lived, so it is instead
+        # addressed page by page through the instance page cache: only table pages actually
+        # consulted are resident, and they share the cache's byte budget.
+        self._table_pages: list[int] | None = None
+        self._lookups: OrderedDict[int, int] = OrderedDict()
+
+    def _table_page(self, flat: int) -> tuple[int, int]:
+        """Return the table page number and 8-byte offset within it for flat index ``flat``."""
+        if self._table_pages is None:
+            self._table_pages = list(self.vbk.get_meta_blob(self.page).pages())
+        page_idx, offset = divmod(flat, PAGE_SIZE // 8)
+        return self._table_pages[page_idx], offset
+
+    def _table_entry(self, flat: int) -> int:
+        page, offset = self._table_page(flat)
+        return int.from_bytes(self.vbk.page(page)[offset * 8 : offset * 8 + 8], "little", signed=True)
 
     def _lookup_page(self, idx: int) -> int:
         """Look up the page number for an entry in the vector.
@@ -907,6 +1116,18 @@ class MetaVector2(MetaVector[T]):
         Args:
             idx: The page index to lookup the page number for.
         """
+        if (cached := self._lookups.get(idx)) is not None:
+            self._lookups.move_to_end(idx)
+            return cached
+
+        page_no = self._lookup_page_uncached(idx)
+
+        self._lookups[idx] = page_no
+        if len(self._lookups) > self._LOOKUP_CACHE_SIZE:
+            self._lookups.popitem(last=False)
+        return page_no
+
+    def _lookup_page_uncached(self, idx: int) -> int:
         # MetaVec2 pages are a little special
         # The first page has a 16 byte header:
         # - 8 bytes for the next page number
@@ -925,7 +1146,7 @@ class MetaVector2(MetaVector[T]):
         # The fifth page can hold 508 entries again, and so on
 
         if idx < self._MAX_TABLE_ENTRIES_PER_PAGE - 2:
-            return self._table[idx + 2]  # Skip the header
+            return self._table_entry(idx + 2)  # Skip the header
 
         idx -= self._MAX_TABLE_ENTRIES_PER_PAGE - 2
         table_idx = 1
@@ -934,7 +1155,7 @@ class MetaVector2(MetaVector[T]):
 
             if idx < max_entries:
                 table_offset = table_idx * self._MAX_TABLE_ENTRIES_PER_PAGE
-                return self._table[table_offset + (self._MAX_TABLE_ENTRIES_PER_PAGE - max_entries) + idx]
+                return self._table_entry(table_offset + (self._MAX_TABLE_ENTRIES_PER_PAGE - max_entries) + idx)
 
             idx -= max_entries
             table_idx += 1
@@ -985,10 +1206,21 @@ class FibMetaSparseTable:
         self._table_count = (count + self.MAX_ENTRIES_PER_TABLE - 1) // self.MAX_ENTRIES_PER_TABLE
         self._vec = MetaVector(vbk, MetaTableDescriptor, page, self._table_count)
 
-        self._open_table = lru_cache(128)(self._open_table)
+        # Maps are held per table object, bounded by count. The old lru_cache(128) was per
+        # sparse table, so a file with many tables could hold thousands of open MetaVectors;
+        # each of those kept its page list and table memoryview alive after the stream closed.
+        self._tables: OrderedDict[tuple[int, int], MetaVector] = OrderedDict()
 
     def _open_table(self, page: int, count: int) -> MetaVector[FibBlockDescriptor | FibBlockDescriptorV7]:
-        return MetaVector(self.vbk, self.type, page, count)
+        key = (page, count)
+        table = self._tables.get(key)
+        if table is None:
+            table = self._tables[key] = MetaVector(self.vbk, self.type, page, count)
+            if len(self._tables) > 32:
+                self._tables.popitem(last=False)
+        else:
+            self._tables.move_to_end(key)
+        return table
 
     def get(self, idx: int) -> FibBlockDescriptor | FibBlockDescriptorV7:
         """Get a block descriptor from the sparse table.
