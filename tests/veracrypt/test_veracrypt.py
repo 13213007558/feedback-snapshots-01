@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 import pytest
 from dissect.util.stream import MappingStream
 
 from dissect.fve.veracrypt.veracrypt import VeraCrypt, is_veracrypt_volume
 from tests._util import absolute_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _system_stream(file: Path) -> MappingStream:
+    """Mock Disk and Volume and prepare stream with correct offsets."""
+    stream = MappingStream(size=31744 + 512 + 64)
+    stream.add(offset=0, size=31744, fh=BytesIO(b"\x01" * 31744))
+    stream.add(offset=0x7C00, size=512 + 64, fh=BytesIO(file.read_bytes() + (64 * b"\x01")))
+    return stream
 
 
 @pytest.mark.parametrize(
@@ -27,11 +40,25 @@ from tests._util import absolute_path
             id="aes256-sha512-passphrase-invalid",
         ),
         pytest.param(
+            "aes256-sha512",
+            "unlock_with_password",
+            b"password",
+            True,
+            id="aes256-sha512-password-bytes",
+        ),
+        pytest.param(
             "aes256-sha256",
             "unlock_with_passphrase",
             "password",
             True,
             id="aes256-sha256-passphrase",
+        ),
+        pytest.param(
+            "aes256-sha256",
+            "unlock_with_password",
+            b"password",
+            True,
+            id="aes256-sha256-password-bytes",
         ),
         pytest.param(
             "aes256-sha512",
@@ -70,7 +97,7 @@ def test_veracrypt_file_container(mode: str, type: str, value: str | bytes, vali
     assert not vc.is_system
 
     if not valid:
-        with pytest.raises(ValueError, match=r"^Unable to decrypt using provided (passphrase|header keys)$"):
+        with pytest.raises(ValueError, match=r"^Unable to decrypt using provided (password|header keys)$"):
             getattr(vc, type)(value)
         return
 
@@ -84,6 +111,66 @@ def test_veracrypt_file_container(mode: str, type: str, value: str | bytes, vali
 
 
 @pytest.mark.parametrize(
+    ("mode", "kdf", "iterations"),
+    [
+        pytest.param("aes256-sha512", "pkcs5-hmac-sha512", 500_000, id="aes256-sha512"),
+        pytest.param("aes256-sha256", "pkcs5-hmac-sha256", 500_000, id="aes256-sha256"),
+    ],
+)
+def test_veracrypt_file_container_records_parameters(mode: str, kdf: str, iterations: int) -> None:
+    """Test that unlocking records the actually used encoding, KDF and iteration parameters."""
+    file = absolute_path(f"_data/veracrypt/{mode}.hc")
+
+    # Raw bytes entry point: no encoding is recorded.
+    vc = VeraCrypt(file.open("rb"))
+    vc.unlock_with_password(b"password")
+    assert vc.unlocked
+    assert vc.kdf == kdf
+    assert vc.iterations == iterations
+    assert vc.pim is None
+    assert vc.password_encoding is None
+
+    # Text passphrase entry point: explicit encoding is recorded.
+    vc = VeraCrypt(file.open("rb"))
+    vc.unlock_with_passphrase("password", encoding="utf-8")
+    assert vc.unlocked
+    assert vc.kdf == kdf
+    assert vc.iterations == iterations
+    assert vc.pim is None
+    assert vc.password_encoding == "utf-8"
+
+    # Legacy call without encoding keeps the old latin-1 byte semantics.
+    vc = VeraCrypt(file.open("rb"))
+    vc.unlock_with_passphrase("password")
+    assert vc.unlocked
+    assert vc.password_encoding == "latin-1"
+
+
+@pytest.mark.parametrize(
+    ("pim", "exception"),
+    [
+        pytest.param(-1, ValueError, id="negative"),
+        pytest.param(65_536, ValueError, id="out-of-range"),
+        pytest.param("485", TypeError, id="string"),
+    ],
+)
+def test_veracrypt_invalid_pim_rejected_before_derivation(
+    monkeypatch: pytest.MonkeyPatch, pim: object, exception: type[Exception]
+) -> None:
+    """Test that invalid PIM values are rejected before any expensive key derivation runs."""
+    file = absolute_path("_data/veracrypt/aes256-sha512.hc")
+    vc = VeraCrypt(file.open("rb"))
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("key derivation must not run on invalid PIM")
+
+    monkeypatch.setattr(hashlib, "pbkdf2_hmac", _fail)
+    with pytest.raises(exception):
+        vc.unlock_with_passphrase("password", pim=pim)  # type: ignore[arg-type]
+    assert not vc.unlocked
+
+
+@pytest.mark.parametrize(
     ("mode", "type", "value"),
     [
         pytest.param(
@@ -91,6 +178,12 @@ def test_veracrypt_file_container(mode: str, type: str, value: str | bytes, vali
             "unlock_with_passphrase",
             "password",
             id="aes256-sha512-passphrase",
+        ),
+        pytest.param(
+            "aes256-sha512",
+            "unlock_with_password",
+            b"password",
+            id="aes256-sha512-password-bytes",
         ),
         pytest.param(
             "aes256-sha512",
@@ -102,16 +195,11 @@ def test_veracrypt_file_container(mode: str, type: str, value: str | bytes, vali
         ),
     ],
 )
-def test_veracrypt_system_partition(mode: str, type: str, value: str) -> None:
+def test_veracrypt_system_partition(mode: str, type: str, value: str | bytes) -> None:
     """Test if we can decrypt a VeraCrypt 1.26.24 (64-bit, Windows) system partition."""
-    # Mock Disk and Volume and prepare stream with correct offsets.
     file = absolute_path(f"_data/veracrypt/{mode}.system")
 
-    stream = MappingStream(size=31744 + 512 + 64)
-    stream.add(offset=0, size=31744, fh=BytesIO(b"\x01" * 31744))
-    stream.add(offset=0x7C00, size=512 + 64, fh=BytesIO(file.read_bytes() + (64 * b"\x01")))
-
-    vc = VeraCrypt(stream, is_system=True)  # type: ignore
+    vc = VeraCrypt(_system_stream(file), is_system=True)  # type: ignore[arg-type]
     getattr(vc, type)(value)
 
     assert vc.is_system
@@ -122,3 +210,17 @@ def test_veracrypt_system_partition(mode: str, type: str, value: str) -> None:
     assert vc.version == 5
     assert vc.client_version == 267
     assert vc.size == 0xFC4600000  # 63 GB
+
+
+def test_veracrypt_system_partition_records_parameters() -> None:
+    """Test that a system volume unlocks with an applicable (system) KDF candidate."""
+    file = absolute_path("_data/veracrypt/aes256-sha512.system")
+
+    vc = VeraCrypt(_system_stream(file), is_system=True)  # type: ignore[arg-type]
+    vc.unlock_with_password(b"password")
+
+    assert vc.unlocked
+    assert vc.kdf == "pkcs5-hmac-sha512"
+    assert vc.iterations == 500_000
+    assert vc.pim is None
+    assert vc.password_encoding is None

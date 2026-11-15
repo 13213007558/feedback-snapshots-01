@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import math
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
@@ -10,12 +11,18 @@ from dissect.fve.veracrypt.c_veracrypt import (
     c_veracrypt,
 )
 from dissect.fve.veracrypt.crypto import CIPHERS
-from dissect.fve.veracrypt.key import KEY_DERIVATIONS
+from dissect.fve.veracrypt.key import (
+    KEY_DERIVATIONS,
+    SYSTEM_KEY_DERIVATIONS,
+    normalize_pim,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from dissect.fve.luks.luks import CryptStream
+
+log = logging.getLogger(__name__)
 
 
 class VeraCrypt:
@@ -26,6 +33,17 @@ class VeraCrypt:
 
     Non-system partitions and hidden volumes are not implemented as well as other key
     derivation algorithms or ciphers. Key files are also not implemented.
+
+    After a successful unlock, the actually used derivation parameters are recorded
+    on the instance for auditing purposes:
+
+        - :attr:`kdf`: the KDF that unlocked the volume, e.g. ``pkcs5-hmac-sha512``.
+        - :attr:`iterations`: the PBKDF2 iteration count that was used.
+        - :attr:`pim`: the normalized PIM that was used, ``None`` if defaulted.
+        - :attr:`password_encoding`: the text encoding used to convert a passphrase
+          to bytes, ``None`` if the password was supplied as raw bytes.
+
+    The password itself and derived keys are never recorded or logged.
 
     References:
         - https://veracrypt.jp/en/System%20Encryption.html
@@ -43,6 +61,11 @@ class VeraCrypt:
         self.version = None
         self.client_version = None
 
+        self.kdf: str | None = None
+        self.iterations: int | None = None
+        self.pim: int | None = None
+        self.password_encoding: str | None = None
+
         if is_system:
             self.fh.seek(TC_BOOT_VOLUME_HEADER_SECTOR_OFFSET)
 
@@ -55,27 +78,82 @@ class VeraCrypt:
             f"cipher={self.cipher} version={self.version} client_version={self.client_version}>"
         )
 
-    def unlock_with_passphrase(self, passphrase: str, pim: int | None = None) -> None:
-        """Unlock the volume with a passphrase.
+    def unlock_with_password(self, password: bytes, pim: int | None = None) -> None:
+        """Unlock the volume with a password as raw bytes.
+
+        The password is used exactly as provided; no encoding or normalization is
+        applied. Use :meth:`unlock_with_passphrase` to unlock with a text passphrase
+        and an explicit encoding instead.
 
         Supports the following PKCS5 header key derivation functions:
             - HMAC SHA512 (default)
             - HMAC SHA256
+            - HMAC SHA256 boot (system encryption volumes only)
 
         Supports the following encryption modes:
             - AES XTS (default)
 
         KDF HMAC BLAKE2s-256, WHIRLPOOL and STREEBOG are not implemented.
         Ciphers (XTS mode) Serpent, Twofish and Camellia are not implemented.
+
+        The ``pim`` value is validated before any key derivation is started, see
+        :func:`dissect.fve.veracrypt.key.normalize_pim` for the exact contract.
         """
-        for Kdf in KEY_DERIVATIONS:
-            kdf = Kdf(passphrase, self.header_salt)
+        pim = normalize_pim(pim)
+        kdfs = SYSTEM_KEY_DERIVATIONS if self.is_system else KEY_DERIVATIONS
+
+        for Kdf in kdfs:
+            kdf = Kdf(password, self.header_salt)
             keys = kdf.derive(pim)
             if self._decrypt_header(keys):
+                self.kdf = kdf.__type__
+                self.iterations = kdf.iterations(pim)
+                self.pim = pim
+                log.info(
+                    "Unlocked VeraCrypt volume using kdf=%s iterations=%d pim=%s encoding=%s",
+                    self.kdf,
+                    self.iterations,
+                    pim,
+                    self.password_encoding,
+                )
                 break
 
         if not self.unlocked:
-            raise ValueError("Unable to decrypt using provided passphrase")
+            raise ValueError("Unable to decrypt using provided password")
+
+    def unlock_with_passphrase(self, passphrase: str, pim: int | None = None, *, encoding: str = "latin-1") -> None:
+        """Unlock the volume with a text passphrase and an explicit encoding.
+
+        The passphrase is encoded to bytes using ``encoding`` and then used as
+        password, see :meth:`unlock_with_password`. The used encoding is recorded
+        on :attr:`password_encoding`.
+
+        The default ``latin-1`` encoding preserves the byte semantics of previous
+        versions of this library, where passphrases were implicitly encoded as
+        ``latin-1``. It maps codepoints U+0000 to U+00FF one-to-one to bytes and
+        is what VeraCrypt effectively used for legacy (non-UTF-8) passwords. For
+        passphrases containing characters outside this range, pass an explicit
+        encoding such as ``utf-8``, or use :meth:`unlock_with_password` with raw
+        bytes instead.
+
+        Migration examples for old calls::
+
+            # Old: vc.unlock_with_passphrase("password")
+            # New (identical byte semantics):
+            vc.unlock_with_passphrase("password", encoding="latin-1")
+            # Or, unambiguously, as raw bytes:
+            vc.unlock_with_password(b"password")
+
+            # Old: vc.unlock_with_passphrase("pässwörd", pim=485)
+            # New (identical byte semantics):
+            vc.unlock_with_passphrase("pässwörd", pim=485, encoding="latin-1")
+            # Or, if the volume was created with a UTF-8 passphrase:
+            vc.unlock_with_passphrase("pässwörd", pim=485, encoding="utf-8")
+        """
+        if not isinstance(passphrase, str):
+            raise TypeError(f"Passphrase must be a string, got {type(passphrase).__name__}")
+        self.password_encoding = encoding
+        self.unlock_with_password(passphrase.encode(encoding), pim)
 
     def unlock_with_header_key(self, keys: bytes) -> None:
         """Unlock the volume with a raw encryption key. Supports AES XTS encryption mode only."""
