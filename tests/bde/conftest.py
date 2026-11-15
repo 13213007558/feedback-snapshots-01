@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, BinaryIO
 import pytest
 
 from tests._util import open_file_gz
+from tests.bde.metadata import build_mixed_protector_volume
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -38,3 +39,8 @@ def bde_win7_partial() -> Iterator[BinaryIO]:
 @pytest.fixture
 def bde_eow_partial() -> Iterator[BinaryIO]:
     yield from open_file_gz("_data/bde/eow_partial.bin.gz")
+
+
+@pytest.fixture
+def bde_mixed_protectors() -> Iterator[BinaryIO]:
+    yield build_mixed_protector_volume()

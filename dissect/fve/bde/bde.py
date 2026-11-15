@@ -31,6 +31,7 @@ from dissect.fve.bde.c_bde import (
 from dissect.fve.bde.eow import EowInformation
 from dissect.fve.bde.information import Dataset, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
+from dissect.fve.bde.protector import Protector
 from dissect.fve.crypto import create_cipher
 from dissect.fve.exception import InvalidHeaderError
 
@@ -102,6 +103,19 @@ class BDE:
             type_=FVE_DATUM_TYPE.VOLUME_MASTER_KEY_INFO,
         )
         return [d.priority for d in datums]
+
+    @property
+    def protectors(self) -> list[Protector]:
+        """Return a read-only listing of the key protectors on this volume.
+
+        Only metadata is read: no key derivation or decryption is performed and the volume unlock state is not
+        modified. Each :class:`Protector` keeps a reference to its originating VMK datum.
+        """
+        datums = self.information.dataset.find_datum(
+            role=FVE_DATUM_ROLE.VOLUME_MASTER_KEY_INFO,
+            type_=FVE_DATUM_TYPE.VOLUME_MASTER_KEY_INFO,
+        )
+        return [Protector(datum) for datum in datums]
 
     @property
     def sector_size(self) -> int:
