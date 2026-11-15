@@ -424,11 +424,17 @@ class FileEntry:
         reparse_point = c_ad1.ReparsePoint(self.open())
         return reparse_point.link.strip("\00").split("\00")[-1]
 
-    def open(self) -> FileStream:
-        """Open the file entry for reading."""
+    def open(self, decompressed_bytes: int | None = None) -> FileStream:
+        """Open the file entry for reading.
+
+        Args:
+            decompressed_bytes: Optional maximum number of decompressed bytes this stream may produce across its
+                lifetime. Reads that would exceed it raise :class:`DecompressionBudgetExceeded`. Use this to
+                impose a stricter budget on untrusted images.
+        """
         if self.is_dir():
             raise IsADirectoryError(self.name)
-        return FileStream(self)
+        return FileStream(self, decompressed_bytes=decompressed_bytes)
 
 
 class VirtualEntry(FileEntry):

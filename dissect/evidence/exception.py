@@ -21,6 +21,14 @@ class NotASymlinkError(Error):
     pass
 
 
+class InvalidChunkTable(Error, ValueError):
+    """Related to AD1: the chunk table of a file entry is malformed or out of bounds."""
+
+
+class DecompressionBudgetExceeded(Error):
+    """Related to AD1: reading a file entry would exceed its decompression budget."""
+
+
 class InvalidSnapshot(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
 
