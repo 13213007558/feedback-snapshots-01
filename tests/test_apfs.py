@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from dissect.apfs.apfs import APFS, log
+from dissect.apfs.apfs import APFS
 from dissect.apfs.c_apfs import c_apfs
 from tests.conftest import absolute_path
 
@@ -370,16 +370,30 @@ def test_snapshots() -> None:
             assert snapshot.open().get("file").open().read() == f"Snapshot {i}\n".encode()
 
 
-def test_corrupt_checkpoints(caplog: pytest.LogCaptureFixture) -> None:
+def test_corrupt_checkpoints() -> None:
     """Test APFS volumes with corrupt checkpoints."""
-    with gzip.open(absolute_path("_data/corrupt.bin.gz"), "rb") as fh, caplog.at_level("DEBUG", log.name):
+    with gzip.open(absolute_path("_data/corrupt.bin.gz"), "rb") as fh:
         container = APFS(fh)
 
         assert container.sb.xid == 302
         assert len(container.volumes) == 1
 
-    assert caplog.messages[0] == "Skipping superblock xid=304: invalid OMAP"
-    assert caplog.messages[1] == "Skipping superblock xid=303: Invalid nx_superblock checksum"
+    report = container.checkpoint_report
+    candidate_by_xid = {candidate.xid: candidate for candidate in report.candidates}
+
+    # The newest transactions are outside the anchor's valid window and cannot be promoted on xid alone.
+    assert not candidate_by_xid[304].in_window
+    assert any("window" in reason for reason in candidate_by_xid[304].rejected_reasons)
+    assert any("OMAP" in reason for reason in candidate_by_xid[304].rejected_reasons)
+
+    # xid 303 is out of window and its superblock checksum is broken.
+    assert not candidate_by_xid[303].in_window
+    assert any("checksum" in reason for reason in candidate_by_xid[303].rejected_reasons)
+
+    # Only the in-window, fully consistent xid 302 transaction is selected.
+    assert report.selected.xid == 302
+    assert candidate_by_xid[302].accepted
+    assert "Selected checkpoint transaction xid=302" in report.describe()
 
 
 def test_large_extents() -> None:

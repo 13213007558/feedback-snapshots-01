@@ -5,11 +5,13 @@ import os
 from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.checkpoint import select_checkpoint
 from dissect.apfs.objects import NxSuperblock
 
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from dissect.apfs.checkpoint import CheckpointCandidate, CheckpointReport
     from dissect.apfs.objects.fs import FS
     from dissect.apfs.objects.keybag import ContainerKeybag
 
@@ -28,35 +30,29 @@ class APFS:
         self.fh = fh
         self.fh.seek(0)
 
-        self.sb = NxSuperblock.from_block(self, 0, self.fh.read(c_apfs.NX_DEFAULT_BLOCK_SIZE))
-        self.sb.check()
+        # The block 0 superblock is the on-disk anchor: its descriptor window defines which checkpoint blocks
+        # are in scope. It is retained separately so a proven newer transaction can replace the working state
+        # without losing the container identity used for validation.
+        self.anchor: NxSuperblock = NxSuperblock.from_block(self, 0, self.fh.read(c_apfs.NX_DEFAULT_BLOCK_SIZE))
+        self.anchor.check()
 
-        self.sbs = sorted(
-            [obj for obj in self.sb.checkpoint_objects if isinstance(obj, NxSuperblock)],
-            key=lambda obj: obj.xid,
-            reverse=True,
-        )
+        self.sb: NxSuperblock
+        self.checkpoint_report: CheckpointReport
+        self.sb, self.checkpoint_report = select_checkpoint(self)
 
-        # TODO: Do more accurate checkpoint traversal
-        for sb in self.sbs:
-            try:
-                sb.check()
-                sb.compare(self.sb)
-            except Exception as e:
-                log.debug("Skipping superblock xid=%d: %s", sb.xid, e)
-                continue
+    @property
+    def checkpoint_candidates(self) -> list[CheckpointCandidate]:
+        """Every checkpoint superblock candidate considered during selection, with its verdict.
 
-            if not sb.omap.is_valid():
-                log.debug("Skipping superblock xid=%d: invalid OMAP", sb.xid)
-                continue
-
-            self.sb = sb
-            break
+        See :class:`~dissect.apfs.checkpoint.CheckpointCandidate` for the recorded rejection reasons.
+        """
+        return self.checkpoint_report.candidates
 
     @property
     def block_size(self) -> int:
         """The block size of the container."""
-        return self.sb.block_size
+        # During checkpoint selection self.sb is not assigned yet; the anchor already carries the block size.
+        return getattr(self, "sb", self.anchor).block_size
 
     @property
     def sectors_per_block(self) -> int:

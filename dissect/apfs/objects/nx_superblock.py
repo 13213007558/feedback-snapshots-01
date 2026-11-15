@@ -4,8 +4,6 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from dissect.fve.crypto import create_cipher
-
 from dissect.apfs.c_apfs import c_apfs
 from dissect.apfs.cursor import Cursor
 from dissect.apfs.exception import Error
@@ -14,6 +12,7 @@ from dissect.apfs.objects.btree import BTree
 from dissect.apfs.objects.fs import FS
 from dissect.apfs.objects.keybag import ContainerKeybag
 from dissect.apfs.objects.omap import ObjectMap
+from dissect.fve.crypto import create_cipher
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -47,10 +46,12 @@ class NxSuperblock(Object):
             )
 
     def compare(self, other: NxSuperblock) -> None:
-        """Compare this superblock to another superblock."""
-        if self.header.o_xid < other.header.o_xid:
-            raise Error("Lower xid than other superblock")
+        """Compare this superblock's container identity to another superblock.
 
+        Only identity-defining, immutable container geometry is compared so an older but consistent
+        checkpoint can still be selected as a fallback. The transaction ID is deliberately not part of
+        the comparison: candidates are ordered by xid by the caller, not accepted or rejected on it.
+        """
         for attr in (
             "nx_uuid",
             "nx_fusion_uuid",
