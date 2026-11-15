@@ -165,7 +165,8 @@ def read_plaintext(store: PageStore, page_index: int, data_key: DataKey | None =
             raise InvalidPasswordError(f"segment at page {page_index} is encrypted and no data key is available")
         from dissect.archive.tibx.crypto import decrypt_segment
 
-        plaintext = decrypt_segment(read_compressed(store, segment, pages[1:]), data_key)
+        context = f"encrypted segment at page {page_index}"
+        plaintext = decrypt_segment(read_compressed(store, segment, pages[1:]), data_key, context)
         if segment.compression == c_tibx.ComprAlg.ZSTD:
             # zstd frame parsing ignores any trailing CBC/PKCS#7 padding
             out = decompress_zstd(plaintext, segment.length)

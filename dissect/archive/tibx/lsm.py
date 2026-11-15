@@ -326,7 +326,7 @@ def _decrypt_cells(stream: bytes, encoding: int, data_key: DataKey | None) -> by
         return stream
     if data_key is None:
         raise InvalidPasswordError("LSM records are encrypted and no data key is available")
-    return decrypt_segment(stream, data_key)
+    return decrypt_segment(stream, data_key, "encrypted LSM cell stream")
 
 
 def iter_memtree_cells(sb: LsmSuperBlock, data_key: DataKey | None = None) -> list[LsmCell]:

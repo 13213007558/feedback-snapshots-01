@@ -22,6 +22,34 @@ to a block boundary; GCM leaves it exactly as long as the plaintext, so a GCM se
 Either way the plaintext is what the segment's codec wrote: a zstd frame, an LZ4 block, a
 zlib stream, or the stored bytes when the codec is NONE.
 
+Integrity guarantees -- what each layer actually authenticates
+--------------------------------------------------------------
+The three crypto layers do not offer the same integrity, and the difference is load-bearing:
+
+* **Password-wrapped data key (CBC + PKCS#7).** No MAC. A candidate is accepted purely on
+  structural validity plus a PKCS#7-unpadded key of the length the header's ``alg`` names.
+  A tampered wrap whose last block still decrypts to valid padding therefore yields a
+  *different* key that passes every check; a wrong password is only rejected because the
+  odds of valid 16-byte-aligned padding are negligible. Neither a correct password nor valid
+  padding authenticates the keymap bytes -- they only show that *some* length-correct key
+  came out. The keymap scan compounds this: it takes the first structurally valid candidate
+  that unwraps, so an archive carrying several key-shaped blobs is only as trustworthy as
+  that scan.
+* **CBC data segments (alg 1-3).** Confidentiality only, no authentication. CBC has no tag,
+  so bit-flipped or swapped ciphertext decrypts without error; PKCS#7 padding is checked (and
+  a bad pad fails), but a valid pad says nothing about the content. The downstream length and
+  codec checks reject *most* damage as a :class:`~dissect.archive.tibx.exception.CorruptArchiveError`,
+  yet a stored (``ComprAlg.NONE``) segment can be silently wrong, and any such failure is a
+  codec/length error, not an authentication verdict.
+* **GCM data segments (alg 5-7).** Authenticated encryption. The AES-GCM tag covers the
+  ciphertext (with no associated data), so any change to ciphertext, IV or tag, and any
+  truncation that drops or splits tag-protected bytes, fails verification before plaintext is
+  returned. This is the only one of the three layers that cryptographically binds the bytes
+  to the data key.
+
+In short: only a GCM segment's tag is an integrity guarantee. A clean CBC decrypt, a valid
+PKCS#7 pad and a successful key unwrap are not, and must never be treated as one.
+
 Ported from ``acronis-tib-reader`` (MIT License, Copyright (c) 2026 the tibread
 contributors, https://github.com/TreadingTheTiber/acronis-tib-reader) and ``acronis-tibx``
 (MIT License, Copyright (c) 2026 mniedermaier).
@@ -222,22 +250,26 @@ def unwrap_data_key(header: ArchiveHeader, password: str | bytes) -> DataKey:
     raise InvalidPasswordError("wrong password, or no password-wrapped key in the keymap")
 
 
-def decrypt_segment(payload: bytes, data_key: DataKey) -> bytes:
+def decrypt_segment(payload: bytes, data_key: DataKey, context: str = "encrypted segment") -> bytes:
     """Decrypt an ``SE`` segment payload, or an encrypted LSM cell stream, to its stored bytes.
 
     Returns the still-compressed (or stored) plaintext; the caller decompresses per the
     segment's compression field. For CBC the padding is left intact -- the caller truncates
     to the segment's declared length; GCM plaintext is already exact.
 
+    ``context`` names what is being decrypted for error messages (e.g. ``"segment at page 1"``)
+    so a failure raised through the public read entry can be traced to the damaged segment
+    rather than an anonymous payload.
+
     Raises:
         ~dissect.archive.tibx.exception.CorruptArchiveError: If the payload is too short for its framing, or a GCM
-            tag does not authenticate.
+            tag does not authenticate. The message names ``context`` either way.
     """
     from Crypto.Cipher import AES
 
     if data_key.gcm:
         if len(payload) < SEGMENT_GCM_HEADER_SIZE:
-            raise CorruptArchiveError(f"encrypted segment payload too short: {len(payload)} bytes")
+            raise CorruptArchiveError(f"{context} payload too short: {len(payload)} bytes")
         header = c_tibx.segment_gcm_header(payload)
         try:
             return AES.new(data_key.key, AES.MODE_GCM, nonce=header.iv).decrypt_and_verify(
@@ -246,10 +278,10 @@ def decrypt_segment(payload: bytes, data_key: DataKey) -> bytes:
         except ValueError as e:
             # The data key is confirmed by its PKCS#7 unwrap, so a failing tag is damage
             # to the archive rather than a wrong password.
-            raise CorruptArchiveError(f"segment failed AES-GCM authentication: {e}")
+            raise CorruptArchiveError(f"{context} failed AES-GCM authentication: {e}")
 
     if len(payload) < SEGMENT_CBC_HEADER_SIZE + 16:
-        raise CorruptArchiveError(f"encrypted segment payload too short: {len(payload)} bytes")
+        raise CorruptArchiveError(f"{context} payload too short: {len(payload)} bytes")
     ciphertext = payload[SEGMENT_CBC_HEADER_SIZE:]
     ciphertext = ciphertext[: len(ciphertext) // 16 * 16]
     return AES.new(data_key.key, AES.MODE_CBC, c_tibx.segment_cbc_header(payload).iv).decrypt(ciphertext)
