@@ -1,0 +1,4 @@
+source "https://rubygems.org"
+gem "webauthn", path: ".."
+gem "rspec", "~> 3.13", require: false
+gem "byebug", "~> 11.1", require: false
