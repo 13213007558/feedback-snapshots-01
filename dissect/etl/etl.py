@@ -274,7 +274,7 @@ class Event:
         The event data is from a specific manifest file if it exists.
         """
         event_values = self._header.additional_header_fields()
-        struct_events = self._struct._values if self._struct else {}
+        struct_events = self._struct.__values__ if self._struct else {}
 
         # Pretty print Instance values.
         update_event = {}

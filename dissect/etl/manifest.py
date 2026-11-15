@@ -9,8 +9,8 @@ from string import Formatter
 from typing import TYPE_CHECKING, BinaryIO
 
 from defusedxml import ElementTree
-from dissect import cstruct
 
+from dissect import cstruct
 from dissect.etl.exceptions import ManifestNotFoundError
 
 if TYPE_CHECKING:
@@ -29,9 +29,47 @@ from uuid import UUID
 from collections import namedtuple
 
 from dissect import cstruct
-from dissect.cstruct import BaseType, MetaType, Structure
+from dissect.cstruct import BaseType, MetaType
+from dissect.cstruct import Structure as _HostStructure
 
-Structure._calc_offsets = lambda _: None
+
+class ManifestStructure(_HostStructure):
+    \"\"\"Structure base class local to this manifest module.
+
+    ETW templates intentionally contain variable length fields. Older dissect.cstruct releases
+    exposed an overridable ``_calc_offsets`` hook that this project used to disable offset
+    calculation for those templates. That hook no longer exists, and patching the imported
+    ``Structure`` class mutated global state for every other cstruct parser in the process.
+
+    Instead we derive a private base class and only shadow the hook here. Manifest structures
+    never escape this module, so the host ``dissect.cstruct`` package is left untouched.
+    \"\"\"
+
+    @staticmethod
+    def _calc_offsets(*args, **kwargs):
+        return None
+
+
+class ManifestParser(cstruct.cstruct):
+    \"\"\"cstruct parser that keeps all structures bound to :class:`ManifestStructure`.\"\"\"
+
+    def _make_struct(self, name, fields, *, align=False, anonymous=False, base=None):
+        # ``base`` is only passed by cstruct internals for unions, which must keep using
+        # their own base class. Everything else is rooted at ManifestStructure.
+        return super()._make_struct(name, fields, align=align, anonymous=anonymous, base=base or ManifestStructure)
+
+    def refresh_offsets(self):
+        \"\"\"Recompute offsets of every manifest structure after a pointer width change.\"\"\"
+        for type_ in list(self.typedefs.values()):
+            if not isinstance(type_, type) or not issubclass(type_, _HostStructure):
+                continue
+
+            # ``commit`` treats existing offsets as leading, so clear them first.
+            for field in type_.__fields__:
+                field.offset = None
+            type_.commit()
+
+
 Keyword = namedtuple('Keyword', ['name', 'message', 'mask'])
 Task = namedtuple('Task', ['name', 'message', 'value'])
 Event = namedtuple('Event', ['symbol', 'value', 'version', 'opcode', 'level', 'task', 'keywords', 'template'])
@@ -40,6 +78,24 @@ Event = namedtuple('Event', ['symbol', 'value', 'version', 'opcode', 'level', 't
 class VariableType(BaseType):
     type: MetaType
     size: int
+
+    @classmethod
+    def _set_width(cls, size, type_):
+        if cls.size == size:
+            return
+        cls.size = size
+        cls.type = type_
+        cls._refresh_offsets()
+
+    @classmethod
+    def _refresh_offsets(cls):
+        # ``cls.cs`` is only present on the parser-bound copy of this class, not on the
+        # plain class defined below. When it is, ask the parser to recompute structure
+        # offsets because a field width just changed.
+        parser = getattr(cls, "cs", None)
+        refresh = getattr(parser, "refresh_offsets", None)
+        if refresh is not None:
+            refresh()
 
     @classmethod
     def as_64bit(cls):
@@ -65,39 +121,28 @@ class VariableType(BaseType):
 class EtwPointer(VariableType):
     @classmethod
     def as_64bit(cls):
-        if cls.size == 8:
-            return
-        cls.size = 8
-        cls.type = cls.cs.uint64
+        cls._set_width(8, cls.cs.uint64)
 
+    @classmethod
     def as_32bit(cls):
-        if cls.size == 4:
-            return
-        cls.size = 4
-        cls.type = cls.cs.uint32
+        cls._set_width(4, cls.cs.uint32)
 
 
 class UserSID_blob(VariableType):
     @classmethod
     def as_64bit(cls):
-        if cls.size == 16:
-            return
-        cls.size = 16
-        cls.type = cls.cs.char[16]
+        cls._set_width(16, cls.cs.char[16])
 
     @classmethod
     def as_32bit(cls):
-        if cls.size == 8:
-            return
-        cls.size = 8
-        cls.type = cls.cs.char[8]
+        cls._set_width(8, cls.cs.char[8])
 
 
 PROVIDER_NAME = {provider_name!r}
 PROVIDER_GUID = UUID({provider_guid!r})
 PROVIDER_SYMBOL = {provider_symbol!r}
 
-c_parser = cstruct.cstruct()
+c_parser = ManifestParser()
 c_parser.add_custom_type("EtwPointer", EtwPointer)
 c_parser.add_custom_type("UserSID_blob", UserSID_blob)
 c_parser.load(\"\"\"
