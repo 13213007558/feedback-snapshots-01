@@ -9,6 +9,7 @@ from dissect.database.ese.ntds.objects.secret import BackupKey
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.database.ese.ntds.membership import MembershipTrace, MembershipTracer
     from dissect.database.ese.ntds.objects import (
         Computer,
         DnsNode,
@@ -42,6 +43,11 @@ class NTDS:
 
     def __init__(self, fh: BinaryIO):
         self.db = Database(fh)
+
+    @property
+    def memberships(self) -> MembershipTracer:
+        """Return the offline group relationship tracer for this database."""
+        return self.db.memberships
 
     @property
     def pek(self) -> PEK | None:
@@ -122,6 +128,35 @@ class NTDS:
     def dns_nodes(self) -> Iterator[DnsNode]:
         """Get all DnsNode objects from the database."""
         yield from self.search(objectClass="dnsNode")
+
+    def trace_memberships(
+        self,
+        subject: Object | int | str,
+        *,
+        max_depth: int = 16,
+        max_paths: int = 10000,
+        include_primary_group: bool = True,
+    ) -> MembershipTrace:
+        """Trace the offline group relationships of a security principal.
+
+        Every returned path records whether it was derived from an explicit ``member`` link or from a
+        ``primaryGroupID`` attribute. Unresolved, foreign and cyclic edges are retained instead of being dropped.
+
+        Args:
+            subject: The principal to trace. May be an object, a Directory Number Tag, a SID or a distinguished name.
+            max_depth: The maximum number of edges in a path.
+            max_paths: The maximum number of paths to collect.
+            include_primary_group: Whether to include ``primaryGroupID`` derived edges.
+
+        Returns:
+            A :class:`~dissect.database.ese.ntds.membership.MembershipTrace` containing the evidence-backed paths.
+        """
+        return self.memberships.trace(
+            subject,
+            max_depth=max_depth,
+            max_paths=max_paths,
+            include_primary_group=include_primary_group,
+        )
 
     def backup_keys(self) -> Iterator[BackupKey]:
         """Get all DPAPI backup keys from the database."""

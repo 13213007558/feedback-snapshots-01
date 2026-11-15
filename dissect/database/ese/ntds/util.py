@@ -400,6 +400,28 @@ def _DNT_to_ldapDisplayName(db: Database, value: int) -> str | DN | int:
         return value
 
 
+def sid_domain(sid: str | None) -> str | None:
+    """Return the domain part of a SID, excluding its relative identifier (RID).
+
+    A domain SID and a primary group SID share the same domain prefix but have a different final sub authority.
+    Comparing only the final RID is not enough to decide whether a group belongs to the same domain.
+
+    Args:
+        sid: The SID to extract the domain prefix from.
+
+    Returns:
+        The SID without its final sub authority, or ``None`` if the value is not a SID.
+    """
+    if not sid or not sid.startswith("S-"):
+        return None
+
+    prefix, separator, _ = sid.rpartition("-")
+    if not separator or not prefix:
+        return None
+
+    return prefix
+
+
 class DN(str):
     """A distinguished name (DN) string wrapper. Presents the DN as a string but also retains the underlying object."""
 

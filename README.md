@@ -31,6 +31,36 @@ Some CLI tools related to specific databases exists. These tools allow you to du
 | `dissect-rpm`      | [Red Hat Package Manager](https://rpm.org/) database.                                                                                                             |
 | `dissect-impacket` | Impacket compatibility shim for `secretsdump.py`.                                                                                                                 |
 
+### Offline group relationship tracing
+
+`dissect.database.ese.ntds.NTDS` can trace why a principal is (or may be) a member of a group without a domain
+controller. Every path records whether it came from an explicit `member` link or from a `primaryGroupID` attribute:
+
+```python
+from dissect.database.ese.ntds import NTDS
+
+with open("ntds.dit", "rb") as fh:
+    ntds = NTDS(fh)
+    trace = ntds.trace_memberships("cersei.lannister")
+
+print(trace.explain())
+```
+
+`primaryGroupID` relationships are resolved using the principal's full SID (`<domain SID>-<primaryGroupID>`), never by
+RID alone. Group cycles, duplicate links, foreign security principals, phantom cross-domain references and missing link
+targets are retained as unresolved edges. A trace therefore explains both the confirmed paths and the parts that could
+not be expanded; it is offline evidence and not a live effective-permission check.
+
+The same trace is available from the CLI:
+
+```bash
+dissect-ntds ntds.dit -m cersei.lannister
+dissect-ntds ntds.dit -m cersei.lannister --json
+```
+
+Use `--no-primary-group` to follow only explicit `member` links, and `--max-depth` or `--max-paths` to bound the
+traversal.
+
 ### Impacket compatibility shim for secretsdump.py
 
 Impacket does not ([yet](https://github.com/fortra/impacket/pull/1452)) have native support for `dissect.database`,

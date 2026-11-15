@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.database.ese.ese import ESE
 from dissect.database.ese.exception import KeyNotFoundError
+from dissect.database.ese.ntds.membership import MembershipTracer
 from dissect.database.ese.ntds.objects import Object
 from dissect.database.ese.ntds.pek import PEK
 from dissect.database.ese.ntds.query import Query
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
     from dissect.database.ese.index import Index
     from dissect.database.ese.ntds.objects import DMD, NTDSDSA, DomainDNS, Server, Top
+    from dissect.database.ese.record import Record
 
 
 class Database:
@@ -42,6 +44,11 @@ class Database:
         # Clear the cache of the data table to avoid caching results before the schema is loaded
         self.data.get.cache_clear()
         self.data._make_dn.cache_clear()
+
+    @cached_property
+    def memberships(self) -> MembershipTracer:
+        """Return the offline group relationship tracer for this database."""
+        return MembershipTracer(self)
 
     @cached_property
     def flags(self) -> DatabaseFlag | None:
@@ -285,6 +292,26 @@ class LinkTable:
             name: An optional link name to filter the linked objects.
         """
         yield from (obj for _, obj in self._links(dnt, self._link_base(name) if name else None))
+
+    def link_records(self, name: str | None = None) -> Iterator[tuple[int, int, Record]]:
+        """Iterate the raw link records for a given link name.
+
+        Unlike :meth:`links`, this does not resolve the linked objects, so it can be used to retain evidence for
+        links whose target object is missing or otherwise cannot be resolved.
+
+        Args:
+            name: An optional link name to filter the link records.
+
+        Yields:
+            Tuples of ``(link_DNT, backlink_DNT, record)``.
+        """
+        base = self._link_base(name) if name else None
+
+        for record in self.table.records():
+            if base is not None and record.get("link_base") != base:
+                continue
+
+            yield record.get("link_DNT"), record.get("backlink_DNT"), record
 
     def all_links(self, dnt: int) -> Iterator[tuple[str, Object]]:
         """Get all linked objects along with their link names for a given Directory Number Tag (DNT).

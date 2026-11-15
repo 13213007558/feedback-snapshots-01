@@ -47,3 +47,11 @@ def test_benchmark_groups(path: str, benchmark: BenchmarkFixture) -> None:
 def test_benchmark_computers(path: str, benchmark: BenchmarkFixture) -> None:
     ntds = open_ntds(path)
     benchmark(lambda: list(ntds.computers()))
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(*PARAMS)
+def test_benchmark_membership_trace(path: str, benchmark: BenchmarkFixture) -> None:
+    ntds = open_ntds(path)
+    subject = next(ntds.users())
+    benchmark(lambda: ntds.trace_memberships(subject))
