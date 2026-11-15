@@ -1,0 +1,8 @@
+dissect-cstruct==4.8.dev9
+dissect-util==3.25.dev21
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+pycryptodome==4.4.0
+pygments==2.21.0
+pytest==9.2.0
