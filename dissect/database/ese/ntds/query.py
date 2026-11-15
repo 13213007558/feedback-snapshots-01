@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from dissect.util.ldap import LogicalOperator, SearchFilter
 
+from dissect.database.ese.exception import KeyNotFoundError
 from dissect.database.ese.ntds.util import encode_value
 
 if TYPE_CHECKING:
@@ -76,7 +77,8 @@ class Query:
         else:
             if "*" in filter.value:
                 # Handle wildcard searches differently
-                if filter.value.endswith("*"):
+                if filter.value.count("*") == 1 and filter.value.endswith("*") and len(filter.value) > 1:
+                    # A single trailing wildcard can be resolved with a range search on the index
                     yield from _process_wildcard_tail(index, filter.value)
                 else:
                     # For more complex wildcard patterns, we need to scan the index and apply the filter
@@ -125,8 +127,13 @@ class Query:
             Records matching any condition in the OR operation.
         """
         records = list(records) if records is not None else None
+        seen = set()
         for child in filter.children:
-            yield from self._process_query(child, records=records)
+            for record in self._process_query(child, records=records):
+                # A record can match multiple children, but should only be returned once
+                if record._node.key not in seen:
+                    seen.add(record._node.key)
+                    yield record
 
     def _filter_records(self, filter: SearchFilter, records: Iterator[Record]) -> Iterator[Record]:
         """Filter an iterable of records against a simple LDAP filter.
@@ -137,9 +144,12 @@ class Query:
 
         Yields:
             Records that match the filter criteria.
+
+        Raises:
+            ValueError: If the attribute in the filter is not found in the NTDS database.
         """
         if (schema := self.db.data.schema.lookup_attribute(name=filter.attribute)) is None:
-            return
+            raise ValueError(f"Attribute {filter.attribute!r} not found in the NTDS database")
 
         encoded_value = encode_value(self.db, schema, filter.value)
         re_encoded_value = None
@@ -148,21 +158,38 @@ class Query:
         if has_wildcard:
             re_encoded_value = re.compile(fnmatch.translate(encoded_value), re.IGNORECASE)
 
+        # Index cursors can yield the same record multiple times for multi-valued attributes
+        seen = set()
         for record in records:
             record_value = record.get(schema.column)
+            values = record_value if isinstance(record_value, list) else [record_value]
 
-            if isinstance(record_value, list):
-                # Currently assume that we can only search for single values, not lists
-                if has_wildcard and record_value and isinstance(record_value[0], str):
-                    if any(re_encoded_value.match(rv) for rv in record_value):
-                        yield record
-                elif encoded_value in record_value:
+            if any(_value_matches(value, encoded_value, re_encoded_value) for value in values):
+                if record._node.key not in seen:
+                    seen.add(record._node.key)
                     yield record
 
-            elif (
-                has_wildcard and isinstance(record_value, str) and re_encoded_value.match(record_value)
-            ) or record_value == encoded_value:
-                yield record
+
+def _value_matches(record_value: object, encoded_value: object, re_encoded_value: re.Pattern | None) -> bool:
+    """Check if a single record value matches the (encoded) filter value.
+
+    String comparisons are case-insensitive, matching the behaviour of the normalized index keys.
+
+    Args:
+        record_value: The value as stored in the record.
+        encoded_value: The encoded filter value to compare against.
+        re_encoded_value: A compiled regular expression if the filter value contains wildcards, else ``None``.
+
+    Returns:
+        Whether the record value matches the filter value.
+    """
+    if re_encoded_value is not None:
+        return isinstance(record_value, str) and re_encoded_value.match(record_value) is not None
+
+    if isinstance(record_value, str) and isinstance(encoded_value, str):
+        return record_value.casefold() == encoded_value.casefold()
+
+    return record_value == encoded_value
 
 
 def _process_wildcard_tail(index: Index, filter_value: str) -> Iterator[Record]:
@@ -177,20 +204,28 @@ def _process_wildcard_tail(index: Index, filter_value: str) -> Iterator[Record]:
     """
     cursor = index.cursor()
 
-    # Create search bounds
+    # Create search bounds on the normalized index keys
     value = filter_value.replace("*", "")
-    end = cursor.seek([_increment_last_char(value)]).record()
+    start_key = cursor.make_key([value])
+    end_key = cursor.make_key([_increment_last_char(value)])
 
-    # Seek back to the start
-    cursor.reset()
-    cursor.seek([value])
+    try:
+        cursor.seek_key(start_key)
+    except KeyNotFoundError:
+        return
 
-    # Yield all records in range
+    # Multi-valued attributes can have multiple index entries pointing to the same record
+    seen = set()
     record = cursor.record()
     while record is not None:
-        yield record
-        if record == end:
+        key = cursor.key()
+        if key < start_key or key >= end_key:
             break
+
+        if record._node.key not in seen:
+            seen.add(record._node.key)
+            yield record
+
         record = cursor.next()
 
 

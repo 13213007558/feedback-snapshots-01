@@ -59,6 +59,14 @@ class Cursor:
         """
         return Record(self.table, self._node())
 
+    def key(self) -> bytes:
+        """Return the key of the node the cursor is currently on.
+
+        Returns:
+            The key of the current node in the index as bytes.
+        """
+        return self._primary.node().key
+
     def reset(self) -> Self:
         """Reset the internal state."""
         self._primary.reset()
