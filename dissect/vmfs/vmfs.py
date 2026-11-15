@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.vmfs.address import FileDescriptorAddr, address_fmt, address_type
 from dissect.vmfs.c_vmfs import (
@@ -19,8 +19,12 @@ from dissect.vmfs.exception import (
     FileNotFoundError,
     InvalidHeader,
 )
+from dissect.vmfs.rdm import RDMBinding, RDMDeviceMode, RDMImage, RDMValidationIssue, check_rdm
 from dissect.vmfs.resource import ResourceManager
 from dissect.vmfs.util import bsf, vmfs_uuid
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class VMFS:
@@ -292,6 +296,41 @@ class VMFS:
             cls = FileDescriptor
 
         return cls(self, address)
+
+    def bind_rdm(
+        self,
+        path: str | int | DirEntry,
+        images: RDMImage | Iterable[RDMImage],
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> RDMBinding:
+        """Bind the RDM file at ``path`` to explicitly supplied evidence.
+
+        This is a convenience wrapper around
+        :meth:`FileDescriptor.bind_rdm`. The evidence is never discovered from
+        the VMFS volume, a descriptor path, or a host device.
+        """
+        return self.get(path).bind_rdm(images, mode=mode)
+
+    def open_rdm(
+        self,
+        path: str | int | DirEntry,
+        images: RDMImage | Iterable[RDMImage],
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> RDMBinding:
+        """Open a read-only stream for the RDM file at ``path``."""
+        return self.bind_rdm(path, images, mode=mode)
+
+    def check_rdm(
+        self,
+        path: str | int | DirEntry,
+        images: RDMImage | Iterable[RDMImage],
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> list[RDMValidationIssue]:
+        """Validate an RDM file against evidence without opening a stream."""
+        return check_rdm(self.get(path), images, mode=mode)
 
     def get(self, path: str | int | DirEntry, node: FileDescriptor | None = None) -> FileDescriptor:
         if isinstance(path, int):

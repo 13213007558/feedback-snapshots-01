@@ -7,8 +7,23 @@ from dissect.vmfs.exception import (
     InvalidHeader,
     NotADirectoryError,
     NotASymlinkError,
+    NotAnRDMFileError,
+    RDMError,
+    RDMNotBoundError,
+    RDMReadError,
+    RDMValidationError,
 )
 from dissect.vmfs.lvm import LVM, Device, Volume
+from dissect.vmfs.rdm import (
+    RDMBinding,
+    RDMDeviceIdentity,
+    RDMDeviceMode,
+    RDMImage,
+    RDMMapping,
+    RDMValidationIssue,
+    bind_rdm,
+    check_rdm,
+)
 from dissect.vmfs.vmfs import VMFS
 
 __all__ = [
@@ -22,5 +37,18 @@ __all__ = [
     "InvalidHeader",
     "NotADirectoryError",
     "NotASymlinkError",
+    "NotAnRDMFileError",
+    "RDMBinding",
+    "RDMDeviceIdentity",
+    "RDMDeviceMode",
+    "RDMError",
+    "RDMImage",
+    "RDMMapping",
+    "RDMNotBoundError",
+    "RDMReadError",
+    "RDMValidationError",
+    "RDMValidationIssue",
     "Volume",
+    "bind_rdm",
+    "check_rdm",
 ]

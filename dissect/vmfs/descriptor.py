@@ -22,14 +22,15 @@ from dissect.vmfs.c_vmfs import FS3_AddrType, FS3_DescriptorType, FS3_ZeroLevelA
 from dissect.vmfs.exception import (
     FileNotFoundError,
     NotADirectoryError,
-    NotAnRDMFileError,
     NotASymlinkError,
+    RDMNotBoundError,
     VolumeNotAvailableError,
 )
+from dissect.vmfs.rdm import RDMBinding, RDMDeviceMode, RDMImage, RDMMapping, RDMValidationIssue
 from dissect.vmfs.util import vmfs_uuid
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from datetime import datetime
 
     from dissect.vmfs.vmfs import VMFS
@@ -196,16 +197,47 @@ class FileDescriptor:
             self.raw[self.vmfs._fd_data_addrs_offset : self.vmfs._fd_data_addrs_offset + self.vmfs._fd_data_addrs_size]
         )
 
-    @property
-    def rdm_mapping(self) -> c_vmfs.FS3_RawDiskMap:
+    @cached_property
+    def rdm_mapping(self) -> RDMMapping:
         """The RDM mapping of this file, if this file is an RDM file.
 
-        The RDM mapping is stored in the data portion of the file descriptor.
-        """
-        if not self.is_rdm():
-            raise NotAnRDMFileError(f"{self} is not an RDM file")
+        The mapping is stored in the data portion of the file descriptor. It
+        describes an external device; it is not itself readable disk content.
+        Use :meth:`bind_rdm` with an explicitly supplied evidence image to read
+        the mapped disk.
 
-        return c_vmfs.FS3_RawDiskMap(self.data)
+        Raises:
+            NotAnRDMFileError: If this file descriptor is not an RDM file.
+        """
+        return RDMMapping(self)
+
+    def bind_rdm(
+        self,
+        images: RDMImage | Iterable[RDMImage],
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> RDMBinding:
+        """Bind this RDM file to explicitly supplied evidence image(s).
+
+        Args:
+            images: One or more :class:`~dissect.vmfs.rdm.RDMImage` objects.
+            mode: Optional expected device mode, for example ``"physical"``.
+
+        Raises:
+            NotAnRDMFileError: If this file descriptor is not an RDM file.
+            RDMValidationError: If the mapping and evidence do not agree on
+                device identity, mode, or capacity.
+        """
+        return self.rdm_mapping.bind(images, mode=mode)
+
+    def open_rdm(
+        self,
+        images: RDMImage | Iterable[RDMImage],
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> RDMBinding:
+        """Open a read-only stream over the disk bound to this RDM file."""
+        return self.bind_rdm(images, mode=mode)
 
     @property
     def parent(self) -> FileDescriptor | None:
@@ -329,12 +361,50 @@ class FileDescriptor:
     def _get(self, name: str) -> DirEntry:
         raise NotImplementedError
 
-    def open(self) -> BlockStream:
-        """Open a read-only stream for this file descriptor."""
+    def open(
+        self,
+        images: RDMImage | Iterable[RDMImage] | None = None,
+        *,
+        mode: RDMDeviceMode | str | None = None,
+    ) -> BlockStream | RDMBinding:
+        """Open a read-only stream for this file descriptor.
+
+        For regular VMFS files this returns a :class:`BlockStream` (or a
+        :class:`BestEffortBlockStream` when no volume is available).
+
+        An RDM file has no VMFS file blocks. Its content lives on an external
+        device, so opening it requires explicitly supplied evidence:
+
+        - ``images`` must be one or more :class:`~dissect.vmfs.rdm.RDMImage`
+          objects.
+        - Without an evidence image, :class:`RDMNotBoundError` is raised. The
+          mapping description remains available through
+          :attr:`rdm_mapping`, but the descriptor bytes are never returned as
+          disk content.
+
+        Args:
+            images: Evidence image(s) for an RDM file. Must be omitted for
+                regular files.
+            mode: Optional expected device mode for an RDM file.
+        """
         if self.is_rdm():
-            # TODO: if we're running on the ESXi host, can we open the RDM file directly?
-            # Something to look into later
-            raise NotImplementedError(f"Can't open RDM file {self}")
+            if images is None:
+                raise RDMNotBoundError(
+                    f"RDM file {self} requires an explicitly supplied evidence image",
+                    issues=(
+                        RDMValidationIssue(
+                            "missing_evidence",
+                            "no evidence image was supplied for this RDM file",
+                        ),
+                    ),
+                    mapping=self.rdm_mapping,
+                    descriptor=self,
+                )
+
+            return self.rdm_mapping.bind(images, mode=mode)
+
+        if images is not None:
+            raise ValueError(f"{self} is not an RDM file; evidence images are not accepted")
 
         if self.vmfs.fh is None:
             return BestEffortBlockStream(self)
