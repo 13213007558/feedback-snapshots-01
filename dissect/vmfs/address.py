@@ -198,9 +198,10 @@ class SmallFileBlockAddr(Address):
     Their encoding now consists of a cluster and resource part, which can be used to check allocation status
     in the resource file. See :class:`~dissect.vmfs.resource.SmallFileBlockResourceVMFS6` for more details.
 
-    In this variant of the address, the TBZ (to-be-zeroed) flag is a bitmap that can be used to indicate
-    different parts of the block that should be zeroed out. Though when reading the block, the whole block seems to
-    be treated as zeroed when any bit is set to 1.
+    In this variant of the address, the TBZ (to-be-zeroed) flag is an 8-bit bitmap. Each set bit marks a single
+    granule of the block as pending zeroing; the granule size is ``1 << tbzGranularityShift`` from the owning file
+    descriptor. Only the marked granules are synthesized as zeros when reading, the remaining granules keep their
+    on-disk contents. When every bit is set (``0xFF``), the whole block reads as zero.
 
     .. rubric :: Encoding
     .. code-block:: c
@@ -652,6 +653,9 @@ class LargeFileBlockAddr(Address):
 
     LFB (large file block) addresses are used to reference file blocks larger than the standard file block size.
     They are used for large files, such as virtual disks.
+
+    As with :class:`SmallFileBlockAddr`, the 8-bit TBZ bitmap marks individual granules (of
+    ``1 << tbzGranularityShift`` bytes) as pending zeroing rather than zeroing the whole LFB.
 
     .. rubric :: Encoding
     .. code-block:: c
