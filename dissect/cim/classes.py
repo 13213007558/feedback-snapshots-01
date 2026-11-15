@@ -389,6 +389,8 @@ class DynpropQualifier:
 
 
 class DataRegion:
+    NULL_OFFSET = 0xFFFFFFFF
+
     def __init__(self, fh: BinaryIO):
         self.fh = fh
         self.size = c_cim.uint32(fh) & 0x7FFFFFFF
@@ -398,6 +400,9 @@ class DataRegion:
         return BytesIO(self.data)
 
     def get_string(self, offset: int) -> str:
+        if offset < 0 or offset >= len(self.data):
+            raise Error(f"String offset {offset:#x} is out of bounds for data region of size {len(self.data):#x}")
+
         encoding_flag = self.data[offset]
 
         if encoding_flag == 0:
@@ -409,15 +414,42 @@ class DataRegion:
 
         return data_str
 
-    def get_array(self, offset: int, item_type: c_cim.cim_type) -> list[CimType]:
+    def get_array(self, offset: int, item_type: c_cim.cim_type) -> list[CimType | None] | None:
+        if offset == self.NULL_OFFSET:
+            return None
+
         ctype = CIM_TYPES_MAP[item_type.type]
+
+        if offset < 0 or offset + 4 > len(self.data):
+            raise Error(f"Array offset {offset:#x} is out of bounds for data region of size {len(self.data):#x}")
 
         buf = self.open()
         buf.seek(offset)
         size = c_cim.uint32(buf)
+
+        if size == 0:
+            return []
+
+        if offset + 4 + size * len(ctype) > len(self.data):
+            raise Error(
+                f"Array of {size} elements at offset {offset:#x} exceeds data region of size {len(self.data):#x}"
+            )
+
+        if item_type.type in (CIM_TYPES.STRING, CIM_TYPES.REFERENCE, CIM_TYPES.DATETIME):
+            offsets = c_cim.uint32[size](buf)
+            return [self._get_array_string(element_offset) for element_offset in offsets]
+
         return ctype[size](buf)
 
-    def get_value(self, value: CimType | BOOLEAN_STATES, value_type: c_cim.cim_type) -> CimType | list[CimType]:
+    def _get_array_string(self, offset: int) -> str | None:
+        try:
+            return self.get_string(offset)
+        except Error:
+            return None
+
+    def get_value(
+        self, value: CimType | BOOLEAN_STATES, value_type: c_cim.cim_type
+    ) -> CimType | list[CimType | None] | None:
         if value_type.array_state == ARRAY_STATES.ARRAY:
             return self.get_array(value, value_type)
 
