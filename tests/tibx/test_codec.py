@@ -105,6 +105,24 @@ def test_lz4_block_bound_enforced() -> None:
 def test_lz4_block_garbage_rejected() -> None:
     with pytest.raises(CorruptArchiveError):
         lz4_block_decompress(b"\xff" * 64, 4096)
+    with pytest.raises(CorruptArchiveError):
+        lz4_block_decompress(b"", 1)
+
+
+def test_lz4_block_truncated_before_final_literals() -> None:
+    # An LZ4 block ends on a literal-only sequence; cutting that sequence off is truncation,
+    # even when the bytes that remain produce the declared size
+    block = _lz4_block((b"abc", 3, 4), tail=b"")
+    assert lz4_block_decompress(block, 7) == b"abcabca"
+    with pytest.raises(CorruptArchiveError):
+        lz4_block_decompress(block[:-1], 7)
+
+
+def test_lz4_block_trailing_bytes_rejected() -> None:
+    block = _lz4_block(tail=PLAIN[:16])
+    assert lz4_block_decompress(block, 16) == PLAIN[:16]
+    with pytest.raises(CorruptArchiveError):
+        lz4_block_decompress(block + b"\x00", 16)
 
 
 def _linked_chain(*blocks: tuple[bytes, int]) -> bytes:
@@ -148,6 +166,27 @@ def test_linked_lz4_strict_overflow() -> None:
         decompress_linked_lz4(body, 100, strict=True)
     # Non-strict stops cleanly at the offending block
     assert decompress_linked_lz4(body, 100, strict=False) == b""
+
+
+def test_linked_lz4_declared_size_mismatch() -> None:
+    # A header that overstates or understates what its payload produces is damage
+    payload = PLAIN[:256]
+    block = _lz4_block(tail=payload)
+    for declared in (len(payload) - 1, len(payload) + 1):
+        body = _linked_chain((block, declared))
+        with pytest.raises(CorruptArchiveError):
+            decompress_linked_lz4(body, declared, strict=True)
+        assert decompress_linked_lz4(body, declared, strict=False) == b""
+
+
+def test_linked_lz4_bad_block_is_not_an_empty_block() -> None:
+    # A payload-less header is damage, not a terminator: strict refuses, best effort keeps
+    # only the prefix and never resumes past the bad block
+    confirmed = _lz4_block(tail=PLAIN[:64])
+    body = _linked_chain((confirmed, 64)) + struct.pack(">II", 4, 8) + b"nope"
+    with pytest.raises(CorruptArchiveError):
+        decompress_linked_lz4(body, 128, strict=True)
+    assert decompress_linked_lz4(body, 128, strict=False) == PLAIN[:64]
 
 
 def test_cell_stream_raw_and_lz4() -> None:

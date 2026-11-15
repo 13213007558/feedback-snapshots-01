@@ -135,7 +135,11 @@ def _keymap_blob(header: ArchiveHeader) -> bytes | None:
 
     blob = keymap.memtree_payload
     if keymap.memtree_encoding & 0x7F == 1 and len(blob) >= LZ4_BLOCK_HEADER_SIZE:
-        uncompressed = c_tibx.lz4_block_header(blob[:LZ4_BLOCK_HEADER_SIZE]).uncompressed_size
+        # The L-SB's decoded size covers the whole chain; the first block's header only its
+        # own part, and 0 when the archive does not fill it in (where that header is used)
+        uncompressed = (
+            keymap.memtree_uncompressed_size or c_tibx.lz4_block_header(blob[:LZ4_BLOCK_HEADER_SIZE]).uncompressed_size
+        )
         blob = decompress_linked_lz4(blob, min(uncompressed + 64, MAX_KEYMAP_BLOB), strict=False)
     if len(blob) > MAX_KEYMAP_BLOB:
         raise InvalidPasswordError("keymap blob implausibly large")

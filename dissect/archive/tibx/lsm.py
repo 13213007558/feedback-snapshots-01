@@ -39,7 +39,7 @@ from dissect.archive.tibx.c_tibx import (
     c_tibx,
 )
 from dissect.archive.tibx.codec import decompress_cell_stream, decompress_linked_lz4
-from dissect.archive.tibx.crypto import decrypt_segment
+from dissect.archive.tibx.crypto import _pkcs7_unpad, decrypt_segment
 from dissect.archive.tibx.exception import CorruptArchiveError, InvalidPasswordError, UnsupportedFormatError
 from dissect.archive.tibx.page import ARCH_MAGIC
 
@@ -109,11 +109,13 @@ class LsmSuperBlock:
         # Residual mem-tree: header after the ctree slots, blob after the fixed L-SB record
         self.memtree_encoding = 0
         self.memtree_node_count = 0
+        self.memtree_uncompressed_size = 0
         self.memtree_payload = b""
         if len(payload) >= LSB_FIXED_SIZE:
             memtree = c_tibx.lsm_memtree_header(payload[LSB_MEMTREE_OFFSET:])
             self.memtree_encoding = memtree.encoding
             self.memtree_node_count = memtree.node_count
+            self.memtree_uncompressed_size = memtree.uncompressed_size
             self.memtree_payload = bytes(payload[LSB_FIXED_SIZE:])
 
     def __repr__(self) -> str:
@@ -326,7 +328,14 @@ def _decrypt_cells(stream: bytes, encoding: int, data_key: DataKey | None) -> by
         return stream
     if data_key is None:
         raise InvalidPasswordError("LSM records are encrypted and no data key is available")
-    return decrypt_segment(stream, data_key)
+    plaintext = decrypt_segment(stream, data_key)
+    if data_key.gcm:
+        return plaintext
+    # CBC pads the plaintext to a block boundary; a chain or raw stream would otherwise see
+    # those bytes as trailing garbage. GCM is already exact, and stripping there could eat
+    # real bytes whenever the stream happens to end in a valid padding pattern.
+    unpadded = _pkcs7_unpad(plaintext)
+    return plaintext if unpadded is None else unpadded
 
 
 def iter_memtree_cells(sb: LsmSuperBlock, data_key: DataKey | None = None) -> list[LsmCell]:
@@ -349,7 +358,12 @@ def iter_memtree_cells(sb: LsmSuperBlock, data_key: DataKey | None = None) -> li
     elif codec == 1:
         if len(payload) < LZ4_BLOCK_HEADER_SIZE:
             return []
-        uncompressed = c_tibx.lz4_block_header(payload[:LZ4_BLOCK_HEADER_SIZE]).uncompressed_size
+        # A mem-tree chain can span several blocks, so the first block's size is only a
+        # fallback: the L-SB's own decoded size covers the whole chain. It is zero in
+        # archives that do not fill it in, and in the synthetic page stores.
+        uncompressed = (
+            sb.memtree_uncompressed_size or c_tibx.lz4_block_header(payload[:LZ4_BLOCK_HEADER_SIZE]).uncompressed_size
+        )
         decoded = decompress_linked_lz4(payload, uncompressed, strict=True)
         if len(decoded) != uncompressed:
             raise CorruptArchiveError(f"mem-tree blob decoded {len(decoded)} bytes, expected {uncompressed}")

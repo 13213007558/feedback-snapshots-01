@@ -29,6 +29,7 @@ from tests._tools.tibx._synth import (
     compact_cells,
     lsb,
     lsm_page,
+    lz4_literals,
 )
 
 
@@ -51,6 +52,16 @@ def test_compact_cells_multiple_groups() -> None:
     decoded = decode_cells_compact(compact_cells(cells), 30, key_length=8, value_length=4)
     assert len(decoded) == 30
     assert decoded[29].key == struct.pack(">Q", 29)
+
+
+def _lz4_literal_block(data: bytes) -> bytes:
+    """An LZ4 block holding ``data`` as literals only (see ``_synth.lz4_literals``)."""
+    return lz4_literals(data)
+
+
+def _lz4_chain(*blocks: bytes, sizes: list[int]) -> bytes:
+    """Frame ``blocks`` as a linked-LZ4 chain, each declaring ``sizes``' decoded size."""
+    return b"".join(struct.pack(">II", len(block), size) + block for block, size in zip(blocks, sizes, strict=True))
 
 
 def _variable_cells(cells: list[Cell]) -> bytes:
@@ -104,6 +115,29 @@ def test_memtree_variable_keys_with_tombstones() -> None:
         (b"abc", b"", False),
         (b"abd", b"w", True),
     ]
+
+
+def test_memtree_lz4_spanning_multiple_blocks() -> None:
+    # A mem-tree's LZ4 chain can hold several blocks; the L-SB's own decoded size covers all
+    # of them, where the first block's header only covers its own part of the chain
+    cells = [Cell(f"k{index:05d}".encode(), f"{index:04d}".encode()) for index in range(40)]
+    decoded = compact_cells(cells)
+    # Split on a cell-group boundary; a group header cannot straddle two blocks
+    split = len(compact_cells(cells[:24]))
+    first, second = decoded[:split], decoded[split:]
+    body = _lz4_chain(_lz4_literal_block(first), _lz4_literal_block(second), sizes=[len(first), len(second)])
+    sb = LsmSuperBlock(
+        lsb(
+            6,
+            4,
+            memtree_cells=cells,
+            memtree_blob=body,
+            memtree_encoding=1,
+            memtree_uncompressed_size=len(decoded),
+        ),
+        tlv_index=0,
+    )
+    assert [(cell.key, cell.value) for cell in iter_memtree_cells(sb)] == [(cell.key, cell.value) for cell in cells]
 
 
 def test_memtree_encrypted() -> None:

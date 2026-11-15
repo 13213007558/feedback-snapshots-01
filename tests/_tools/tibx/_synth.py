@@ -444,12 +444,18 @@ def lsb(
     seq: int = 1,
     memtree_blob: bytes | None = None,
     memtree_encoding: int = 0,
+    memtree_uncompressed_size: int | None = None,
 ) -> bytes:
     """Build one L-SB TLV payload.
 
     ``memtree_cells`` go into the residual mem-tree (raw compact stream unless an
     explicit pre-encoded ``memtree_blob`` + ``memtree_encoding`` is given);
     ``ctrees`` is a list of ``(root_byte_offset, tree_nr)`` on-disk run slots.
+
+    ``memtree_uncompressed_size`` is the decoded size of the blob, which a real writer
+    stores in the L-SB header. It is left 0 unless given, as archives that do not fill it
+    in do; the reader then falls back to the first LZ4 block's header. Pass it for a raw
+    stream, whose decoded size is the blob's length, or for a chain of more than one block.
     """
     memtree_cells = memtree_cells or []
     ctrees = ctrees or []
@@ -472,7 +478,10 @@ def lsb(
         ref = c_tibx.ctree_ref(offset=root_offset, tree_sz=PAGE, tree_nr=tree_nr)
         record[slot : slot + len(c_tibx.ctree_ref)] = ref.dumps()
     memtree = c_tibx.lsm_memtree_header(
-        encoding=memtree_encoding, node_count=len(memtree_cells), extra_len=len(memtree_blob)
+        encoding=memtree_encoding,
+        node_count=len(memtree_cells),
+        extra_len=len(memtree_blob),
+        uncompressed_size=memtree_uncompressed_size or 0,
     )
     record[LSB_MEMTREE_OFFSET : LSB_MEMTREE_OFFSET + len(c_tibx.lsm_memtree_header)] = memtree.dumps()
     return bytes(record) + memtree_blob
