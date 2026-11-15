@@ -8,15 +8,18 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.evidence.ad1.c_ad1 import c_ad1
 from dissect.evidence.ad1.stream import AD1Stream, FileStream
+from dissect.evidence.ad1.verify import verify_ad1, verify_entries, verify_file
 from dissect.evidence.adcrypt.adcrypt import ADCrypt, is_adcrypt
 from dissect.evidence.exception import FileNotFoundError, NotADirectoryError, NotASymlinkError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from pathlib import PurePath
     from types import TracebackType
 
     from typing_extensions import Self
+
+    from dissect.evidence.ad1.verify import VerificationReport, VerificationResult
 
 EntryType = c_ad1.EntryType
 MetaType = c_ad1.MetaType
@@ -220,6 +223,42 @@ class AD1:
     def open(self, path: str) -> FileStream:
         """Shortcut for ``AD1.entry(path).open()``."""
         return self.entry(path).open()
+
+    def verify(
+        self, path: str | None = None, *, algorithm: str | None = None
+    ) -> VerificationResult | VerificationReport:
+        """Verify the reassembled logical content of one file, or of every file.
+
+        Args:
+            path: Absolute path within the AD1 container. If omitted, every file
+                in the container is verified one by one.
+            algorithm: Optional digest algorithm to check (``md5`` or ``sha1``).
+                By default every declared digest is checked.
+
+        Returns:
+            A :class:`VerificationResult` for a single file, or a
+            :class:`VerificationReport` when no path is given.
+        """
+        if path is None:
+            return verify_ad1(self, algorithm=algorithm)
+
+        from dissect.evidence.ad1.verify import _preserve_positions
+
+        with _preserve_positions(self):
+            return verify_file(self.entry(path), algorithm=algorithm)
+
+    def verify_all(self, *, algorithm: str | None = None) -> VerificationReport:
+        """Verify every file in the container, one by one."""
+        return verify_ad1(self, algorithm=algorithm)
+
+    def verify_entries(self, entries: Iterable[FileEntry | str], *, algorithm: str | None = None) -> VerificationReport:
+        """Verify a specific set of files, returning one result per requested entry.
+
+        Args:
+            entries: File entries or absolute paths within the container.
+            algorithm: Optional digest algorithm to check (``md5`` or ``sha1``).
+        """
+        return verify_entries(self, entries, algorithm=algorithm)
 
     def close(self) -> None:
         """Close all segment file handles that we opened ourselves and clear the segment cache."""
@@ -429,6 +468,21 @@ class FileEntry:
         if self.is_dir():
             raise IsADirectoryError(self.name)
         return FileStream(self)
+
+    def verify(self, *, algorithm: str | None = None) -> VerificationResult:
+        """Verify the reassembled logical content of this file entry.
+
+        The declared digest is compared against the SHA1 or MD5 calculated over
+        the deflated (reassembled) logical bytes, not over the compressed chunks.
+
+        Args:
+            algorithm: Optional digest algorithm to check (``md5`` or ``sha1``).
+                By default every declared digest is checked.
+
+        Returns:
+            A :class:`VerificationResult` describing success or the failure reason.
+        """
+        return verify_file(self, algorithm=algorithm)
 
 
 class VirtualEntry(FileEntry):
