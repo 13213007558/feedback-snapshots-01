@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
 
@@ -7,6 +8,60 @@ from dissect.database.bbolt.c_bbolt import BucketLeafFlag, PageFlag, c_bbolt
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+# bbolt always writes two meta pages: page 0 and page 1
+META_PAGE_COUNT = 2
+
+# Page size bounds as used by bbolt
+MIN_PAGE_SIZE = 0x200
+MAX_PAGE_SIZE = 0x10000
+
+# Page sizes to probe for the second meta page if the first one cannot tell us the page size
+PROBE_PAGE_SIZES = (0x1000, 0x2000, 0x4000, 0x8000, 0x10000, 0x200, 0x400, 0x800)
+
+SUPPORTED_VERSION = 2
+
+# bbolt writes this value as freelist pgid when no freelist is persisted
+PGID_NO_FREELIST = 0xFFFFFFFFFFFFFFFF
+
+_FNV1A64_OFFSET_BASIS = 14695981039346656037
+_FNV1A64_PRIME = 1099511628211
+
+_PAGE_HEADER_SIZE = len(c_bbolt.Page)
+_META_SIZE = len(c_bbolt.Meta)
+# The meta checksum covers all meta fields after the page header, up to the checksum field
+_CHECKSUM_START = _PAGE_HEADER_SIZE
+_CHECKSUM_END = _META_SIZE - 8
+
+
+def fnv1a64(data: bytes) -> int:
+    """Return the FNV-1a 64-bit hash of ``data``, used by bbolt to checksum meta pages."""
+    h = _FNV1A64_OFFSET_BASIS
+    for byte in data:
+        h = ((h ^ byte) * _FNV1A64_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _is_plausible_page_size(page_size: int) -> bool:
+    return MIN_PAGE_SIZE <= page_size <= MAX_PAGE_SIZE and page_size & (page_size - 1) == 0
+
+
+@dataclass
+class MetaCandidate:
+    """Forensic diagnostics for one of the two meta pages of a bbolt database.
+
+    Records what was found at each meta page, whether it could be proven valid,
+    and why it was or was not selected as the active transaction view.
+    """
+
+    index: int
+    offset: int | None
+    meta: c_bbolt.Meta | None = field(default=None, repr=False)
+    txid: int | None = None
+    page_size: int | None = None
+    valid: bool = False
+    selected: bool = False
+    reason: str = ""
 
 
 class Bbolt:
@@ -16,6 +71,11 @@ class Bbolt:
         - https://github.com/etcd-io/bbolt
         - https://www.qtmuniao.com/en/2020/11/29/bolt-data-organised/
         - https://www.qtmuniao.com/en/2020/12/14/bolt-index-design/
+
+    A bbolt file contains two meta pages. When opening a (possibly crashed) database offline,
+    both are validated independently and the newest provably valid one is selected as the
+    active transaction view. The per-candidate diagnostics of this selection are available
+    in :attr:`meta_candidates`.
     """
 
     def __init__(self, fh: BinaryIO | Path) -> None:
@@ -28,17 +88,121 @@ class Bbolt:
         else:
             raise TypeError("Argument fh must be Path or BytesIO-like object")
 
-        self.meta = c_bbolt.Meta(self.fh)
+        self.fh.seek(0, 2)
+        self.file_size = self.fh.tell()
+
+        self.meta_candidates = self._read_meta_candidates()
+        self.meta = self._select_meta(self.meta_candidates)
         self.version = self.meta.version
         self.page_size = self.meta.pageSize
-
-        if self.meta.magic != c_bbolt.Magic:
-            raise ValueError(f"Unexpected bbolt meta magic value {self.meta.magic:x}")
+        self.txid = self.meta.txid
 
         self.root = Page(self, self.meta.root.root)
 
     def __repr__(self) -> str:
         return f"<Bbolt version={self.version} page_size={self.page_size} path={self.path or self.fh}>"
+
+    def _read_meta_candidates(self) -> list[MetaCandidate]:
+        """Read and validate both meta pages, returning per-candidate diagnostics."""
+        candidates = [self._read_meta_at(0, 0)]
+
+        first = candidates[0]
+        if first.page_size is not None and _is_plausible_page_size(first.page_size):
+            # The second meta page lives exactly one page after the first
+            candidates.append(self._read_meta_at(1, first.page_size))
+            return candidates
+
+        # The first meta page cannot tell us the page size; probe common page sizes
+        # for a page that looks like a meta page
+        candidate = None
+        fallback = None
+        for page_size in PROBE_PAGE_SIZES:
+            probed = self._read_meta_at(1, page_size)
+            if probed.meta is not None and probed.meta.magic == c_bbolt.Magic:
+                candidate = probed
+                break
+            if fallback is None and probed.meta is not None:
+                fallback = probed
+        else:
+            candidate = fallback
+
+        if candidate is None:
+            candidate = MetaCandidate(index=1, offset=None, reason="no second meta page found")
+        candidates.append(candidate)
+        return candidates
+
+    def _read_meta_at(self, index: int, offset: int) -> MetaCandidate:
+        """Parse and validate the meta page at ``offset``."""
+        self.fh.seek(offset)
+        buf = self.fh.read(_META_SIZE)
+        if len(buf) < _META_SIZE:
+            return MetaCandidate(index=index, offset=offset, reason="not enough data for a meta page")
+
+        meta = c_bbolt.Meta(buf)
+        candidate = MetaCandidate(index=index, offset=offset, meta=meta, txid=meta.txid, page_size=meta.pageSize)
+        reason = self._validate_meta(meta, buf)
+        candidate.valid = reason is None
+        candidate.reason = reason or "valid"
+        return candidate
+
+    def _validate_meta(self, meta: c_bbolt.Meta, buf: bytes) -> str | None:
+        """Return ``None`` if the meta page is provably valid, otherwise a human readable reason."""
+        if meta.page.flags != PageFlag.Meta:
+            return f"page flags {meta.page.flags} do not mark a meta page"
+        if meta.magic != c_bbolt.Magic:
+            return f"bad magic 0x{meta.magic:x}"
+        if meta.version != SUPPORTED_VERSION:
+            return f"unsupported version {meta.version}"
+        if not _is_plausible_page_size(meta.pageSize):
+            return f"implausible page size {meta.pageSize}"
+        checksum = fnv1a64(buf[_CHECKSUM_START:_CHECKSUM_END])
+        if meta.checksum != checksum:
+            return f"checksum mismatch (stored 0x{meta.checksum:x}, computed 0x{checksum:x})"
+        if meta.root.root < META_PAGE_COUNT or meta.root.root >= meta.pgid:
+            return f"root bucket page {meta.root.root} is outside the page high-water mark {meta.pgid}"
+        if meta.freelist != PGID_NO_FREELIST and meta.freelist >= meta.pgid:
+            return f"freelist page {meta.freelist} is outside the page high-water mark {meta.pgid}"
+        if meta.pgid * meta.pageSize > self.file_size:
+            return f"page high-water mark {meta.pgid} reaches beyond the end of the file"
+        return None
+
+    def _select_meta(self, candidates: list[MetaCandidate]) -> c_bbolt.Meta:
+        """Select a single consistent transaction view from the validated meta pages.
+
+        The newest (highest txid) provably valid meta page wins. If both candidates are valid
+        but disagree on the page size, their views can never be mixed: only the selected
+        meta's page size, root bucket and high-water mark are used.
+        """
+        valid = [candidate for candidate in candidates if candidate.valid]
+        if not valid:
+            reasons = "; ".join(f"meta{candidate.index}: {candidate.reason}" for candidate in candidates)
+            raise ValueError(f"No valid bbolt meta page found ({reasons})")
+
+        chosen = max(valid, key=lambda candidate: candidate.txid)
+        chosen.selected = True
+        chosen.reason = f"selected: highest valid txid {chosen.txid}"
+
+        conflicting = [
+            candidate for candidate in valid if candidate is not chosen and candidate.page_size != chosen.page_size
+        ]
+        if conflicting:
+            others = ", ".join(f"meta{candidate.index} ({candidate.page_size})" for candidate in conflicting)
+            chosen.reason += f"; page size conflict with {others}; views were not mixed"
+
+        for candidate in candidates:
+            if candidate is chosen:
+                continue
+            if candidate.valid:
+                candidate.reason = f"valid but not selected: older txid {candidate.txid} < {chosen.txid}"
+                if candidate.page_size != chosen.page_size:
+                    candidate.reason += (
+                        f"; conflicting page size {candidate.page_size} (selected {chosen.page_size}), "
+                        "views were not mixed"
+                    )
+            elif candidate.txid is not None and candidate.txid > chosen.txid:
+                candidate.reason += f"; txid {candidate.txid} is newer but cannot be proven valid"
+
+        return chosen.meta
 
     def _iter(self, type: Literal["page", "value"], path: str | None, sep: str) -> Page | bytes | None:
         """Iterate over :class:`Page`` and :class:`Inode` until the requested page or key value is found."""
