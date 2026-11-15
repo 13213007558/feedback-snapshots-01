@@ -375,26 +375,55 @@ class FileDescriptor:
 
         Since most of the subtleties of the differences between VMFS5 and VMFS6 are not relevant here, we
         implement this in a single function that handles both versions.
+
+        Only data that is actually recoverable from the available system files is returned. Ranges that
+        require the volume raise a :class:`VolumeNotAvailableError` instead of being substituted with
+        zero-filled or otherwise fabricated data.
+
+        Raises:
+            VolumeNotAvailableError: If the requested range can not be recovered from the available system files.
         """
         if self.zla == FS3_ZeroLevelAddrType.FILE_DESCRIPTOR_RESIDENT:
             if offset > self.vmfs._fd_data_size:
                 raise ValueError(f"Offset {offset} exceeds resident size {self.vmfs._fd_data_size} for {self}")
-            start = self.vmfs._fd_size - self.vmfs._fd_data_size + offset
-            end = max(start + length, self.vmfs._fd_size)
+
+            # Resident data is limited by the actual file length
+            resident_size = min(self.size, self.vmfs._fd_data_size)
+            start = self.vmfs._fd_data_offset + offset
+            end = min(start + length, self.vmfs._fd_data_offset + resident_size)
             return self.raw[start:end]
 
-        block = self._offset_to_block_address(offset)
+        try:
+            block = self._offset_to_block_address(offset)
+        except VolumeNotAvailableError as e:
+            raise VolumeNotAvailableError(
+                f"Unable to resolve a block address for offset {offset:#x} in {self}: {e}"
+            ) from e
+
+        if block == 0:
+            # A zero block is genuine data (a sparse block), not missing evidence
+            return b"\x00" * length
+
         if self.vmfs.is_vmfs5:
             offset_in_block = offset & (self.block_size - 1)
         else:
             offset_in_block = offset & ((1 << self.vmfs._sub_block_size_shift) - 1)
 
         type = address_type(block)
-        if type == FS3_AddrType.SUB_BLOCK and (resource := self.vmfs.resources.get(type)):
-            block = resource.read(block)
-            return block[offset_in_block : offset_in_block + length]
+        if type == FS3_AddrType.SUB_BLOCK:
+            if resource := self.vmfs.resources.get(type):
+                block_buf = resource.read(block)
+                return block_buf[offset_in_block : offset_in_block + length]
 
-        raise VolumeNotAvailableError(f"Unsupported address type {FS3_AddrType(type)} for block {block:#x} in {self}")
+            raise VolumeNotAvailableError(
+                f"Unable to read {length} bytes at offset {offset:#x} of {self}: "
+                "the sub-block resource (.sbc.sf) is not available"
+            )
+
+        raise VolumeNotAvailableError(
+            f"Unable to read {length} bytes at offset {offset:#x} of {self}: "
+            f"block {Address(block)} requires volume data, but no volume is available"
+        )
 
 
 class FileDescriptor5(FileDescriptor):
@@ -1026,9 +1055,19 @@ class BestEffortBlockStream(AlignedStream):
     def _read(self, offset: int, length: int) -> bytes:
         result = []
 
+        # Never read beyond the end of the file
+        length = min(length, self.size - offset)
+
         while length > 0:
             read_length = min(length, self.descriptor.block_size - offset % self.descriptor.block_size)
-            read_buf = self.descriptor._read_offset_sadpanda(offset, length)
+            read_buf = self.descriptor._read_offset_sadpanda(offset, read_length)
+            if len(read_buf) != read_length:
+                # A short read here means the available system files are incomplete
+                # Don't silently return less data, which would look like a normal EOF
+                raise VolumeNotAvailableError(
+                    f"Unable to read {read_length} bytes at offset {offset:#x} of {self.descriptor}: "
+                    "the available system files are truncated or incomplete"
+                )
             result.append(read_buf)
 
             length -= read_length

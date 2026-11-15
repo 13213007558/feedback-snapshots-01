@@ -15,9 +15,11 @@ from dissect.vmfs.address import (
     SmallFileBlockAddr,
     SubBlockAddr,
     SubBlockAddr64,
+    address_fmt,
     address_type,
 )
 from dissect.vmfs.c_vmfs import FS3_Config, FS3_DescriptorType, FS3_ResourceTypeID, c_vmfs
+from dissect.vmfs.exception import VolumeNotAvailableError
 from dissect.vmfs.util import bsf
 
 if TYPE_CHECKING:
@@ -467,7 +469,10 @@ class ResourceManager:
         Args:
             address: The address of the resource to read.
         """
-        return self.get(address_type(address)).read(address)
+        resource = self.get(address_type(address))
+        if resource is None:
+            raise VolumeNotAvailableError(f"No resource opened for address {address_fmt(address)}")
+        return resource.read(address)
 
     @property
     def FB(self) -> FileBlockResourceVMFS5 | SmallFileBlockResourceVMFS6:
