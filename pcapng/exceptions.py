@@ -30,6 +30,24 @@ class PcapngStrictnessWarning(PcapngWarning):
     """Indicate a condition about poorly formed pcapng files"""
 
 
+class InterfaceMergeConflict(PcapngException):
+    """
+    Indicate that interfaces explicitly declared as being the same by the
+    caller turned out to have incompatible capture metadata, and the merge
+    policy requested that this be treated as an error.
+    """
+
+    def __init__(self, source, interface_id, conflicts):
+        self.source = source
+        self.interface_id = interface_id
+        self.conflicts = list(conflicts)
+        super(InterfaceMergeConflict, self).__init__(
+            "interface {0} from source {1!r} cannot be merged: {2}".format(
+                interface_id, source, "; ".join(self.conflicts)
+            )
+        )
+
+
 class StreamEmpty(PcapngLoadError):  # End of stream
     """
     Exception indicating that the end of the stream was reached
