@@ -18,6 +18,7 @@ from dissect.vmfs.address import (
     address_type,
 )
 from dissect.vmfs.c_vmfs import FS3_Config, FS3_DescriptorType, FS3_ResourceTypeID, c_vmfs
+from dissect.vmfs.exception import InvalidPointerBlockError
 from dissect.vmfs.util import bsf
 
 if TYPE_CHECKING:
@@ -467,7 +468,11 @@ class ResourceManager:
         Args:
             address: The address of the resource to read.
         """
-        return self.get(address_type(address)).read(address)
+        resource_type = FS3_ResourceTypeID(address_type(address))
+        resource = self.resources.get(resource_type.value)
+        if resource is None:
+            raise InvalidPointerBlockError(f"No resource available for address {address:#x} of type {resource_type}")
+        return resource.read(address)
 
     @property
     def FB(self) -> FileBlockResourceVMFS5 | SmallFileBlockResourceVMFS6:

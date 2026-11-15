@@ -21,6 +21,7 @@ from dissect.vmfs.address import (
 from dissect.vmfs.c_vmfs import FS3_AddrType, FS3_DescriptorType, FS3_ZeroLevelAddrType, FS6_DirBlockType, c_vmfs
 from dissect.vmfs.exception import (
     FileNotFoundError,
+    InvalidPointerBlockError,
     NotADirectoryError,
     NotAnRDMFileError,
     NotASymlinkError,
@@ -33,6 +34,74 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from dissect.vmfs.vmfs import VMFS
+
+
+# Address types allowed inside a pointer block (PB/PB2), i.e. entries that point at another pointer block.
+# VMFS5 stores pointer blocks in .pbc.sf/.pb2.sf; VMFS6 may also store them in .sbc.sf or as a file block.
+# Note: FS3_AddrType.FILE_BLOCK and FS3_AddrType.SMALL_FILE_BLOCK share the same numeric value (0x1), so the sets
+# below intentionally use the raw numeric values rather than enum members.
+_POINTER_ENTRY_TYPES_VMFS5 = frozenset(
+    {
+        FS3_AddrType.POINTER_BLOCK.value,
+        FS3_AddrType.POINTER2_BLOCK.value,
+    }
+)
+_POINTER_ENTRY_TYPES_VMFS6 = frozenset(
+    {
+        FS3_AddrType.POINTER_BLOCK.value,
+        FS3_AddrType.POINTER2_BLOCK.value,
+        FS3_AddrType.SUB_BLOCK.value,
+        FS3_AddrType.SMALL_FILE_BLOCK.value,
+        FS3_AddrType.LARGE_FILE_BLOCK.value,
+    }
+)
+
+# Address types allowed for an entry that terminates the indirection and holds actual file data.
+_DATA_ENTRY_TYPES_VMFS5 = frozenset(
+    {
+        FS3_AddrType.FILE_BLOCK.value,
+        FS3_AddrType.SUB_BLOCK.value,
+    }
+)
+_DATA_ENTRY_TYPES_VMFS6 = frozenset(
+    {
+        FS3_AddrType.SMALL_FILE_BLOCK.value,
+        FS3_AddrType.LARGE_FILE_BLOCK.value,
+        FS3_AddrType.SUB_BLOCK.value,
+    }
+)
+
+
+def _addr_type_name(addr_type: int) -> str:
+    try:
+        return FS3_AddrType(addr_type).name
+    except ValueError:
+        return f"0x{addr_type:x}"
+
+
+def _validate_pointer_entry(vmfs: VMFS, address: int) -> None:
+    """Validate that a pointer block entry may point at another pointer block.
+
+    A zero pointer is a sparse hole and must be handled by the caller; this function only validates non-zero entries.
+    """
+    allowed = _POINTER_ENTRY_TYPES_VMFS5 if vmfs.is_vmfs5 else _POINTER_ENTRY_TYPES_VMFS6
+    addr_type = address_type(address)
+    if addr_type not in allowed:
+        raise InvalidPointerBlockError(
+            f"Invalid pointer block entry {address_fmt(address)}: "
+            f"got address type {_addr_type_name(addr_type)} ({addr_type:#x})"
+        )
+
+
+def _validate_data_entry(vmfs: VMFS, address: int, offset: int, descriptor: FileDescriptor) -> None:
+    """Validate that an entry terminating the indirection may hold file data."""
+    allowed = _DATA_ENTRY_TYPES_VMFS5 if vmfs.is_vmfs5 else _DATA_ENTRY_TYPES_VMFS6
+    addr_type = address_type(address)
+    if addr_type not in allowed:
+        raise InvalidPointerBlockError(
+            f"Invalid block {Address(address)} for offset {offset:#x} in {descriptor}: "
+            f"got address type {_addr_type_name(addr_type)} ({addr_type:#x})"
+        )
 
 
 class DirEntry:
@@ -452,6 +521,7 @@ class FileDescriptor5(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
 
             return _get_uint32_index(pb_buf, secondary_num)
@@ -463,10 +533,12 @@ class FileDescriptor5(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
 
             if (block := _get_uint32_index(pb_buf, secondary_num)) == 0:
                 return 0
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
 
             return _get_uint32_index(pb_buf, tertiary_num)
@@ -489,6 +561,7 @@ class FileDescriptor5(FileDescriptor):
             return 0, 1
 
         type = address_type(block)
+        _validate_data_entry(self.vmfs, block, offset, self)
 
         if resource := self.vmfs.resources.get(type):
             block_offset = resource.resolve_address(block)
@@ -496,7 +569,7 @@ class FileDescriptor5(FileDescriptor):
             # No resource available (yet), likely still in filesystem initialization phase
             block_offset = FileBlockAddr.parse(block) << self.metadata.blockOffsetShift
         else:
-            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+            raise InvalidPointerBlockError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
 
         offset_in_block = offset & (self.block_size - 1)
 
@@ -728,6 +801,7 @@ class FileDescriptor6(FileDescriptor):
 
             # Pointer block data can be stored in the .pbc.sf file itself, in .sbc.sf or as regular file block
             # Use the address type to figure it out
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
             return _get_uint64_index(pb_buf, secondary_num)
 
@@ -738,10 +812,12 @@ class FileDescriptor6(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
 
             if (block := _get_uint64_index(pb_buf, secondary_num)) == 0:
                 return 0
+            _validate_pointer_entry(self.vmfs, block)
             pb_buf = self.vmfs.resources.read(block)
 
             return _get_uint64_index(pb_buf, tertiary_num)
@@ -763,6 +839,7 @@ class FileDescriptor6(FileDescriptor):
             # Return early with a TBZ set for 0 blocks
             return 0, 0xFF
         type = address_type(block)
+        _validate_data_entry(self.vmfs, block, offset, self)
 
         if resource := self.vmfs.resources.get(type):
             block_offset = resource.resolve_address(block)
@@ -771,7 +848,7 @@ class FileDescriptor6(FileDescriptor):
             cluster, resource = SmallFileBlockAddr.parse(block)
             block_offset = ((cluster * self.vmfs._sfb_size) + resource) << self.metadata.blockOffsetShift
         else:
-            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+            raise InvalidPointerBlockError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
 
         if type == FS3_AddrType.LARGE_FILE_BLOCK:
             offset_in_block = offset & (
@@ -1037,17 +1114,39 @@ class BestEffortBlockStream(AlignedStream):
         return b"".join(result)
 
 
-_S32 = struct.Struct("<i")
+_U32 = struct.Struct("<I")
+_U64 = struct.Struct("<Q")
 
 
 def _get_uint32_index(buf: bytes, index: int) -> int:
-    """Convenience function to index into a ``uint32`` sized array."""
-    return _S32.unpack(buf[index * 4 : (index * 4) + 4])[0]
+    """Index into a ``uint32`` pointer array.
 
+    VMFS5 pointer blocks hold opaque 32-bit addresses. The top bit is part of the address (the ``resource``/``block``
+    field), so the value must be decoded as an *unsigned* integer. Decoding it signed turns a legal high address into a
+    negative number, which later fails address type/resource lookups or produces negative seeks.
 
-_S64 = struct.Struct("<Q")
+    A short buffer means the pointer block is truncated or the index is out of bounds, which is a hard error rather
+    than something that should silently read unrelated data.
+    """
+    start = index * 4
+    entry = buf[start : start + 4]
+    if len(entry) != 4:
+        raise InvalidPointerBlockError(
+            f"Truncated uint32 pointer array: need index {index} (offset {start:#x}), buffer is {len(buf)} bytes"
+        )
+    return _U32.unpack(entry)[0]
 
 
 def _get_uint64_index(buf: bytes, index: int) -> int:
-    """Convenience function to index into a ``uint64`` sized array."""
-    return _S64.unpack(buf[index * 8 : (index * 8) + 8])[0]
+    """Index into a ``uint64`` pointer array.
+
+    VMFS6 pointer blocks hold opaque 64-bit addresses. As with :func:`_get_uint32_index`, a truncated pointer block
+    is reported explicitly instead of silently reading past the buffer.
+    """
+    start = index * 8
+    entry = buf[start : start + 8]
+    if len(entry) != 8:
+        raise InvalidPointerBlockError(
+            f"Truncated uint64 pointer array: need index {index} (offset {start:#x}), buffer is {len(buf)} bytes"
+        )
+    return _U64.unpack(entry)[0]

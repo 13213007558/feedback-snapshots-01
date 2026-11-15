@@ -31,3 +31,9 @@ class NotASymlinkError(Error):
 
 class NotAnRDMFileError(Error):
     pass
+
+
+class InvalidPointerBlockError(Error):
+    """Raised when a pointer block (PB/PB2) contains a malformed or truncated pointer array."""
+
+    pass
