@@ -35,7 +35,7 @@ def problem(msg):
 
 def warn(msg):
     "Show a warning with the given message."
-    if strict_level > Strictness.NONE:
+    if strict_level != Strictness.NONE:
         warnings.warn(PcapngStrictnessWarning(msg))
 
 

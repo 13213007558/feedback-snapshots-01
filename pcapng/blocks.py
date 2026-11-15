@@ -14,6 +14,7 @@ import io
 import itertools
 
 from pcapng import strictness as strictness
+from pcapng._compat import namedtuple
 from pcapng.constants import link_types
 from pcapng.structs import (
     IntField,
@@ -31,6 +32,32 @@ from pcapng.structs import (
 from pcapng.utils import unpack_timestamp_resolution
 
 KNOWN_BLOCKS = {}
+
+#: Value of the obsolete Packet Block "drops count" field meaning the
+#: number of dropped packets is not available (pcapng spec, Appendix A).
+DROPS_COUNT_UNKNOWN = 0xFFFF
+
+#: Description of a piece of Packet Block information that has no
+#: equivalent in an Enhanced Packet Block and could not be migrated.
+UnmigratedField = namedtuple("UnmigratedField", ("field", "value", "reason"))
+
+#: Result of migrating an obsolete Packet Block to an Enhanced Packet
+#: Block: the new block, plus a list of :py:data:`UnmigratedField` items
+#: describing information that could not be equivalently represented.
+PacketMigration = namedtuple("PacketMigration", ("block", "unmigrated"))
+
+#: Options of an obsolete Packet Block that have an exact equivalent in
+#: an Enhanced Packet Block (Packet Block option name -> EPB option name).
+#: The custom options are valid on any block, so they map to themselves.
+_PB_TO_EPB_OPTIONS = {
+    "opt_comment": "opt_comment",
+    "pack_flags": "epb_flags",
+    "pack_hash": "epb_hash",
+    "custom_str_safe": "custom_str_safe",
+    "custom_bytes_safe": "custom_bytes_safe",
+    "custom_str": "custom_str",
+    "custom_bytes": "custom_bytes",
+}
 
 
 class Block(object):
@@ -563,16 +590,59 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
         ),
     ]
 
-    def enhanced(self):
-        """Return an EnhancedPacket with this block's attributes."""
-        opts_dict = dict(self.options)
-        opts_dict["epb_dropcount"] = self.drops_count
-        for a in ("flags", "hash"):
+    def migrate(self):
+        """
+        Convert this obsolete Packet Block into an Enhanced Packet Block.
+
+        :returns:
+            a :py:data:`PacketMigration` tuple of ``(block, unmigrated)``.
+            ``block`` is the new :py:class:`EnhancedPacket`; ``unmigrated``
+            is a list of :py:data:`UnmigratedField` items describing any
+            information that has no equivalent in an Enhanced Packet Block
+            and therefore could not be carried over.
+        """
+        unmigrated = []
+        opts_dict = {}
+        for key, values in self.options.iter_all_items():
             try:
-                opts_dict["epb_" + a] = opts_dict.pop("pack_" + a)
+                new_key = _PB_TO_EPB_OPTIONS[key]
             except KeyError:
-                pass
-        return self.section.new_member(
+                # Unknown option code: it cannot be carried over safely
+                # (the same code may have a different meaning in the EPB
+                # option schema), so report it along with its raw values.
+                unmigrated.append(
+                    UnmigratedField(
+                        field="options[{0!r}]".format(key),
+                        value=list(values),
+                        reason=(
+                            "option has no defined equivalent in an "
+                            "Enhanced Packet Block"
+                        ),
+                    )
+                )
+                continue
+            # Keep *all* values of repeated options (eg. multiple
+            # pack_hash / opt_comment), not just the first one.
+            opts_dict[new_key] = list(values)
+
+        if self.drops_count == DROPS_COUNT_UNKNOWN:
+            # 0xFFFF means "drop count not available"; the EPB
+            # epb_dropcount option has no such "unknown" value, so it
+            # must be omitted rather than turned into a real count.
+            unmigrated.append(
+                UnmigratedField(
+                    field="drops_count",
+                    value=self.drops_count,
+                    reason=(
+                        "0xFFFF marks the drop count as unknown; the EPB "
+                        "epb_dropcount option has no 'unknown' value"
+                    ),
+                )
+            )
+        else:
+            opts_dict["epb_dropcount"] = self.drops_count
+
+        block = self.section.new_member(
             EnhancedPacket,
             interface_id=self.interface_id,
             timestamp_high=self.timestamp_high,
@@ -581,13 +651,26 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
             packet_data=self.packet_data,
             options=opts_dict,
         )
+        return PacketMigration(block=block, unmigrated=unmigrated)
+
+    def enhanced(self):
+        """Return an EnhancedPacket with this block's attributes."""
+        return self.migrate().block
 
     # Do this check in _write() instead of _encode() to ensure the block gets written
     # with the correct magic number.
     def _write(self, outstream):
         strictness.problem("Packet Block is obsolete and must not be used")
         if strictness.should_fix():
-            self.enhanced()._write(outstream)
+            migration = self.migrate()
+            for item in migration.unmigrated:
+                strictness.warn(
+                    "migrating Packet Block to Enhanced Packet Block: "
+                    "{field} cannot be represented ({reason})".format(
+                        field=item.field, reason=item.reason
+                    )
+                )
+            migration.block._write(outstream)
         else:
             super(ObsoletePacket, self)._write(outstream)
 
