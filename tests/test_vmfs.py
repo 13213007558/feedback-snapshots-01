@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import stat
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,6 +12,9 @@ from dissect.vmfs.c_vmfs import FS3_Config, FS3_ZeroLevelAddrType, FS6_DirBlockT
 from dissect.vmfs.descriptor import _dir_hash_get_location, _dir_name_hash
 from dissect.vmfs.exception import VolumeNotAvailableError
 from tests.conftest import absolute_path
+
+if TYPE_CHECKING:
+    from typing import BinaryIO
 
 
 @pytest.mark.parametrize(
@@ -221,6 +225,122 @@ def test_vmfs_jbosf() -> None:
 
         fd = fs.get(donor.get("small").address)
         assert fd.open().read() == b"tiny\n"
+
+
+def _jbosf_kwargs(donor: vmfs.VMFS, sbc: BinaryIO | None = None) -> dict[str, BinaryIO]:
+    """Return keyword arguments to open a JBOSF VMFS from a donor VMFS."""
+    kwargs = {
+        "vh": donor.get(".vh.sf").open(),
+        "fdc": donor.get(".fdc.sf").open(),
+        "fbb": donor.get(".fbb.sf").open(),
+        "sbc": sbc if sbc is not None else donor.get(".sbc.sf").open(),
+        "pbc": donor.get(".pbc.sf").open(),
+        "pb2": donor.get(".pb2.sf").open(),
+    }
+    if donor.is_vmfs6:
+        kwargs["jbc"] = donor.get(".jbc.sf").open()
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    ("path", "sub_block_files"),
+    [
+        pytest.param("vmfs/vmfs5.bin.gz", ("collision",), id="vmfs5"),
+        pytest.param("vmfs/vmfs6.bin.gz", ("directory", "collision"), id="vmfs6"),
+    ],
+)
+def test_vmfs_jbosf_content(path: str, sub_block_files: tuple[str, ...]) -> None:
+    """Test that recoverable file content is identical between a full volume and JBOSF.
+
+    Resident and sub-block data must be returned exactly per the requested range, while
+    ranges that require the volume must raise a clear error instead of a fake EOF.
+    """
+    with gzip.open(absolute_path(f"_data/{path}"), "rb") as fh:
+        vs = lvm.LVM(fh)
+        donor = vmfs.VMFS(vs.volumes[0].open())
+        fs = vmfs.VMFS(**_jbosf_kwargs(donor))
+
+        def assert_ranges_equal(name: str) -> None:
+            donor_fd = donor.get(name)
+            jbosf_fd = fs.get(donor_fd.address)
+            expected = donor_fd.open().read()
+
+            assert jbosf_fd.open().read() == expected
+
+            offsets = {0, 1, max(0, donor_fd.size - 1), donor_fd.size}
+            for base in range(0, donor_fd.size, fs.sub_block_size):
+                offsets.update({max(0, base - 1), base, base + 1})
+
+            for offset in sorted(offsets):
+                for length in (1, 7, 128, fs.sub_block_size + 1):
+                    assert jbosf_fd.open().readoffset(offset, length) == expected[offset : offset + length]
+
+        # Resident files are limited by the actual file length
+        assert_ranges_equal("small")
+        assert_ranges_equal("normal.vmdk")
+
+        # Sub-block backed files, potentially spanning multiple sub-blocks
+        for name in sub_block_files:
+            assert_ranges_equal(name)
+
+        # File-block backed data requires the volume and must not be returned
+        for name in ("big", "bigger"):
+            jbosf_fd = fs.get(donor.get(name).address)
+            with pytest.raises(VolumeNotAvailableError):
+                jbosf_fd.open().read()
+
+            stream = jbosf_fd.open()
+            stream.seek(512)
+            with pytest.raises(VolumeNotAvailableError):
+                stream.read(512)
+
+        # On VMFS5 the directory data is stored in file blocks, which we don't have
+        if fs.is_vmfs5:
+            jbosf_fd = fs.get(donor.get("directory").address)
+            with pytest.raises(VolumeNotAvailableError):
+                jbosf_fd.open().read()
+
+
+class _TruncatedStream:
+    """File-like wrapper that pretends the stream ends at a given size."""
+
+    def __init__(self, fh: BinaryIO, size: int) -> None:
+        self._fh = fh
+        self._size = size
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._fh.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._fh.tell()
+
+    def read(self, n: int = -1) -> bytes:
+        pos = self._fh.tell()
+        if pos >= self._size:
+            return b""
+        if n is None or n < 0:
+            n = self._size - pos
+        return self._fh.read(min(n, self._size - pos))
+
+
+def test_vmfs_jbosf_truncated_system_file() -> None:
+    """Test that missing data in a system file is not silently wrapped as a normal EOF."""
+    with gzip.open(absolute_path("_data/vmfs/vmfs6.bin.gz"), "rb") as fh:
+        vs = lvm.LVM(fh)
+        donor = vmfs.VMFS(vs.volumes[0].open())
+
+        directory_fd = donor.get("directory")
+        assert directory_fd.zla == FS3_ZeroLevelAddrType.SUB_BLOCK
+
+        # Truncate the sub-block system file right before the directory data
+        offset = donor.resources.SB._resource_offset_from_address(directory_fd.blocks[0])
+        sbc = _TruncatedStream(donor.get(".sbc.sf").open(), offset)
+
+        fs = vmfs.VMFS(**_jbosf_kwargs(donor, sbc=sbc))
+
+        jbosf_fd = fs.get(directory_fd.address)
+        with pytest.raises(VolumeNotAvailableError):
+            jbosf_fd.open().read()
 
 
 def _assert_is_file(fd: vmfs.FileDescriptor, size: int, zla: FS3_ZeroLevelAddrType) -> None:

@@ -379,22 +379,36 @@ class FileDescriptor:
         if self.zla == FS3_ZeroLevelAddrType.FILE_DESCRIPTOR_RESIDENT:
             if offset > self.vmfs._fd_data_size:
                 raise ValueError(f"Offset {offset} exceeds resident size {self.vmfs._fd_data_size} for {self}")
-            start = self.vmfs._fd_size - self.vmfs._fd_data_size + offset
-            end = max(start + length, self.vmfs._fd_size)
+            data_offset = self.vmfs._fd_size - self.vmfs._fd_data_size
+            start = data_offset + offset
+            # Resident data is limited by both the file descriptor data area and the actual file length
+            end = min(start + length, data_offset + self.size, self.vmfs._fd_size)
             return self.raw[start:end]
 
         block = self._offset_to_block_address(offset)
+        if block == 0:
+            # Unallocated (sparse) block, the content is known to be zeroed
+            return b"\x00" * length
+
         if self.vmfs.is_vmfs5:
             offset_in_block = offset & (self.block_size - 1)
         else:
             offset_in_block = offset & ((1 << self.vmfs._sub_block_size_shift) - 1)
 
         type = address_type(block)
-        if type == FS3_AddrType.SUB_BLOCK and (resource := self.vmfs.resources.get(type)):
-            block = resource.read(block)
-            return block[offset_in_block : offset_in_block + length]
+        if type == FS3_AddrType.SUB_BLOCK:
+            if (resource := self.vmfs.resources.get(type)) is None:
+                raise VolumeNotAvailableError(
+                    f"Cannot recover offset {offset:#x}-{offset + length:#x} of {self}: "
+                    f"no sub-block resource (.sbc.sf) available for block {Address(block)}"
+                )
+            block_buf = resource.read(block)
+            return block_buf[offset_in_block : offset_in_block + length]
 
-        raise VolumeNotAvailableError(f"Unsupported address type {FS3_AddrType(type)} for block {block:#x} in {self}")
+        raise VolumeNotAvailableError(
+            f"Cannot recover offset {offset:#x}-{offset + length:#x} of {self}: "
+            f"block {Address(block)} with address type {FS3_AddrType(type).name} requires volume data"
+        )
 
 
 class FileDescriptor5(FileDescriptor):
@@ -1026,9 +1040,19 @@ class BestEffortBlockStream(AlignedStream):
     def _read(self, offset: int, length: int) -> bytes:
         result = []
 
+        # Never read past the end of the file, we only want to return recoverable data
+        length = min(length, self.descriptor.size - offset)
+
         while length > 0:
             read_length = min(length, self.descriptor.block_size - offset % self.descriptor.block_size)
-            read_buf = self.descriptor._read_offset_sadpanda(offset, length)
+            read_buf = self.descriptor._read_offset_sadpanda(offset, read_length)
+            if len(read_buf) != read_length:
+                # A short read means the underlying system file did not have the data available
+                # Don't silently return less data, which would look like a normal EOF
+                raise VolumeNotAvailableError(
+                    f"Cannot recover offset {offset:#x}-{offset + read_length:#x} of {self.descriptor}: "
+                    f"expected {read_length} bytes, got {len(read_buf)}"
+                )
             result.append(read_buf)
 
             length -= read_length
