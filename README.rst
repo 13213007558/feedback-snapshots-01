@@ -150,6 +150,32 @@ Or even better, open an issue so the whole world can participate in
 the discussion :)
 
 
+Deriving a filtered capture
+===========================
+
+``pcapng.derive_capture()`` writes a copy containing only the packets
+selected by a caller-supplied predicate, and returns a manifest mapping
+every output block back to the source block's byte range.  The manifest is
+bound to the SHA-256 of the input bytes, so it keeps its identity without
+relying on file names or temporary paths::
+
+    import pcapng
+
+    def keep(block):
+        return b"GET" in block.packet_data
+
+    manifest = pcapng.derive_capture("original.pcapng", "derived.pcapng", keep)
+
+    for entry in manifest.entries_for_packets():
+        print(entry.source_offset, entry.source_length, entry.output_offset)
+
+Duplicate packets are kept as distinct evidence: selection is per source
+block and packets are never deduplicated by content.  Only interfaces used
+by selected packets are written, renumbered from zero, and the manifest
+records both source and output interface identifiers.  Name Resolution and
+Interface Statistics blocks are omitted by default; when retained they
+still describe the original capture, which the manifest records explicitly.
+
 Pcap-ng write support
 =====================
 

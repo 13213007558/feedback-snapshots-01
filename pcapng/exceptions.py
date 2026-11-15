@@ -22,6 +22,12 @@ class PcapngDumpError(PcapngException):
     pass
 
 
+class DeriveError(PcapngException):
+    """Indicate an error while deriving a filtered capture file"""
+
+    pass
+
+
 class PcapngStrictnessError(PcapngException):
     """Indicate a condition about poorly formed pcapng files"""
 
