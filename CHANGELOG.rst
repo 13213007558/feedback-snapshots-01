@@ -1,6 +1,21 @@
 History
 #######
 
+Unreleased
+==========
+
+- Harden parsing at the Name Resolution Block / options boundary:
+
+  - Reject an ``nrb_record_end`` terminator declaring a non-zero length
+    (previously the following bytes were silently re-interpreted as options)
+  - Reject IPv4/IPv6 name resolution records too short to hold an address
+  - Raise ``TruncatedFile`` when a record or option header/payload is cut
+    off by the end of the enclosing block, instead of silently dropping it
+
+- Add structural-mutation tests covering the boundary between the name
+  resolution record list and block options (fixed-seed generator plus
+  minimal failing samples)
+
 2.1.1
 =====
 

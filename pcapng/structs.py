@@ -489,12 +489,39 @@ class NameResolutionRecordField(StructField):
 
     def load(self, stream, endianness, seen=None):
         record_type = read_int(stream, 16, False, endianness)
-        record_length = read_int(stream, 16, False, endianness)
+        try:
+            record_length = read_int(stream, 16, False, endianness)
+        except StreamEmpty:
+            raise TruncatedFile(
+                "Name resolution record header truncated at block boundary"
+            )
 
         if record_type == NRB_RECORD_END:
+            if record_length != 0:
+                raise CorruptedFile(
+                    "Name resolution end-of-records record must declare a "
+                    "zero length, got {0}".format(record_length)
+                )
             raise StreamEmpty("End marker reached")
 
-        data = read_bytes_padded(stream, record_length)
+        if record_type == NRB_RECORD_IPv4 and record_length < 4:
+            raise CorruptedFile(
+                "IPv4 name resolution record too short to hold an address: "
+                "{0} bytes".format(record_length)
+            )
+
+        if record_type == NRB_RECORD_IPv6 and record_length < 16:
+            raise CorruptedFile(
+                "IPv6 name resolution record too short to hold an address: "
+                "{0} bytes".format(record_length)
+            )
+
+        try:
+            data = read_bytes_padded(stream, record_length)
+        except StreamEmpty:
+            raise TruncatedFile(
+                "Name resolution record payload truncated at block boundary"
+            )
 
         if record_type == NRB_RECORD_IPv4:
             return {
@@ -556,16 +583,22 @@ def read_options(stream, endianness):
         while True:
             try:
                 option_code = read_int(stream, 16, False, endianness)
+            except StreamEmpty:
+                # Reaching the end of the block exactly on an option
+                # boundary is fine.
+                return
+            try:
                 option_length = read_int(stream, 16, False, endianness)
 
                 if option_code == 0:  # End of options
                     return
 
                 payload = read_bytes_padded(stream, option_length)
-                yield option_code, payload
-
             except StreamEmpty:
-                return
+                raise TruncatedFile(
+                    "Option header or payload truncated at block boundary"
+                )
+            yield option_code, payload
 
     return list(_iter_read_options(stream, endianness))
 
