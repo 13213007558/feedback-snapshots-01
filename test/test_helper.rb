@@ -57,6 +57,7 @@ require "oauth"
 # Test Support Code
 require "support/minitest_helpers"
 require "support/oauth_case"
+require "support/recording_http_double"
 
 # Run the tests!
 require "minitest/autorun"

@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+* `OAuth::Client::SignedRequest`, an optional guard wrapper for signed `Net::HTTP` requests
+  * Pins a fingerprint of everything the OAuth signature binds (method, request target, signed parameters, Content-Type of body carriers, and body bytes covered by `oauth_body_hash`) at signing time
+  * `#perform` refuses to send and raises `SignatureInvalidatedError` when a bound component changed after signing; unrelated transport headers (Accept, User-Agent, ...) may change freely
+  * `#resign!` explicitly re-signs with a fresh nonce/timestamp (never silently reuses the old nonce), and a performed request must be re-signed before it can be sent again
+  * Streaming bodies (`body_stream`) are buffered into a rewindable `StringIO` so they can be re-read for verification and re-sent on retry
 
 ### Changed
 

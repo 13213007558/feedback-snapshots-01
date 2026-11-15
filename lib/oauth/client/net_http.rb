@@ -2,6 +2,7 @@
 
 require "oauth/helper"
 require "oauth/request_proxy/net_http"
+require "oauth/client/signed_request"
 
 module Net
   class HTTPGenericRequest
