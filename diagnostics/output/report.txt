@@ -1,0 +1,70 @@
+dissect.etl same-GUID / different-manifest conflict diagnosis
+================================================================
+provider GUID        : f1c2a3b4-1111-2222-3333-444455556666
+event descriptor     : opcode=11 version=0
+payload (12 bytes)   : 07000000410042000000ccdd
+ETL files identical  : True
+
+[cold_cache_order_a_then_b]
+  - active source   : collector-a
+    cache hit       : False  compiled: ['collector-a:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorA  symbol: MeasurementA
+    parsed values   : {'Counter': 7, 'Label': 'AB'}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+  - active source   : collector-b
+    cache hit       : False  compiled: ['collector-b:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorB  symbol: MeasurementB
+    parsed values   : {'Counter': 7, 'NextDword': 4325441, 'TrailingWord': 0}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+
+[cold_cache_order_b_then_a]
+  - active source   : collector-b
+    cache hit       : False  compiled: ['collector-b:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorB  symbol: MeasurementB
+    parsed values   : {'Counter': 7, 'NextDword': 4325441, 'TrailingWord': 0}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+  - active source   : collector-a
+    cache hit       : False  compiled: ['collector-a:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorA  symbol: MeasurementA
+    parsed values   : {'Counter': 7, 'Label': 'AB'}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+
+[sticky_cache_a_then_b]
+  - active source   : collector-a
+    cache hit       : False  compiled: ['collector-a:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorA  symbol: MeasurementA
+    parsed values   : {'Counter': 7, 'Label': 'AB'}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+  - active source   : collector-b
+    cache hit       : True  compiled: []
+    provider name   : ConflictProvider-CollectorA  symbol: MeasurementA
+    parsed values   : {'Counter': 7, 'Label': 'AB'}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+
+[sticky_cache_b_then_a]
+  - active source   : collector-b
+    cache hit       : False  compiled: ['collector-b:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorB  symbol: MeasurementB
+    parsed values   : {'Counter': 7, 'NextDword': 4325441, 'TrailingWord': 0}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+  - active source   : collector-a
+    cache hit       : True  compiled: []
+    provider name   : ConflictProvider-CollectorB  symbol: MeasurementB
+    parsed values   : {'Counter': 7, 'NextDword': 4325441, 'TrailingWord': 0}
+    payload/consumed/unconsumed: 12/10/2  unconsumed_hex=ccdd
+    exception       : None
+
+[missing_event_entry_collector_c]
+  - active source   : collector-c
+    cache hit       : False  compiled: ['collector-c:manifests/xml/{f1c2a3b4-1111-2222-3333-444455556666}.xml']
+    provider name   : ConflictProvider-CollectorC  symbol: None
+    parsed values   : {}
+    payload/consumed/unconsumed: 12/0/12  unconsumed_hex=07000000410042000000ccdd
+    exception       : silent-none (KeyError/ManifestNotFound swallowed)

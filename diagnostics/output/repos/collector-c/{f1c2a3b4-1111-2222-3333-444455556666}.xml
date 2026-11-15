@@ -1,0 +1,20 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation><events>
+  <provider name="ConflictProvider-CollectorC" guid="{f1c2a3b4-1111-2222-3333-444455556666}" symbol="ConflictProviderC">
+   <keywords>
+    <keyword name="Trace" message="$(string.Trace)" mask="0x1"/>
+   </keywords>
+   <events>
+    <event value="99" symbol="MeasurementC" version="0" opcode="99" level="win:Informational" keywords="Trace" template="TmplC"/>
+   </events>
+   <templates>
+    <template tid="TmplC">
+     <data name="Counter" inType="win:UInt32"/>
+    </template>
+   </templates>
+  </provider>
+ </events></instrumentation>
+ <localization><resources culture="en-US"><stringTable>
+  <string id="Trace" value="Trace"/>
+ </stringTable></resources></localization>
+</instrumentationManifest>

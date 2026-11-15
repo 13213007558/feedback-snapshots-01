@@ -1,0 +1,21 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation><events>
+  <provider name="ConflictProvider-CollectorA" guid="{f1c2a3b4-1111-2222-3333-444455556666}" symbol="ConflictProviderA">
+   <keywords>
+    <keyword name="Trace" message="$(string.Trace)" mask="0x1"/>
+   </keywords>
+   <events>
+    <event value="11" symbol="MeasurementA" version="0" opcode="11" level="win:Informational" keywords="Trace" template="TmplA"/>
+   </events>
+   <templates>
+    <template tid="TmplA">
+     <data name="Counter" inType="win:UInt32"/>
+     <data name="Label" inType="win:UnicodeString"/>
+    </template>
+   </templates>
+  </provider>
+ </events></instrumentation>
+ <localization><resources culture="en-US"><stringTable>
+  <string id="Trace" value="Trace"/>
+ </stringTable></resources></localization>
+</instrumentationManifest>
