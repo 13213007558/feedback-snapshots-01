@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from dissect.evidence.ewf.metadata import EWFMetadata
+
 MAX_OPEN_SEGMENTS = 128
 
 
@@ -88,6 +90,13 @@ class EWF:
         """Return whether the ADCRYPT container is locked."""
         return self.is_adcrypt() and self.adcrypt.is_locked()
 
+    @cached_property
+    def metadata(self) -> EWFMetadata:
+        """Return the acquisition metadata declared by the header sections."""
+        from dissect.evidence.ewf.metadata import EWFMetadata
+
+        return EWFMetadata(self)
+
     def segment(self, idx: int) -> Segment:
         """Open a segment by index.
 
@@ -141,6 +150,9 @@ class EWF:
         # Reset LRU
         self._segments = {}
         self._segment_lru = []
+
+        # Any metadata read before unlocking was an error, so allow a fresh read afterwards
+        self.__dict__.pop("metadata", None)
 
         # Open the EWF
         self._open_ewf()

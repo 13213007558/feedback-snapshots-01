@@ -74,6 +74,8 @@ asdf-verify = "dissect.evidence.tools.asdf.verify:main"
 
 adcrypt = "dissect.evidence.tools.adcrypt:main"
 
+ewf-meta = "dissect.evidence.tools.ewf.meta:main"
+
 [tool.ruff]
 line-length = 120
 required-version = ">=0.13.1"

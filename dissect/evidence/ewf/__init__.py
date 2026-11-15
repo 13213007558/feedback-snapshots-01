@@ -10,12 +10,32 @@ from dissect.evidence.ewf.ewf import (
     VolumeSection,
     find_files,
 )
+from dissect.evidence.ewf.metadata import (
+    DeclaredDigest,
+    EWFMetadata,
+    FieldCandidate,
+    FieldResolution,
+    HeaderField,
+    HeaderRecord,
+    HeaderSource,
+    ImageInfo,
+    ParsedTime,
+)
 from dissect.evidence.ewf.stream import EWFStream
 
 __all__ = [
     "EWF",
+    "DeclaredDigest",
+    "EWFMetadata",
     "EWFStream",
+    "FieldCandidate",
+    "FieldResolution",
+    "HeaderField",
+    "HeaderRecord",
     "HeaderSection",
+    "HeaderSource",
+    "ImageInfo",
+    "ParsedTime",
     "SectionDescriptor",
     "Segment",
     "TableSection",
