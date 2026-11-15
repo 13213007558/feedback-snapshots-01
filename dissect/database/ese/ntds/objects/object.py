@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 from uuid import UUID
 
-from dissect.database.ese.ntds.util import InstanceType, SystemFlag, decode_value
+from dissect.database.ese.ntds.util import DecodeReason, InstanceType, SystemFlag, UndecodedValue, decode_value
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -92,15 +92,13 @@ class Object:
             db: The database instance associated with this object.
             record: The :class:`Record` instance representing this object.
         """
-        try:
-            if (object_classes := _get_attribute(db, record, "objectClass")) and (
-                known_cls := cls.__known_classes__.get(object_classes[0])
-            ) is not None:
+        # Upcast to the most specific *known* class in the objectClass chain. An extended schema can add
+        # custom subclasses (unregistered ATTRTYP values); those are retained on the object but must not
+        # prevent decoding with a registered ancestor such as ``user`` or ``top``.
+        for class_id in _get_attribute(db, record, "objectClass", raw=True) or []:
+            class_entry = db.data.schema.lookup_class_id(class_id)
+            if class_entry is not None and (known_cls := cls.__known_classes__.get(class_entry.name)) is not None:
                 return known_cls(db, record)
-        except ValueError:
-            # Resolving the objectClass values can fail if the schema is not loaded yet (or is malformed)
-            # Fallback to a generic Object in that case
-            pass
 
         return cls(db, record)
 
@@ -120,12 +118,18 @@ class Object:
         return value
 
     def as_dict(self) -> dict[str, Any]:
-        """Return the object's attributes as a dictionary."""
+        """Return the object's attributes as a dictionary.
+
+        Columns with a registered schema entry are keyed by their LDAP display name and decoded. Columns
+        that have no schema entry at all (for example columns introduced by an extended schema this parser
+        does not know) are kept under their raw column name with their raw value instead of being dropped.
+        """
         result = {}
-        for key in self.record.as_dict():
-            if (schema := self.db.data.schema.lookup_attribute(column=key)) is not None:
-                key = schema.name
-                result[key] = self.get(key)
+        for column, raw_value in self.record.as_dict().items():
+            if (schema := self.db.data.schema.lookup_attribute(column=column)) is not None:
+                result[schema.name] = self.get(schema.name)
+            else:
+                result[column] = UndecodedValue(raw_value, None, DecodeReason.MISSING_SCHEMA)
         return result
 
     def parent(self) -> Object | None:
@@ -192,9 +196,23 @@ class Object:
         return self.get("objectCategory")
 
     @property
-    def object_class(self) -> list[str] | None:
-        """Return the object's objectClass."""
+    def object_class(self) -> list[str | int] | None:
+        """Return the object's objectClass.
+
+        Registered classes are returned by LDAP display name. An extended schema may contain custom
+        subclasses whose ATTRTYP has no class definition; those are returned as their raw integer so the
+        information is not lost. Use :attr:`unregistered_object_classes` to isolate them.
+        """
         return self.get("objectClass")
+
+    @property
+    def unregistered_object_classes(self) -> list[int]:
+        """Return the raw ATTRTYP values in ``objectClass`` that have no registered class definition."""
+        return [
+            class_id
+            for class_id in (self.get("objectClass", raw=True) or [])
+            if self.db.data.schema.lookup_class_id(class_id) is None
+        ]
 
     @property
     def sid(self) -> str | None:

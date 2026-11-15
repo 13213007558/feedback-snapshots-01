@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from enum import Enum
 from io import BytesIO
 from typing import TYPE_CHECKING, NamedTuple
 
 from dissect.database.ese.ntds.c_ds import c_ds
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from dissect.database.ese.ntds.database import Database
     from dissect.database.ese.ntds.util import SearchFlag
 
@@ -105,10 +108,32 @@ BOOTSTRAP_OID_PREFIXES = {
 }
 
 
+class SchemaSource(Enum):
+    """Where a schema entry (or an index binding) originated from."""
+
+    BOOTSTRAP = "bootstrap"
+    DATABASE = "database"
+
+
+class SchemaConflict(NamedTuple):
+    """A record of one schema index key pointing at more than one distinct entry.
+
+    The database definition always wins the index slot, but the ambiguity is retained so that callers
+    never silently apply one attribute's decoding rule to another attribute that happens to share a name.
+    """
+
+    index: str
+    key: object
+    winner: ClassEntry | AttributeEntry
+    shadowed: ClassEntry | AttributeEntry
+    ambiguous: bool
+
+
 class ClassEntry(NamedTuple):
     dnt: int
     id: int
     name: str
+    source: SchemaSource = SchemaSource.BOOTSTRAP
 
 
 class AttributeEntry(NamedTuple):
@@ -122,6 +147,7 @@ class AttributeEntry(NamedTuple):
     is_single_valued: bool
     link_id: int | None
     search_flags: SearchFlag | None
+    source: SchemaSource = SchemaSource.BOOTSTRAP
 
 
 class Schema:
@@ -144,6 +170,9 @@ class Schema:
         # Class specific indices
         self._class_id_index: dict[int, ClassEntry] = {}
         self._class_name_index: dict[str, ClassEntry] = {}
+
+        # Every time an index key is (re)bound, including expected bootstrap overwrites
+        self._conflicts: list[SchemaConflict] = []
 
         # OID prefixes
         self._oid_idx_to_prefix_index: dict[int, str] = {
@@ -222,6 +251,7 @@ class Schema:
                     is_single_valued=obj.get("isSingleValued"),
                     link_id=obj.get("linkId"),
                     search_flags=obj.get("searchFlags"),
+                    source=SchemaSource.DATABASE,
                 )
 
             elif class_schema.id in classes:
@@ -229,6 +259,7 @@ class Schema:
                     dnt=obj.dnt,
                     id=obj.get("governsID", raw=True),
                     name=obj.get("lDAPDisplayName"),
+                    source=SchemaSource.DATABASE,
                 )
 
         # Load user-defined OID prefixes
@@ -237,11 +268,12 @@ class Schema:
             # Rebuild the reverse index
             self._oid_prefix_to_idx_index = {prefix: idx for idx, prefix in self._oid_idx_to_prefix_index.items()}
 
-    def _add_class(self, dnt: int, id: int, name: str) -> None:
+    def _add_class(self, dnt: int, id: int, name: str, source: SchemaSource = SchemaSource.BOOTSTRAP) -> None:
         entry = ClassEntry(
             dnt=dnt,
             id=id,
             name=name,
+            source=source,
         )
         self._add(entry)
 
@@ -256,10 +288,11 @@ class Schema:
         is_single_valued: bool,
         link_id: int | None,
         search_flags: SearchFlag | None,
+        source: SchemaSource = SchemaSource.BOOTSTRAP,
     ) -> None:
         entry = AttributeEntry(
-            dnt=dnt,
             id=id,
+            dnt=dnt,
             name=name,
             column=f"ATT{chr(ord('a') + (syntax & 0xFFFF))}{id}",
             syntax=syntax & 0xFF,
@@ -268,29 +301,51 @@ class Schema:
             is_single_valued=is_single_valued,
             link_id=link_id,
             search_flags=search_flags,
+            source=source,
         )
         self._add(entry)
 
+    @staticmethod
+    def _same_entry(left: ClassEntry | AttributeEntry, right: ClassEntry | AttributeEntry) -> bool:
+        """Return whether two entries describe the same schema object (same kind, ATTRTYP and display name)."""
+        return type(left) is type(right) and left.id == right.id and left.name.lower() == right.name.lower()
+
+    def _rebind(
+        self,
+        index: str,
+        key: object,
+        bindings: dict[object, ClassEntry | AttributeEntry],
+        entry: ClassEntry | AttributeEntry,
+    ) -> None:
+        """Bind ``entry`` to ``key`` in ``bindings``, recording the previous binding if there was one."""
+        if (previous := bindings.get(key)) is not None:
+            # A database entry replacing its own bootstrap placeholder is expected and unambiguous.
+            # Two distinct entries fighting over the same key (e.g. a colliding lDAPDisplayName) is ambiguous:
+            # the newcomer still wins the index slot, but we keep the evidence instead of hiding the clash.
+            ambiguous = not self._same_entry(previous, entry)
+            self._conflicts.append(SchemaConflict(index, key, entry, previous, ambiguous))
+        bindings[key] = entry
+
     def _add(self, entry: ClassEntry | AttributeEntry) -> None:
         if entry.dnt != -1:
-            self._dnt_index[entry.dnt] = entry
+            self._rebind("dnt", entry.dnt, self._dnt_index, entry)
         if entry.id != -1:
-            self._attrtyp_index[entry.id] = entry
+            self._rebind("attrtyp", entry.id, self._attrtyp_index, entry)
 
         if isinstance(entry, ClassEntry):
-            self._class_name_index[entry.name.lower()] = entry
+            self._rebind("class_name", entry.name.lower(), self._class_name_index, entry)
 
             if entry.id != -1:
-                self._class_id_index[entry.id] = entry
+                self._rebind("class_id", entry.id, self._class_id_index, entry)
 
         if isinstance(entry, AttributeEntry):
-            self._attribute_name_index[entry.name.lower()] = entry
-            self._attribute_column_index[entry.column] = entry
+            self._rebind("attribute_name", entry.name.lower(), self._attribute_name_index, entry)
+            self._rebind("attribute_column", entry.column, self._attribute_column_index, entry)
 
             if entry.id != -1:
-                self._attribute_id_index[entry.id] = entry
+                self._rebind("attribute_id", entry.id, self._attribute_id_index, entry)
             if entry.link_id is not None:
-                self._attribute_link_index[entry.link_id] = entry
+                self._rebind("attribute_link", entry.link_id, self._attribute_link_index, entry)
 
     def lookup_attribute(
         self,
@@ -410,6 +465,54 @@ class Schema:
 
         return ".".join(parts)
 
+    def oid(self, entry: ClassEntry | AttributeEntry) -> str | None:
+        """Return the OID associated with a schema entry's ATTRTYP, or ``None`` if no prefix is registered."""
+        if entry.id is None or entry.id < 0:
+            return None
+        return self.attrtyp_to_oid(entry.id)
+
+    def conflicts(self, *, ambiguous_only: bool = False) -> tuple[SchemaConflict, ...]:
+        """Return the recorded index (re)bindings.
+
+        Every entry includes the winning (current) definition and the definition it replaced or shadowed.
+        Non-ambiguous conflicts are the expected bootstrap-to-database overwrites; ambiguous conflicts are
+        genuine key collisions between distinct definitions (such as two attributes sharing an
+        ``lDAPDisplayName``).
+
+        Args:
+            ambiguous_only: If ``True``, only return genuine ambiguous collisions.
+        """
+        return tuple(conflict for conflict in self._conflicts if not ambiguous_only or conflict.ambiguous)
+
+    def is_ambiguous_name(self, name: str) -> bool:
+        """Return whether an LDAP display name resolves to more than one distinct schema entry."""
+        return any(
+            conflict.ambiguous and conflict.index == "attribute_name" and conflict.key == name.lower()
+            for conflict in self._conflicts
+        )
+
+    def explain_attribute(self, name: str) -> Iterator[tuple[AttributeEntry, str | None, bool]]:
+        """Yield every attribute definition sharing an LDAP display name.
+
+        Each result is a tuple of ``(entry, oid, name_is_ambiguous)``. The first yielded entry is the one
+        bound to the name index; any further entries are shadowed definitions that remain reachable by
+        ATTRTYP or column name. This makes a same-name collision explainable instead of silently picking
+        one decoding rule.
+        """
+        key = name.lower()
+        if (winner := self._attribute_name_index.get(key)) is None:
+            return
+
+        ambiguous = self.is_ambiguous_name(name)
+        yield winner, self.oid(winner), ambiguous
+        for entry in self._attribute_id_index.values():
+            if entry.name.lower() == key and entry is not winner:
+                yield entry, self.oid(entry), ambiguous
+
+    def lookup_class_id(self, id: int) -> ClassEntry | None:
+        """Lookup a class schema entry by its ATTRTYP without accidentally resolving an attribute."""
+        return self._class_id_index.get(id)
+
     def lookup(
         self,
         *,
@@ -444,6 +547,8 @@ class Schema:
 
         if name is not None:
             name = name.lower()
+            # Prefer the exact index for each kind so a class and attribute sharing a display name do not
+            # get conflated; fall back to the combined lookup for callers that do not know the kind.
             return self._class_name_index.get(name) or self._attribute_name_index.get(name)
 
         return None

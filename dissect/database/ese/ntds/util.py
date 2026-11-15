@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import struct
-from enum import Flag, IntEnum, IntFlag, auto
-from typing import TYPE_CHECKING, Any
+from enum import Enum, Flag, IntEnum, IntFlag, auto
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from dissect.util.sid import read_sid, write_sid
 from dissect.util.ts import wintimestamp
@@ -460,6 +460,26 @@ def _attrtyp_to_oid(db: Database, value: int) -> str:
     raise ValueError(f"Attribute not found for ATTRTYP value: {value!r}")
 
 
+def _attrtyp_to_oid_lenient(db: Database, value: int) -> str | int:
+    """Convert an ATTRTYP value to a name/OID without raising, for decoding stored values.
+
+    Used on the decode path where an extended schema may contain ATTRTYP values (for example in
+    ``objectClass``) that have no registered class or attribute definition. The raw integer is preserved
+    instead of raising, so a single unknown class cannot make the whole object unreadable.
+
+    Args:
+        db: The associated NTDS database instance.
+        value: The ATTRTYP integer value.
+
+    Returns:
+        The resolved display name, the resolved OID string, or the original integer if unresolved.
+    """
+    if (schema := db.data.schema.lookup(attrtyp=value)) is not None:
+        return schema.name
+
+    return db.data.schema.attrtyp_to_oid(value) or value
+
+
 def _binary_to_dn(db: Database, value: bytes) -> tuple[int, bytes]:
     """Convert DN-Binary to the separate (DN, binary) tuple.
 
@@ -481,7 +501,7 @@ SYNTAX_ENCODE_DECODE_MAP: dict[
     # Object(DN-DN); The fully qualified name of an object
     1: (_ldapDisplayName_to_DNT, _DNT_to_ldapDisplayName),
     # String(Object-Identifier); The object identifier
-    2: (_oid_to_attrtyp, _attrtyp_to_oid),
+    2: (_oid_to_attrtyp, _attrtyp_to_oid_lenient),
     # String(Object-Identifier); The object identifier
     3: (None, lambda db, value: str(value)),
     4: (None, lambda db, value: str(value)),
@@ -516,6 +536,141 @@ SYNTAX_ENCODE_DECODE_MAP: dict[
 }
 
 
+class DecodeReason(Enum):
+    """Why a value could not be decoded with a specific rule.
+
+    Each member names the exact definition that turned out to be insufficient, so callers never have to
+    rely on a generic string to distinguish the cases.
+    """
+
+    NO_DECODER = "no decoder registered for the selected rule"
+    UNKNOWN_SYNTAX = "attributeSyntax is not a known syntax"
+    NAME_COLLISION = "lDAPDisplayName is shared by multiple distinct attributes; the name-specific rule was not applied"
+    MISSING_SCHEMA = "no schema entry maps the column to an attribute definition"
+
+
+class UndecodedValue:
+    """A value that could not be decoded, kept losslessly together with the reason.
+
+    The raw value is always retained (and still reachable as bytes), together with the schema entry and
+    the precise reason decoding was not possible. Multi-valued attributes may contain a mix of decoded
+    values and :class:`UndecodedValue` instances.
+
+    Args:
+        raw: The original, untouched value as stored in the record.
+        schema: The attribute schema entry, or ``None`` if no schema entry exists at all.
+        reason: The precise reason no decoding rule could be applied.
+        detail: An optional human-readable clarification of the reason.
+    """
+
+    __slots__ = ("detail", "raw", "reason", "schema")
+
+    def __init__(
+        self,
+        raw: Any,
+        schema: AttributeEntry | None,
+        reason: DecodeReason,
+        detail: str | None = None,
+    ):
+        self.raw = raw
+        self.schema = schema
+        self.reason = reason
+        self.detail = detail
+
+    def __repr__(self) -> str:
+        name = self.schema.name if self.schema is not None else "<unknown attribute>"
+        detail = f": {self.detail}" if self.detail else ""
+        return f"<UndecodedValue attribute={name!r} reason={self.reason.name}{detail} raw={self.raw!r}>"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, UndecodedValue):
+            return NotImplemented
+        return (
+            self.raw == other.raw
+            and self.reason is other.reason
+            and self.detail == other.detail
+            and (self.schema is None) == (other.schema is None)
+            and (self.schema is None or self.schema.id == other.schema.id)
+        )
+
+    def __bytes__(self) -> bytes:
+        if isinstance(self.raw, bytes):
+            return self.raw
+        if isinstance(self.raw, memoryview):
+            return self.raw.tobytes()
+        raise TypeError(f"Raw value of {self!r} is not bytes")
+
+
+class DecodeDecision(NamedTuple):
+    """The rule selected (or not) for decoding an attribute, with the justification.
+
+    Attributes:
+        schema: The schema entry the decision is based on, or ``None`` if it could not be resolved.
+        rule: Either ``"attribute"`` (name-specific rule), ``"syntax"`` (syntax-based rule) or ``None``.
+        decoder: The callable that would be applied, or ``None`` when no usable decoder exists.
+        reason: The precise reason a decoder could not be selected, or ``None`` when one was selected.
+        detail: Optional human-readable clarification.
+        ambiguous_name: Whether the attribute name collides with another distinct definition.
+    """
+
+    schema: AttributeEntry | None
+    rule: str | None
+    decoder: Callable[[Database, Any], Any] | None
+    reason: DecodeReason | None
+    detail: str | None
+    ambiguous_name: bool
+
+
+def _select_decoder(db: Database, schema: AttributeEntry | None) -> DecodeDecision:
+    """Resolve which decoder applies to ``schema`` and record exactly why if none does.
+
+    Name-specific rules only apply when the ``lDAPDisplayName`` uniquely identifies one attribute. On a
+    name collision we deliberately fall through to the syntax-based rule rather than borrowing another
+    attribute's decoder; the collision is retained as the rationale even when syntax decoding succeeds.
+    When the syntax itself is unknown the raw value is wrapped instead of guessed.
+    """
+    if schema is None:
+        return DecodeDecision(None, None, None, DecodeReason.MISSING_SCHEMA, None, False)
+
+    ambiguous_name = db.data.schema.is_ambiguous_name(schema.name)
+
+    collision_reason = None
+    collision_detail = None
+    if ambiguous_name:
+        # The name maps to more than one ATTRTYP; any name-specific rule would decode this attribute with
+        # a different attribute's rule. Even when no name rule happens to be registered, record that the
+        # name alone is insufficient and continue with the syntax-based selection.
+        collision_reason = DecodeReason.NAME_COLLISION
+        collision_detail = f"lDAPDisplayName {schema.name!r} is shared by multiple attributes; resolved by syntax"
+    else:
+        _, decode = ATTRIBUTE_ENCODE_DECODE_MAP.get(schema.name, (None, None))
+        if decode is not None:
+            return DecodeDecision(schema, "attribute", decode, None, None, False)
+
+    _, decode = SYNTAX_ENCODE_DECODE_MAP.get(schema.syntax, (None, None))
+    if decode is not None:
+        # On a collision the syntax rule still works, but the decision keeps the collision as rationale.
+        return DecodeDecision(schema, "syntax", decode, collision_reason, collision_detail, ambiguous_name)
+
+    if schema.syntax not in SYNTAX_ENCODE_DECODE_MAP:
+        reason = DecodeReason.UNKNOWN_SYNTAX
+        detail = f"attributeSyntax {schema.syntax} has no registered decoder"
+    else:
+        reason = DecodeReason.NO_DECODER
+        detail = f"attributeSyntax {schema.syntax} is registered but has no decoder implementation"
+
+    # A name collision that also lacks a usable syntax decoder is reported with the collision first,
+    # since that is the more specific reason the obvious name rule could not be used.
+    return DecodeDecision(
+        schema,
+        None,
+        None,
+        collision_reason or reason,
+        collision_detail or detail,
+        ambiguous_name,
+    )
+
+
 def encode_value(db: Database, schema: AttributeEntry, value: str) -> int | bytes | str:
     """Encode a string value according to the attribute's type.
 
@@ -538,6 +693,66 @@ def encode_value(db: Database, schema: AttributeEntry, value: str) -> int | byte
     return encode(db, value)
 
 
+def _decode_single(db: Database, schema: AttributeEntry | None, value: Any, decision: DecodeDecision) -> Any:
+    """Apply a selected decoder to one value, wrapping it if the decoder itself cannot handle it."""
+    try:
+        return decision.decoder(db, value)
+    except Exception as exc:  # noqa: BLE001 - keep the raw value losslessly on any decoder failure
+        return UndecodedValue(
+            value,
+            schema,
+            DecodeReason.NO_DECODER,
+            f"{decision.rule} decoder failed: {exc}",
+        )
+
+
+def explain_decode(db: Database, schema: AttributeEntry | None, value: Any) -> tuple[Any, DecodeDecision]:
+    """Decode ``value`` while also returning the :class:`DecodeDecision` that explains the selection.
+
+    Undecodable values come back as :class:`UndecodedValue`, never as a generic string, and the decision
+    states which definition (name rule, syntax rule, or none) was used and why.
+
+    Args:
+        db: The associated NTDS database instance.
+        schema: The LDAP attribute schema, or ``None`` if unresolved.
+        value: The raw value to decode.
+
+    Returns:
+        A tuple of the decoded value (or an :class:`UndecodedValue`) and the decision behind it.
+    """
+    if value is None:
+        return None, _select_decoder(db, schema)
+
+    # Multi-valued attributes have a separate set of name-specific list decoders (e.g. password history)
+    if isinstance(value, list):
+        name = schema.name if schema is not None else ""
+        ambiguous = schema is not None and db.data.schema.is_ambiguous_name(schema.name)
+        _, list_decode = ATTRIBUTE_LIST_ENCODE_DECODE_MAP.get(name, (None, None))
+        if list_decode is not None and not ambiguous:
+            decision = DecodeDecision(schema, "attribute", list_decode, None, None, False)
+            return list_decode(db, value), decision
+
+        base_decision = _select_decoder(db, schema)
+        if not value:
+            return [], base_decision
+
+        # Decode each member independently so a single bad member never hides the rest
+        decisions = [_select_decoder(db, schema) for _ in value]
+        result = [
+            UndecodedValue(member, schema, member_decision.reason, member_decision.detail)
+            if member_decision.decoder is None
+            else _decode_single(db, schema, member, member_decision)
+            for member, member_decision in zip(value, decisions)
+        ]
+        return result, decisions[0]
+
+    decision = _select_decoder(db, schema)
+    if decision.decoder is None:
+        return UndecodedValue(value, schema, decision.reason, decision.detail), decision
+
+    return _decode_single(db, schema, value, decision), decision
+
+
 def decode_value(db: Database, schema: AttributeEntry, value: Any) -> Any:
     """Decode a value according to the attribute's type.
 
@@ -547,26 +762,8 @@ def decode_value(db: Database, schema: AttributeEntry, value: Any) -> Any:
         value: The value to decode.
 
     Returns:
-        The decoded value in the appropriate Python type for the attribute.
+        The decoded value in the appropriate Python type for the attribute, or an
+        :class:`UndecodedValue` (possibly inside a list for multi-valued attributes) when no rule applies.
     """
-    if value is None:
-        return value
-
-    # First check if we have a special decoder for this attribute
-    # Check for special handing of multi-valued attributes first
-    if isinstance(value, list):
-        _, decode = ATTRIBUTE_LIST_ENCODE_DECODE_MAP.get(schema.name, (None, None))
-        if decode is not None:
-            return decode(db, value)
-
-    _, decode = ATTRIBUTE_ENCODE_DECODE_MAP.get(schema.name, (None, None))
-    if decode is None:
-        # Next, try it using the regular SYNTAX_ENCODE_DECODE_MAP mapping
-        # TODO: handle oMSyntax/oMObjectClass deviations?
-        # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/7cda533e-d7a4-4aec-a517-91d02ff4a1aa
-        _, decode = SYNTAX_ENCODE_DECODE_MAP.get(schema.syntax, (None, None))
-
-    if decode is None:
-        return value
-
-    return [decode(db, v) for v in value] if isinstance(value, list) else decode(db, value)
+    decoded, _ = explain_decode(db, schema, value)
+    return decoded
