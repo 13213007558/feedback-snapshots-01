@@ -15,6 +15,7 @@ import itertools
 
 from pcapng import strictness as strictness
 from pcapng.constants import link_types
+from pcapng.exceptions import BadPacketLength
 from pcapng.structs import (
     IntField,
     ListField,
@@ -386,6 +387,11 @@ class BasePacketBlock(SectionMemberBlock, BlockWithInterfaceMixin):
 
     This class makes the ``captured_len`` a read-only property returning
     the current length of the packet data.
+
+    In addition to the raw packet bytes, it exposes metadata describing
+    how much of the on-wire frame is actually held by the block and
+    whether a complete Frame Check Sequence (FCS) is present, so callers
+    never have to guess any of this from the length numbers alone.
     """
 
     __slots__ = []
@@ -403,6 +409,103 @@ class BasePacketBlock(SectionMemberBlock, BlockWithInterfaceMixin):
     def packet_len(self):
         plen = self.__getattr__("packet_len") or 0  # this call prevents recursion
         return plen or len(self.packet_data)
+
+    def _validate_lengths(self, captured_len, packet_len):
+        """
+        Check the consistency of the two packet length fields.
+
+        ``captured_len`` is the number of packet bytes the block actually
+        holds (after any snap-length truncation); ``packet_len`` is the
+        frame length as observed on the wire. A captured length greater
+        than the on-wire length is a self-contradiction rather than an
+        ordinary truncation, so it raises :py:exc:`BadPacketLength`
+        instead of :py:exc:`~pcapng.exceptions.TruncatedFile`.
+        """
+        if captured_len > packet_len:
+            raise BadPacketLength(
+                "{cls}: captured length ({captured}) is greater than the "
+                "on-wire packet length ({wire})".format(
+                    cls=self.__class__.__name__,
+                    captured=captured_len,
+                    wire=packet_len,
+                )
+            )
+
+    @property
+    def packet_truncated(self):
+        """
+        Whether the packet data is a truncated portion of the on-wire
+        frame (``captured_len`` strictly smaller than ``packet_len``).
+        """
+        return self.captured_len < self.packet_len
+
+    def _packet_fcs_length(self):
+        """
+        FCS length in bytes stated at packet level, or ``None`` when the
+        block carries no per-packet FCS information. Overridden by blocks
+        (such as the Enhanced Packet Block) that have an ``epb_flags``
+        option.
+        """
+        return None
+
+    def _interface_fcs_length(self):
+        """
+        FCS length in bytes stated by the interface's ``if_fcslen``
+        option. The pcapng spec stores this option in *bits*, so it is
+        converted here; a missing or zero option means no FCS is
+        advertised at the interface level.
+        """
+        options = self.interface.options
+        if "if_fcslen" not in options:
+            return 0
+        fcs_bits = options["if_fcslen"]
+        if fcs_bits <= 0:
+            return 0
+        return fcs_bits // 8
+
+    @property
+    def fcs_length(self):
+        """
+        Number of trailing FCS bytes claimed for this packet, in bytes.
+
+        A per-packet FCS length (for example the ``fcslen`` field of the
+        Enhanced Packet Block's ``epb_flags`` option) takes precedence
+        over the interface's ``if_fcslen`` option; if neither provides
+        one, this is zero. This only reports what the metadata claims --
+        see :py:attr:`fcs_present` to find out whether those bytes are
+        actually held by the block.
+        """
+        packet_fcs = self._packet_fcs_length()
+        if packet_fcs:
+            return packet_fcs
+        return self._interface_fcs_length()
+
+    @property
+    def fcs_present(self):
+        """
+        Whether the block actually holds a complete FCS.
+
+        An advertised FCS length alone is not enough: the whole on-wire
+        frame must have been captured (``captured_len == packet_len``),
+        otherwise the block ends somewhere inside the frame and the
+        missing tail must not be mistaken for an FCS. Only then do the
+        final :py:attr:`fcs_length` bytes of the packet data really
+        constitute the frame check sequence.
+        """
+        if self.packet_truncated:
+            return False
+        return self.fcs_length > 0
+
+    @property
+    def fcs(self):
+        """
+        The FCS bytes actually contained in the packet data, or ``None``
+        when no complete FCS is held (including every truncated case).
+        The returned bytes are never stripped from :py:attr:`packet_data`.
+        """
+        if not self.fcs_present:
+            return None
+        return self.packet_data[-self.fcs_length :]
 
 
 @register_block
@@ -441,6 +544,29 @@ class EnhancedPacket(BasePacketBlock, BlockWithTimestampMixin):
         ),
     ]
 
+    def __init__(self, section, **kwargs):
+        super(EnhancedPacket, self).__init__(section, **kwargs)
+        if "raw" in kwargs:
+            # The block is fully read at this point; make sure the two
+            # length headers agree with each other. A captured length
+            # exceeding the on-wire length is contradictory metadata,
+            # distinct from the stream itself being truncated.
+            self._validate_lengths(
+                self.__getattr__("captured_len"),
+                self.__getattr__("packet_len") or 0,
+            )
+
+    def _packet_fcs_length(self):
+        # The fcslen field of epb_flags is expressed in bytes and, when
+        # non-zero, overrides the interface's if_fcslen option. A zero
+        # value (or a missing option) means "not stated at packet level".
+        options = self._decoded.get("options")
+        if options is not None and "epb_flags" in options:
+            fcslen = options["epb_flags"].fcslen
+            if fcslen:
+                return fcslen
+        return None
+
 
 @register_block
 class SimplePacket(BasePacketBlock):
@@ -467,12 +593,57 @@ class SimplePacket(BasePacketBlock):
             # we have to do a bit of work here
             stream = io.BytesIO(kwargs["raw"])
             self._decoded = struct_decode(self.schema[:1], stream, kwargs["endianness"])
-            # Now we can get our ``captured_len`` property which is required
-            # to really know how much data we can load
-            rb = RawBytes(self.captured_len)
+            # The snap length / original packet length imply how many
+            # captured bytes the block *should* contain (plus its 32-bit
+            # alignment padding). A snap length of zero means "no limit".
+            # We still trust the bytes actually present in the block over
+            # that implication, but the two must not contradict each other.
+            snap_len = self.interface.snaplen
+            if snap_len == 0:
+                implied_len = self.packet_len
+            else:
+                implied_len = min(snap_len, self.packet_len)
+            padded_implied = implied_len + ((4 - (implied_len % 4)) % 4)
+            available = len(kwargs["raw"]) - stream.tell()
+            if available < implied_len:
+                # The block's framing is complete but its payload does not
+                # hold even the packet bytes promised by the original packet
+                # length and the interface snap length. The length claims
+                # therefore contradict the stored bytes -- this is distinct
+                # from the underlying stream itself being truncated, which
+                # surfaces as TruncatedFile while reading the block framing.
+                raise BadPacketLength(
+                    "SimplePacket: block only contains {actual} packet bytes "
+                    "but original packet length ({wire}) and interface snap "
+                    "length ({snap}) imply at least {expected}".format(
+                        actual=available,
+                        wire=self.packet_len,
+                        snap=snap_len,
+                        expected=implied_len,
+                    )
+                )
+            if available >= padded_implied:
+                # The producer may have stored more bytes than the snap
+                # length implies (as some real-world captures do). Read only
+                # the implied packet data and its padding; the alignment
+                # bytes are discarded and never become part of packet_data.
+                read_len = implied_len
+            else:
+                # All implied packet bytes are present, but the block omits
+                # their final alignment padding. Read exactly what is there.
+                read_len = available
+            rb = RawBytes(read_len)
             self._decoded["packet_data"] = rb.load(stream)
+            self._decoded["captured_len"] = len(self._decoded["packet_data"])
         else:
             super(SimplePacket, self).__init__(section, **kwargs)
+            # Mirror what a round-trip through a file would store, so that
+            # in-memory and re-read blocks compare equal.
+            snap_len = self.interface.snaplen
+            if snap_len == 0:
+                self._decoded["captured_len"] = self.packet_len
+            else:
+                self._decoded["captured_len"] = min(snap_len, self.packet_len)
 
     readonly_fields = set(("captured_len", "interface_id"))
 
@@ -489,18 +660,29 @@ class SimplePacket(BasePacketBlock):
     @property
     def captured_len(self):
         """
+        Number of packet bytes actually held by the block.
+
+        When parsing a file this is the size of the Packet Data field as
+        stored in the block (alignment padding excluded), which may differ
+        from the value implied by the snap length if the producer's length
+        fields are inconsistent. When building a block in memory it is the
+        amount that will be stored given the interface's snap length:
+
         "...the SnapLen value MUST be used to determine the size of the Packet
-        Data field length."
+        Data field length." A snap length of zero means "no limit", in which
+        case the whole on-wire packet is expected.
         """
-        snap_len = self.interface.snaplen
-        if snap_len == 0:  # unlimited
-            return self.packet_len
-        else:
-            return min(snap_len, self.packet_len)
+        try:
+            return self._decoded["captured_len"]
+        except KeyError:
+            snap_len = self.interface.snaplen
+            if snap_len == 0:  # unlimited
+                return self.packet_len
+            else:
+                return min(snap_len, self.packet_len)
 
     def _encode(self, outstream):
         fld_size = IntField(32, False)
-        fld_data = RawBytes(0)
         if len(self.section.interfaces) > 1:
             # Spec is a bit ambiguous here. Section 4.4 says "it MUST
             # be assumed that all the Simple Packet Blocks have been captured
@@ -517,18 +699,18 @@ class SimplePacket(BasePacketBlock):
                 # Can't fix this. The IDBs have already been written.
                 pass
         snap_len = self.interface.snaplen
-        if snap_len > 0 and snap_len < self.captured_len:
+        packet_data = self.packet_data
+        if snap_len > 0 and snap_len < len(packet_data):
             # This isn't a strictness issue, it *will* break other readers
             # if we write more bytes than the snaplen says to expect.
-            fld_size.encode(
-                self.packet_len, outstream, endianness=self.section.endianness
-            )
-            fld_data.encode(self.packet_data[:snap_len], outstream)
-        else:
-            fld_size.encode(
-                self.packet_len, outstream, endianness=self.section.endianness
-            )
-            fld_data.encode(self.packet_data, outstream)
+            packet_data = packet_data[:snap_len]
+        fld_size.encode(
+            self.packet_len, outstream, endianness=self.section.endianness
+        )
+        # Packet data must be padded to a 32-bit boundary; never append
+        # zero bytes to reach the *on-wire* length -- padding only aligns
+        # the captured bytes within the block.
+        write_bytes_padded(outstream, packet_data)
 
 
 @register_block

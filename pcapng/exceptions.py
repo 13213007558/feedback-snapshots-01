@@ -60,6 +60,23 @@ class TruncatedFile(PcapngLoadError):
     pass
 
 
+class BadPacketLength(CorruptedFile):
+    """
+    Exception used to indicate that the length fields of a packet
+    block are mutually inconsistent (for example, a captured length
+    that is greater than the on-wire packet length, or a Simple
+    Packet Block whose payload does not match the length implied by
+    the original packet length and the interface snap length).
+
+    This is distinct from :py:exc:`TruncatedFile`, which means the
+    underlying stream simply ended before the advertised amount of
+    data could be read: here the block *is* fully present, but its
+    own length claims are contradictory.
+    """
+
+    pass
+
+
 class BadMagic(PcapngLoadError):
     """
     Exception used to indicate a failure due to some bad magic
