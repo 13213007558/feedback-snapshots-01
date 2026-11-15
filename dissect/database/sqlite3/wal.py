@@ -81,7 +81,7 @@ class WAL:
 
             # A commit record has a page_count header greater than zero
             if frame.page_count > 0:
-                commits.append(Commit(self, frames))
+                commits.append(Commit(self, frames, len(commits)))
                 frames = []
 
         if frames:
@@ -108,7 +108,7 @@ class WAL:
                 continue
             salt1 = commit.frames[0].header.salt1
             # Keep the most recent commit for each salt1 (later commits overwrite).
-            checkpoints_map[salt1] = commit
+            checkpoints_map[salt1] = Checkpoint(self, commit.frames, commit.index)
 
         return [checkpoints_map[salt] for salt in sorted(checkpoints_map.keys())]
 
@@ -150,9 +150,12 @@ class Frame:
 class _FrameCollection:
     """Convenience class to keep track of a collection of frames that were committed together."""
 
-    def __init__(self, wal: WAL, frames: list[Frame]):
+    def __init__(self, wal: WAL, frames: list[Frame], index: int = -1):
         self.wal = wal
         self.frames = frames
+        # Position of this collection among the WAL's commits (-1 when not tied
+        # to a single commit, e.g. a deduplicated checkpoint spanning commits).
+        self.index = index
 
     def __contains__(self, page: int) -> bool:
         return page in self.page_map

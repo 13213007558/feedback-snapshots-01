@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import itertools
 import re
 from functools import lru_cache
@@ -15,7 +16,7 @@ from dissect.database.sqlite3.exception import (
     NoCellData,
 )
 from dissect.database.sqlite3.util import parse_table_columns_constraints
-from dissect.database.sqlite3.wal import WAL
+from dissect.database.sqlite3.wal import WAL, Commit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -54,6 +55,35 @@ SERIAL_TYPES = {
 
 # See https://sqlite.org/fileformat2.html#magic_header_string
 SQLITE3_HEADER_MAGIC = b"SQLite format 3\x00"
+
+
+class Provenance(enum.Enum):
+    """Where a :class:`Row` column value came from.
+
+    Forensically it matters whether a value is physically present in the record
+    bytes or reconstructed by the reader from the current schema:
+
+    - ``STORED``: a field for this column exists in the record's serial-type
+      list (including an explicitly stored NULL, serial type ``0``).
+    - ``DEFAULT``: the record predates the column (an ``ALTER TABLE ADD COLUMN``
+      with a constant default); no bytes exist for it and the value is taken
+      from the schema's ``DEFAULT`` clause. This value is *not* in the record.
+    - ``ROWID``: an ``INTEGER PRIMARY KEY`` column that is stored as the b-tree
+      rowid/cell key rather than as a record field (the record holds a
+      placeholder NULL, serial type ``0``).
+    - ``NULL``: the column has no stored field and no usable default, so the
+      SQL semantics are NULL. The distinction between "explicit NULL" and
+      "no value ever written" cannot be made for this column.
+    - ``UNKNOWN``: reserved for a physical field that has no matching column in
+      the schema used to read the row. Such fields cannot be keyed by a column
+      name and are returned in :attr:`Row._unknowns` rather than relabeled.
+    """
+
+    STORED = "stored"
+    DEFAULT = "default"
+    ROWID = "rowid"
+    NULL = "null"
+    UNKNOWN = "unknown"
 
 
 class SQLite3:
@@ -212,9 +242,26 @@ class SQLite3:
             raise InvalidPageNumber("Page number exceeds boundaries")
 
         data = None
-        if self.checkpoint is not None and (frame := self.checkpoint.get(num)):
-            # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
-            data = frame.data
+        if self.checkpoint is not None:
+            if isinstance(self.checkpoint, Commit):
+                # Pin the view to this exact commit: a page reflects the newest
+                # frame for it among the committed transactions up to and
+                # including this commit (same WAL salt only). Frames from later
+                # commits must not leak into an earlier point-in-time view.
+                for commit in reversed(self.wal.commits[: self.checkpoint.index + 1]):
+                    if (frame := commit.get(num)) and frame.valid:
+                        data = frame.data
+                        break
+            elif (frame := self.checkpoint.get(num)):
+                # An explicit, deduplicated checkpoint: use its frame if present.
+                data = frame.data
+            else:
+                # Fall back to the newest committed frame (mirrors the default
+                # WAL view) for pages the checkpoint does not contain.
+                for commit in reversed(self.wal.commits):
+                    if (frame := commit.get(num)) and frame.valid:
+                        data = frame.data
+                        break
 
         elif self.wal:
             # Check if the latest valid instance of the page is committed (either the frame itself
@@ -256,20 +303,63 @@ class Column:
     EXPRESSION = r"\(.+?\)"
     STRING = r"['\"].+?['\"]"
     TOKENIZER_EXPRESSION = re.compile(f"({SPACE}|{EXPRESSION}|{STRING})")
+    BLOB_LITERAL = re.compile(r"[xX]'([0-9a-fA-F]+)'")
 
     def __init__(self, name: str, description: str):
         self.name = name
         self.default_value = self._parse_default_value_from_description(description)
+        # A non-constant DEFAULT expression (e.g. ``DEFAULT (upper('z'))``)
+        # cannot be evaluated from the schema text alone. SQLite only allows
+        # such a default at CREATE time and materializes the evaluated value
+        # into every row, so it is normally present in the record bytes.
+        self.default_is_expression = self._is_expression_default(description)
 
-    def _parse_default_value_from_description(self, description: str) -> bool | str | int | float | None:
+    def _parse_default_value_from_description(self, description: str) -> bool | str | int | float | bytes | None:
         """Find the default from the description string."""
-        if "DEFAULT" not in description.upper():
+        value = self._extract_default_value(description)
+        if value is None:
             return None
 
-        tokens = self._tokenize(description)
-        value = self._get_default_value(tokens)
-
         return self._parse_default_value(value)
+
+    def _extract_default_value(self, description: str) -> str | None:
+        """Extract the literal or expression following ``DEFAULT``.
+
+        The simple regex tokenizer splits on spaces and quotes, which breaks
+        BLOB literals (``x'2a2b'``) and parenthesized expressions containing
+        strings. This walks the description while respecting quote and
+        parenthesis depth and returns the complete DEFAULT token, stopping at a
+        top-level column constraint such as ``NOT NULL`` or ``PRIMARY KEY``.
+        """
+        upper = description.upper()
+        if "DEFAULT" not in upper:
+            return None
+
+        start = upper.index("DEFAULT") + len("DEFAULT")
+        length = len(description)
+        while start < length and description[start].isspace():
+            start += 1
+
+        depth = 0
+        quote = None
+        end = start
+        while end < length:
+            char = description[end]
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"', "`"):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char.isspace() and depth == 0:
+                # A following, top-level constraint ends the DEFAULT token.
+                break
+            end += 1
+
+        return description[start:end].strip()
 
     def _tokenize(self, description: str) -> list[str]:
         """Tokenize the description string."""
@@ -283,22 +373,68 @@ class Column:
         value_index = [x.upper() for x in tokens].index("DEFAULT") + 1
         return tokens[value_index]
 
-    def _parse_default_value(self, value: str) -> bool | str | int | float | None:
+    def _is_expression_default(self, description: str) -> bool:
+        """Return whether the DEFAULT is a non-constant expression.
+
+        Parenthesized constant literals such as ``DEFAULT ('x')`` or
+        ``DEFAULT (1)`` are still constants and therefore return ``False``.
+        Parentheses occurring inside a quoted string do not count.
+        """
+        value = self._extract_default_value(description)
+        if value is None or not (value.startswith("(") and value.endswith(")")):
+            return False
+
+        # A value that closes its parenthesis before the end (e.g. an operator
+        # applied to a parenthesized term) is an expression, not a literal.
+        depth = 0
+        quote = None
+        last = len(value) - 1
+        for index, char in enumerate(value):
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != last:
+                    return True
+
+        inner = value[1:-1].strip()
+        try:
+            self._parse_literal(inner)
+        except ValueError:
+            return True
+        return False
+
+    def _parse_default_value(self, value: str) -> bool | str | int | float | bytes | None:
         """Parses the default value.
 
         The value can hold an expression surrounded by ().
         This can be a literal, so these values get stripped.
         """
+        blob_match = self.BLOB_LITERAL.fullmatch(value.strip())
+        if blob_match:
+            return bytes.fromhex(blob_match.group(1))
+
         try:
-            return self._parse_literal(value.strip("()"))
+            inner = value[1:-1].strip() if value.startswith("(") and value.endswith(")") else value
+            return self._parse_literal(inner)
         except ValueError:
             return None
 
-    def _parse_literal(self, value: str) -> bool | str | int | float:
+    def _parse_literal(self, value: str) -> bool | str | int | float | bytes:
         """Tries to convert a literal from a string to any type.
 
         CURRENT_(TIME|DATE|TIMESTAMP) isn't being taken into account.
         """
+        blob_match = self.BLOB_LITERAL.fullmatch(value.strip())
+        if blob_match:
+            return bytes.fromhex(blob_match.group(1))
+
         try:
             return int(value)
         except ValueError:
@@ -312,15 +448,21 @@ class Column:
         if value.upper() in ["TRUE", "FALSE"]:
             return value.upper() == "TRUE"
 
-        # Convert the string literal
-        if set(value) & {"'", '"'}:
-            return value.strip("'\"")
+        # A string literal is fully wrapped in a matching pair of quotes.
+        # A value that merely contains a quote (e.g. an expression such as
+        # ``upper('z')``) is not a literal and must not be accepted as one.
+        if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+            return value[1:-1]
 
         raise ValueError("Unknown literal")
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Column):
-            return other.name == self.name and other.default_value == self.default_value
+            return (
+                other.name == self.name
+                and other.default_value == self.default_value
+                and other.default_is_expression == self.default_is_expression
+            )
         return False
 
     def __repr__(self) -> str:
@@ -372,7 +514,9 @@ class Row:
     def __init__(self, table: Table, cell: Cell):
         self._table = table
         self._cell = cell
-        self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
+        self._values, self._unknowns, self._provenance = self._match_columns_to_values(
+            table.columns, cell.values
+        )
 
         # If there is no primary key or the primary key is a compound key,
         # primary_key will be None, but then all (primary key) columns will
@@ -380,24 +524,58 @@ class Row:
         primary_key = table.primary_key
         if primary_key and self._values.get(primary_key, None) is None and self._cell.key is not None:
             self._values[primary_key] = self._cell.key
+            # An INTEGER PRIMARY KEY is stored as the b-tree rowid (cell key),
+            # not as a record field; record that provenance explicitly.
+            self._provenance[primary_key] = Provenance.ROWID
+        elif primary_key and self._provenance.get(primary_key) == Provenance.STORED and self._cell.key is not None:
+            # A non-NULL value stored in an INTEGER PRIMARY KEY column is still
+            # required to equal the rowid; treat it as a rowid alias rather than
+            # an independent record field.
+            self._provenance[primary_key] = Provenance.ROWID
 
-    def _match_columns_to_values(self, columns: list[Column], values: list[Any]) -> tuple[dict[str, Any], list[Any]]:
+    def _match_columns_to_values(
+        self, columns: list[Column], values: list[Any]
+    ) -> tuple[dict[str, Any], list[Any], dict[str, Provenance]]:
         """Match all table columns to the cell values in this row.
 
         If there are any cell values with unknown column names
         they get added to the unknown list.
+
+        Provenance distinguishes values physically present in the record from
+        values reconstructed by the reader. A column whose record field is
+        absent is filled from the schema DEFAULT (``Provenance.DEFAULT``) or,
+        when no usable default exists, reported as NULL (``Provenance.NULL``).
+        Physical values without a matching column cannot be named and are
+        returned in the unknowns list (``Provenance.UNKNOWN``) instead of being
+        silently dropped.
         """
         row_values = {}
         unknowns = []
+        provenance: dict[str, Provenance] = {}
 
         for column, value in itertools.zip_longest(columns, values, fillvalue=Empty):
-            column_value = column.default_value if value is Empty else value
             if column is Empty:
-                unknowns.append(column_value)
-            else:
-                row_values.update({column.name: column_value})
+                # More physical fields than the current schema has columns.
+                unknowns.append(value)
+                continue
 
-        return row_values, unknowns
+            if value is Empty:
+                # The record holds no field for this column. Prefer the schema
+                # DEFAULT, but never present it as something stored on disk.
+                if column.default_is_expression:
+                    row_values[column.name] = None
+                    provenance[column.name] = Provenance.NULL
+                elif column.default_value is not None:
+                    row_values[column.name] = column.default_value
+                    provenance[column.name] = Provenance.DEFAULT
+                else:
+                    row_values[column.name] = None
+                    provenance[column.name] = Provenance.NULL
+            else:
+                row_values[column.name] = value
+                provenance[column.name] = Provenance.STORED
+
+        return row_values, unknowns, provenance
 
     def __iter__(self) -> Iterator[tuple[str, Any]]:
         for col in self._table.columns:
@@ -418,6 +596,30 @@ class Row:
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._values.get(key, default)
+
+    def provenance(self, key: str) -> Provenance | None:
+        """Return how the value for ``key`` was obtained.
+
+        See :class:`Provenance` for the meaning of each result. Returns
+        ``None`` when the column does not exist in the schema used to read
+        this row.
+        """
+        return self._provenance.get(key)
+
+    def explain(self) -> dict[str, dict[str, Any]]:
+        """Return each column with its value and how that value was obtained.
+
+        Every entry contains ``value`` and ``provenance`` so a report can
+        separate bytes that exist in the record from reader-synthesized
+        defaults and indeterminate columns.
+        """
+        return {
+            column.name: {
+                "value": self._values[column.name],
+                "provenance": self._provenance[column.name],
+            }
+            for column in self._table.columns
+        }
 
 
 class Empty:
