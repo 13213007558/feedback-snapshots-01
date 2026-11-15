@@ -13,7 +13,7 @@ better access to decoded information, ...
 import io
 import itertools
 
-from pcapng import strictness as strictness
+from pcapng import strictness as _strictness
 from pcapng.constants import link_types
 from pcapng.structs import (
     IntField,
@@ -32,6 +32,17 @@ from pcapng.utils import unpack_timestamp_resolution
 
 KNOWN_BLOCKS = {}
 
+_POLICY_KWARGS = ("strictness_policy", "policy", "strictness_level", "strictness")
+
+
+def _pop_policy(kwargs):
+    """Remove an optional policy from keyword arguments, if present."""
+    for key in _POLICY_KWARGS:
+        value = kwargs.pop(key, None)
+        if value is not None:
+            return value
+    return None
+
 
 class Block(object):
     """Base class for blocks"""
@@ -42,13 +53,24 @@ class Block(object):
         # These are in addition to the above two properties
         "magic_number",
         "_decoded",
+        "_strictness_policy",
     ]
 
     def __init__(self, **kwargs):
+        # A block created while a task scope is active keeps a snapshot of
+        # that policy, so it remains explainable when handed to a different
+        # processing stage (or after the scope exits).  Without a scope it
+        # stays unbound and follows the legacy global setting.
+        policy = _pop_policy(kwargs)
+        self._strictness_policy = _strictness.capture_policy(policy)
         if "raw" in kwargs:
             self._decoded = struct_decode(
-                self.schema, io.BytesIO(kwargs["raw"]), kwargs["endianness"]
+                self.schema,
+                io.BytesIO(kwargs["raw"]),
+                kwargs["endianness"],
+                policy=self._strictness_policy,
             )
+            self._propagate_policy_to_options()
         else:
             self._decoded = {}
             for key, packed_type, default in self.schema:
@@ -57,6 +79,7 @@ class Block(object):
                         schema=packed_type.options_schema,
                         data={},
                         endianness=kwargs["endianness"],
+                        policy=self._strictness_policy,
                     )
                     if "options" in kwargs:
                         for oky, ovl in kwargs["options"].items():
@@ -67,6 +90,31 @@ class Block(object):
                     except KeyError:
                         self._decoded[key] = default
 
+    @property
+    def strictness_policy(self):
+        """The task policy this block belongs to, or None for the global one."""
+        return self._strictness_policy
+
+    @property
+    def policy(self):
+        """The policy governing operations involving this block.
+
+        An active task scope is an explicit override; otherwise the policy
+        captured when the block was read applies, then the legacy global
+        setting.
+        """
+        return _strictness.operation_policy(self)
+
+    @policy.setter
+    def policy(self, value):
+        self._strictness_policy = _strictness.capture_policy(value)
+        self._propagate_policy_to_options()
+
+    def _propagate_policy_to_options(self):
+        options = self._decoded.get("options") if self._decoded else None
+        if isinstance(options, Options) and self._strictness_policy is not None:
+            options._strictness_policy = self._strictness_policy
+
     def __eq__(self, other):
         if self.__class__ != other.__class__:
             return False
@@ -74,10 +122,11 @@ class Block(object):
         # Use `getattr()` so eg. @property calls are used
         return [getattr(self, k) for k in keys] == [getattr(other, k) for k in keys]
 
-    def _write(self, outstream):
+    def _write(self, outstream, policy=None):
         """Writes this block into the given output stream"""
+        policy = _strictness.operation_policy(self, policy)
         encoded_block = io.BytesIO()
-        self._encode(encoded_block)
+        self._encode(encoded_block, policy=policy)
         encoded_block = encoded_block.getvalue()
         subblock_length = len(encoded_block)
         if subblock_length == 0:
@@ -90,11 +139,15 @@ class Block(object):
         write_bytes_padded(outstream, encoded_block)
         write_int(block_length, outstream, 32, endianness=self.section.endianness)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, policy=None):
         """Encodes the fields of this block into raw data"""
+        policy = _strictness.operation_policy(self, policy)
         for name, field, default in self.schema:
             field.encode(
-                getattr(self, name), outstream, endianness=self.section.endianness
+                getattr(self, name),
+                outstream,
+                endianness=self.section.endianness,
+                policy=policy,
             )
 
     def __getattr__(self, name):
@@ -197,13 +250,15 @@ class SectionHeader(Block):
         self.interface_stats = {}
         super(SectionHeader, self).__init__(endianness=endianness, **kwargs)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, policy=None):
         write_int(0x1A2B3C4D, outstream, 32, endianness=self.endianness)
-        super(SectionHeader, self)._encode(outstream)
+        super(SectionHeader, self)._encode(outstream, policy=policy)
 
     def new_member(self, cls, **kwargs):
         """Helper method to create a block that's a member of this section"""
         assert issubclass(cls, SectionMemberBlock)
+        if not any(key in kwargs for key in _POLICY_KWARGS):
+            kwargs["strictness_policy"] = self._strictness_policy
         blk = cls(section=self, endianness=self.endianness, **kwargs)
         # Some blocks (eg. SPB) don't have options
         if any([x[0] == "options" for x in blk.schema]):
@@ -362,17 +417,18 @@ class BlockWithInterfaceMixin(object):
         # by looking up the interface_id
         return self.section.interfaces[self.interface_id]
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, policy=None):
+        policy = _strictness.operation_policy(self, policy)
         if len(self.section.interfaces) < 1:
-            strictness.problem(
+            policy.problem(
                 "writing {cls} for section with no interfaces".format(
                     cls=self.__class__.__name__
                 )
             )
-            if strictness.should_fix():
+            if policy.should_fix():
                 # Only way to "fix" is to not write the block
                 return
-        super(BlockWithInterfaceMixin, self)._encode(outstream)
+        super(BlockWithInterfaceMixin, self)._encode(outstream, policy=policy)
 
 
 class BasePacketBlock(SectionMemberBlock, BlockWithInterfaceMixin):
@@ -465,8 +521,15 @@ class SimplePacket(BasePacketBlock):
         if "raw" in kwargs:
             # Since we can't be sure of the packet length without the snap length,
             # we have to do a bit of work here
+            policy = _pop_policy(kwargs)
+            self._strictness_policy = _strictness.capture_policy(policy)
             stream = io.BytesIO(kwargs["raw"])
-            self._decoded = struct_decode(self.schema[:1], stream, kwargs["endianness"])
+            self._decoded = struct_decode(
+                self.schema[:1],
+                stream,
+                kwargs["endianness"],
+                policy=self._strictness_policy,
+            )
             # Now we can get our ``captured_len`` property which is required
             # to really know how much data we can load
             rb = RawBytes(self.captured_len)
@@ -498,7 +561,8 @@ class SimplePacket(BasePacketBlock):
         else:
             return min(snap_len, self.packet_len)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, policy=None):
+        policy = _strictness.operation_policy(self, policy)
         fld_size = IntField(32, False)
         fld_data = RawBytes(0)
         if len(self.section.interfaces) > 1:
@@ -510,10 +574,10 @@ class SimplePacket(BasePacketBlock):
             # of the impossibility to refer to the correct one (it does not
             # contain any Interface ID field)." Why would it say "the first"
             # IDB and not "the only" IDB if this was really forbidden?
-            strictness.problem(
+            policy.problem(
                 "writing SimplePacket for section with multiple interfaces"
             )
-            if strictness.should_fix():
+            if policy.should_fix():
                 # Can't fix this. The IDBs have already been written.
                 pass
         snap_len = self.interface.snaplen
@@ -521,14 +585,20 @@ class SimplePacket(BasePacketBlock):
             # This isn't a strictness issue, it *will* break other readers
             # if we write more bytes than the snaplen says to expect.
             fld_size.encode(
-                self.packet_len, outstream, endianness=self.section.endianness
+                self.packet_len,
+                outstream,
+                endianness=self.section.endianness,
+                policy=policy,
             )
-            fld_data.encode(self.packet_data[:snap_len], outstream)
+            fld_data.encode(self.packet_data[:snap_len], outstream, policy=policy)
         else:
             fld_size.encode(
-                self.packet_len, outstream, endianness=self.section.endianness
+                self.packet_len,
+                outstream,
+                endianness=self.section.endianness,
+                policy=policy,
             )
-            fld_data.encode(self.packet_data, outstream)
+            fld_data.encode(self.packet_data, outstream, policy=policy)
 
 
 @register_block
@@ -565,14 +635,15 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
 
     def enhanced(self):
         """Return an EnhancedPacket with this block's attributes."""
-        opts_dict = dict(self.options)
+        options = self.options
+        opts_dict = dict(options.iter_all_items())
         opts_dict["epb_dropcount"] = self.drops_count
         for a in ("flags", "hash"):
             try:
                 opts_dict["epb_" + a] = opts_dict.pop("pack_" + a)
             except KeyError:
                 pass
-        return self.section.new_member(
+        enhanced = self.section.new_member(
             EnhancedPacket,
             interface_id=self.interface_id,
             timestamp_high=self.timestamp_high,
@@ -581,15 +652,22 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
             packet_data=self.packet_data,
             options=opts_dict,
         )
+        return enhanced
 
     # Do this check in _write() instead of _encode() to ensure the block gets written
     # with the correct magic number.
-    def _write(self, outstream):
-        strictness.problem("Packet Block is obsolete and must not be used")
-        if strictness.should_fix():
-            self.enhanced()._write(outstream)
+    def _write(self, outstream, policy=None):
+        policy = _strictness.operation_policy(self, policy)
+        policy.problem("Packet Block is obsolete and must not be used")
+        if policy.should_fix():
+            enhanced = self.enhanced()
+            # The replacement block belongs to the task performing the fix,
+            # so its own diagnostics and fixes stay attributed to that task.
+            enhanced._strictness_policy = policy
+            enhanced._propagate_policy_to_options()
+            enhanced._write(outstream, policy=policy)
         else:
-            super(ObsoletePacket, self)._write(outstream)
+            super(ObsoletePacket, self)._write(outstream, policy=policy)
 
 
 @register_block
@@ -669,9 +747,20 @@ class UnknownBlock(Block):
 
     __slots__ = ["block_type", "data"]
 
-    def __init__(self, block_type, data):
+    def __init__(
+        self,
+        block_type,
+        data,
+        strictness_policy=None,
+        policy=None,
+        strictness=None,
+        strictness_level=None,
+    ):
         self.block_type = block_type
         self.data = data
-
-    def __repr__(self):
-        return "UnknownBlock(0x{0:08X}, {1!r})".format(self.block_type, self.data)
+        explicit = policy if policy is not None else strictness_policy
+        if explicit is None:
+            explicit = strictness_level
+        if explicit is None:
+            explicit = strictness
+        self._strictness_policy = _strictness.capture_policy(explicit)

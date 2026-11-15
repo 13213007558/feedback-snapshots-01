@@ -1,6 +1,16 @@
 History
 #######
 
+Unreleased
+==========
+
+- Add ``StrictnessPolicy`` and ``strictness_scope`` so independent tasks
+  (threads, async tasks, nested scopes) can each own a strictness policy
+  without sharing the process-wide setting.  Read-time diagnostics, delayed
+  option decoding and writer-side automatic fixes now follow the policy of
+  the object/task doing the work.  ``set_strictness`` remains available as
+  the legacy global entry point.
+
 2.1.1
 =====
 

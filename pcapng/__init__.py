@@ -5,4 +5,12 @@
 # ----------------------------------------------------------------------
 
 from .scanner import FileScanner  # noqa
+from .strictness import (  # noqa
+    Strictness,
+    StrictnessPolicy,
+    get_strictness,
+    get_strictness_policy,
+    set_strictness,
+    strictness_scope,
+)
 from .writer import FileWriter  # noqa

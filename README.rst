@@ -170,6 +170,41 @@ the library, as in:
 Recognized values are ``Strictness.FORBID`` (the default),
 ``Strictness.FIX`` (warn about problems, fix *if possible*),
 ``Strictness.WARN`` (warn only), and ``Strictness.NONE`` (no warnings).
+
+``set_strictness`` changes a process-wide setting.  A service handling
+several requests at once must not use it, because one request's setting
+would change another request's results.  Give each task its own policy
+instead, either as a scope or explicitly on the scanner/writer:
+
+.. code-block:: python
+
+    from pcapng import FileScanner, FileWriter
+    from pcapng.strictness import Strictness, StrictnessPolicy, strictness_scope
+
+    forensic = StrictnessPolicy(Strictness.FORBID, name="forensic")
+    convert = StrictnessPolicy(Strictness.FIX, name="convert", record=True)
+
+    with strictness_scope(forensic):
+        blocks = list(FileScanner(source))
+
+    # Blocks remember which task read them, but the writing task decides
+    # whether an obsolete Packet Block is rejected or rewritten as an EPB.
+    with strictness_scope(convert):
+        writer = FileWriter(output, blocks[0], policy=convert)
+        writer.write_block(blocks[2])
+
+    for warning in convert.diagnostics:
+        print(warning.policy_name, warning)
+
+Scopes are re-entrant and thread/async-safe; leaving one (including via
+an exception) restores the previous policy.  ``StrictnessPolicy``
+objects record warnings in ``diagnostics`` when created with
+``record=True``, and every warning/exception carries the owning
+``policy`` and ``policy_name``.  A policy attached to a scanner, block,
+options container or writer stays inspectable through
+``.strictness_policy`` after the object is handed to another
+processing stage.
+
 Circumstances that will result in strictness warnings include:
 
     * Adding multiples of a non-repeatable option to a block
