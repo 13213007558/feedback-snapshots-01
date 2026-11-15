@@ -95,9 +95,21 @@ class PEK:
 
         if encrypted_data.AlgorithmId == c_pek.PEK_ENCRYPTION_WITH_AES:
             encrypted_data_aes = c_pek.ENCRYPTED_DATA_WITH_AES(data)
-            return _aes_decrypt(encrypted_data_aes.EncryptedData, key, encrypted_data_aes.IV)[
-                : encrypted_data_aes.Length
-            ]
+            ciphertext = encrypted_data_aes.EncryptedData
+            if len(ciphertext) == 0 or len(ciphertext) % 16 != 0:
+                raise ValueError(
+                    "Truncated AES encrypted data: expected a whole number of 16-byte blocks, "
+                    f"got {len(ciphertext)} bytes"
+                )
+
+            decrypted = _aes_decrypt(ciphertext, key, encrypted_data_aes.IV)
+            if encrypted_data_aes.Length > len(decrypted):
+                raise ValueError(
+                    "Declared AES plaintext length "
+                    f"{encrypted_data_aes.Length} exceeds the {len(decrypted)} decrypted bytes"
+                )
+
+            return decrypted[: encrypted_data_aes.Length]
 
         raise NotImplementedError(f"Unsupported PEK encryption algorithm: {encrypted_data.AlgorithmId}")
 
