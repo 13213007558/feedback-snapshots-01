@@ -27,6 +27,7 @@ It can also mark all http cookies with the Secure, HttpOnly and SameSite attribu
 - [Per action configuration](docs/per_action_configuration.md)
 - [Cookies](docs/cookies.md)
 - [Hashes](docs/hashes.md)
+- [CSP nonces behind conditional caches](docs/csp_nonce_caching.md)
 - [Sinatra Config](docs/sinatra.md)
 
 ## Configuration

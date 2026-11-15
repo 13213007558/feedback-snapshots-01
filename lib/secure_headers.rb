@@ -13,6 +13,7 @@ require "secure_headers/headers/clear_site_data"
 require "secure_headers/headers/expect_certificate_transparency"
 require "secure_headers/headers/reporting_endpoints"
 require "secure_headers/middleware"
+require "secure_headers/nonce_cache_middleware"
 require "secure_headers/railtie"
 require "secure_headers/view_helper"
 require "singleton"
@@ -236,10 +237,32 @@ module SecureHeaders
     #
     # Returns the nonce
     def content_security_policy_nonce(request, script_or_style)
-      request.env[NONCE_KEY] ||= SecureRandom.base64(32).chomp
+      request.env[NONCE_KEY] ||= generate_nonce(request)
       nonce_key = script_or_style == ContentSecurityPolicy::SCRIPT_SRC ? :script_nonce : :style_nonce
       append_content_security_policy_directives(request, nonce_key => request.env[NONCE_KEY])
       request.env[NONCE_KEY]
+    end
+
+    # Private: generates the nonce for this request. When
+    # NonceCacheMiddleware runs in :pinned mode, the nonce is derived
+    # deterministically from the app-supplied cache token so that any
+    # response representing the same body (200, HEAD or 304) carries the
+    # nonce embedded in that body. Otherwise a random per-request nonce is
+    # used.
+    #
+    # Returns the nonce
+    # Raises NonceCacheError if :pinned mode is active but no token was
+    # supplied before the first nonce was requested.
+    def generate_nonce(request)
+      if request.env[NonceCacheMiddleware::MODE_KEY] == NonceCacheMiddleware::PINNED
+        token = request.env[NonceCacheMiddleware::TOKEN_KEY]
+        if token.nil? || token.to_s.empty?
+          raise NonceCacheError, ":pinned mode requires env[#{NonceCacheMiddleware::TOKEN_KEY}] (or a :token callback) to be set before the first CSP nonce is used"
+        end
+        NonceCacheMiddleware.derive_nonce(request.env[NonceCacheMiddleware::SECRET_KEY], token)
+      else
+        SecureRandom.base64(32).chomp
+      end
     end
 
     # Private: convenience method for specifying which configuration object should

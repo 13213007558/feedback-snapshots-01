@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add `SecureHeaders::NonceCacheMiddleware`: an explicit cache policy for responses whose CSP uses a nonce. `:no_store` mode (default) forces `Cache-Control: private, no-store` and strips ETag/Last-Modified on nonce'd responses; `:pinned` mode derives the nonce deterministically via HMAC(secret, token) so 200/HEAD/304 responses always match the cached body. Unsafe combinations raise `SecureHeaders::NonceCacheError`. See [the docs](docs/csp_nonce_caching.md).
+
 ## 6.5.0
 
 - CSP: Remove source expression deduplication. (@lgarron) https://github.com/github/secure_headers/pull/499
