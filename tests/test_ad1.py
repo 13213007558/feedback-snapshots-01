@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import zlib
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 
 from dissect.evidence.ad1 import ad1
-from dissect.evidence.ad1.ad1 import EntryType, find_files
+from dissect.evidence.ad1.ad1 import EntryType, MetaType, find_files
+from dissect.evidence.ad1.verify import VerifyStatus, verify, verify_entry
 from tests._utils import absolute_path
 
 if TYPE_CHECKING:
@@ -305,3 +308,151 @@ def test_ad1_segment_lru(ad1_segmented: list[Path], monkeypatch: pytest.MonkeyPa
 
     picture = fs.get("C:/Users/pcbje/Desktop/Data/Pictures/5-0-762-Koala.jpg")
     assert hashlib.sha1(picture.open().read()).hexdigest() == "9c3dcb1f9185a314ea25d51aed3b5881b32f420c"
+
+
+def _tamper_ad1(data: bytes, offset: int, old: bytes, new: bytes) -> BytesIO:
+    """Return a new AD1 file-like object with ``old`` at ``offset`` replaced by ``new``."""
+    assert len(old) == len(new)
+    assert data[offset : offset + len(old)] == old
+    patched = bytearray(data)
+    patched[offset : offset + len(old)] = new
+    return BytesIO(bytes(patched))
+
+
+def test_ad1_verify_multi_chunk(ad1_segmented: list[Path]) -> None:
+    """Verify a file spanning multiple segments and compressed chunks against its declared hashes."""
+    fs = ad1.AD1(ad1_segmented)
+
+    entry = fs.get("C:/Users/pcbje/Desktop/Data/Text/norvig-big.txt")
+    assert entry.size == 6488666
+    assert entry.size > fs.logical_image.chunk_size
+    assert entry.size > fs.segment(0).size
+
+    results = verify_entry(entry)
+    assert len(results) == 2
+    assert {result.algorithm for result in results} == {"md5", "sha1"}
+    for result in results:
+        assert result.status is VerifyStatus.OK
+        assert result.ok
+        assert result.bytes_processed == entry.size
+        assert result.actual == result.expected
+
+    results = verify(fs)
+    assert len(results) == 16
+    assert all(result.ok for result in results)
+
+
+def test_ad1_verify_preserves_stream_positions(ad1_basic: BinaryIO) -> None:
+    """Verification must not disturb the caller's existing stream positions."""
+    fs = ad1.AD1(ad1_basic)
+
+    ad1_basic.seek(123)
+    fs.stream.seek(456)
+
+    results = verify(fs)
+    assert results and all(result.ok for result in results)
+
+    assert ad1_basic.tell() == 123
+    assert fs.stream.tell() == 456
+
+
+def test_ad1_verify_tampered_compressed_content() -> None:
+    """Tampered compressed content must produce a content mismatch, not a copied-metadata pass."""
+    data = absolute_path("_data/ad1/compressed.ad1").read_bytes()
+
+    fs = ad1.AD1(BytesIO(data))
+    entry = fs.get("E:/AD1_test/doc1.txt")
+    stream = entry.open()
+    chunk_start, chunk_end = stream.chunks[0], stream.chunks[1]
+
+    # Segment 0 data starts after the 512 byte segment header
+    compressed = data[512 + chunk_start : 512 + chunk_end]
+    content = zlib.decompress(compressed)
+    tampered = zlib.compress(b"Inhoud document X", 9).ljust(len(compressed), b"\x00")
+
+    fh = _tamper_ad1(data, 512 + chunk_start, compressed, tampered)
+    fs = ad1.AD1(fh)
+
+    results = verify_entry(fs.get("E:/AD1_test/doc1.txt"))
+    assert {result.status for result in results} == {VerifyStatus.MISMATCH}
+    for result in results:
+        assert not result.ok
+        assert result.bytes_processed == result.size == len(content)
+        assert result.actual != result.expected
+        assert "declared" in result.source
+
+    # The failure of doc1.txt must not affect the independent result of doc2.txt
+    results = verify(fs)
+    by_name = {}
+    for result in results:
+        by_name.setdefault(result.name, []).append(result)
+    assert all(result.status is VerifyStatus.MISMATCH for result in by_name["E:/AD1_test/doc1.txt"])
+    assert all(result.ok for result in by_name["E:/AD1_test/doc2.txt"])
+
+    # Corrupt the compressed stream itself: the read error must surface as an incomplete read
+    fh = _tamper_ad1(data, 512 + chunk_end - 1, compressed[-1:], bytes([compressed[-1] ^ 0xFF]))
+    results = verify_entry(ad1.AD1(fh).get("E:/AD1_test/doc1.txt"))
+    assert {result.status for result in results} == {VerifyStatus.INCOMPLETE_READ}
+    assert all("read error" in result.source for result in results)
+
+
+def test_ad1_verify_tampered_file_size() -> None:
+    """A declared file size larger than the readable content must yield an incomplete read.
+
+    The declared hashes still match the readable prefix exactly, so a partial read must never be
+    reported as a hash match.
+    """
+    data = absolute_path("_data/ad1/compressed.ad1").read_bytes()
+
+    fs = ad1.AD1(BytesIO(data))
+    entry = fs.get("E:/AD1_test/doc1.txt")
+
+    # FileMeta data starts 20 bytes into the record; segment 0 data starts after the 512 byte header
+    size_offset = 512 + entry.meta[MetaType.FileSize].offset + 20
+    fh = _tamper_ad1(data, size_offset, b"17", b"18")
+    fs = ad1.AD1(fh)
+
+    entry = fs.get("E:/AD1_test/doc1.txt")
+    assert entry.size == 18
+
+    results = verify_entry(entry)
+    assert {result.status for result in results} == {VerifyStatus.INCOMPLETE_READ}
+    for result in results:
+        assert not result.ok
+        assert result.size == 18
+        assert result.bytes_processed == 17
+        # The digest of the 17 readable bytes equals the declared hash, but the read is incomplete
+        assert result.actual == result.expected
+
+
+def test_ad1_verify_tampered_declared_hash() -> None:
+    """Tampered declared hashes must be reported as mismatch, format error or missing."""
+    data = absolute_path("_data/ad1/compressed.ad1").read_bytes()
+
+    fs = ad1.AD1(BytesIO(data))
+    entry = fs.get("E:/AD1_test/doc1.txt")
+    md5_offset = 512 + entry.meta[MetaType.MD5].offset
+    sha1_offset = 512 + entry.meta[MetaType.SHA1].offset
+
+    # Declared hash no longer matches the content
+    fh = _tamper_ad1(data, md5_offset + 20, b"8", b"0")
+    results = verify_entry(ad1.AD1(fh).get("E:/AD1_test/doc1.txt"))
+    by_algorithm = {result.algorithm: result for result in results}
+    assert by_algorithm["md5"].status is VerifyStatus.MISMATCH
+    assert by_algorithm["md5"].bytes_processed == 17
+    assert by_algorithm["sha1"].status is VerifyStatus.OK
+
+    # Declared hash with an invalid format
+    fh = _tamper_ad1(data, md5_offset + 20, b"8", b"z")
+    results = verify_entry(ad1.AD1(fh).get("E:/AD1_test/doc1.txt"))
+    by_algorithm = {result.algorithm: result for result in results}
+    assert by_algorithm["md5"].status is VerifyStatus.INVALID_HASH
+    assert by_algorithm["md5"].bytes_processed == 0
+    assert by_algorithm["sha1"].status is VerifyStatus.OK
+
+    # No declared hashes at all: mask out the MD5 and SHA1 meta types
+    fh = _tamper_ad1(data, md5_offset + 12, b"\x01\x50", b"\x99\x99")
+    fh = _tamper_ad1(fh.getvalue(), sha1_offset + 12, b"\x02\x50", b"\x99\x99")
+    results = verify_entry(ad1.AD1(fh).get("E:/AD1_test/doc1.txt"))
+    assert len(results) == 1
+    assert results[0].status is VerifyStatus.MISSING_HASH
