@@ -891,12 +891,16 @@ def test_close_releases_the_index() -> None:
     tibx = _open(build_lsm_archive([ExtentSpec(10, 0, b"A" * 0x1000)]))
     volume = weakref.ref(tibx.streams()[0])
     assert volume().read(0, 4) == b"AAAA"
+    # Make a second view before closing: it must be released too.
+    other = tibx.view_at("latest")
+    assert other.streams()
 
     gc.disable()
     try:
         tibx.close()
         assert volume() is None
         assert not tibx._segment_cache
+        assert not other._volumes
     finally:
         gc.enable()
 
