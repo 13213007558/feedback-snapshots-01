@@ -1,0 +1,29 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Contoso-Fleet-Telemetry" guid="{13976d09-a327-438c-950b-7f03192815c7}" symbol="ContosoFleetTelemetryV2" source="Xml">
+    <tasks>
+     <task name="Sync" message="$(string.task_Sync)" value="32"/>
+    </tasks>
+    <events>
+     <event value="32" symbol="Sync/Complete" version="2" task="Sync" opcode="32" level="win:Informational" template="SyncV2Args"/>
+    </events>
+    <templates>
+     <template tid="SyncV2Args">
+      <data name="SessionId" inType="win:GUID"/>
+      <data name="Sequence" inType="win:UInt64"/>
+      <data name="Bytes" inType="win:UInt32"/>
+      <data name="Detail" inType="win:String"/>
+     </template>
+    </templates>
+   </provider>
+  </events>
+ </instrumentation>
+ <localization>
+  <resources culture="en-US">
+   <stringTable>
+    <string id="task_Sync" value="Sync"/>
+   </stringTable>
+  </resources>
+ </localization>
+</instrumentationManifest>

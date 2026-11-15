@@ -1,0 +1,5 @@
+
+candidate repo sha256=4f11b89b96252d85
+  dissect.etl/manifests/xml/{30336ed4-e327-447c-9de0-51b652c86108}.xml
+  provider='Microsoft-Windows-Shell-Core' symbol='MicrosoftWindowsShellCore' events=880
+  EVENTS[(6206, 0)] value=6206 opcode='win:Stop' version=0 symbol='Thumbnails_CacheLookupStop' template=Thumbnails_CacheLookupStopArgs size=5

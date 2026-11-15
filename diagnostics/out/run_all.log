@@ -1,0 +1,298 @@
+diagnostics/fixtures/alpc_conflict.etl  1032 bytes  sha256=c5d1822596c6ff7d
+diagnostics/fixtures/shellcore_collision.etl  656 bytes  sha256=5c8dfc3fc6bcf51c
+diagnostics/fixtures/pointer_width.etl  648 bytes  sha256=47bc872b2c0a52ff
+diagnostics/fixtures/manifest_v1_v2.etl  576 bytes  sha256=78511b9f7790bb91
+diagnostics/fixtures/exporter_a.etl  560 bytes  sha256=911e11396ba222b9
+diagnostics/fixtures/exporter_b.etl  584 bytes  sha256=da445e4f056ce689
+diagnostics/fixtures/unknown_provider.etl  552 bytes  sha256=9a46314e75726502
+diagnostics/fixtures/broken_manifest.etl  552 bytes  sha256=5692b0db4247a5be
+
+file: diagnostics/fixtures/manifest_v1_v2.etl
+provider: 13976d09-a327-438c-950b-7f03192815c7
+pointer_size=8 is_64bit=True records=2
+rec  candidate  lookup(op,ver)  entry(id,ver)  layout                                                                                    bytes  used  left  fit    parse result
+---  ---------  --------------  -------------  ----------------------------------------------------------------------------------------  -----  ----  ----  -----  ------------
+1    v1         Sync/Complete   Sync/Complete  dyn[Component:uint32@0+4,Level:uint32@4+4,Message:char[]@8+dyn]                           29     29    0     exact  ok          
+1    v2         Sync/Complete   Sync/Complete  dyn[SessionId:char[16]@0+16,Sequence:uint64@16+8,Bytes:uint32@24+4,Detail:char[]@28+dyn]  29     29    0     exact  ok          
+
+manifest provenance:
+  v1: origin=file sha256=5c3521ac55c925d1 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetry'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v1.xml
+  v2: origin=file sha256=cb72b3258c009b05 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetryV2'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v2.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [caller-must-choose] ambiguous: 2 candidate manifests fit descriptor id 32 exactly (v1, v2)
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=v1         cold=yes installed='ContosoFleetTelemetry' cache_hit=no
+  open 1: candidate=v2         cold=no  installed='ContosoFleetTelemetry' cache_hit=yes
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/manifest_v1_v2.json
+file: diagnostics/fixtures/manifest_v1_v2.etl
+provider: 13976d09-a327-438c-950b-7f03192815c7
+pointer_size=8 is_64bit=True records=2
+rec  candidate  lookup(op,ver)       entry(id,ver)        layout                                                                                    bytes  used  left  fit    parse result
+---  ---------  -------------------  -------------------  ----------------------------------------------------------------------------------------  -----  ----  ----  -----  ------------
+1    repo       Debugger/DebugPrint  Debugger/DebugPrint  dyn[Component:uint32@0+4,Level:uint32@4+4,Message:char[]@8+dyn]                           29     29    0     exact  ok          
+1    v1         Sync/Complete        Sync/Complete        dyn[Component:uint32@0+4,Level:uint32@4+4,Message:char[]@8+dyn]                           29     29    0     exact  ok          
+1    v2         Sync/Complete        Sync/Complete        dyn[SessionId:char[16]@0+16,Sequence:uint64@16+8,Bytes:uint32@24+4,Detail:char[]@28+dyn]  29     29    0     exact  ok          
+
+manifest provenance:
+  repo: origin=resource sha256=7670a3e8fc4454aa events=1 provider='Windows Kernel' symbol=None
+    dissect.etl/manifests/xml/{13976d09-a327-438c-950b-7f03192815c7}.xml
+  v1: origin=file sha256=5c3521ac55c925d1 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetry'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v1.xml
+  v2: origin=file sha256=cb72b3258c009b05 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetryV2'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v2.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [caller-must-choose] ambiguous: 3 candidate manifests fit descriptor id 32 exactly (repo, v1, v2)
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='Windows Kernel' cache_hit=no
+  open 1: candidate=v1         cold=no  installed='Windows Kernel' cache_hit=yes
+  open 2: candidate=v2         cold=no  installed='Windows Kernel' cache_hit=yes
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/manifest_v1_v2_three_way.json
+file: diagnostics/fixtures/alpc_conflict.etl
+provider: 45d8cccd-539f-4b72-a8b7-5c683142609a
+pointer_size=8 is_64bit=True records=7
+rec  candidate   lookup(op,ver)             entry(id,ver)              layout                                                                            bytes  used  left  fit        parse result
+---  ----------  -------------------------  -------------------------  --------------------------------------------------------------------------------  -----  ----  ----  ---------  ------------
+1    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           4      4     0     exact      ok          
+2    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           24     4     20    padded     ok          
+3    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           28     4     24    padded     ok          
+4    repo        ALPC/ALPC-Receive-Message  ALPC/ALPC-Receive-Message  4[MessageID:uint32@0+4]                                                           4      4     0     exact      ok          
+5    repo        -                          ALPC/ALPC-Send-Message     -                                                                                 4      -     -     no-entry   -           
+6    repo        -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                4      4     0     truncated  EOFError:   
+2    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                24     24    0     exact      ok          
+3    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                28     24    4     padded     ok          
+4    b           -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    b           -                          ALPC/Bridge-Send           -                                                                                 4      -     -     no-entry   -           
+6    b           -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  4      4     0     truncated  EOFError:   
+2    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  24     24    0     exact      ok          
+3    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  28     24    4     padded     ok          
+4    c           -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    c           -                          ALPC/Bridge-Send           -                                                                                 4      -     -     no-entry   -           
+6    c           -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            4      4     0     exact      ok          
+2    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            24     4     20    padded     ok          
+3    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            28     4     24    padded     ok          
+4    probe34     -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probe34     -                          ALPC/Bridge-ProbeOpcode    -                                                                                 4      -     -     no-entry   -           
+6    probe34     -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+2    probeother  -                          -                          -                                                                                 24     -     -     no-entry   -           
+3    probeother  -                          -                          -                                                                                 28     -     -     no-entry   -           
+4    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+6    probeother  ALPC/Bridge-ProbeOther     ALPC/Bridge-ProbeOther     4[OnlyWord:uint32@0+4]                                                            4      4     0     exact      ok          
+1    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+2    probev1     -                          -                          -                                                                                 24     -     -     no-entry   -           
+3    probev1     -                          -                          -                                                                                 28     -     -     no-entry   -           
+4    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+6    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+
+manifest provenance:
+  repo: origin=resource sha256=1d02b56d10a237ff events=5 provider='Windows Kernel' symbol=None
+    dissect.etl/manifests/xml/{45d8cccd-539f-4b72-a8b7-5c683142609a}.xml
+  b: origin=file sha256=f426930d3d99f43c events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeExporterB'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_b_24byte.xml
+  c: origin=file sha256=a2929caf6b70c490 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeExporterC'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_c_24byte.xml
+  probe34: origin=file sha256=cb36a74182bce581 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeOpcode'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_opcode_34.xml
+  probeother: origin=file sha256=b8001299a58b146c events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeOther'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_other_event.xml
+  probev1: origin=file sha256=f25229da685930f0 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeVersion'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_version_1.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [caller-must-choose] ambiguous: 2 candidate manifests fit descriptor id 33 exactly (repo, probe34)
+  record 2: [caller-must-choose] ambiguous: 2 candidate manifests fit descriptor id 33 exactly (b, c)
+  record 3: [caller-or-source-required] descriptor id resolves, but no candidate consumes the payload exactly
+  record 4: [precise] precisely disambiguated by descriptor id 34: repo
+  record 5: [lookup-miss-id-hit] lookup (opcode, version) (1, 2) misses; descriptor id (33, 2) resolves in repo, probe34 without a unique layout
+  record 6: [precise] precisely disambiguated by descriptor id 99: probeother
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='Windows Kernel' cache_hit=no
+  open 1: candidate=b          cold=no  installed='Windows Kernel' cache_hit=yes
+  open 2: candidate=c          cold=no  installed='Windows Kernel' cache_hit=yes
+  open 3: candidate=probe34    cold=no  installed='Windows Kernel' cache_hit=yes
+  open 4: candidate=probeother cold=no  installed='Windows Kernel' cache_hit=yes
+  open 5: candidate=probev1    cold=no  installed='Windows Kernel' cache_hit=yes
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/alpc_conflict.json
+file: diagnostics/fixtures/shellcore_collision.etl
+provider: 30336ed4-e327-447c-9de0-51b652c86108
+pointer_size=8 is_64bit=True records=3
+rec  candidate  lookup(op,ver)                          entry(id,ver)               layout                                   bytes  used  left  fit        parse result
+---  ---------  --------------------------------------  --------------------------  ---------------------------------------  -----  ----  ----  ---------  ------------
+1    repo       AggregatePropertyProvider_GetValueStop  Thumbnails_CacheLookupStop  20[FMTID:char[16]@0+16,PID:uint32@16+4]  20     20    0     exact      ok          
+2    repo       AggregatePropertyProvider_GetValueStop  Thumbnails_CacheLookupStop  20[FMTID:char[16]@0+16,PID:uint32@16+4]  5      5     0     truncated  EOFError:   
+
+manifest provenance:
+  repo: origin=resource sha256=4f11b89b96252d85 events=880 provider='Microsoft-Windows-Shell-Core' symbol='MicrosoftWindowsShellCore'
+    dissect.etl/manifests/xml/{30336ed4-e327-447c-9de0-51b652c86108}.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [key-space-conflict] descriptor id 6206 resolves but nothing consumes the payload exactly; descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo
+  record 2: [key-space-conflict] precise, but only through descriptor id 6206: repo (descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo)
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='MicrosoftWindowsShellCore' cache_hit=no
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/shellcore_collision.json
+file: diagnostics/fixtures/pointer_width.etl
+provider: 11111111-2222-3333-4444-555555555555
+pointer_size=8 is_64bit=True records=3
+rec  candidate  lookup(op,ver)  entry(id,ver)  layout                                         bytes  used  left  fit        parse result                                                                                    
+---  ---------  --------------  -------------  ---------------------------------------------  -----  ----  ----  ---------  ------------------------------------------------------------------------------------------------
+1    ptr        Pointer/Probe   Pointer/Probe  dyn[Address:EtwPointer@0+8,Tag:uint32@None+4]  12     12    0     exact      ok                                                                                              
+2    ptr        Pointer/Probe   Pointer/Probe  dyn[Address:EtwPointer@0+8,Tag:uint32@None+4]  8      0     8     abi-error  ABI setup failed: TypeError: EtwPointer.as_32bit() missing 1 required positional argument: 'cls'
+
+manifest provenance:
+  ptr: origin=file sha256=62bf646765d2a045 events=1 provider='Contoso-Pointer-Probe' symbol='ContosoPointerProbe'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/pointer_provider.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [precise] precisely disambiguated by descriptor id 1: ptr
+  record 2: [caller-or-source-required] descriptor id resolves, but no candidate consumes the payload exactly
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=ptr        cold=yes installed='ContosoPointerProbe' cache_hit=no
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/pointer_width.json
+file: diagnostics/fixtures/alpc_conflict.etl
+provider: 45d8cccd-539f-4b72-a8b7-5c683142609a
+duration: 0:00:01 (logfile start/end)
+
+cache seed  rec  descriptor                             symbol                     template        used  left  values                                                                                      result         
+----------  ---  -------------------------------------  -------------------------  --------------  ----  ----  ------------------------------------------------------------------------------------------  ---------------
+repo        1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     0     {"MessageID": 287454020}                                                                    ok             
+repo        2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     20    {"MessageID": 287454020}                                                                    ok             
+repo        3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     24    {"MessageID": 287454020}                                                                    ok             
+repo        4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Receive-Message  NULLx3d0d4f80L  4     0     {"MessageID": 1432778632}                                                                   ok             
+repo        5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+repo        6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+b           1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  <raised>                   -               -     -     -                                                                                           EOFError:      
+b           2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           BridgeV2Args    24    0     {"MessageId": 287454020, "SessionId": {"hex": "45d8cccd539f4b72a8b75c683142609a", "len": 1  ok             
+b           3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           BridgeV2Args    24    4     {"MessageId": 287454020, "SessionId": {"hex": "45d8cccd539f4b72a8b75c683142609a", "len": 1  ok             
+b           4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+b           5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+b           6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+c           1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  <raised>                   -               -     -     -                                                                                           EOFError:      
+c           2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           AuditV2Args     24    0     {"Timestamp": 14829465464175997764, "Sequence": 7520087411901833043, "Level": 2589999665,   ok             
+c           3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           AuditV2Args     24    4     {"Timestamp": 14829465464175997764, "Sequence": 7520087411901833043, "Level": 2589999665,   ok             
+c           4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+c           5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+c           6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+
+wrote diagnostics/out/cache_order.json
+file: diagnostics/fixtures/manifest_v1_v2.etl
+provider: 13976d09-a327-438c-950b-7f03192815c7
+duration: 0:00:01 (logfile start/end)
+
+cache seed  rec  descriptor                             symbol         template    used  left  values                                                                                      result
+----------  ---  -------------------------------------  -------------  ----------  ----  ----  ------------------------------------------------------------------------------------------  ------
+v1          1    id=32 op=32 ver=2 lvl=4 task=0 kw=0x0  Sync/Complete  SyncV1Args  29    0     {"Component": 857870592, "Level": 2003195204, "Message": {"hex": "8899aabbccddeeff08070605  ok    
+v2          1    id=32 op=32 ver=2 lvl=4 task=0 kw=0x0  Sync/Complete  SyncV2Args  29    0     {"SessionId": {"hex": "00112233445566778899aabbccddeeff", "len": 16}, "Sequence": 72623859  ok    
+
+wrote diagnostics/out/cache_order_v1_v2.json
+file: diagnostics/fixtures/broken_manifest.etl
+provider: cbda4dbf-8d5d-4f69-9578-be14aa540d22
+pointer_size=8 is_64bit=True records=2
+rec  candidate  lookup(op,ver)  entry(id,ver)  layout  bytes  used  left  fit  parse result      
+---  ---------  --------------  -------------  ------  -----  ----  ----  ---  ------------------
+-    repo                                                                      KeyError: 'Binary'
+
+manifest provenance:
+  repo: LOAD ERROR KeyError: 'Binary'
+
+per-record conclusion (byte fit is not provenance):
+  no candidate produced a usable event report
+  repo: load error KeyError: 'Binary'
+
+wrote diagnostics/out/broken_manifest.json
+file: diagnostics/fixtures/alpc_conflict.etl
+pointer_size=8 is_64bit=True buffers=1
+cache_before: []
+
+record 0: {"header_type": "SystemHeader", "marker": "0xc0020002", "size": 388, "minimal_size": 32, "is_64bit": true, "provider_id": "68fdd900-4a3e-11d1-84f4-0000f80464e3", "descriptor": {}, "lookup_key": [0, 2], "payload_size": 356}
+  logfile logger='fixture-machine' file='C:\\fixtures\\trace.etl'
+
+record 1: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": false, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 0, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 2: {"header_type": "EventHeader", "marker": "0xc0130068", "size": 104, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 24}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 20, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 3: {"header_type": "EventHeader", "marker": "0xc013006c", "size": 108, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 28}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 24, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 4: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 34, "version": 2, "channel": 11, "level": 4, "opcode": 34, "task": 0, "keywords": 0}, "lookup_key": [34, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Receive-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 0, "dynamic_sizes": {}, "values": {"MessageID": 1432778632}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 5: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 1, "task": 0, "keywords": 0}, "lookup_key": [1, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol=None
+  event_values: {"ThreadId": 256, "ProcessId": 512, "ActivityId": "00000000-0000-0000-0000-000000000000", "Extensions": []}
+
+record 6: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 99, "version": 2, "channel": 11, "level": 4, "opcode": 99, "task": 0, "keywords": 0}, "lookup_key": [99, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol=None
+  event_values: {"ThreadId": 256, "ProcessId": 512, "ActivityId": "00000000-0000-0000-0000-000000000000", "Extensions": []}
+
+cache_after: ['45d8cccd-539f-4b72-a8b7-5c683142609a']
+A. cold process reading exporter_a.etl, then exporter_b.etl
+  exporter_a.etl (v1 first)    provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 1, 'Level': 2, 'Message': b'alpha'}
+  exporter_b.etl (reuses v1)   provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 158177043, 'Level': 2353211299, 'Message': b'\x95\x0b\x7f\x03\x19(\x15\xc7\x08\x07\x06\x05\x04\x03\x02\x01\xef\xbe\xad\xdebeta'}
+
+B. cold process reading exporter_b.etl, then exporter_a.etl
+  exporter_b.etl (v2 first)    provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'SessionId': b"\x13\x97m\t\xa3'C\x8c\x95\x0b\x7f\x03\x19(\x15\xc7", 'Sequence': 72623859790382856, 'Bytes': 3735928559, 'Detail': b'beta'}
+  exporter_a.etl (reuses v2)   raised EOFError: 
+
+C. same files, fresh cache per file (isolation)
+  exporter_a.etl (provider_v1.xml) provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 1, 'Level': 2, 'Message': b'alpha'}
+  exporter_b.etl (provider_v2.xml) provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'SessionId': b"\x13\x97m\t\xa3'C\x8c\x95\x0b\x7f\x03\x19(\x15\xc7", 'Sequence': 72623859790382856, 'Bytes': 3735928559, 'Detail': b'beta'}
+
+candidate repo sha256=4f11b89b96252d85
+  dissect.etl/manifests/xml/{30336ed4-e327-447c-9de0-51b652c86108}.xml
+  provider='Microsoft-Windows-Shell-Core' symbol='MicrosoftWindowsShellCore' events=880
+  EVENTS[(6206, 0)] value=6206 opcode='win:Stop' version=0 symbol='Thumbnails_CacheLookupStop' template=Thumbnails_CacheLookupStopArgs size=5

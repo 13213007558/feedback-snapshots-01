@@ -1,0 +1,75 @@
+file: diagnostics/fixtures/alpc_conflict.etl
+provider: 45d8cccd-539f-4b72-a8b7-5c683142609a
+pointer_size=8 is_64bit=True records=7
+rec  candidate   lookup(op,ver)             entry(id,ver)              layout                                                                            bytes  used  left  fit        parse result
+---  ----------  -------------------------  -------------------------  --------------------------------------------------------------------------------  -----  ----  ----  ---------  ------------
+1    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           4      4     0     exact      ok          
+2    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           24     4     20    padded     ok          
+3    repo        ALPC/ALPC-Send-Message     ALPC/ALPC-Send-Message     4[MessageID:uint32@0+4]                                                           28     4     24    padded     ok          
+4    repo        ALPC/ALPC-Receive-Message  ALPC/ALPC-Receive-Message  4[MessageID:uint32@0+4]                                                           4      4     0     exact      ok          
+5    repo        -                          ALPC/ALPC-Send-Message     -                                                                                 4      -     -     no-entry   -           
+6    repo        -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                4      4     0     truncated  EOFError:   
+2    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                24     24    0     exact      ok          
+3    b           ALPC/Bridge-Send           ALPC/Bridge-Send           24[MessageId:uint32@0+4,SessionId:char[16]@4+16,Flags:uint32@20+4]                28     24    4     padded     ok          
+4    b           -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    b           -                          ALPC/Bridge-Send           -                                                                                 4      -     -     no-entry   -           
+6    b           -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  4      4     0     truncated  EOFError:   
+2    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  24     24    0     exact      ok          
+3    c           ALPC/Bridge-Send           ALPC/Bridge-Send           24[Timestamp:uint64@0+8,Sequence:uint64@8+8,Level:uint32@16+4,Flags:uint32@20+4]  28     24    4     padded     ok          
+4    c           -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    c           -                          ALPC/Bridge-Send           -                                                                                 4      -     -     no-entry   -           
+6    c           -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            4      4     0     exact      ok          
+2    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            24     4     20    padded     ok          
+3    probe34     ALPC/Bridge-ProbeOpcode    ALPC/Bridge-ProbeOpcode    4[OnlyWord:uint32@0+4]                                                            28     4     24    padded     ok          
+4    probe34     -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probe34     -                          ALPC/Bridge-ProbeOpcode    -                                                                                 4      -     -     no-entry   -           
+6    probe34     -                          -                          -                                                                                 4      -     -     no-entry   -           
+1    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+2    probeother  -                          -                          -                                                                                 24     -     -     no-entry   -           
+3    probeother  -                          -                          -                                                                                 28     -     -     no-entry   -           
+4    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probeother  -                          -                          -                                                                                 4      -     -     no-entry   -           
+6    probeother  ALPC/Bridge-ProbeOther     ALPC/Bridge-ProbeOther     4[OnlyWord:uint32@0+4]                                                            4      4     0     exact      ok          
+1    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+2    probev1     -                          -                          -                                                                                 24     -     -     no-entry   -           
+3    probev1     -                          -                          -                                                                                 28     -     -     no-entry   -           
+4    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+5    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+6    probev1     -                          -                          -                                                                                 4      -     -     no-entry   -           
+
+manifest provenance:
+  repo: origin=resource sha256=1d02b56d10a237ff events=5 provider='Windows Kernel' symbol=None
+    dissect.etl/manifests/xml/{45d8cccd-539f-4b72-a8b7-5c683142609a}.xml
+  b: origin=file sha256=f426930d3d99f43c events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeExporterB'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_b_24byte.xml
+  c: origin=file sha256=a2929caf6b70c490 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeExporterC'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_c_24byte.xml
+  probe34: origin=file sha256=cb36a74182bce581 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeOpcode'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_opcode_34.xml
+  probeother: origin=file sha256=b8001299a58b146c events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeOther'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_other_event.xml
+  probev1: origin=file sha256=f25229da685930f0 events=1 provider='Contoso-ALPC-Bridge' symbol='ContosoAlpcBridgeProbeVersion'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_version_1.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [caller-must-choose] ambiguous: 2 candidate manifests fit descriptor id 33 exactly (repo, probe34)
+  record 2: [caller-must-choose] ambiguous: 2 candidate manifests fit descriptor id 33 exactly (b, c)
+  record 3: [caller-or-source-required] descriptor id resolves, but no candidate consumes the payload exactly
+  record 4: [precise] precisely disambiguated by descriptor id 34: repo
+  record 5: [lookup-miss-id-hit] lookup (opcode, version) (1, 2) misses; descriptor id (33, 2) resolves in repo, probe34 without a unique layout
+  record 6: [precise] precisely disambiguated by descriptor id 99: probeother
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='Windows Kernel' cache_hit=no
+  open 1: candidate=b          cold=no  installed='Windows Kernel' cache_hit=yes
+  open 2: candidate=c          cold=no  installed='Windows Kernel' cache_hit=yes
+  open 3: candidate=probe34    cold=no  installed='Windows Kernel' cache_hit=yes
+  open 4: candidate=probeother cold=no  installed='Windows Kernel' cache_hit=yes
+  open 5: candidate=probev1    cold=no  installed='Windows Kernel' cache_hit=yes
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/alpc_conflict.json

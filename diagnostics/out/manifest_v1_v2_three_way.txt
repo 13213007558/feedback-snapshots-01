@@ -1,0 +1,28 @@
+file: diagnostics/fixtures/manifest_v1_v2.etl
+provider: 13976d09-a327-438c-950b-7f03192815c7
+pointer_size=8 is_64bit=True records=2
+rec  candidate  lookup(op,ver)       entry(id,ver)        layout                                                                                    bytes  used  left  fit    parse result
+---  ---------  -------------------  -------------------  ----------------------------------------------------------------------------------------  -----  ----  ----  -----  ------------
+1    repo       Debugger/DebugPrint  Debugger/DebugPrint  dyn[Component:uint32@0+4,Level:uint32@4+4,Message:char[]@8+dyn]                           29     29    0     exact  ok          
+1    v1         Sync/Complete        Sync/Complete        dyn[Component:uint32@0+4,Level:uint32@4+4,Message:char[]@8+dyn]                           29     29    0     exact  ok          
+1    v2         Sync/Complete        Sync/Complete        dyn[SessionId:char[16]@0+16,Sequence:uint64@16+8,Bytes:uint32@24+4,Detail:char[]@28+dyn]  29     29    0     exact  ok          
+
+manifest provenance:
+  repo: origin=resource sha256=7670a3e8fc4454aa events=1 provider='Windows Kernel' symbol=None
+    dissect.etl/manifests/xml/{13976d09-a327-438c-950b-7f03192815c7}.xml
+  v1: origin=file sha256=5c3521ac55c925d1 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetry'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v1.xml
+  v2: origin=file sha256=cb72b3258c009b05 events=1 provider='Contoso-Fleet-Telemetry' symbol='ContosoFleetTelemetryV2'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v2.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [caller-must-choose] ambiguous: 3 candidate manifests fit descriptor id 32 exactly (repo, v1, v2)
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='Windows Kernel' cache_hit=no
+  open 1: candidate=v1         cold=no  installed='Windows Kernel' cache_hit=yes
+  open 2: candidate=v2         cold=no  installed='Windows Kernel' cache_hit=yes
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/manifest_v1_v2_three_way.json

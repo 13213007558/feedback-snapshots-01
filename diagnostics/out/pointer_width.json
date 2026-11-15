@@ -1,0 +1,352 @@
+{
+  "file": "diagnostics/fixtures/pointer_width.etl",
+  "provider": "11111111-2222-3333-4444-555555555555",
+  "pointer_size": 8,
+  "is_64bit": true,
+  "candidates": [
+    {
+      "candidate": {
+        "name": "ptr",
+        "origin": "file",
+        "path": "diagnostics/manifests/pointer_provider.xml"
+      },
+      "identity": {
+        "label": "ptr",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/pointer_provider.xml",
+        "sha256": "62bf646765d2a045d861d3eaa3734df840ae98fd8b9d45f41b71267a4eb9a187"
+      },
+      "module": {
+        "module": "11111111-2222-3333-4444-555555555555",
+        "provider_name": "Contoso-Pointer-Probe",
+        "provider_guid": "11111111-2222-3333-4444-555555555555",
+        "provider_symbol": "ContosoPointerProbe",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013005c",
+            "size": 92,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "11111111-2222-3333-4444-555555555555",
+            "descriptor": {
+              "id": 1,
+              "version": 0,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              0
+            ],
+            "payload_size": 12
+          },
+          "lookup_entry": {
+            "symbol": "Pointer/Probe",
+            "value": 1,
+            "version": 0,
+            "opcode": "1",
+            "level": "win:Informational",
+            "task": "Pointer",
+            "keywords": null,
+            "template": "PointerProbeArgs"
+          },
+          "id_entry": {
+            "symbol": "Pointer/Probe",
+            "value": 1,
+            "version": 0,
+            "opcode": "1",
+            "level": "win:Informational",
+            "task": "Pointer",
+            "keywords": null,
+            "template": "PointerProbeArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "PointerProbeArgs",
+            "static_size": null,
+            "dynamic": true,
+            "fields": [
+              {
+                "name": "Address",
+                "type": "EtwPointer",
+                "offset": 0,
+                "static_size": 8,
+                "dynamic": true
+              },
+              {
+                "name": "Tag",
+                "type": "uint32",
+                "offset": null,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 12,
+            "unconsumed": 0,
+            "dynamic_sizes": {
+              "Address": 8
+            },
+            "values": {
+              "Address": 1234605616436508552,
+              "Tag": 153
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "Pointer/Probe",
+            "layout": {
+              "structure": "PointerProbeArgs",
+              "static_size": null,
+              "dynamic": true,
+              "fields": [
+                {
+                  "name": "Address",
+                  "type": "EtwPointer",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": true
+                },
+                {
+                  "name": "Tag",
+                  "type": "uint32",
+                  "offset": null,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 12,
+              "unconsumed": 0,
+              "dynamic_sizes": {
+                "Address": 8
+              },
+              "values": {
+                "Address": 1234605616436508552,
+                "Tag": 153
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0120058",
+            "size": 88,
+            "minimal_size": 80,
+            "is_64bit": false,
+            "provider_id": "11111111-2222-3333-4444-555555555555",
+            "descriptor": {
+              "id": 1,
+              "version": 0,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              0
+            ],
+            "payload_size": 8
+          },
+          "lookup_entry": {
+            "symbol": "Pointer/Probe",
+            "value": 1,
+            "version": 0,
+            "opcode": "1",
+            "level": "win:Informational",
+            "task": "Pointer",
+            "keywords": null,
+            "template": "PointerProbeArgs"
+          },
+          "id_entry": {
+            "symbol": "Pointer/Probe",
+            "value": 1,
+            "version": 0,
+            "opcode": "1",
+            "level": "win:Informational",
+            "task": "Pointer",
+            "keywords": null,
+            "template": "PointerProbeArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": false,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": "TypeError: EtwPointer.as_32bit() missing 1 required positional argument: 'cls'"
+          },
+          "layout": {
+            "structure": "PointerProbeArgs",
+            "static_size": null,
+            "dynamic": true,
+            "fields": [
+              {
+                "name": "Address",
+                "type": "EtwPointer",
+                "offset": 0,
+                "static_size": 8,
+                "dynamic": true
+              },
+              {
+                "name": "Tag",
+                "type": "uint32",
+                "offset": null,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": false,
+            "error": "ABI setup failed: TypeError: EtwPointer.as_32bit() missing 1 required positional argument: 'cls'",
+            "consumed": 0,
+            "unconsumed": 8,
+            "values": null
+          },
+          "verdict": "abi-error",
+          "id_parse": {
+            "symbol": "Pointer/Probe",
+            "layout": {
+              "structure": "PointerProbeArgs",
+              "static_size": null,
+              "dynamic": true,
+              "fields": [
+                {
+                  "name": "Address",
+                  "type": "EtwPointer",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": true
+                },
+                {
+                  "name": "Tag",
+                  "type": "uint32",
+                  "offset": null,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": false,
+              "error": "EOFError: Read 0 bytes, but expected 4",
+              "consumed": 8,
+              "unconsumed": 0,
+              "values": null
+            },
+            "verdict": "truncated",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "ambiguity": [
+    {
+      "record": 1,
+      "descriptor_id": 1,
+      "lookup_key": [
+        1,
+        0
+      ],
+      "exact_by_lookup": [
+        "ptr"
+      ],
+      "exact_by_id": [
+        "ptr"
+      ],
+      "id_available": [
+        "ptr"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "precise",
+      "conclusion": "precisely disambiguated by descriptor id 1: ptr"
+    },
+    {
+      "record": 2,
+      "descriptor_id": 1,
+      "lookup_key": [
+        1,
+        0
+      ],
+      "exact_by_lookup": [],
+      "exact_by_id": [],
+      "id_available": [
+        "ptr"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "caller-or-source-required",
+      "conclusion": "descriptor id resolves, but no candidate consumes the payload exactly"
+    }
+  ]
+}

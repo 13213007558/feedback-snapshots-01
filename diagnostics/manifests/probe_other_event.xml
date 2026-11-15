@@ -1,0 +1,19 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Contoso-ALPC-Bridge" guid="{45d8cccd-539f-4b72-a8b7-5c683142609a}" symbol="ContosoAlpcBridgeProbeOther">
+    <tasks>
+     <task name="ALPC" message="$(string.task_ALPC)" value="99"/>
+    </tasks>
+    <events>
+     <event value="99" symbol="ALPC/Bridge-ProbeOther" version="2" task="ALPC" opcode="99" level="win:Informational" template="ProbeOtherArgs"/>
+    </events>
+    <templates>
+     <template tid="ProbeOtherArgs">
+      <data name="OnlyWord" inType="win:UInt32"/>
+     </template>
+    </templates>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

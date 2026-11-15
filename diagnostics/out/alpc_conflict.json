@@ -1,0 +1,3280 @@
+{
+  "file": "diagnostics/fixtures/alpc_conflict.etl",
+  "provider": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+  "pointer_size": 8,
+  "is_64bit": true,
+  "candidates": [
+    {
+      "candidate": {
+        "name": "repo",
+        "origin": "resource",
+        "path": null
+      },
+      "identity": {
+        "label": "repo",
+        "origin": "resource",
+        "location": "dissect.etl/manifests/xml/{45d8cccd-539f-4b72-a8b7-5c683142609a}.xml",
+        "sha256": "1d02b56d10a237ffa7e69fa152e8721baabadda7cb1ca5b5602fca48423d9a3e"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Windows Kernel",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": null,
+        "events": 5
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "id_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "not numeric"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "NULLx3d0d4f80L",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageID",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageID": 287454020
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "layout": {
+              "structure": "NULLx3d0d4f80L",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageID",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageID": 287454020
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "id_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "not numeric"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "NULLx3d0d4f80L",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageID",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 20,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageID": 287454020
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "layout": {
+              "structure": "NULLx3d0d4f80L",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageID",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 20,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageID": 287454020
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "id_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "not numeric"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "NULLx3d0d4f80L",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageID",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 24,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageID": 287454020
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "layout": {
+              "structure": "NULLx3d0d4f80L",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageID",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 24,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageID": 287454020
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/ALPC-Receive-Message",
+            "value": 34,
+            "version": 2,
+            "opcode": "ALPC-Receive-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "id_entry": {
+            "symbol": "ALPC/ALPC-Receive-Message",
+            "value": 34,
+            "version": 2,
+            "opcode": "ALPC-Receive-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "not numeric"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "NULLx3d0d4f80L",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageID",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageID": 1432778632
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/ALPC-Receive-Message",
+            "layout": {
+              "structure": "NULLx3d0d4f80L",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageID",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageID": 1432778632
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "value": 33,
+            "version": 2,
+            "opcode": "ALPC-Send-Message",
+            "level": null,
+            "task": "ALPC",
+            "keywords": null,
+            "template": "NULLx3d0d4f80L"
+          },
+          "lookup_hit": false,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": {
+            "symbol": "ALPC/ALPC-Send-Message",
+            "layout": {
+              "structure": "NULLx3d0d4f80L",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageID",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageID": 153
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "b",
+        "origin": "file",
+        "path": "diagnostics/manifests/exporter_b_24byte.xml"
+      },
+      "identity": {
+        "label": "b",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_b_24byte.xml",
+        "sha256": "f426930d3d99f43c8c3ad79f94b972e11b0ed672150c68310159843c855aa580"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Contoso-ALPC-Bridge",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": "ContosoAlpcBridgeExporterB",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "BridgeV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageId",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "SessionId",
+                "type": "char[16]",
+                "offset": 4,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": false,
+            "error": "EOFError: ",
+            "consumed": 4,
+            "unconsumed": 0,
+            "values": null
+          },
+          "verdict": "truncated",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "BridgeV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageId",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "SessionId",
+                  "type": "char[16]",
+                  "offset": 4,
+                  "static_size": 16,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": false,
+              "error": "EOFError: ",
+              "consumed": 4,
+              "unconsumed": 0,
+              "values": null
+            },
+            "verdict": "truncated",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "BridgeV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageId",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "SessionId",
+                "type": "char[16]",
+                "offset": 4,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 24,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageId": 287454020,
+              "SessionId": {
+                "hex": "45d8cccd539f4b72a8b75c683142609a",
+                "len": 16
+              },
+              "Flags": 2864434397
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "BridgeV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageId",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "SessionId",
+                  "type": "char[16]",
+                  "offset": 4,
+                  "static_size": 16,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 24,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageId": 287454020,
+                "SessionId": {
+                  "hex": "45d8cccd539f4b72a8b75c683142609a",
+                  "len": 16
+                },
+                "Flags": 2864434397
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "BridgeV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "MessageId",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "SessionId",
+                "type": "char[16]",
+                "offset": 4,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 24,
+            "unconsumed": 4,
+            "dynamic_sizes": {},
+            "values": {
+              "MessageId": 287454020,
+              "SessionId": {
+                "hex": "45d8cccd539f4b72a8b75c683142609a",
+                "len": 16
+              },
+              "Flags": 2864434397
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "BridgeV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageId",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "SessionId",
+                  "type": "char[16]",
+                  "offset": 4,
+                  "static_size": 16,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 24,
+              "unconsumed": 4,
+              "dynamic_sizes": {},
+              "values": {
+                "MessageId": 287454020,
+                "SessionId": {
+                  "hex": "45d8cccd539f4b72a8b75c683142609a",
+                  "len": 16
+                },
+                "Flags": 2864434397
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "BridgeV2Args"
+          },
+          "lookup_hit": false,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "BridgeV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "MessageId",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "SessionId",
+                  "type": "char[16]",
+                  "offset": 4,
+                  "static_size": 16,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": false,
+              "error": "EOFError: ",
+              "consumed": 4,
+              "unconsumed": 0,
+              "values": null
+            },
+            "verdict": "truncated",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "c",
+        "origin": "file",
+        "path": "diagnostics/manifests/exporter_c_24byte.xml"
+      },
+      "identity": {
+        "label": "c",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/exporter_c_24byte.xml",
+        "sha256": "a2929caf6b70c4904f666f9e6e9c09dd64ebdd58002310d583538825b7396a90"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Contoso-ALPC-Bridge",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": "ContosoAlpcBridgeExporterC",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "AuditV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "Timestamp",
+                "type": "uint64",
+                "offset": 0,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Sequence",
+                "type": "uint64",
+                "offset": 8,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Level",
+                "type": "uint32",
+                "offset": 16,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": false,
+            "error": "EOFError: ",
+            "consumed": 4,
+            "unconsumed": 0,
+            "values": null
+          },
+          "verdict": "truncated",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "AuditV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "Timestamp",
+                  "type": "uint64",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Sequence",
+                  "type": "uint64",
+                  "offset": 8,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 16,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": false,
+              "error": "EOFError: ",
+              "consumed": 4,
+              "unconsumed": 0,
+              "values": null
+            },
+            "verdict": "truncated",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "AuditV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "Timestamp",
+                "type": "uint64",
+                "offset": 0,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Sequence",
+                "type": "uint64",
+                "offset": 8,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Level",
+                "type": "uint32",
+                "offset": 16,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 24,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "Timestamp": 14829465464175997764,
+              "Sequence": 7520087411901833043,
+              "Level": 2589999665,
+              "Flags": 2864434397
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "AuditV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "Timestamp",
+                  "type": "uint64",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Sequence",
+                  "type": "uint64",
+                  "offset": 8,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 16,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 24,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "Timestamp": 14829465464175997764,
+                "Sequence": 7520087411901833043,
+                "Level": 2589999665,
+                "Flags": 2864434397
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "AuditV2Args",
+            "static_size": 24,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "Timestamp",
+                "type": "uint64",
+                "offset": 0,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Sequence",
+                "type": "uint64",
+                "offset": 8,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Level",
+                "type": "uint32",
+                "offset": 16,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Flags",
+                "type": "uint32",
+                "offset": 20,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 24,
+            "unconsumed": 4,
+            "dynamic_sizes": {},
+            "values": {
+              "Timestamp": 14829465464175997764,
+              "Sequence": 7520087411901833043,
+              "Level": 2589999665,
+              "Flags": 2864434397
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "AuditV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "Timestamp",
+                  "type": "uint64",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Sequence",
+                  "type": "uint64",
+                  "offset": 8,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 16,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 24,
+              "unconsumed": 4,
+              "dynamic_sizes": {},
+              "values": {
+                "Timestamp": 14829465464175997764,
+                "Sequence": 7520087411901833043,
+                "Level": 2589999665,
+                "Flags": 2864434397
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": {
+            "symbol": "ALPC/Bridge-Send",
+            "value": 33,
+            "version": 2,
+            "opcode": "33",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "AuditV2Args"
+          },
+          "lookup_hit": false,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-Send",
+            "layout": {
+              "structure": "AuditV2Args",
+              "static_size": 24,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "Timestamp",
+                  "type": "uint64",
+                  "offset": 0,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Sequence",
+                  "type": "uint64",
+                  "offset": 8,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 16,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Flags",
+                  "type": "uint32",
+                  "offset": 20,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": false,
+              "error": "EOFError: ",
+              "consumed": 4,
+              "unconsumed": 0,
+              "values": null
+            },
+            "verdict": "truncated",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "probe34",
+        "origin": "file",
+        "path": "diagnostics/manifests/probe_opcode_34.xml"
+      },
+      "identity": {
+        "label": "probe34",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_opcode_34.xml",
+        "sha256": "cb36a74182bce5810f9f545acf1bc828d68a3a0cd12ca0871ca612f7858cc303"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Contoso-ALPC-Bridge",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": "ContosoAlpcBridgeProbeOpcode",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "ProbeOpcodeArgs",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "OnlyWord",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "OnlyWord": 287454020
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "layout": {
+              "structure": "ProbeOpcodeArgs",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "OnlyWord",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "OnlyWord": 287454020
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "ProbeOpcodeArgs",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "OnlyWord",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 20,
+            "dynamic_sizes": {},
+            "values": {
+              "OnlyWord": 287454020
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "layout": {
+              "structure": "ProbeOpcodeArgs",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "OnlyWord",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 20,
+              "dynamic_sizes": {},
+              "values": {
+                "OnlyWord": 287454020
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "ProbeOpcodeArgs",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "OnlyWord",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 24,
+            "dynamic_sizes": {},
+            "values": {
+              "OnlyWord": 287454020
+            }
+          },
+          "verdict": "padded",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "layout": {
+              "structure": "ProbeOpcodeArgs",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "OnlyWord",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 24,
+              "dynamic_sizes": {},
+              "values": {
+                "OnlyWord": 287454020
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "value": 33,
+            "version": 2,
+            "opcode": "34",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOpcodeArgs"
+          },
+          "lookup_hit": false,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-ProbeOpcode",
+            "layout": {
+              "structure": "ProbeOpcodeArgs",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "OnlyWord",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "OnlyWord": 153
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "probeother",
+        "origin": "file",
+        "path": "diagnostics/manifests/probe_other_event.xml"
+      },
+      "identity": {
+        "label": "probeother",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_other_event.xml",
+        "sha256": "b8001299a58b146cb125b67b69aff0a6089ca4218e4c7e89dda6c01acbfdb6aa"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Contoso-ALPC-Bridge",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": "ContosoAlpcBridgeProbeOther",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": {
+            "symbol": "ALPC/Bridge-ProbeOther",
+            "value": 99,
+            "version": 2,
+            "opcode": "99",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOtherArgs"
+          },
+          "id_entry": {
+            "symbol": "ALPC/Bridge-ProbeOther",
+            "value": 99,
+            "version": 2,
+            "opcode": "99",
+            "level": "win:Informational",
+            "task": "ALPC",
+            "keywords": null,
+            "template": "ProbeOtherArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "ProbeOtherArgs",
+            "static_size": 4,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "OnlyWord",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 4,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "OnlyWord": 305441741
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "ALPC/Bridge-ProbeOther",
+            "layout": {
+              "structure": "ProbeOtherArgs",
+              "static_size": 4,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "OnlyWord",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 4,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "OnlyWord": 305441741
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "probev1",
+        "origin": "file",
+        "path": "diagnostics/manifests/probe_version_1.xml"
+      },
+      "identity": {
+        "label": "probev1",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/probe_version_1.xml",
+        "sha256": "f25229da685930f09b732c4648d2db12f0ab04919511a5aeddb05c0797cc184e"
+      },
+      "module": {
+        "module": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_name": "Contoso-ALPC-Bridge",
+        "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+        "provider_symbol": "ContosoAlpcBridgeProbeVersion",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130068",
+            "size": 104,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 24
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 3,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006c",
+            "size": 108,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 33,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              33,
+              2
+            ],
+            "payload_size": 28
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 4,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 34,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 34,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              34,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 5,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 33,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 1,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              1,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        },
+        {
+          "record": 6,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130054",
+            "size": 84,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a",
+            "descriptor": {
+              "id": 99,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 99,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              99,
+              2
+            ],
+            "payload_size": 4
+          },
+          "lookup_entry": null,
+          "id_entry": null,
+          "lookup_hit": false,
+          "id_hit": false,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {},
+          "layout": null,
+          "parse": null,
+          "abi": null,
+          "verdict": "no-entry",
+          "id_parse": null
+        }
+      ]
+    }
+  ],
+  "ambiguity": [
+    {
+      "record": 1,
+      "descriptor_id": 33,
+      "lookup_key": [
+        33,
+        2
+      ],
+      "exact_by_lookup": [
+        "repo",
+        "probe34"
+      ],
+      "exact_by_id": [
+        "repo",
+        "probe34"
+      ],
+      "id_available": [
+        "repo",
+        "b",
+        "c",
+        "probe34"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "caller-must-choose",
+      "conclusion": "ambiguous: 2 candidate manifests fit descriptor id 33 exactly (repo, probe34)"
+    },
+    {
+      "record": 2,
+      "descriptor_id": 33,
+      "lookup_key": [
+        33,
+        2
+      ],
+      "exact_by_lookup": [
+        "b",
+        "c"
+      ],
+      "exact_by_id": [
+        "b",
+        "c"
+      ],
+      "id_available": [
+        "repo",
+        "b",
+        "c",
+        "probe34"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "caller-must-choose",
+      "conclusion": "ambiguous: 2 candidate manifests fit descriptor id 33 exactly (b, c)"
+    },
+    {
+      "record": 3,
+      "descriptor_id": 33,
+      "lookup_key": [
+        33,
+        2
+      ],
+      "exact_by_lookup": [],
+      "exact_by_id": [],
+      "id_available": [
+        "repo",
+        "b",
+        "c",
+        "probe34"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "caller-or-source-required",
+      "conclusion": "descriptor id resolves, but no candidate consumes the payload exactly"
+    },
+    {
+      "record": 4,
+      "descriptor_id": 34,
+      "lookup_key": [
+        34,
+        2
+      ],
+      "exact_by_lookup": [
+        "repo"
+      ],
+      "exact_by_id": [
+        "repo"
+      ],
+      "id_available": [
+        "repo"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "precise",
+      "conclusion": "precisely disambiguated by descriptor id 34: repo"
+    },
+    {
+      "record": 5,
+      "descriptor_id": 33,
+      "lookup_key": [
+        1,
+        2
+      ],
+      "exact_by_lookup": [],
+      "exact_by_id": [
+        "repo",
+        "probe34"
+      ],
+      "id_available": [
+        "repo",
+        "b",
+        "c",
+        "probe34"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "lookup-miss-id-hit",
+      "conclusion": "lookup (opcode, version) (1, 2) misses; descriptor id (33, 2) resolves in repo, probe34 without a unique layout"
+    },
+    {
+      "record": 6,
+      "descriptor_id": 99,
+      "lookup_key": [
+        99,
+        2
+      ],
+      "exact_by_lookup": [
+        "probeother"
+      ],
+      "exact_by_id": [
+        "probeother"
+      ],
+      "id_available": [
+        "probeother"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "precise",
+      "conclusion": "precisely disambiguated by descriptor id 99: probeother"
+    }
+  ]
+}

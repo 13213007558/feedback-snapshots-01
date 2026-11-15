@@ -1,0 +1,15 @@
+file: diagnostics/fixtures/broken_manifest.etl
+provider: cbda4dbf-8d5d-4f69-9578-be14aa540d22
+pointer_size=8 is_64bit=True records=2
+rec  candidate  lookup(op,ver)  entry(id,ver)  layout  bytes  used  left  fit  parse result      
+---  ---------  --------------  -------------  ------  -----  ----  ----  ---  ------------------
+-    repo                                                                      KeyError: 'Binary'
+
+manifest provenance:
+  repo: LOAD ERROR KeyError: 'Binary'
+
+per-record conclusion (byte fit is not provenance):
+  no candidate produced a usable event report
+  repo: load error KeyError: 'Binary'
+
+wrote diagnostics/out/broken_manifest.json

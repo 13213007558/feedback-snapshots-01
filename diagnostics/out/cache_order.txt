@@ -1,0 +1,26 @@
+file: diagnostics/fixtures/alpc_conflict.etl
+provider: 45d8cccd-539f-4b72-a8b7-5c683142609a
+duration: 0:00:01 (logfile start/end)
+
+cache seed  rec  descriptor                             symbol                     template        used  left  values                                                                                      result         
+----------  ---  -------------------------------------  -------------------------  --------------  ----  ----  ------------------------------------------------------------------------------------------  ---------------
+repo        1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     0     {"MessageID": 287454020}                                                                    ok             
+repo        2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     20    {"MessageID": 287454020}                                                                    ok             
+repo        3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Send-Message     NULLx3d0d4f80L  4     24    {"MessageID": 287454020}                                                                    ok             
+repo        4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  ALPC/ALPC-Receive-Message  NULLx3d0d4f80L  4     0     {"MessageID": 1432778632}                                                                   ok             
+repo        5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+repo        6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+b           1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  <raised>                   -               -     -     -                                                                                           EOFError:      
+b           2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           BridgeV2Args    24    0     {"MessageId": 287454020, "SessionId": {"hex": "45d8cccd539f4b72a8b75c683142609a", "len": 1  ok             
+b           3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           BridgeV2Args    24    4     {"MessageId": 287454020, "SessionId": {"hex": "45d8cccd539f4b72a8b75c683142609a", "len": 1  ok             
+b           4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+b           5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+b           6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+c           1    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  <raised>                   -               -     -     -                                                                                           EOFError:      
+c           2    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           AuditV2Args     24    0     {"Timestamp": 14829465464175997764, "Sequence": 7520087411901833043, "Level": 2589999665,   ok             
+c           3    id=33 op=33 ver=2 lvl=4 task=0 kw=0x0  ALPC/Bridge-Send           AuditV2Args     24    4     {"Timestamp": 14829465464175997764, "Sequence": 7520087411901833043, "Level": 2589999665,   ok             
+c           4    id=34 op=34 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+c           5    id=33 op=1 ver=2 lvl=4 task=0 kw=0x0   None                       None            -     -     -                                                                                           no lookup entry
+c           6    id=99 op=99 ver=2 lvl=4 task=0 kw=0x0  None                       None            -     -     -                                                                                           no lookup entry
+
+wrote diagnostics/out/cache_order.json

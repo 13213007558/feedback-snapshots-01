@@ -1,0 +1,18 @@
+{
+  "file": "diagnostics/fixtures/broken_manifest.etl",
+  "provider": "cbda4dbf-8d5d-4f69-9578-be14aa540d22",
+  "pointer_size": 8,
+  "is_64bit": true,
+  "candidates": [
+    {
+      "candidate": {
+        "name": "repo",
+        "origin": "resource",
+        "path": null
+      },
+      "load_error": "KeyError: 'Binary'",
+      "records": []
+    }
+  ],
+  "ambiguity": []
+}

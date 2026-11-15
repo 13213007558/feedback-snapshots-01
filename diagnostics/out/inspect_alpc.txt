@@ -1,0 +1,46 @@
+file: diagnostics/fixtures/alpc_conflict.etl
+pointer_size=8 is_64bit=True buffers=1
+cache_before: []
+
+record 0: {"header_type": "SystemHeader", "marker": "0xc0020002", "size": 388, "minimal_size": 32, "is_64bit": true, "provider_id": "68fdd900-4a3e-11d1-84f4-0000f80464e3", "descriptor": {}, "lookup_key": [0, 2], "payload_size": 356}
+  logfile logger='fixture-machine' file='C:\\fixtures\\trace.etl'
+
+record 1: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": false, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 0, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 2: {"header_type": "EventHeader", "marker": "0xc0130068", "size": 104, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 24}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 20, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 3: {"header_type": "EventHeader", "marker": "0xc013006c", "size": 108, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 33, "task": 0, "keywords": 0}, "lookup_key": [33, 2], "payload_size": 28}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Send-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 24, "dynamic_sizes": {}, "values": {"MessageID": 287454020}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 4: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 34, "version": 2, "channel": 11, "level": 4, "opcode": 34, "task": 0, "keywords": 0}, "lookup_key": [34, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol='ALPC/ALPC-Receive-Message'
+  layout: {"structure": "NULLx3d0d4f80L", "static_size": 4, "dynamic": false, "fields": [{"name": "MessageID", "type": "uint32", "offset": 0, "static_size": 4, "dynamic": false}], "pointer_width": 8}
+  parse: {"ok": true, "error": null, "consumed": 4, "unconsumed": 0, "dynamic_sizes": {}, "values": {"MessageID": 1432778632}}
+  event_values raised AttributeError: 'NULLx3d0d4f80L' object has no attribute '_values'
+
+record 5: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 33, "version": 2, "channel": 11, "level": 4, "opcode": 1, "task": 0, "keywords": 0}, "lookup_key": [1, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol=None
+  event_values: {"ThreadId": 256, "ProcessId": 512, "ActivityId": "00000000-0000-0000-0000-000000000000", "Extensions": []}
+
+record 6: {"header_type": "EventHeader", "marker": "0xc0130054", "size": 84, "minimal_size": 80, "is_64bit": true, "provider_id": "45d8cccd-539f-4b72-a8b7-5c683142609a", "descriptor": {"id": 99, "version": 2, "channel": 11, "level": 4, "opcode": 99, "task": 0, "keywords": 0}, "lookup_key": [99, 2], "payload_size": 4}
+  manifest: {"found": true, "guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "cache_hit": true, "module": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_name": "Windows Kernel", "provider_guid": "45d8cccd-539f-4b72-a8b7-5c683142609a", "provider_symbol": null, "events": 5}
+  provider_name='Windows Kernel' symbol=None
+  event_values: {"ThreadId": 256, "ProcessId": 512, "ActivityId": "00000000-0000-0000-0000-000000000000", "Extensions": []}
+
+cache_after: ['45d8cccd-539f-4b72-a8b7-5c683142609a']

@@ -1,0 +1,200 @@
+[
+  {
+    "seed": "repo",
+    "record": 1,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/ALPC-Send-Message",
+    "template": "NULLx3d0d4f80L",
+    "used": 4,
+    "left": 0,
+    "values": "{\"MessageID\": 287454020}",
+    "result": "ok"
+  },
+  {
+    "seed": "repo",
+    "record": 2,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/ALPC-Send-Message",
+    "template": "NULLx3d0d4f80L",
+    "used": 4,
+    "left": 20,
+    "values": "{\"MessageID\": 287454020}",
+    "result": "ok"
+  },
+  {
+    "seed": "repo",
+    "record": 3,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/ALPC-Send-Message",
+    "template": "NULLx3d0d4f80L",
+    "used": 4,
+    "left": 24,
+    "values": "{\"MessageID\": 287454020}",
+    "result": "ok"
+  },
+  {
+    "seed": "repo",
+    "record": 4,
+    "descriptor": "id=34 op=34 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/ALPC-Receive-Message",
+    "template": "NULLx3d0d4f80L",
+    "used": 4,
+    "left": 0,
+    "values": "{\"MessageID\": 1432778632}",
+    "result": "ok"
+  },
+  {
+    "seed": "repo",
+    "record": 5,
+    "descriptor": "id=33 op=1 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "repo",
+    "record": 6,
+    "descriptor": "id=99 op=99 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "b",
+    "record": 1,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "<raised>",
+    "template": "-",
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "EOFError: "
+  },
+  {
+    "seed": "b",
+    "record": 2,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/Bridge-Send",
+    "template": "BridgeV2Args",
+    "used": 24,
+    "left": 0,
+    "values": "{\"MessageId\": 287454020, \"SessionId\": {\"hex\": \"45d8cccd539f4b72a8b75c683142609a\", \"len\": 1",
+    "result": "ok"
+  },
+  {
+    "seed": "b",
+    "record": 3,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/Bridge-Send",
+    "template": "BridgeV2Args",
+    "used": 24,
+    "left": 4,
+    "values": "{\"MessageId\": 287454020, \"SessionId\": {\"hex\": \"45d8cccd539f4b72a8b75c683142609a\", \"len\": 1",
+    "result": "ok"
+  },
+  {
+    "seed": "b",
+    "record": 4,
+    "descriptor": "id=34 op=34 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "b",
+    "record": 5,
+    "descriptor": "id=33 op=1 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "b",
+    "record": 6,
+    "descriptor": "id=99 op=99 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "c",
+    "record": 1,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "<raised>",
+    "template": "-",
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "EOFError: "
+  },
+  {
+    "seed": "c",
+    "record": 2,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/Bridge-Send",
+    "template": "AuditV2Args",
+    "used": 24,
+    "left": 0,
+    "values": "{\"Timestamp\": 14829465464175997764, \"Sequence\": 7520087411901833043, \"Level\": 2589999665, ",
+    "result": "ok"
+  },
+  {
+    "seed": "c",
+    "record": 3,
+    "descriptor": "id=33 op=33 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "ALPC/Bridge-Send",
+    "template": "AuditV2Args",
+    "used": 24,
+    "left": 4,
+    "values": "{\"Timestamp\": 14829465464175997764, \"Sequence\": 7520087411901833043, \"Level\": 2589999665, ",
+    "result": "ok"
+  },
+  {
+    "seed": "c",
+    "record": 4,
+    "descriptor": "id=34 op=34 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "c",
+    "record": 5,
+    "descriptor": "id=33 op=1 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  },
+  {
+    "seed": "c",
+    "record": 6,
+    "descriptor": "id=99 op=99 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": null,
+    "template": null,
+    "used": "-",
+    "left": "-",
+    "values": "-",
+    "result": "no lookup entry"
+  }
+]

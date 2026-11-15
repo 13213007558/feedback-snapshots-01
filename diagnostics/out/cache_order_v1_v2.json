@@ -1,0 +1,24 @@
+[
+  {
+    "seed": "v1",
+    "record": 1,
+    "descriptor": "id=32 op=32 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "Sync/Complete",
+    "template": "SyncV1Args",
+    "used": 29,
+    "left": 0,
+    "values": "{\"Component\": 857870592, \"Level\": 2003195204, \"Message\": {\"hex\": \"8899aabbccddeeff08070605",
+    "result": "ok"
+  },
+  {
+    "seed": "v2",
+    "record": 1,
+    "descriptor": "id=32 op=32 ver=2 lvl=4 task=0 kw=0x0",
+    "manifest_symbol": "Sync/Complete",
+    "template": "SyncV2Args",
+    "used": 29,
+    "left": 0,
+    "values": "{\"SessionId\": {\"hex\": \"00112233445566778899aabbccddeeff\", \"len\": 16}, \"Sequence\": 72623859",
+    "result": "ok"
+  }
+]

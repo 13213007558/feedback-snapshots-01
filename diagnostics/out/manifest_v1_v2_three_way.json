@@ -1,0 +1,632 @@
+{
+  "file": "diagnostics/fixtures/manifest_v1_v2.etl",
+  "provider": "13976d09-a327-438c-950b-7f03192815c7",
+  "pointer_size": 8,
+  "is_64bit": true,
+  "candidates": [
+    {
+      "candidate": {
+        "name": "repo",
+        "origin": "resource",
+        "path": null
+      },
+      "identity": {
+        "label": "repo",
+        "origin": "resource",
+        "location": "dissect.etl/manifests/xml/{13976d09-a327-438c-950b-7f03192815c7}.xml",
+        "sha256": "7670a3e8fc4454aa9b36834b010e12ced6a9de26db115f01331fa88da35f6fdd"
+      },
+      "module": {
+        "module": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_name": "Windows Kernel",
+        "provider_guid": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_symbol": null,
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006d",
+            "size": 109,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "13976d09-a327-438c-950b-7f03192815c7",
+            "descriptor": {
+              "id": 32,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 32,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              32,
+              2
+            ],
+            "payload_size": 29
+          },
+          "lookup_entry": {
+            "symbol": "Debugger/DebugPrint",
+            "value": 32,
+            "version": 2,
+            "opcode": "DebugPrint",
+            "level": null,
+            "task": "Debugger",
+            "keywords": null,
+            "template": "NULLx9db2396cL"
+          },
+          "id_entry": {
+            "symbol": "Debugger/DebugPrint",
+            "value": 32,
+            "version": 2,
+            "opcode": "DebugPrint",
+            "level": null,
+            "task": "Debugger",
+            "keywords": null,
+            "template": "NULLx9db2396cL"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "not numeric"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "NULLx9db2396cL",
+            "static_size": null,
+            "dynamic": true,
+            "fields": [
+              {
+                "name": "Component",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Level",
+                "type": "uint32",
+                "offset": 4,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Message",
+                "type": "char[]",
+                "offset": 8,
+                "static_size": null,
+                "dynamic": true
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 29,
+            "unconsumed": 0,
+            "dynamic_sizes": {
+              "Message": 21
+            },
+            "values": {
+              "Component": 857870592,
+              "Level": 2003195204,
+              "Message": {
+                "hex": "8899aabbccddeeff0807060504030201efbeadde",
+                "len": 20
+              }
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "Debugger/DebugPrint",
+            "layout": {
+              "structure": "NULLx9db2396cL",
+              "static_size": null,
+              "dynamic": true,
+              "fields": [
+                {
+                  "name": "Component",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 4,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Message",
+                  "type": "char[]",
+                  "offset": 8,
+                  "static_size": null,
+                  "dynamic": true
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 29,
+              "unconsumed": 0,
+              "dynamic_sizes": {
+                "Message": 21
+              },
+              "values": {
+                "Component": 857870592,
+                "Level": 2003195204,
+                "Message": {
+                  "hex": "8899aabbccddeeff0807060504030201efbeadde",
+                  "len": 20
+                }
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "not numeric"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "v1",
+        "origin": "file",
+        "path": "diagnostics/manifests/provider_v1.xml"
+      },
+      "identity": {
+        "label": "v1",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v1.xml",
+        "sha256": "5c3521ac55c925d1b525b7fcfaff52befa4909299e5baa2274c7d2f8545cec14"
+      },
+      "module": {
+        "module": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_name": "Contoso-Fleet-Telemetry",
+        "provider_guid": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_symbol": "ContosoFleetTelemetry",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006d",
+            "size": 109,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "13976d09-a327-438c-950b-7f03192815c7",
+            "descriptor": {
+              "id": 32,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 32,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              32,
+              2
+            ],
+            "payload_size": 29
+          },
+          "lookup_entry": {
+            "symbol": "Sync/Complete",
+            "value": 32,
+            "version": 2,
+            "opcode": "32",
+            "level": "win:Informational",
+            "task": "Sync",
+            "keywords": null,
+            "template": "SyncV1Args"
+          },
+          "id_entry": {
+            "symbol": "Sync/Complete",
+            "value": 32,
+            "version": 2,
+            "opcode": "32",
+            "level": "win:Informational",
+            "task": "Sync",
+            "keywords": null,
+            "template": "SyncV1Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "SyncV1Args",
+            "static_size": null,
+            "dynamic": true,
+            "fields": [
+              {
+                "name": "Component",
+                "type": "uint32",
+                "offset": 0,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Level",
+                "type": "uint32",
+                "offset": 4,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Message",
+                "type": "char[]",
+                "offset": 8,
+                "static_size": null,
+                "dynamic": true
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 29,
+            "unconsumed": 0,
+            "dynamic_sizes": {
+              "Message": 21
+            },
+            "values": {
+              "Component": 857870592,
+              "Level": 2003195204,
+              "Message": {
+                "hex": "8899aabbccddeeff0807060504030201efbeadde",
+                "len": 20
+              }
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "Sync/Complete",
+            "layout": {
+              "structure": "SyncV1Args",
+              "static_size": null,
+              "dynamic": true,
+              "fields": [
+                {
+                  "name": "Component",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Level",
+                  "type": "uint32",
+                  "offset": 4,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Message",
+                  "type": "char[]",
+                  "offset": 8,
+                  "static_size": null,
+                  "dynamic": true
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 29,
+              "unconsumed": 0,
+              "dynamic_sizes": {
+                "Message": 21
+              },
+              "values": {
+                "Component": 857870592,
+                "Level": 2003195204,
+                "Message": {
+                  "hex": "8899aabbccddeeff0807060504030201efbeadde",
+                  "len": 20
+                }
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "name": "v2",
+        "origin": "file",
+        "path": "diagnostics/manifests/provider_v2.xml"
+      },
+      "identity": {
+        "label": "v2",
+        "origin": "file",
+        "location": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/provider_v2.xml",
+        "sha256": "cb72b3258c009b05d185920ebc3b99afa5b1fbcae6502601cccccd3c4e5eb67e"
+      },
+      "module": {
+        "module": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_name": "Contoso-Fleet-Telemetry",
+        "provider_guid": "13976d09-a327-438c-950b-7f03192815c7",
+        "provider_symbol": "ContosoFleetTelemetryV2",
+        "events": 1
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc013006d",
+            "size": 109,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "13976d09-a327-438c-950b-7f03192815c7",
+            "descriptor": {
+              "id": 32,
+              "version": 2,
+              "channel": 11,
+              "level": 4,
+              "opcode": 32,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              32,
+              2
+            ],
+            "payload_size": 29
+          },
+          "lookup_entry": {
+            "symbol": "Sync/Complete",
+            "value": 32,
+            "version": 2,
+            "opcode": "32",
+            "level": "win:Informational",
+            "task": "Sync",
+            "keywords": null,
+            "template": "SyncV2Args"
+          },
+          "id_entry": {
+            "symbol": "Sync/Complete",
+            "value": 32,
+            "version": 2,
+            "opcode": "32",
+            "level": "win:Informational",
+            "task": "Sync",
+            "keywords": null,
+            "template": "SyncV2Args"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": true,
+          "descriptor_checks": {
+            "id_matches_value": true,
+            "version_matches": true,
+            "opcode_semantics": "not numeric",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "SyncV2Args",
+            "static_size": null,
+            "dynamic": true,
+            "fields": [
+              {
+                "name": "SessionId",
+                "type": "char[16]",
+                "offset": 0,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "Sequence",
+                "type": "uint64",
+                "offset": 16,
+                "static_size": 8,
+                "dynamic": false
+              },
+              {
+                "name": "Bytes",
+                "type": "uint32",
+                "offset": 24,
+                "static_size": 4,
+                "dynamic": false
+              },
+              {
+                "name": "Detail",
+                "type": "char[]",
+                "offset": 28,
+                "static_size": null,
+                "dynamic": true
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 29,
+            "unconsumed": 0,
+            "dynamic_sizes": {
+              "Detail": 1
+            },
+            "values": {
+              "SessionId": {
+                "hex": "00112233445566778899aabbccddeeff",
+                "len": 16
+              },
+              "Sequence": 72623859790382856,
+              "Bytes": 3735928559,
+              "Detail": {
+                "hex": "",
+                "len": 0
+              }
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "Sync/Complete",
+            "layout": {
+              "structure": "SyncV2Args",
+              "static_size": null,
+              "dynamic": true,
+              "fields": [
+                {
+                  "name": "SessionId",
+                  "type": "char[16]",
+                  "offset": 0,
+                  "static_size": 16,
+                  "dynamic": false
+                },
+                {
+                  "name": "Sequence",
+                  "type": "uint64",
+                  "offset": 16,
+                  "static_size": 8,
+                  "dynamic": false
+                },
+                {
+                  "name": "Bytes",
+                  "type": "uint32",
+                  "offset": 24,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "Detail",
+                  "type": "char[]",
+                  "offset": 28,
+                  "static_size": null,
+                  "dynamic": true
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 29,
+              "unconsumed": 0,
+              "dynamic_sizes": {
+                "Detail": 1
+              },
+              "values": {
+                "SessionId": {
+                  "hex": "00112233445566778899aabbccddeeff",
+                  "len": 16
+                },
+                "Sequence": 72623859790382856,
+                "Bytes": 3735928559,
+                "Detail": {
+                  "hex": "",
+                  "len": 0
+                }
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "not numeric",
+              "level_semantics": "symbol=header"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "ambiguity": [
+    {
+      "record": 1,
+      "descriptor_id": 32,
+      "lookup_key": [
+        32,
+        2
+      ],
+      "exact_by_lookup": [
+        "repo",
+        "v1",
+        "v2"
+      ],
+      "exact_by_id": [
+        "repo",
+        "v1",
+        "v2"
+      ],
+      "id_available": [
+        "repo",
+        "v1",
+        "v2"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [],
+      "resolution": "caller-must-choose",
+      "conclusion": "ambiguous: 3 candidate manifests fit descriptor id 32 exactly (repo, v1, v2)"
+    }
+  ]
+}

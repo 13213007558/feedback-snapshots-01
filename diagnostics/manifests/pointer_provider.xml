@@ -1,0 +1,20 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Contoso-Pointer-Probe" guid="{11111111-2222-3333-4444-555555555555}" symbol="ContosoPointerProbe">
+    <tasks>
+     <task name="Pointer" message="$(string.task_Pointer)" value="1"/>
+    </tasks>
+    <events>
+     <event value="1" symbol="Pointer/Probe" version="0" task="Pointer" opcode="1" level="win:Informational" template="PointerProbeArgs"/>
+    </events>
+    <templates>
+     <template tid="PointerProbeArgs">
+      <data name="Address" inType="win:Pointer"/>
+      <data name="Tag" inType="win:UInt32"/>
+     </template>
+    </templates>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

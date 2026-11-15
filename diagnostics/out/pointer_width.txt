@@ -1,0 +1,22 @@
+file: diagnostics/fixtures/pointer_width.etl
+provider: 11111111-2222-3333-4444-555555555555
+pointer_size=8 is_64bit=True records=3
+rec  candidate  lookup(op,ver)  entry(id,ver)  layout                                         bytes  used  left  fit        parse result                                                                                    
+---  ---------  --------------  -------------  ---------------------------------------------  -----  ----  ----  ---------  ------------------------------------------------------------------------------------------------
+1    ptr        Pointer/Probe   Pointer/Probe  dyn[Address:EtwPointer@0+8,Tag:uint32@None+4]  12     12    0     exact      ok                                                                                              
+2    ptr        Pointer/Probe   Pointer/Probe  dyn[Address:EtwPointer@0+8,Tag:uint32@None+4]  8      0     8     abi-error  ABI setup failed: TypeError: EtwPointer.as_32bit() missing 1 required positional argument: 'cls'
+
+manifest provenance:
+  ptr: origin=file sha256=62bf646765d2a045 events=1 provider='Contoso-Pointer-Probe' symbol='ContosoPointerProbe'
+    /Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-014/workspace/diagnostics/manifests/pointer_provider.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [precise] precisely disambiguated by descriptor id 1: ptr
+  record 2: [caller-or-source-required] descriptor id resolves, but no candidate consumes the payload exactly
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=ptr        cold=yes installed='ContosoPointerProbe' cache_hit=no
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/pointer_width.json

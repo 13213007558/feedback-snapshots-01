@@ -1,0 +1,22 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Contoso-ALPC-Bridge" guid="{45d8cccd-539f-4b72-a8b7-5c683142609a}" symbol="ContosoAlpcBridgeExporterC">
+    <tasks>
+     <task name="ALPC" message="$(string.task_ALPC)" value="33"/>
+    </tasks>
+    <events>
+     <event value="33" symbol="ALPC/Bridge-Send" version="2" task="ALPC" opcode="33" level="win:Informational" template="AuditV2Args"/>
+    </events>
+    <templates>
+     <template tid="AuditV2Args">
+      <data name="Timestamp" inType="win:UInt64"/>
+      <data name="Sequence" inType="win:UInt64"/>
+      <data name="Level" inType="win:UInt32"/>
+      <data name="Flags" inType="win:UInt32"/>
+     </template>
+    </templates>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

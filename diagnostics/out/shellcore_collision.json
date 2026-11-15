@@ -1,0 +1,359 @@
+{
+  "file": "diagnostics/fixtures/shellcore_collision.etl",
+  "provider": "30336ed4-e327-447c-9de0-51b652c86108",
+  "pointer_size": 8,
+  "is_64bit": true,
+  "candidates": [
+    {
+      "candidate": {
+        "name": "repo",
+        "origin": "resource",
+        "path": null
+      },
+      "identity": {
+        "label": "repo",
+        "origin": "resource",
+        "location": "dissect.etl/manifests/xml/{30336ed4-e327-447c-9de0-51b652c86108}.xml",
+        "sha256": "4f11b89b96252d854885ba52c3cb08430dd80759886548792dccc777f8c8b77e"
+      },
+      "module": {
+        "module": "30336ed4-e327-447c-9de0-51b652c86108",
+        "provider_name": "Microsoft-Windows-Shell-Core",
+        "provider_guid": "30336ed4-e327-447c-9de0-51b652c86108",
+        "provider_symbol": "MicrosoftWindowsShellCore",
+        "events": 880
+      },
+      "records": [
+        {
+          "record": 1,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130064",
+            "size": 100,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "30336ed4-e327-447c-9de0-51b652c86108",
+            "descriptor": {
+              "id": 6206,
+              "version": 0,
+              "channel": 11,
+              "level": 4,
+              "opcode": 2,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              2,
+              0
+            ],
+            "payload_size": 20
+          },
+          "lookup_entry": {
+            "symbol": "AggregatePropertyProvider_GetValueStop",
+            "value": 2,
+            "version": 0,
+            "opcode": "win:Stop",
+            "level": "win:Informational",
+            "task": "AggregatePropertyProvider_GetValue",
+            "keywords": null,
+            "template": "AggregatePropertyProvider_GetValueStartArgs"
+          },
+          "id_entry": {
+            "symbol": "Thumbnails_CacheLookupStop",
+            "value": 6206,
+            "version": 0,
+            "opcode": "win:Stop",
+            "level": "win:Informational",
+            "task": "Thumbnails_CacheLookup",
+            "keywords": null,
+            "template": "Thumbnails_CacheLookupStopArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {
+            "id_matches_value": false,
+            "version_matches": true,
+            "opcode_semantics": "symbol=header",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": null,
+              "UserSID_blob": null
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "AggregatePropertyProvider_GetValueStartArgs",
+            "static_size": 20,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "FMTID",
+                "type": "char[16]",
+                "offset": 0,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "PID",
+                "type": "uint32",
+                "offset": 16,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": true,
+            "error": null,
+            "consumed": 20,
+            "unconsumed": 0,
+            "dynamic_sizes": {},
+            "values": {
+              "FMTID": {
+                "hex": "11111111111111111111111111111111",
+                "len": 16
+              },
+              "PID": 286331153
+            }
+          },
+          "verdict": "exact",
+          "id_parse": {
+            "symbol": "Thumbnails_CacheLookupStop",
+            "layout": {
+              "structure": "Thumbnails_CacheLookupStopArgs",
+              "static_size": 5,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "HRESULT",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "LowQuality",
+                  "type": "uint8",
+                  "offset": 4,
+                  "static_size": 1,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 5,
+              "unconsumed": 15,
+              "dynamic_sizes": {},
+              "values": {
+                "HRESULT": 286331153,
+                "LowQuality": 17
+              }
+            },
+            "verdict": "padded",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "symbol=header",
+              "level_semantics": "symbol=header"
+            }
+          }
+        },
+        {
+          "record": 2,
+          "header": {
+            "header_type": "EventHeader",
+            "marker": "0xc0130055",
+            "size": 85,
+            "minimal_size": 80,
+            "is_64bit": true,
+            "provider_id": "30336ed4-e327-447c-9de0-51b652c86108",
+            "descriptor": {
+              "id": 6206,
+              "version": 0,
+              "channel": 11,
+              "level": 4,
+              "opcode": 2,
+              "task": 0,
+              "keywords": 0
+            },
+            "lookup_key": [
+              2,
+              0
+            ],
+            "payload_size": 5
+          },
+          "lookup_entry": {
+            "symbol": "AggregatePropertyProvider_GetValueStop",
+            "value": 2,
+            "version": 0,
+            "opcode": "win:Stop",
+            "level": "win:Informational",
+            "task": "AggregatePropertyProvider_GetValue",
+            "keywords": null,
+            "template": "AggregatePropertyProvider_GetValueStartArgs"
+          },
+          "id_entry": {
+            "symbol": "Thumbnails_CacheLookupStop",
+            "value": 6206,
+            "version": 0,
+            "opcode": "win:Stop",
+            "level": "win:Informational",
+            "task": "Thumbnails_CacheLookup",
+            "keywords": null,
+            "template": "Thumbnails_CacheLookupStopArgs"
+          },
+          "lookup_hit": true,
+          "id_hit": true,
+          "id_agrees_with_lookup": false,
+          "descriptor_checks": {
+            "id_matches_value": false,
+            "version_matches": true,
+            "opcode_semantics": "symbol=header",
+            "level_semantics": "symbol=header"
+          },
+          "abi": {
+            "requested_is_64bit": true,
+            "before": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "after": {
+              "EtwPointer": 8,
+              "UserSID_blob": 16
+            },
+            "error": null
+          },
+          "layout": {
+            "structure": "AggregatePropertyProvider_GetValueStartArgs",
+            "static_size": 20,
+            "dynamic": false,
+            "fields": [
+              {
+                "name": "FMTID",
+                "type": "char[16]",
+                "offset": 0,
+                "static_size": 16,
+                "dynamic": false
+              },
+              {
+                "name": "PID",
+                "type": "uint32",
+                "offset": 16,
+                "static_size": 4,
+                "dynamic": false
+              }
+            ],
+            "pointer_width": 8
+          },
+          "parse": {
+            "ok": false,
+            "error": "EOFError: ",
+            "consumed": 5,
+            "unconsumed": 0,
+            "values": null
+          },
+          "verdict": "truncated",
+          "id_parse": {
+            "symbol": "Thumbnails_CacheLookupStop",
+            "layout": {
+              "structure": "Thumbnails_CacheLookupStopArgs",
+              "static_size": 5,
+              "dynamic": false,
+              "fields": [
+                {
+                  "name": "HRESULT",
+                  "type": "uint32",
+                  "offset": 0,
+                  "static_size": 4,
+                  "dynamic": false
+                },
+                {
+                  "name": "LowQuality",
+                  "type": "uint8",
+                  "offset": 4,
+                  "static_size": 1,
+                  "dynamic": false
+                }
+              ],
+              "pointer_width": 8
+            },
+            "parse": {
+              "ok": true,
+              "error": null,
+              "consumed": 5,
+              "unconsumed": 0,
+              "dynamic_sizes": {},
+              "values": {
+                "HRESULT": 572662306,
+                "LowQuality": 34
+              }
+            },
+            "verdict": "exact",
+            "descriptor_checks": {
+              "id_matches_value": true,
+              "version_matches": true,
+              "opcode_semantics": "symbol=header",
+              "level_semantics": "symbol=header"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "ambiguity": [
+    {
+      "record": 1,
+      "descriptor_id": 6206,
+      "lookup_key": [
+        2,
+        0
+      ],
+      "exact_by_lookup": [
+        "repo"
+      ],
+      "exact_by_id": [],
+      "id_available": [
+        "repo"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [
+        "repo"
+      ],
+      "resolution": "key-space-conflict",
+      "conclusion": "descriptor id 6206 resolves but nothing consumes the payload exactly; descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo"
+    },
+    {
+      "record": 2,
+      "descriptor_id": 6206,
+      "lookup_key": [
+        2,
+        0
+      ],
+      "exact_by_lookup": [],
+      "exact_by_id": [
+        "repo"
+      ],
+      "id_available": [
+        "repo"
+      ],
+      "lookup_only": [],
+      "key_space_conflict": [
+        "repo"
+      ],
+      "resolution": "key-space-conflict",
+      "conclusion": "precise, but only through descriptor id 6206: repo (descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo)"
+    }
+  ]
+}

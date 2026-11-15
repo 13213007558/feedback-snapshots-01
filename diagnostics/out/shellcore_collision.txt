@@ -1,0 +1,22 @@
+file: diagnostics/fixtures/shellcore_collision.etl
+provider: 30336ed4-e327-447c-9de0-51b652c86108
+pointer_size=8 is_64bit=True records=3
+rec  candidate  lookup(op,ver)                          entry(id,ver)               layout                                   bytes  used  left  fit        parse result
+---  ---------  --------------------------------------  --------------------------  ---------------------------------------  -----  ----  ----  ---------  ------------
+1    repo       AggregatePropertyProvider_GetValueStop  Thumbnails_CacheLookupStop  20[FMTID:char[16]@0+16,PID:uint32@16+4]  20     20    0     exact      ok          
+2    repo       AggregatePropertyProvider_GetValueStop  Thumbnails_CacheLookupStop  20[FMTID:char[16]@0+16,PID:uint32@16+4]  5      5     0     truncated  EOFError:   
+
+manifest provenance:
+  repo: origin=resource sha256=4f11b89b96252d85 events=880 provider='Microsoft-Windows-Shell-Core' symbol='MicrosoftWindowsShellCore'
+    dissect.etl/manifests/xml/{30336ed4-e327-447c-9de0-51b652c86108}.xml
+
+per-record conclusion (byte fit is not provenance):
+  record 1: [key-space-conflict] descriptor id 6206 resolves but nothing consumes the payload exactly; descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo
+  record 2: [key-space-conflict] precise, but only through descriptor id 6206: repo (descriptor id 6206 and (opcode, version) (2, 0) select different entries in repo)
+
+load order (cold cache, then each candidate in turn, exactly like opening files):
+  open 0: candidate=repo       cold=yes installed='MicrosoftWindowsShellCore' cache_hit=no
+  first successful lookup wins for the lifetime of the process; later files
+  for the same GUID silently reuse it (cache_hit=yes) regardless of their bytes.
+
+wrote diagnostics/out/shellcore_collision.json

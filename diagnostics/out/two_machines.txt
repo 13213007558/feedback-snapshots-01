@@ -1,0 +1,16 @@
+A. cold process reading exporter_a.etl, then exporter_b.etl
+  exporter_a.etl (v1 first)    provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 1, 'Level': 2, 'Message': b'alpha'}
+  exporter_b.etl (reuses v1)   provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 158177043, 'Level': 2353211299, 'Message': b'\x95\x0b\x7f\x03\x19(\x15\xc7\x08\x07\x06\x05\x04\x03\x02\x01\xef\xbe\xad\xdebeta'}
+
+B. cold process reading exporter_b.etl, then exporter_a.etl
+  exporter_b.etl (v2 first)    provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'SessionId': b"\x13\x97m\t\xa3'C\x8c\x95\x0b\x7f\x03\x19(\x15\xc7", 'Sequence': 72623859790382856, 'Bytes': 3735928559, 'Detail': b'beta'}
+  exporter_a.etl (reuses v2)   raised EOFError: 
+
+C. same files, fresh cache per file (isolation)
+  exporter_a.etl (provider_v1.xml) provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'Component': 1, 'Level': 2, 'Message': b'alpha'}
+  exporter_b.etl (provider_v2.xml) provider='Contoso-Fleet-Telemetry' symbol='Sync/Complete'
+                               values={'SessionId': b"\x13\x97m\t\xa3'C\x8c\x95\x0b\x7f\x03\x19(\x15\xc7", 'Sequence': 72623859790382856, 'Bytes': 3735928559, 'Detail': b'beta'}
