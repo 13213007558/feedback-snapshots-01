@@ -439,51 +439,62 @@ class FileStream(RunlistStream):
         self.fragment = inode.header.fragment
         self.fragment_offset = inode.header.offset
 
+        # Precompute the logical start of every run, its logical length and its absolute starting
+        # block on disk. The runlist from ``INode.block_list`` is in block units for regular and
+        # sparse blocks (always one block per run), but a fragment run is expressed in bytes.
+        self._run_offsets: list[int] = []
+        self._runs: list[tuple[int, int | None, int, int | None]] = []
+        start_block = self.start_block
+        run_offset = 0
+
+        for run_block_size, run_block_count in self.runlist:
+            if run_block_size is None:
+                run_length = run_block_count
+                block_start = None
+            else:
+                run_length = run_block_count * self.block_size
+                if run_block_size == 0:
+                    block_start = None
+                else:
+                    block_start = start_block
+                    start_block += run_block_size & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
+
+            self._run_offsets.append(run_offset)
+            self._runs.append((run_offset, run_block_size, run_length, block_start))
+            run_offset += run_length
+
     def _read(self, offset: int, length: int) -> bytes:
+        if length == 0 or offset >= self.size:
+            return b""
+
+        length = self.size - offset if length < 0 else min(length, self.size - offset)
+        end = offset + length
         result = []
 
-        block_offset = offset // self.block_size
+        run_idx = bisect_right(self._run_offsets, offset) - 1
+        run_count = len(self._runs)
 
-        run_idx = bisect_right(self._runlist_offsets, block_offset)
-        runlist_len = len(self.runlist)
-        size = self.size
+        while offset < end and run_idx < run_count:
+            run_offset, run_block_size, run_length, block_start = self._runs[run_idx]
+            run_pos = offset - run_offset
 
-        start_block = self.start_block + sum(
-            v & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK for v, _ in self.runlist[:run_idx]
-        )
-
-        while length > 0:
-            if run_idx >= runlist_len:
-                # We somehow requested more data than we have runs for
+            if run_pos >= run_length:
                 break
 
-            run_block_size, run_block_count = self.runlist[run_idx]
+            read_count = min(run_length - run_pos, end - offset)
 
             # For squashfs we use 0 to indicate a sparse block and None to indicate a fragment
             if run_block_size is None:
-                result.append(self.fs._read_fragment(self.fragment, self.fragment_offset, run_block_count))
-                offset += run_block_count
-                length -= run_block_count
+                # A fragment is a shared, decompressed block, so the offset within the run is
+                # relative to this file's fragment offset in that block.
+                result.append(self.fs._read_fragment(self.fragment, self.fragment_offset + run_pos, read_count))
+            elif run_block_size == 0:
+                result.append(b"\x00" * read_count)
             else:
-                run_pos = offset - run_idx * self.block_size
-                run_remaining = self.block_size - run_pos
+                _, data = self.fs._read_block(block_start, run_block_size)
+                result.append(data[run_pos : run_pos + read_count])
 
-                # Sometimes the self.size is way larger than what we actually have runs for?
-                # Stop reading if we reach a negative run_remaining
-                if run_remaining < 0:
-                    break
-
-                read_count = min(size - offset, min(run_remaining, length))
-
-                # Sparse run
-                if run_block_size == 0:
-                    result.append(b"\x00" * read_count)
-                else:
-                    start_block, data = self.fs._read_block(start_block, run_block_size)
-                    result.append(data[:read_count])
-
-                offset += read_count
-                length -= read_count
-                run_idx += 1
+            offset += read_count
+            run_idx += 1
 
         return b"".join(result)
