@@ -219,8 +219,11 @@ class SQLite3:
         elif self.wal:
             # Check if the latest valid instance of the page is committed (either the frame itself
             # is the commit frame or it is included in a commit's frames). If so, return that frame's data.
+            # Only frames of the current WAL generation (salts matching the WAL header) are
+            # considered, mirroring what SQLite itself would read. Older generations remain
+            # accessible through the checkpoints mechanism.
             for commit in reversed(self.wal.commits):
-                if (frame := commit.get(num)) and frame.valid:
+                if (frame := commit.get(num)) and frame.valid and frame.salt_valid:
                     data = frame.data
                     break
 

@@ -39,9 +39,16 @@ class WAL:
             raise InvalidDatabase("Invalid WAL header magic")
 
         self.checksum_endian = "<" if self.header.magic == WAL_HEADER_MAGIC_LE else ">"
-        self.highest_page_num = max(fr.page_number for commit in self.commits for fr in commit.frames if fr.valid)
 
         self.frame = lru_cache(1024)(self.frame)
+
+        self.header_checksum_valid = self._verify_header_checksum()
+        self.valid_frame_count = self._validate_frame_chain()
+
+        self.highest_page_num = max(
+            (fr.page_number for commit in self.commits for fr in commit.frames if fr.valid),
+            default=0,
+        )
 
     def close(self) -> None:
         """Close the WAL."""
@@ -63,12 +70,113 @@ class WAL:
             except EOFError:  # noqa: PERF203
                 break
 
+    def _verify_header_checksum(self) -> bool:
+        """Verify the checksum of the WAL header.
+
+        The header checksum is calculated over the first 24 bytes of the header.
+        If the header checksum is invalid, no frame in the WAL can be trusted.
+
+        References:
+            - https://sqlite.org/fileformat2.html#wal_file_format
+        """
+        self.fh.seek(0)
+        buf = self.fh.read(24)
+        if len(buf) < 24:
+            return False
+        return checksum(buf, self.checksum_endian) == (self.header.checksum1, self.header.checksum2)
+
+    def _validate_frame_chain(self) -> int:
+        """Validate the cumulative checksum chain of all frames.
+
+        Each frame checksum is calculated over the first 8 bytes of the frame header and the page
+        data, seeded with the checksum of the previous frame. A WAL file can contain multiple
+        "generations" of frames: every checkpoint restart rewrites the WAL header with new salts
+        and starts writing frames from the beginning of the file, but stale frames from older
+        generations may still be present later in the file. Each generation has its own
+        independent checksum chain, delimited by a change in the frame salt values.
+
+        The chain of the first (current) generation is anchored at the checksum in the WAL
+        header, but only if the frame salts match the header salts. The headers of older
+        generations have been overwritten, so their chains are anchored at the stored checksum of
+        the first frame of the generation; all subsequent frames in the generation are verified
+        against the running chain.
+
+        A frame that breaks the chain of its generation invalidates all subsequent frames in that
+        generation, regardless of how legitimate they may look. Older generations are independent
+        segments and are still validated.
+
+        Returns the number of frames that are part of a valid checksum chain.
+
+        References:
+            - https://sqlite.org/fileformat2.html#wal_file_format
+        """
+        if not self.header_checksum_valid:
+            return 0
+
+        valid_count = 0
+        s0 = s1 = 0
+        salts = None
+        verify = False
+        broken = False
+
+        for frame in self.frames():
+            frame_salts = (frame.header.salt1, frame.header.salt2)
+            if frame_salts != salts:
+                # A new generation starts here, the checksum chain restarts
+                salts = frame_salts
+                broken = False
+                if frame.offset == len(c_sqlite3.wal_header) and frame_salts == (
+                    self.header.salt1,
+                    self.header.salt2,
+                ):
+                    # Current generation, anchor the chain at the WAL header checksum
+                    s0, s1 = self.header.checksum1, self.header.checksum2
+                    verify = True
+                else:
+                    # Historical generation, the original WAL header is lost so anchor the
+                    # chain at the stored checksum of this frame and verify from the next
+                    s0, s1 = frame.header.checksum1, frame.header.checksum2
+                    verify = False
+
+            if broken:
+                continue
+
+            data = frame.data
+            if len(data) != self.header.page_size:
+                broken = True
+                continue
+
+            if verify:
+                buf = struct.pack(">II", frame.header.page_number, frame.header.page_count) + data
+                s0, s1 = checksum(buf, self.checksum_endian, s0, s1)
+                if (s0, s1) != (frame.header.checksum1, frame.header.checksum2):
+                    log.warning(
+                        "Encountered invalid WAL frame at offset %d, invalidating the rest of the chain",
+                        frame.offset,
+                    )
+                    broken = True
+                    continue
+            else:
+                # First frame of a historical generation, continue the chain from its checksum
+                verify = True
+
+            frame.checksum_valid = True
+            valid_count += 1
+
+        return valid_count
+
     @cached_property
     def commits(self) -> list[Commit]:
-        """Return all commits in the WAL file.
+        """Return all valid commits in the WAL file.
 
         Commits are frames where ``header.page_count`` specifies the size of the
         database file in pages after the commit. For all other frames it is 0.
+
+        A commit is only valid if all of its frames are part of a valid checksum
+        chain (see :meth:`_validate_frame_chain`). Frames that are not part of a
+        valid chain are never considered committed, even if they look like
+        legitimate commit frames. Invalid frames can still be enumerated as raw
+        evidence through :meth:`frames`.
 
         References:
             - https://sqlite.org/fileformat2.html#wal_file_format
@@ -77,6 +185,13 @@ class WAL:
         frames = []
 
         for frame in self.frames():
+            if not frame.valid:
+                # The checksum chain is broken, discard any partially collected transaction
+                if frames:
+                    log.warning("Discarding %d uncommitted frames before invalid frame", len(frames))
+                    frames = []
+                continue
+
             frames.append(frame)
 
             # A commit record has a page_count header greater than zero
@@ -114,6 +229,9 @@ class WAL:
 
 
 class Frame:
+    # Whether this frame is part of the valid checksum chain, set by the WAL during validation.
+    checksum_valid = False
+
     def __init__(self, wal: WAL, offset: int):
         self.wal = wal
         self.offset = offset
@@ -127,11 +245,22 @@ class Frame:
         return f"<Frame page_number={self.page_number} page_count={self.page_count}>"
 
     @property
-    def valid(self) -> bool:
-        salt1_match = self.header.salt1 == self.wal.header.salt1
-        salt2_match = self.header.salt2 == self.wal.header.salt2
+    def salt_valid(self) -> bool:
+        """Whether the frame salts match the current WAL header salts.
 
-        return salt1_match and salt2_match
+        Frames of historical generations (from before a checkpoint restart) have
+        different salts, but can still be part of a valid checksum chain.
+        """
+        return self.header.salt1 == self.wal.header.salt1 and self.header.salt2 == self.wal.header.salt2
+
+    @property
+    def valid(self) -> bool:
+        """A frame is only valid if it is part of a valid checksum chain.
+
+        Matching salts alone are not sufficient: the frame also has to verify
+        against the cumulative checksum chain of its generation.
+        """
+        return self.checksum_valid
 
     @property
     def data(self) -> bytes:
@@ -188,8 +317,7 @@ class Commit(_FrameCollection):
     """
 
 
-def checksum(buf: bytes, endian: str = ">") -> tuple[int, int]:
-    s0 = s1 = 0
+def checksum(buf: bytes, endian: str = ">", s0: int = 0, s1: int = 0) -> tuple[int, int]:
     num_ints = len(buf) // 4
     arr = struct.unpack(f"{endian}{num_ints}I", buf)
 
