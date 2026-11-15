@@ -195,6 +195,68 @@ class GroupPolicyOption(IntFlag):
     BLOCK_POLICY = 0x00000001
 
 
+def sid_domain(sid: str | None) -> str | None:
+    """Return the domain portion of a SID.
+
+    A Relative Identifier (RID) is only meaningful within the scope of the domain SID it belongs to. This helper
+    returns everything except the final RID component, so it can be used to compare SID scopes.
+
+    Args:
+        sid: The SID string to get the domain portion of.
+
+    Returns:
+        The domain portion of the SID, or ``None`` if the value is not a SID.
+    """
+    if not sid or not isinstance(sid, str) or not sid.startswith("S-"):
+        return None
+
+    domain, separator, rid = sid.rpartition("-")
+    if not separator or not domain or not rid.isdigit():
+        return None
+
+    return domain
+
+
+def sid_rid(sid: str | None) -> int | None:
+    """Return the Relative Identifier (RID) portion of a SID.
+
+    Args:
+        sid: The SID string to get the RID of.
+
+    Returns:
+        The RID as an integer, or ``None`` if the value is not a SID.
+    """
+    if not sid or not isinstance(sid, str) or not sid.startswith("S-"):
+        return None
+
+    _, separator, rid = sid.rpartition("-")
+    if not separator or not rid.isdigit():
+        return None
+
+    return int(rid)
+
+
+def sid_for_rid(domain_sid: str | None, rid: int | str | None) -> str | None:
+    """Construct the SID for a RID within a domain SID scope.
+
+    Args:
+        domain_sid: The domain portion of a SID.
+        rid: The Relative Identifier within that domain.
+
+    Returns:
+        The combined SID, or ``None`` if the domain SID or RID is invalid.
+    """
+    if domain_sid is None or rid is None:
+        return None
+
+    try:
+        rid_value = int(rid)
+    except (TypeError, ValueError):
+        return None
+
+    return f"{domain_sid}-{rid_value}"
+
+
 def _pek_decrypt(db: Database, value: bytes) -> bytes:
     """Decrypt a PEK-encrypted blob using the database's PEK, if it's unlocked.
 

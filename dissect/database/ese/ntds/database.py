@@ -315,6 +315,47 @@ class LinkTable:
             if (schema := self.db.data.schema.lookup_attribute(link_id=(base * 2) + 1)) is not None:
                 yield schema.name, obj
 
+    def raw_links(self, dnt: int, name: str | None = None) -> Iterator[tuple[int, int]]:
+        """Get the raw link targets for a given Directory Number Tag (DNT).
+
+        Unlike :meth:`links`, this does not resolve the target object. This makes it possible to observe links
+        whose target object is missing from the database, which is important when tracing group membership.
+
+        Args:
+            dnt: The DNT to retrieve links for.
+            name: An optional link name to filter the links.
+
+        Yields:
+            Tuples of the link base and the target (backlink) DNT.
+        """
+        yield from self._raw_links(dnt, self._link_base(name) if name else None)
+
+    def raw_backlinks(self, dnt: int, name: str | None = None) -> Iterator[tuple[int, int]]:
+        """Get the raw backlink sources for a given Directory Number Tag (DNT).
+
+        Unlike :meth:`backlinks`, this does not resolve the source object, so links to missing objects are
+        preserved.
+
+        Args:
+            dnt: The DNT to retrieve backlinks for.
+            name: An optional link name to filter the backlinks.
+
+        Yields:
+            Tuples of the link base and the source (link) DNT.
+        """
+        yield from self._raw_backlinks(dnt, self._link_base(name) if name else None)
+
+    def resolve(self, dnt: int) -> Object | None:
+        """Resolve a DNT to an object, returning ``None`` if the target is missing or unreadable.
+
+        Args:
+            dnt: The DNT to resolve.
+        """
+        try:
+            return self.db.data.get(dnt=dnt)
+        except (KeyError, KeyNotFoundError, ValueError):
+            return None
+
     def has_link(self, link_dnt: int, name: str, backlink_dnt: int) -> bool:
         """Check if a specific link exists between two DNTs and a given link name.
 
@@ -355,6 +396,19 @@ class LinkTable:
         Returns:
             An iterator of tuples containing the link base and the linked object.
         """
+        for link_base, backlink_dnt in self._raw_links(dnt, base):
+            yield link_base, self.db.data.get(dnt=backlink_dnt)
+
+    def _raw_links(self, dnt: int, base: int | None = None) -> Iterator[tuple[int, int]]:
+        """Get all raw link targets for a given Directory Number Tag (DNT).
+
+        Args:
+            dnt: The DNT to retrieve links for.
+            base: An optional base DNT to filter the links.
+
+        Returns:
+            An iterator of tuples containing the link base and the target DNT.
+        """
         cursor = self.table.index("link_index").cursor()
         cursor.seek([dnt] if base is None else [dnt, base])
 
@@ -363,7 +417,7 @@ class LinkTable:
             if base is not None and record.get("link_base") != base:
                 break
 
-            yield record.get("link_base"), self.db.data.get(dnt=record.get("backlink_DNT"))
+            yield record.get("link_base"), record.get("backlink_DNT")
             record = cursor.next()
 
     def _has_link(self, link_dnt: int, base: int, backlink_dnt: int) -> bool:
@@ -410,6 +464,19 @@ class LinkTable:
         Returns:
             An iterator of tuples containing the link base and the backlinked object.
         """
+        for link_base, link_dnt in self._raw_backlinks(dnt, base):
+            yield link_base, self.db.data.get(dnt=link_dnt)
+
+    def _raw_backlinks(self, dnt: int, base: int | None = None) -> Iterator[tuple[int, int]]:
+        """Get all raw backlink sources for a given Directory Number Tag (DNT).
+
+        Args:
+            dnt: The DNT to retrieve backlinks for.
+            base: An optional base DNT to filter the backlinks.
+
+        Returns:
+            An iterator of tuples containing the link base and the source DNT.
+        """
         cursor = self.table.index("backlink_index").cursor()
         cursor.seek([dnt] if base is None else [dnt, base])
 
@@ -418,7 +485,7 @@ class LinkTable:
             if base is not None and record.get("link_base") != base:
                 break
 
-            yield record.get("link_base"), self.db.data.get(dnt=record.get("link_DNT"))
+            yield record.get("link_base"), record.get("link_DNT")
             record = cursor.next()
 
 

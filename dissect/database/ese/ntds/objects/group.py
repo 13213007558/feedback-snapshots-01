@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dissect.database.ese.ntds.objects.top import Top
+from dissect.database.ese.ntds.util import sid_domain, sid_rid
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -46,8 +47,16 @@ class Group(Top):
 
         yield from self.db.link.links(self.dnt, "member")
 
-        # We also need to include users with primaryGroupID matching the group's RID
-        yield from self.db.data.search(primaryGroupID=self.rid)
+        # We also need to include users with primaryGroupID matching the group's RID.
+        # A RID is only meaningful within its own domain SID, so only accept exact SID matches.
+        domain = sid_domain(self.sid)
+        rid = sid_rid(self.sid)
+        if domain is None or rid is None:
+            return
+
+        for user in self.db.data.search(primaryGroupID=rid):
+            if sid_domain(user.sid) == domain:
+                yield user
 
     def is_member(self, user: User) -> bool:
         """Return whether the given user is a member of this group.

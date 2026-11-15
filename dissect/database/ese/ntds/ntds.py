@@ -4,11 +4,13 @@ from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
 from dissect.database.ese.ntds.database import Database
+from dissect.database.ese.ntds.membership import MembershipTracer, resolve_membership
 from dissect.database.ese.ntds.objects.secret import BackupKey
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.database.ese.ntds.membership import MembershipPath, MembershipTrace
     from dissect.database.ese.ntds.objects import (
         Computer,
         DnsNode,
@@ -59,6 +61,66 @@ class NTDS:
     def walk(self) -> Iterator[Object]:
         """Walk through all objects in the NTDS database."""
         yield from self.db.data.walk()
+
+    def membership(self, principal: Object, *, direction: str = "up", max_depth: int = 64) -> MembershipTrace:
+        """Trace offline group membership relations for a principal.
+
+        The result contains every provable membership path, with explicit ``member`` links and
+        ``primaryGroupID`` relations labelled separately. Unresolved edges, cycles and foreign security
+        principals are preserved instead of being silently dropped.
+
+        This only reflects relations recorded in the offline NTDS database. It does not indicate that an account
+        is enabled or holds effective permissions in a live domain.
+
+        Args:
+            principal: The account or group to start from.
+            direction: ``"up"`` to follow containing groups, or ``"down"`` to follow a group's members.
+            max_depth: Maximum number of edges in a single path.
+
+        Returns:
+            A :class:`~dissect.database.ese.ntds.membership.MembershipTrace`.
+        """
+        return MembershipTracer(self).trace(principal, direction=direction, max_depth=max_depth)
+
+    def trace_memberships(self, principal: Object, *, max_depth: int = 64) -> MembershipTrace:
+        """Trace all offline group memberships for a principal.
+
+        Args:
+            principal: The account or group to start from.
+            max_depth: Maximum number of edges in a single path.
+        """
+        return self.membership(principal, direction="up", max_depth=max_depth)
+
+    def trace_group_members(self, group: Object, *, max_depth: int = 64) -> MembershipTrace:
+        """Trace all offline members of a group, including nested groups.
+
+        Args:
+            group: The group to start from.
+            max_depth: Maximum number of edges in a single path.
+        """
+        return self.membership(group, direction="down", max_depth=max_depth)
+
+    def membership_paths(
+        self, principal: Object, *, direction: str = "up", max_depth: int = 64
+    ) -> list[MembershipPath]:
+        """Return every offline membership path for a principal.
+
+        Args:
+            principal: The account or group to start from.
+            direction: ``"up"`` to follow containing groups, or ``"down"`` to follow a group's members.
+            max_depth: Maximum number of edges in a single path.
+        """
+        return self.membership(principal, direction=direction, max_depth=max_depth).paths
+
+    def resolve_membership(self, principal: Object, *, direction: str = "up", max_depth: int = 64) -> MembershipTrace:
+        """Trace offline membership relations for a principal.
+
+        Args:
+            principal: The account or group to start from.
+            direction: ``"up"`` to follow containing groups, or ``"down"`` to follow a group's members.
+            max_depth: Maximum number of edges in a single path.
+        """
+        return resolve_membership(self, principal, direction=direction, max_depth=max_depth)
 
     def query(self, query: str, *, optimize: bool = True) -> Iterator[Object]:
         """Execute an LDAP query against the NTDS database.

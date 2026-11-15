@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, ClassVar
 from dissect.util.ts import wintimestamp
 
 from dissect.database.ese.ntds.objects.organizationalperson import OrganizationalPerson
-from dissect.database.ese.ntds.util import SAMAccountType, UserAccountControl
+from dissect.database.ese.ntds.util import SAMAccountType, UserAccountControl, sid_domain, sid_for_rid
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -122,9 +122,11 @@ class User(OrganizationalPerson):
 
         yield from self.db.link.backlinks(self.dnt, "memberOf")
 
-        # We also need to include the group with primaryGroupID matching the user's primaryGroupID
-        if self.primary_group_id is not None:
-            yield from self.db.data.search(objectSid=f"{self.sid.rsplit('-', 1)[0]}-{self.primary_group_id}")
+        # We also need to include the group with primaryGroupID matching the user's primaryGroupID.
+        # A RID is only meaningful within its own domain SID, so build the full SID from the user's SID scope.
+        primary_sid = sid_for_rid(sid_domain(self.sid), self.primary_group_id)
+        if primary_sid is not None:
+            yield from self.db.data.search(objectSid=primary_sid)
 
     def is_member_of(self, group: Group) -> bool:
         """Return whether the user is a member of the given group.

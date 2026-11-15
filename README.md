@@ -43,6 +43,29 @@ dissect-impacket /path/to/impacket/examples/secretsdump.py -h
 
 Impacket `secretsdump.py` will now use `dissect.database` for parsing the `NTDS.dit` file, resulting in a significant performance improvement!
 
+## Offline NTDS group membership tracing
+
+`dissect.database` can trace group membership from an offline `NTDS.dit` file without contacting a domain controller:
+
+```python
+from dissect.database.ese.ntds import NTDS
+
+with open("NTDS.dit", "rb") as fh:
+    ntds = NTDS(fh)
+    account = next(ntds.search(sAMAccountName="cersei.lannister"))
+
+    trace = ntds.trace_memberships(account)
+    for line in trace.explain():
+        print(line)
+```
+
+Each result distinguishes explicit `member` links from `primaryGroupID` relations and keeps unresolved edges,
+group cycles, duplicate paths and foreign security principals. `primaryGroupID` is resolved as a full SID within the
+account's own domain scope, never by matching a bare RID in another domain.
+
+The trace only reflects relations recorded in the offline database. It does not prove that an account is enabled or
+that it currently has effective permissions.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
