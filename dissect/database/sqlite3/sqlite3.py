@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import itertools
 import re
+import struct
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 from dissect.database.sqlite3.c_sqlite3 import c_sqlite3
 from dissect.database.sqlite3.exception import (
@@ -50,6 +51,35 @@ SERIAL_TYPES = {
     7: c_sqlite3.double,
     8: lambda fh: 0,
     9: lambda fh: 1,
+}
+
+# Size in bytes of the value of each serial type.
+# Serial types 8 and 9 are the constants 0 and 1 and occupy no bytes in the record body.
+SERIAL_TYPE_SIZES = {
+    0: 0,
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 6,
+    6: 8,
+    7: 8,
+    8: 0,
+    9: 0,
+}
+
+# See https://www.sqlite.org/fileformat.html -- Record format
+STORAGE_CLASSES = {
+    0: "null",
+    1: "integer",
+    2: "integer",
+    3: "integer",
+    4: "integer",
+    5: "integer",
+    6: "integer",
+    7: "float",
+    8: "integer",
+    9: "integer",
 }
 
 # See https://sqlite.org/fileformat2.html#magic_header_string
@@ -257,9 +287,39 @@ class Column:
     STRING = r"['\"].+?['\"]"
     TOKENIZER_EXPRESSION = re.compile(f"({SPACE}|{EXPRESSION}|{STRING})")
 
+    # Keywords that end the type name part of a column definition.
+    CONSTRAINT_KEYWORDS = {
+        "CONSTRAINT",
+        "PRIMARY",
+        "NOT",
+        "NULL",
+        "UNIQUE",
+        "CHECK",
+        "DEFAULT",
+        "COLLATE",
+        "REFERENCES",
+        "GENERATED",
+        "AS",
+    }
+
     def __init__(self, name: str, description: str):
         self.name = name
+        self.type = self._parse_type_from_description(description)
         self.default_value = self._parse_default_value_from_description(description)
+
+    def _parse_type_from_description(self, description: str) -> str:
+        """Extract the declared column type from the column definition.
+
+        The declared type is everything before the first constraint keyword,
+        e.g. ``VARCHAR(255)`` in ``VARCHAR(255) NOT NULL``. Can be empty if the
+        column was declared without a type.
+        """
+        type_tokens = []
+        for token in description.split():
+            if token.upper() in self.CONSTRAINT_KEYWORDS:
+                break
+            type_tokens.append(token)
+        return " ".join(type_tokens)
 
     def _parse_default_value_from_description(self, description: str) -> bool | str | int | float | None:
         """Find the default from the description string."""
@@ -373,6 +433,8 @@ class Row:
         self._table = table
         self._cell = cell
         self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
+        self._fields = None
+        self._unknown_fields = None
 
         # If there is no primary key or the primary key is a compound key,
         # primary_key will be None, but then all (primary key) columns will
@@ -399,6 +461,48 @@ class Row:
 
         return row_values, unknowns
 
+    def _match_columns_to_fields(self) -> tuple[dict[str, RowField], list[RowField]]:
+        """Match all table columns to the record fields of the cell in this row.
+
+        Columns without a stored field (e.g. served from a column default) get a
+        :class:`RowField` without field evidence. Stored fields without a matching
+        column get added to the unknown list.
+        """
+        record_fields = self._cell.record.fields
+        row_fields = {}
+        unknowns = []
+
+        for idx, column in enumerate(self._table.columns):
+            field = record_fields[idx] if idx < len(record_fields) else None
+            row_fields[column.name] = RowField(column, field, self._values.get(column.name))
+
+        for field in record_fields[len(self._table.columns) :]:
+            unknowns.append(RowField(None, field, field.value))
+
+        return row_fields, unknowns
+
+    @property
+    def fields(self) -> dict[str, RowField]:
+        """Return the forensic field evidence of this row, keyed by column name.
+
+        This evidence is obtained by structurally parsing the b-tree pages and
+        record format only; no SQL is executed against the database.
+        """
+        if self._fields is None:
+            self._fields, self._unknown_fields = self._match_columns_to_fields()
+        return self._fields
+
+    @property
+    def unknown_fields(self) -> list[RowField]:
+        """Return the stored fields that could not be matched to a column."""
+        if self._unknown_fields is None:
+            self._fields, self._unknown_fields = self._match_columns_to_fields()
+        return self._unknown_fields
+
+    def field(self, key: str) -> RowField:
+        """Return the forensic field evidence for the given column name."""
+        return self.fields[key]
+
     def __iter__(self) -> Iterator[tuple[str, Any]]:
         for col in self._table.columns:
             yield col.name, self[col.name]
@@ -420,8 +524,157 @@ class Row:
         return self._values.get(key, default)
 
 
+class RowField:
+    """Combines a column's declared interpretation with the stored field evidence of a row.
+
+    Distinguishes the column type declared in the database schema
+    (:attr:`declared_type`) from the storage encoding actually used by this
+    record (:attr:`serial_type` and :attr:`storage_class`).
+    """
+
+    def __init__(self, column: Column | None, field: Field | None, value: Any):
+        self.column = column
+        self.field = field
+        self.value = value
+
+    @property
+    def name(self) -> str | None:
+        return self.column.name if self.column else None
+
+    @property
+    def declared_type(self) -> str | None:
+        """The column type as declared in the ``CREATE TABLE`` statement."""
+        return self.column.type if self.column else None
+
+    @property
+    def serial_type(self) -> int | None:
+        """The serial type actually used to store this value in the record."""
+        return self.field.serial_type if self.field else None
+
+    @property
+    def storage_class(self) -> str | None:
+        """The storage class actually used to store this value in the record."""
+        return self.field.storage_class if self.field else None
+
+    @property
+    def raw(self) -> bytes | None:
+        return self.field.raw if self.field else None
+
+    @property
+    def segments(self) -> tuple[FieldSegment, ...]:
+        return self.field.segments if self.field else ()
+
+    @property
+    def encoding(self) -> str | None:
+        return self.field.encoding if self.field else None
+
+    @property
+    def error(self) -> UnicodeDecodeError | None:
+        return self.field.error if self.field else None
+
+    def __repr__(self) -> str:
+        return (
+            f"<RowField name={self.name} declared_type={self.declared_type!r} "
+            f"serial_type={self.serial_type} storage_class={self.storage_class!r}>"
+        )
+
+
 class Empty:
     pass
+
+
+class FieldSegment(NamedTuple):
+    """Locates a chunk of a field's raw bytes in the database image.
+
+    Attributes:
+        page: The 1-based page number the bytes reside on.
+        offset: The absolute offset in the database file image.
+        size: The amount of bytes of the field stored at this location.
+    """
+
+    page: int
+    offset: int
+    size: int
+
+
+class Field:
+    """A single stored value within a record, with forensic evidence.
+
+    Attributes:
+        serial_type: The serial type of the value as stored in the record header.
+        offset: The offset of the value relative to the start of the record payload.
+        value: The decoded Python value. Undecodable text is kept as raw ``bytes``.
+        raw: The raw bytes of the value as stored in the record body.
+        segments: The locations of the raw bytes in the database image. Spans
+            multiple segments if the value crosses (overflow) pages. Empty for
+            values that occupy no bytes (NULL and the constants 0 and 1).
+        encoding: The text encoding the value was decoded with, if it is text.
+        error: The decoding error if the text value could not be decoded.
+    """
+
+    def __init__(
+        self,
+        serial_type: int,
+        offset: int,
+        value: int | float | str | bytes | None,
+        raw: bytes,
+        segments: tuple[FieldSegment, ...] = (),
+        encoding: str | None = None,
+        error: UnicodeDecodeError | None = None,
+    ):
+        self.serial_type = serial_type
+        self.offset = offset
+        self.value = value
+        self.raw = raw
+        self.segments = segments
+        self.encoding = encoding
+        self.error = error
+
+    @property
+    def storage_class(self) -> str:
+        """The storage class of this value, derived from the serial type."""
+        return serial_type_storage_class(self.serial_type)
+
+    @property
+    def size(self) -> int:
+        """The amount of bytes this value occupies in the record body."""
+        return len(self.raw)
+
+    def __repr__(self) -> str:
+        return (
+            f"<Field serial_type={self.serial_type} storage_class={self.storage_class!r} "
+            f"offset={self.offset} size={self.size}>"
+        )
+
+
+class Record:
+    """A parsed record of a cell, exposing the stored fields with their evidence.
+
+    Attributes:
+        cell: The cell this record was parsed from.
+        fields: The stored fields of this record.
+        header_size: The size in bytes of the record header, including the
+            header size varint itself.
+    """
+
+    def __init__(self, cell: Cell, fields: list[Field], header_size: int):
+        self.cell = cell
+        self.fields = fields
+        self.header_size = header_size
+
+    @property
+    def types(self) -> list[int]:
+        return [field.serial_type for field in self.fields]
+
+    @property
+    def values(self) -> list[int | float | str | bytes | None]:
+        return [field.value for field in self.fields]
+
+    def __iter__(self) -> Iterator[Field]:
+        return iter(self.fields)
+
+    def __repr__(self) -> str:
+        return f"<Record cell={self.cell!r} fields={len(self.fields)}>"
 
 
 class Page:
@@ -482,8 +735,8 @@ class Cell:
         self.left_page = None
 
         self._data = None
-        self._types = None
-        self._values = None
+        self._payload_segments = None
+        self._record = None
 
         sqlite = page.sqlite
         cell_buf = BytesIO(page.data[self._offset :])
@@ -511,74 +764,115 @@ class Cell:
     def __repr__(self) -> str:
         return f"<Cell page={self.page.num} offset=0x{self.offset:x}>"
 
+    def _load_payload(self) -> None:
+        """Load the cell payload and build a map of where each part of the payload is stored.
+
+        The segment map is a list of ``(payload_offset, page, offset, size)`` tuples, where
+        ``offset`` is the absolute offset in the database file image. It allows the raw bytes
+        of individual record fields to be traced back to their on-disk location, including
+        across overflow pages.
+        """
+        offset = self._offset + self._record_offset
+        page = self.page
+        page_data = page.data
+
+        # Page data of page 1 excludes the database header, so offsets into the
+        # data need to be compensated to arrive at absolute file offsets.
+        page_base = page.offset + (len(c_sqlite3.header) if page.num == 1 else 0)
+        segments = []
+
+        if self.size <= self.max_payload_size:
+            size = max(self.size, 4)
+
+            buf = page_data[offset : offset + size]
+            segments.append((0, page.num, page_base + offset, self.size))
+        else:
+            # If the data does not fit in a single page, there is an
+            # overflow. The last 4 bytes of the first page will contain the
+            # next (overflow) page number. Each subsequent overflow page
+            # will have the next overflow page in the first 4 bytes (which
+            # are 0 if there is no next overflow page), followed by the
+            # page data.
+            result = []
+
+            min_local = self.min_payload_size
+            max_local = self.max_payload_size
+            surplus = min_local + (self.size - min_local) % (self.page.sqlite.usable_page_size - 4)
+
+            local_size = surplus if surplus <= max_local else min_local
+
+            local_buf = page_data[offset : offset + local_size + 4]
+            result.append(local_buf[:-4])
+            segments.append((0, page.num, page_base + offset, local_size))
+
+            overflow_page = c_sqlite3.uint32(local_buf[-4:])
+            overflow_size = self.size - local_size
+            payload_offset = local_size
+
+            while overflow_page:
+                # page_size is the total page size, including the 4 bytes
+                # for the next overflow page in front of the page data.
+                # overflow_size is the size of the page data without the
+                # extra 4 bytes for the next overflow page, so it needs to
+                # be added.
+                data_size = min(overflow_size + 4, self.page.sqlite.usable_page_size)
+                page_buf = self.page.sqlite.raw_page(overflow_page)[:data_size]
+
+                segments.append(
+                    (payload_offset, overflow_page, (overflow_page - 1) * self.page.sqlite.page_size + 4, data_size - 4)
+                )
+                payload_offset += data_size - 4
+
+                overflow_page = c_sqlite3.uint32(page_buf[:4])
+                result.append(page_buf[4:])
+
+            buf = b"".join(result)
+
+        self._data = buf
+        self._payload_segments = segments
+
     @property
     def data(self) -> bytes:
         if self.size is None:
             raise NoCellData("Cell has no data")
 
-        if not self._data:
-            offset = self._offset + self._record_offset
-            page_data = self.page.data
-
-            if self.size <= self.max_payload_size:
-                size = max(self.size, 4)
-
-                buf = page_data[offset : offset + size]
-            else:
-                # If the data does not fit in a single page, there is an
-                # overflow. The last 4 bytes of the first page will contain the
-                # next (overflow) page number. Each subsequent overflow page
-                # will have the next overflow page in the first 4 bytes (which
-                # are 0 if there is no next overflow page), followed by the
-                # page data.
-                result = []
-
-                min_local = self.min_payload_size
-                max_local = self.max_payload_size
-                surplus = min_local + (self.size - min_local) % (self.page.sqlite.usable_page_size - 4)
-
-                local_size = surplus if surplus <= max_local else min_local
-
-                local_buf = page_data[offset : offset + local_size + 4]
-                result.append(local_buf[:-4])
-
-                overflow_page = c_sqlite3.uint32(local_buf[-4:])
-                overflow_size = self.size - local_size
-
-                while overflow_page:
-                    # page_size is the total page size, including the 4 bytes
-                    # for the next overflow page in front of the page data.
-                    # overflow_size is the size of the page data without the
-                    # extra 4 bytes for the next overflow page, so it needs to
-                    # be added.
-                    data_size = min(overflow_size + 4, self.page.sqlite.usable_page_size)
-                    page_buf = self.page.sqlite.raw_page(overflow_page)[:data_size]
-
-                    overflow_page = c_sqlite3.uint32(page_buf[:4])
-                    result.append(page_buf[4:])
-
-                buf = b"".join(result)
-
-            self._data = buf
+        if self._data is None:
+            self._load_payload()
 
         return self._data
 
-    def _read_record(self) -> None:
-        self._types, self._values = read_record(BytesIO(self.data), self.page.sqlite.encoding)
+    def _locate(self, offset: int, size: int) -> tuple[FieldSegment, ...]:
+        """Return the segments that locate ``size`` payload bytes at ``offset`` in the database image."""
+        if self._payload_segments is None:
+            self._load_payload()
+
+        segments = []
+        end = offset + size
+        for payload_offset, page_num, file_offset, segment_size in self._payload_segments:
+            segment_end = payload_offset + segment_size
+            if offset < segment_end and end > payload_offset:
+                start = max(offset, payload_offset)
+                length = min(end, segment_end) - start
+                segments.append(FieldSegment(page_num, file_offset + (start - payload_offset), length))
+        return tuple(segments)
+
+    @property
+    def record(self) -> Record:
+        """Parse the cell payload as a record, preserving per-field storage evidence."""
+        if self._record is None:
+            fields, header_size = parse_record(self.data, self.page.sqlite.encoding)
+            for field in fields:
+                field.segments = self._locate(field.offset, field.size)
+            self._record = Record(self, fields, header_size)
+        return self._record
 
     @property
     def types(self) -> list[int]:
-        if not self._types:
-            self._read_record()
-
-        return self._types
+        return self.record.types
 
     @property
     def values(self) -> list[int | float | str | bytes | None]:
-        if not self._values:
-            self._read_record()
-
-        return self._values
+        return self.record.values
 
 
 def walk_tree(sqlite: SQLite3, page: Page) -> Iterator[Cell]:
@@ -599,31 +893,73 @@ def walk_tree(sqlite: SQLite3, page: Page) -> Iterator[Cell]:
             yield cell
 
 
-def read_record(fh: BinaryIO, encoding: str) -> tuple[list[int], list[int | float | str | bytes | None]]:
-    start = fh.tell()
-    size = varint(fh)
-    end = start + size
+def serial_type_size(serial_type: int) -> int:
+    """Return the amount of bytes a value of the given serial type occupies in a record body."""
+    if serial_type in SERIAL_TYPE_SIZES:
+        return SERIAL_TYPE_SIZES[serial_type]
+    if serial_type >= 12:
+        return (serial_type - 12) // 2 if serial_type % 2 == 0 else (serial_type - 13) // 2
+    raise ValueError(f"Reserved serial type: {serial_type}")
+
+
+def serial_type_storage_class(serial_type: int) -> str:
+    """Return the storage class a serial type belongs to."""
+    if serial_type in STORAGE_CLASSES:
+        return STORAGE_CLASSES[serial_type]
+    if serial_type >= 12:
+        return "blob" if serial_type % 2 == 0 else "text"
+    raise ValueError(f"Reserved serial type: {serial_type}")
+
+
+def parse_record(data: bytes, encoding: str) -> tuple[list[Field], int]:
+    """Parse a record payload into fields, preserving storage evidence per field.
+
+    Text that cannot be decoded with the given encoding is kept as raw bytes,
+    with the decoding error stored on the field, so other fields in the same
+    record remain available.
+
+    Returns a tuple of the parsed fields and the record header size.
+    """
+    fh = BytesIO(data)
+    header_size = varint(fh)
 
     types = []
-    while fh.tell() < end:
+    while fh.tell() < header_size:
         types.append(varint(fh))
 
-    values = []
-    for type_ in types:
-        if type_ in SERIAL_TYPES:
-            val = SERIAL_TYPES[type_](fh)
+    fields = []
+    for serial_type in types:
+        offset = fh.tell()
+        size = serial_type_size(serial_type)
+        raw = fh.read(size)
+
+        field_encoding = None
+        error = None
+
+        if serial_type in (0, 8, 9):
+            value = SERIAL_TYPES[serial_type](fh)
+        elif 1 <= serial_type <= 6:
+            value = int.from_bytes(raw, "big", signed=True)
+        elif serial_type == 7:
+            value = struct.unpack(">d", raw)[0]
+        elif serial_type % 2 == 0:
+            value = raw
         else:
-            if type_ % 2 == 0:
-                val = fh.read((type_ - 12) // 2)
-            else:
-                try:
-                    val = fh.read((type_ - 13) // 2).decode(encoding)
-                except UnicodeDecodeError as e:
-                    val = e.object
+            field_encoding = encoding
+            try:
+                value = raw.decode(encoding)
+            except UnicodeDecodeError as e:
+                value = raw
+                error = e
 
-        values.append(val)
+        fields.append(Field(serial_type, offset, value, raw, encoding=field_encoding, error=error))
 
-    return types, values
+    return fields, header_size
+
+
+def read_record(fh: BinaryIO, encoding: str) -> tuple[list[int], list[int | float | str | bytes | None]]:
+    fields, _ = parse_record(fh.read(), encoding)
+    return [field.serial_type for field in fields], [field.value for field in fields]
 
 
 def varint(fh: BinaryIO) -> int:
