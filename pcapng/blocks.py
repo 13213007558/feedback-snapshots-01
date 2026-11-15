@@ -172,6 +172,8 @@ class SectionHeader(Block):
         "_interfaces_id",
         "interfaces",
         "interface_stats",
+        "interface_stats_history",
+        "interface_statistics",
     ]
     schema = [
         ("version_major", IntField(16, False), 1),
@@ -194,7 +196,16 @@ class SectionHeader(Block):
         self.endianness = endianness
         self._interfaces_id = itertools.count(0)
         self.interfaces = {}
+        # Legacy mapping: interface_id -> *latest* InterfaceStatistics block.
+        # Kept for backwards compatibility; see ``interface_stats_history``
+        # and ``interface_statistics`` for access to every observation.
         self.interface_stats = {}
+        # interface_id -> list of every InterfaceStatistics block, in the
+        # order in which it appears in the file (capture/observation order).
+        self.interface_stats_history = {}
+        # Flat list of every InterfaceStatistics block in the section, in
+        # file order, regardless of interface.
+        self.interface_statistics = []
         super(SectionHeader, self).__init__(endianness=endianness, **kwargs)
 
     def _encode(self, outstream):
@@ -222,9 +233,38 @@ class SectionHeader(Block):
         self.interfaces[interface_id] = interface
 
     def add_interface_stats(self, interface_stats):
-        """Helper method to register interface stats within this section"""
+        """Register an Interface Statistics Block with this section.
+
+        A section may contain several Interface Statistics Blocks for the
+        same interface, each one a separate point-in-time observation. All
+        of them are retained (in file order) in
+        :attr:`interface_stats_history` and :attr:`interface_statistics`.
+
+        For backwards compatibility, :attr:`interface_stats` keeps mapping
+        each interface id to its *latest* statistics block -- later
+        observations overwrite earlier ones there, mirroring the historical
+        behavior. Use the history-based accessors when every observation is
+        needed.
+        """
         assert isinstance(interface_stats, InterfaceStatistics)
-        self.interface_stats[interface_stats.interface_id] = interface_stats
+        interface_id = interface_stats.interface_id
+        # Legacy behavior: only the most recent block is reachable here.
+        self.interface_stats[interface_id] = interface_stats
+        self.interface_stats_history.setdefault(interface_id, []).append(
+            interface_stats
+        )
+        self.interface_statistics.append(interface_stats)
+
+    def iter_interface_stats(self, interface_id=None):
+        """Iterate over Interface Statistics Blocks in file order.
+
+        :param interface_id:
+            when given, only observations for this interface are yielded;
+            otherwise every observation in the section is yielded.
+        """
+        if interface_id is None:
+            return iter(self.interface_statistics)
+        return iter(self.interface_stats_history.get(interface_id, []))
 
     @property
     def version(self):
@@ -315,8 +355,24 @@ class InterfaceDescription(SectionMemberBlock):
 
     @property
     def statistics(self):
-        # todo: ensure we always have an interface id -> how??
+        # Legacy convenience property: the *latest* Interface Statistics
+        # Block for this interface, or ``None`` if there is none. When the
+        # capture contains several observations for the interface, earlier
+        # ones are not reachable through this property -- use
+        # :attr:`statistics_history` instead.
         return self.section.interface_stats.get(self.interface_id)
+
+    @property
+    def statistics_history(self):
+        """Every Interface Statistics Block for this interface.
+
+        Returns a list in file (observation) order. It is empty when the
+        interface has no statistics blocks. Unlike :attr:`statistics`, an
+        early observation is never replaced by a later one.
+        """
+        return list(
+            self.section.interface_stats_history.get(self.interface_id, [])
+        )
 
     @property
     def link_type_description(self):
