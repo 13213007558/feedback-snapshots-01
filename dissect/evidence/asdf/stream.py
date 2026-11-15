@@ -7,6 +7,39 @@ from typing import BinaryIO
 from zlib import compressobj, crc32
 
 
+def _write_all(fh: BinaryIO, b: bytes) -> int:
+    """Write all of ``b`` to ``fh``, retrying on short writes.
+
+    File-like objects are allowed to accept fewer bytes than offered. Callers
+    such as ``shutil.copyfileobj`` and cstruct ignore the return value of
+    ``write``, so a short write would silently truncate the snapshot. This
+    helper keeps writing until every byte is accepted or the underlying object
+    raises.
+
+    Args:
+        fh: The file-like object to write to.
+        b: The bytes to write.
+
+    Returns:
+        The amount of bytes written, which is always ``len(b)``.
+    """
+    view = memoryview(b)
+    total = 0
+    if not view:
+        return total
+    while view:
+        written = fh.write(view)
+        if written is None:
+            # Buffered file objects may return None, in which case we cannot
+            # tell how many bytes were accepted and cannot safely retry.
+            written = len(view)
+        elif written <= 0:
+            raise OSError("write failed, no bytes were accepted")
+        total += written
+        view = view[written:]
+    return total
+
+
 class SubStreamBase(io.RawIOBase):
     """Convenience class for easy sub stream subclassing.
 
@@ -20,7 +53,7 @@ class SubStreamBase(io.RawIOBase):
         self.fh = fh
 
     def write(self, b: bytes) -> int:
-        return self.fh.write(b)
+        return _write_all(self.fh, b)
 
     def tell(self) -> int:
         return self.fh.tell()
@@ -51,8 +84,23 @@ class Crc32Stream(SubStreamBase):
         self.crc = 0
 
     def write(self, b: bytes) -> int:
-        self.crc = crc32(b, self.crc) & 0xFFFFFFFF
-        return self.fh.write(b)
+        # Only fold the bytes that the underlying file actually accepts into
+        # the checksum, retrying the remainder on short writes.
+        view = memoryview(b)
+        total = 0
+        if not view:
+            return total
+        while view:
+            written = self.fh.write(view)
+            if written is None:
+                written = len(view)
+            elif written <= 0:
+                raise OSError("write failed, no bytes were accepted")
+            accepted = view[:written]
+            self.crc = crc32(accepted, self.crc) & 0xFFFFFFFF
+            total += written
+            view = view[written:]
+        return total
 
     def digest(self) -> bytes:
         return struct.pack("<I", self.crc)
@@ -77,8 +125,22 @@ class HashedStream(SubStreamBase):
         self.ctx = hashlib.new(alg)
 
     def write(self, b: bytes) -> int:
-        self.ctx.update(b)
-        return self.fh.write(b)
+        # Only hash the bytes that the underlying file actually accepts,
+        # retrying the remainder on short writes.
+        view = memoryview(b)
+        total = 0
+        if not view:
+            return total
+        while view:
+            written = self.fh.write(view)
+            if written is None:
+                written = len(view)
+            elif written <= 0:
+                raise OSError("write failed, no bytes were accepted")
+            self.ctx.update(view[:written])
+            total += written
+            view = view[written:]
+        return total
 
     def digest(self) -> bytes:
         return self.ctx.digest()
@@ -105,8 +167,15 @@ class CompressedStream(SubStreamBase):
         self.cobj = compressobj()
 
     def write(self, b: bytes) -> int:
-        return self.fh.write(self.cobj.compress(b))
+        if not b:
+            return 0
+        compressed = self.cobj.compress(b)
+        if compressed:
+            self.fh.write(compressed)
+        return len(b)
 
     def finalize(self) -> None:
-        self.fh.write(self.cobj.flush())
+        tail = self.cobj.flush()
+        if tail:
+            self.fh.write(tail)
         super().finalize()

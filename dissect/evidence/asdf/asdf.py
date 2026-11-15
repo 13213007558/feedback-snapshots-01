@@ -86,6 +86,15 @@ class AsdfWriter(io.RawIOBase):
         self._meta_buf = io.BytesIO()
         self._meta_tar = tarfile.open(fileobj=self._meta_buf, mode="w")  # noqa: SIM115
 
+        # Finalization state. A failed writer can never become successful:
+        # the first error is remembered and re-raised on every subsequent
+        # close, while each finalization step runs at most once.
+        self._meta_written = False
+        self._table_written = False
+        self._footer_written = False
+        self._closed = False
+        self._close_error: Exception | None = None
+
         self._write_header()
 
     def add_metadata_file(self, path: str, fh: BinaryIO, size: int | None = None) -> None:
@@ -200,14 +209,35 @@ class AsdfWriter(io.RawIOBase):
     def close(self) -> None:
         """Close the ASDF file.
 
-        Writes the block table and footer, then closes the destination file-like object.
+        Writes the metadata, block table and footer in that order, then closes
+        the destination file-like object. The footer is the last thing written,
+        so a failure in any earlier step leaves a file without a valid footer
+        that can only be opened in recovery mode.
+
+        A failed close is sticky: the original error is re-raised on every
+        subsequent call and the destination file-like object is left open so
+        the caller can still inspect or copy the partial data. A successful
+        close is idempotent.
         """
-        super().close()
-        self._write_meta()
-        if self._table:
+        if self._closed:
+            return
+
+        if self._close_error is not None:
+            raise self._close_error
+
+        try:
+            self._write_meta()
             self._write_table()
-        self._write_footer()
-        self.fh.close()
+            self._write_footer()
+            self.fh.close()
+        except Exception as e:
+            # Remember the failure. Do not close the underlying file so the
+            # caller retains the partial snapshot and any diagnostics.
+            self._close_error = e
+            raise
+
+        self._closed = True
+        super().close()
 
     def _write_header(self) -> None:
         """Write the ASDF header to the destination file-like object."""
@@ -262,21 +292,31 @@ class AsdfWriter(io.RawIOBase):
             offset=absolute_offset,
             size=size,
         )
-        block.write(self.fh)
-        data_offset = self.fh.tell()  # Block data location
+        try:
+            block.write(self.fh)
+            data_offset = self.fh.tell()  # Block data location
 
-        source_stream = RangeStream(source, offset, size)
-        shutil.copyfileobj(source_stream, outfh)
-        # This writes any remaining data or footer for each block writer
-        outfh.finalize()
+            source_stream = RangeStream(source, offset, size)
+            shutil.copyfileobj(source_stream, outfh)
+            # This writes any remaining data or footer for each block writer
+            outfh.finalize()
 
-        data_size = self.fh.tell() - data_offset
+            data_size = self.fh.tell() - data_offset
+        except Exception as e:
+            # A partially written block can never result in a complete
+            # snapshot: poison the writer so a later close keeps failing.
+            self._close_error = e
+            raise
 
         lookup_table.insert(table_idx, absolute_offset)
         entry_table.insert(table_idx, (flags, idx, absolute_offset, size, block_offset, data_size))
 
     def _write_meta(self) -> None:
         """Write the metadata tar to the destination file-like object."""
+        if self._meta_written:
+            return
+        self._meta_written = True
+
         self._meta_tar.close()
 
         size = self._meta_buf.tell()
@@ -285,6 +325,10 @@ class AsdfWriter(io.RawIOBase):
 
     def _write_table(self) -> None:
         """Write the ASDF block table to the destination file-like object."""
+        if self._table_written:
+            return
+        self._table_written = True
+
         self._table_offset = self.fh.tell()
         for stream_table in self._table.values():
             for flags, idx, offset, size, file_offset, file_size in stream_table:
@@ -300,6 +344,10 @@ class AsdfWriter(io.RawIOBase):
 
     def _write_footer(self) -> None:
         """Write the ASDF footer to the destination file-like object."""
+        if self._footer_written:
+            return
+        self._footer_written = True
+
         footer = c_asdf.footer(
             magic=FOOTER_MAGIC,
             table_offset=self._table_offset,
@@ -430,7 +478,12 @@ class Metadata:
     def __init__(self, asdf: AsdfSnapshot):
         self.tar = None
         if IDX_METADATA in asdf.table:
-            self.tar = tarfile.open(fileobj=asdf.open(IDX_METADATA), mode="r")  # noqa: SIM115
+            try:
+                self.tar = tarfile.open(fileobj=asdf.open(IDX_METADATA), mode="r")  # noqa: SIM115
+            except tarfile.TarError:
+                # A recovered snapshot may contain a truncated metadata block.
+                # Keep the snapshot usable instead of failing the whole open.
+                self.tar = None
 
     def names(self) -> list[str]:
         """Return all metadata file entries."""
