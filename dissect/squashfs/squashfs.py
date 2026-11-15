@@ -17,6 +17,7 @@ from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
 from dissect.squashfs.exceptions import (
     FileNotFoundError,
+    MetadataError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
@@ -124,29 +125,58 @@ class SquashFS:
         return c_squashfs.uint64[num_blocks](self.fh)
 
     def _read_metadata(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
+        if length < 0:
+            raise MetadataError("negative metadata length", block, offset)
+
         result = []
         while length:
-            next_block, data = self._read_block(block)
-            remaining = len(data) - offset
+            if offset < 0:
+                raise MetadataError("negative metadata offset", block, offset)
 
-            if remaining <= length:
-                result.append(data[offset:])
-                length -= remaining
-                block = next_block
-                offset = 0
-            else:
+            try:
+                next_block, data = self._read_block(block)
+            except MetadataError:
+                raise
+            except Exception as e:
+                raise MetadataError("unable to read metadata block", block, offset) from e
+
+            if not data:
+                raise MetadataError("empty metadata block", block, offset)
+
+            if offset > len(data):
+                # Never continue in the next block when the requested offset is outside this one;
+                # that would make it possible to assemble a record from unrelated data.
+                raise MetadataError("metadata offset outside block", block, offset)
+
+            remaining = len(data) - offset
+            if remaining >= length:
                 result.append(data[offset : offset + length])
                 offset += length
+
+                if offset == len(data):
+                    # The record ends exactly at the end of this block. Continue in the next
+                    # physical block, but only if the chain actually moves forward.
+                    if next_block <= block:
+                        raise MetadataError("metadata chain does not advance", block, offset)
+
+                    block = next_block
+                    offset = 0
                 break
+
+            result.append(data[offset:])
+            length -= remaining
+
+            if next_block <= block:
+                raise MetadataError("metadata chain does not advance", block, len(data))
+
+            block = next_block
+            offset = 0
 
         return block, offset, b"".join(result)
 
     def _read_block(self, block: int, length: int | None = None) -> tuple[int, bytes]:
-        if length is not None:
-            # Data block
-            compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK == 0
-            length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
-        else:
+        metadata = length is None
+        if metadata:
             # Metadata block
             self.fh.seek(block)
             length = c_squashfs.uint16(self.fh)
@@ -155,8 +185,18 @@ class SquashFS:
             length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT
             block += 2
 
+            if length > c_squashfs.SQUASHFS_METADATA_SIZE:
+                raise ValueError(f"Metadata block {block - 2} is too large: {length}")
+        else:
+            # Data block
+            compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK == 0
+            length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
+
         self.fh.seek(block)
         data = self.fh.read(length)
+
+        if metadata and len(data) != length:
+            raise EOFError(f"Short read of metadata block {block - 2}: expected {length} bytes, got {len(data)}")
 
         if not compressed:
             return block + length, data
@@ -164,7 +204,17 @@ class SquashFS:
         if self._compression is None:
             raise RuntimeError(f"Tried to read compressed block {block} but no compression initialized")
 
-        return block + length, self._compression.decompress(data, self.block_size)
+        # Metadata frames always decompress to at most SQUASHFS_METADATA_SIZE bytes, independent
+        # of the filesystem block size. Some backends (e.g. LZ4) truncate to the expected size.
+        expected = c_squashfs.SQUASHFS_METADATA_SIZE if metadata else self.block_size
+        data = self._compression.decompress(data, expected)
+
+        if metadata and len(data) > c_squashfs.SQUASHFS_METADATA_SIZE:
+            raise ValueError(
+                f"Decompressed metadata block {block} is too large: {len(data)} > {c_squashfs.SQUASHFS_METADATA_SIZE}"
+            )
+
+        return block + length, data
 
     def _read_fragment(self, fragment: int, offset: int, length: int) -> bytes:
         entry = self._lookup_fragment(fragment)
