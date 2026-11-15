@@ -1,0 +1,17 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Internal-Security-Provider" guid="{f1f1f1f1-6666-7777-8888-999999999999}" symbol="InternalSecurityProvider" source="Xml">
+    <templates>
+     <template tid="RuntimeOddWcharArgs">
+      <data name="NameByteLength" inType="win:UInt16"/>
+      <data name="Name" inType="win:UnicodeString" length="NameByteLength"/>
+     </template>
+    </templates>
+    <events>
+     <event value="1" symbol="RuntimeOddWcharEvent" version="0" level="win:Informational" template="RuntimeOddWcharArgs"/>
+    </events>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

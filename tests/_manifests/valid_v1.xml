@@ -1,0 +1,22 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Internal-Security-Provider" guid="{aaaaaaaa-1111-1111-1111-111111111111}" symbol="InternalSecurityProvider" source="Xml">
+    <templates>
+     <template tid="SecurityEventV1Args">
+      <data name="IdCount" inType="win:UInt32"/>
+      <data name="Ids" inType="win:UInt32" count="IdCount"/>
+      <data name="NameByteLength" inType="win:UInt16"/>
+      <data name="Name" inType="win:UnicodeString" length="NameByteLength"/>
+      <data name="BlobLength" inType="win:UInt32"/>
+      <data name="Blob" inType="win:Binary" length="BlobLength"/>
+      <data name="Trailer" inType="win:UInt32"/>
+     </template>
+    </templates>
+    <events>
+     <event value="1" symbol="SecurityEventV1" version="1" level="win:Informational" template="SecurityEventV1Args"/>
+    </events>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

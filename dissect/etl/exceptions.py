@@ -25,6 +25,14 @@ class ManifestNotFoundError(Error):
     pass
 
 
+class InvalidTemplateError(Error):
+    """Raised when a manifest template declares an invalid count or length relationship."""
+
+
+class InvalidPayloadError(Error):
+    """Raised when an event payload does not satisfy the count or length declarations of its template."""
+
+
 class ExtendedDataItemException(Error):
     pass
 

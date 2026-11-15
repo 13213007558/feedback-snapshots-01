@@ -1,0 +1,17 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Internal-Security-Provider" guid="{a2a2a2a2-7777-8888-9999-aaaaaaaaaaaa}" symbol="InternalSecurityProvider" source="Xml">
+    <templates>
+     <template tid="CyclicArgs">
+      <data name="First" inType="win:UInt8" count="Second"/>
+      <data name="Second" inType="win:UInt8" count="First"/>
+     </template>
+    </templates>
+    <events>
+     <event value="1" symbol="CyclicEvent" version="0" level="win:Informational" template="CyclicArgs"/>
+    </events>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

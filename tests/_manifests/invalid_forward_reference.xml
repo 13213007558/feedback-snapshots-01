@@ -1,0 +1,17 @@
+<instrumentationManifest xmlns="http://schemas.microsoft.com/win/2004/08/events">
+ <instrumentation xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events">
+  <events>
+   <provider name="Internal-Security-Provider" guid="{cccccccc-3333-3333-3333-333333333333}" symbol="InternalSecurityProvider" source="Xml">
+    <templates>
+     <template tid="ForwardReferenceArgs">
+      <data name="Ids" inType="win:UInt32" count="IdCount"/>
+      <data name="IdCount" inType="win:UInt32"/>
+     </template>
+    </templates>
+    <events>
+     <event value="1" symbol="ForwardReferenceEvent" version="0" level="win:Informational" template="ForwardReferenceArgs"/>
+    </events>
+   </provider>
+  </events>
+ </instrumentation>
+</instrumentationManifest>

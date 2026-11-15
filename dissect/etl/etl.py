@@ -31,11 +31,13 @@ from dissect.etl.c_etl import BufferFlag, c_etl
 from dissect.etl.exceptions import (
     InvalidBufferError,
     InvalidHeaderError,
+    InvalidPayloadError,
     ManifestNotFoundError,
     NoMoreEventsError,
 )
 from dissect.etl.headers.logfile import LogfileHeader
 from dissect.etl.headers.utils import select_event_header
+from dissect.etl.manifest import FieldDeclaration, validate_payload
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -240,11 +242,39 @@ class Event:
         if event_manifest:
             try:
                 self._event = event_manifest.EVENTS[key]
-                self._struct = self._event.template(header.payload)
+                self._validate_template(event_manifest, header)
+                try:
+                    self._struct = self._event.template(header.payload)
+                except (EOFError, ValueError, OverflowError) as e:
+                    raise InvalidPayloadError(
+                        f"{self._event_label(event_manifest)}: payload could not be decoded: {e}"
+                    ) from e
             except KeyError:
                 self._struct = None
         else:
             self._struct = None
+
+    def _event_label(self, event_manifest: ModuleType) -> str:
+        template_name = self._event.template.__name__
+        return (
+            f"event symbol={self._event.symbol!r} value={self._event.value} version={self._event.version} "
+            f"template={template_name!r} provider={event_manifest.PROVIDER_NAME!r}"
+        )
+
+    def _validate_template(self, event_manifest: ModuleType, header: Header) -> None:
+        """Validate count/length declarations against the payload before cstruct decodes it."""
+        template_name = self._event.template.__name__
+        declarations: list[FieldDeclaration] = event_manifest.TEMPLATE_FIELDS.get(template_name, [])
+        if not declarations:
+            return
+
+        validate_payload(
+            self._event.template,
+            declarations,
+            header.payload,
+            header._etl.pointer_size,
+            self._event_label(event_manifest),
+        )
 
     def __getattr__(self, attribute: str) -> Any:
         try:
@@ -274,7 +304,7 @@ class Event:
         The event data is from a specific manifest file if it exists.
         """
         event_values = self._header.additional_header_fields()
-        struct_events = self._struct._values if self._struct else {}
+        struct_events = self._struct.__values__ if self._struct else {}
 
         # Pretty print Instance values.
         update_event = {}
