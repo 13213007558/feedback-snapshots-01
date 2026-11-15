@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 import unicodedata
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
@@ -14,7 +15,17 @@ from dissect.util.ts import from_unix, from_unix_ns
 
 from dissect.apfs.c_apfs import FILESYSTEM_OBJECT_TYPE_MAP, XF_MAP, c_apfs
 from dissect.apfs.cursor import Cursor
-from dissect.apfs.exception import Error, FileNotFoundError, NotADirectoryError, NotASymlinkError
+from dissect.apfs.exception import (
+    EncryptionError,
+    Error,
+    FileNotFoundError,
+    NotADirectoryError,
+    NotASymlinkError,
+    UnsupportedEncryptionError,
+    UnsupportedKeyGenerationError,
+    VolumeLockedError,
+    VolumeMismatchError,
+)
 from dissect.apfs.objects.base import Object
 from dissect.apfs.objects.btree import BTree
 from dissect.apfs.objects.omap import ObjectMap
@@ -25,8 +36,181 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
 
+    from dissect.fve.crypto import Cipher
+
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
+
+
+@dataclass(frozen=True)
+class CryptoState:
+    """The volume metadata crypto state that determines which key generation is in use.
+
+    APFS records this state in every ``apfs_superblock``, including the ones stored for snapshots.
+    A snapshot is only decryptable with the same key generation as the volume it belongs to, so this
+    state is captured in a :class:`VolumeKeyContext` and compared when opening a snapshot.
+    """
+
+    major_version: int
+    minor_version: int
+    cpflags: int
+    persistent_class: int
+    key_os_version: int
+    key_revision: int
+
+    @classmethod
+    def from_superblock(cls, sb: c_apfs.apfs_superblock) -> CryptoState:
+        """Capture the crypto state of an ``apfs_superblock``."""
+        crypto = sb.apfs_meta_crypto
+        return cls(
+            major_version=crypto.major_version,
+            minor_version=crypto.minor_version,
+            cpflags=crypto.cpflags,
+            persistent_class=crypto.persistent_class,
+            key_os_version=crypto.key_os_version,
+            key_revision=crypto.key_revision,
+        )
+
+    @property
+    def key_generation(self) -> tuple[int, int, int, int, int]:
+        """The fields that define the key generation of this crypto state.
+
+        ``key_os_version`` is informational about the OS that wrote the metadata and is not part of
+        the key identity: it may differ between a volume and its snapshots while both still use the
+        same key.
+        """
+        return (
+            self.major_version,
+            self.minor_version,
+            self.cpflags,
+            self.persistent_class,
+            self.key_revision,
+        )
+
+    def is_supported(self) -> bool:
+        """Whether this module can use the key generation described by this crypto state."""
+        # Key revisions are the mechanism APFS uses to roll volume keys, and non-zero crypto flags
+        # signal an in-progress key roll. We only understand the initial revision of the metadata
+        # crypto scheme that the supported encrypted volumes use.
+        return (
+            self.major_version == 5
+            and self.minor_version == 0
+            and self.cpflags == 0
+            and self.key_revision == 1
+        )
+
+
+class VolumeKeyContext:
+    """A verified volume encryption context, bound to one volume identity.
+
+    A context is created when a volume is unlocked and only wraps the derived volume encryption key
+    and the identity it was derived for. It intentionally does not hold any filesystem tree,
+    object map or transaction state: those are per volume and, for snapshots, per snapshot transaction.
+
+    Args:
+        uuid: The UUID of the volume the key was derived for.
+        vek: The unwrapped volume encryption key.
+        crypto_state: The crypto state of the volume the key was unlocked with.
+        keybag_uuid: The UUID of the VEK record the key was unwrapped from.
+        container_uuid: The UUID of the container the volume belongs to.
+    """
+
+    __slots__ = ("_cipher", "_container_uuid", "_crypto_state", "_keybag_uuid", "_uuid")
+
+    def __init__(
+        self,
+        uuid: UUID,
+        vek: bytes,
+        crypto_state: CryptoState,
+        keybag_uuid: UUID | None = None,
+        container_uuid: UUID | None = None,
+    ):
+        self._uuid = uuid
+        self._container_uuid = container_uuid
+        self._keybag_uuid = keybag_uuid
+        self._crypto_state = crypto_state
+        self._cipher = create_cipher("aes-xts-128", vek)
+
+    def __repr__(self) -> str:
+        return f"<VolumeKeyContext uuid={self._uuid} key_revision={self._crypto_state.key_revision}>"
+
+    @property
+    def uuid(self) -> UUID:
+        """The UUID of the volume this context belongs to."""
+        return self._uuid
+
+    @property
+    def crypto_state(self) -> CryptoState:
+        """The crypto state of the volume this context belongs to."""
+        return self._crypto_state
+
+    @property
+    def keybag_uuid(self) -> UUID | None:
+        """The UUID of the keybag record this context was derived from, if known."""
+        return self._keybag_uuid
+
+    @property
+    def container_uuid(self) -> UUID | None:
+        """The UUID of the container this context was derived in, if known."""
+        return self._container_uuid
+
+    @property
+    def cipher(self) -> Cipher:
+        """The cipher for this volume."""
+        return self._cipher
+
+    def apply_to(self, fs: FS) -> None:
+        """Attach this context to a filesystem object after verifying the volume identity.
+
+        Args:
+            fs: The volume or snapshot filesystem to attach the context to.
+
+        Raises:
+            VolumeMismatchError: If the context belongs to a different volume.
+            UnsupportedKeyGenerationError: If the filesystem requires a different key generation.
+        """
+        self.validate(fs)
+
+        fs._cipher = self._cipher
+        fs._key_context = self
+
+    def validate(self, fs: FS) -> None:
+        """Verify that this context may be used for a filesystem object.
+
+        Args:
+            fs: The volume or snapshot filesystem to validate against.
+
+        Raises:
+            VolumeMismatchError: If the context belongs to a different volume.
+            UnsupportedKeyGenerationError: If the filesystem requires a different key generation.
+        """
+        if fs.uuid != self._uuid:
+            raise VolumeMismatchError(
+                f"Encryption context for volume {self._uuid} can not be used for volume {fs.uuid}"
+            )
+
+        if self._container_uuid is not None and fs.container.uuid != self._container_uuid:
+            raise VolumeMismatchError(
+                f"Encryption context for container {self._container_uuid} can not be used in "
+                f"container {fs.container.uuid}"
+            )
+
+        crypto_state = fs.crypto_state
+        if crypto_state.key_generation != self._crypto_state.key_generation:
+            raise UnsupportedKeyGenerationError(
+                f"Encryption context for key generation {self._crypto_state.key_generation} can not be "
+                f"used for volume {fs.uuid} with key generation {crypto_state.key_generation}"
+            )
+
+        if not crypto_state.is_supported():
+            raise UnsupportedKeyGenerationError(
+                f"Volume {fs.uuid} uses unsupported key generation {crypto_state}"
+            )
+
+        if not fs.is_onekey:
+            raise UnsupportedEncryptionError(
+                f"Volume {fs.uuid} uses multi-key encryption, which is not supported"
+            )
 
 
 class FS(Object):
@@ -46,6 +230,11 @@ class FS(Object):
             )
 
         self._cipher = None
+        self._crypto_state = None
+        self._key_context = None
+        # Transaction used to resolve virtual objects (like the root tree) through the volume OMAP.
+        # Snapshots must resolve their trees using their own transaction, not the live volume's.
+        self._tree_xid = None
 
         self.inode = lru_cache(4096)(self.inode)
         self._cursor_state = lru_cache(128)(self._cursor_state)
@@ -95,25 +284,83 @@ class FS(Object):
         """The object map for the filesystem."""
         return ObjectMap.from_address(self.container, self.object.apfs_omap_oid)
 
+    @property
+    def tree_xid(self) -> int:
+        """The transaction ID used to resolve this filesystem's virtual objects.
+
+        For a live volume this is the transaction of its superblock. Snapshots override this with
+        the transaction the snapshot was taken at, so their trees are resolved at that point in
+        time instead of resolving to the current version of the volume.
+        """
+        return self.xid if self._tree_xid is None else self._tree_xid
+
+    @property
+    def crypto_state(self) -> CryptoState:
+        """The crypto state recorded in this filesystem's superblock."""
+        if self._crypto_state is None:
+            self._crypto_state = CryptoState.from_superblock(self.object)
+        return self._crypto_state
+
+    @property
+    def key_context(self) -> VolumeKeyContext | None:
+        """The encryption context this filesystem was opened with, if any."""
+        return self._key_context
+
+    def require_cipher(self) -> Cipher | None:
+        """Return the cipher needed to read this filesystem's metadata and file data.
+
+        Raises:
+            VolumeLockedError: If the filesystem is encrypted and no unlock context was applied.
+            UnsupportedKeyGenerationError: If the volume uses an unsupported key generation.
+            UnsupportedEncryptionError: If the encryption mode is not supported.
+        """
+        if not self.is_encrypted:
+            return self._cipher
+
+        if self._cipher is None:
+            raise VolumeLockedError(f"Volume {self.uuid} is encrypted, unlock it first")
+
+        if not self.crypto_state.is_supported():
+            raise UnsupportedKeyGenerationError(
+                f"Volume {self.uuid} uses an unsupported key generation {self.crypto_state}"
+            )
+
+        if not self.is_onekey:
+            raise UnsupportedEncryptionError(
+                f"Volume {self.uuid} uses multi-key encryption, which is not supported"
+            )
+
+        return self._cipher
+
     @cached_property
     def root_tree(self) -> BTree:
         """The root B-tree for the filesystem."""
-        if self.is_encrypted and self._cipher is None:
-            raise Error("Volume is encrypted, unlock volume first")
-
         return BTree.from_address(
             self.container,
-            self.omap.lookup(self.object.apfs_root_tree_oid, self.xid),
-            cipher=self._cipher,
+            self.omap.lookup(self.object.apfs_root_tree_oid, self.tree_xid),
+            cipher=self.require_cipher(),
         )
 
     @cached_property
     def snap_meta_tree(self) -> BTree:
         """The snapshot metadata B-tree for the filesystem."""
-        return BTree.from_address(
+        if self.object.apfs_snap_meta_tree_oid == 0:
+            raise Error(f"Volume {self.uuid} has no snapshot metadata tree")
+
+        # The snapshot metadata tree is a physical object without an object map record. It is only
+        # encrypted when the volume metadata is encrypted, so only require an unlock context then.
+        tree = BTree.from_address(
             self.container,
             self.object.apfs_snap_meta_tree_oid,
+            cipher=self._cipher,
         )
+
+        if self._cipher is None and self.is_encrypted:
+            node_type = tree.root.header.o_type
+            if node_type & c_apfs.OBJECT_TYPE_MASK != c_apfs.OBJECT_TYPE_BTREE:
+                raise VolumeLockedError(f"Volume {self.uuid} is encrypted, unlock it first")
+
+        return tree
 
     @cached_property
     def uuid(self) -> UUID:
@@ -205,6 +452,7 @@ class FS(Object):
         return BTree.from_address(
             self.container,
             self.object.apfs_fext_tree_oid,
+            cipher=self.require_cipher(),
         )
 
     @cached_property
@@ -221,9 +469,25 @@ class FS(Object):
         return self.keybag.password_hint(self.object.apfs_vol_uuid)
 
     def unlock(self, password: str, uuid: UUID | str | None = None) -> None:
-        if (vek := self.container.keybag.vek(self.object.apfs_vol_uuid)) is None:
+        """Unlock this volume and remember the verified key as a :class:`VolumeKeyContext`.
+
+        The resulting context can be used to read this volume and its snapshots, but nothing else.
+        It does not carry filesystem trees, object maps or transaction state.
+
+        Args:
+            password: The password to unlock the volume with.
+            uuid: Optionally, the UUID of the KEK to use.
+        """
+        if (keybag := self.container.keybag) is None:
+            raise Error(f"Volume {self.uuid} has no container keybag")
+
+        if (vek := keybag.vek(self.object.apfs_vol_uuid)) is None:
             raise Error("No VEK found for this volume")
 
+        if not vek.verify():
+            raise Error(f"VEK for volume {self.uuid} failed verification")
+
+        unlocked = False
         for kek in self.keybag.keks():
             if uuid is not None and str(kek.uuid) != str(uuid):
                 continue
@@ -232,19 +496,51 @@ class FS(Object):
                 continue
 
             try:
-                vek = vek.unwrap(kek.unwrap(password))
+                unwrapped = vek.unwrap(kek.unwrap(password))
             except Exception:
                 continue
             else:
-                self._cipher = create_cipher("aes-xts-128", vek)
+                self.apply_key_context(
+                    VolumeKeyContext(
+                        self.uuid,
+                        unwrapped,
+                        self.crypto_state,
+                        keybag_uuid=vek.uuid,
+                        container_uuid=self.container.uuid,
+                    )
+                )
+                unlocked = True
                 break
 
-        if self._cipher is None:
+        if not unlocked:
             raise Error("Failed to unlock volume with the given password")
+
+    def apply_key_context(self, context: VolumeKeyContext) -> None:
+        """Apply a verified encryption context to this filesystem.
+
+        The context is validated against this filesystem's volume identity and crypto state before
+        it is applied.
+
+        Args:
+            context: The encryption context to apply.
+
+        Raises:
+            VolumeMismatchError: If the context belongs to a different volume.
+            UnsupportedKeyGenerationError: If the filesystem requires a different key generation.
+        """
+        if self.is_unencrypted:
+            raise VolumeMismatchError(f"Volume {self.uuid} is not encrypted, refusing an encryption context")
+
+        context.apply_to(self)
 
     def cursor(self) -> Cursor:
         """Create a new cursor for the volume's root B-tree."""
-        return Cursor(self.root_tree, self.omap, self.object.apfs_root_tree_oid if self.is_sealed else 0, self.xid)
+        return Cursor(
+            self.root_tree,
+            self.omap,
+            self.object.apfs_root_tree_oid if self.is_sealed else 0,
+            self.tree_xid,
+        )
 
     def _cursor_state(self, oid: int) -> tuple[BTreeNode, int, list[tuple[BTreeNode, int]]]:
         """Precompute the cursor state for a given object ID.
@@ -388,14 +684,91 @@ class Snapshot:
         """The name of the snapshot."""
         return self.value.name.decode().rstrip("\x00")
 
-    def open(self) -> FS:
-        """Open the snapshot as a filesystem."""
-        fs = FS.from_address(
-            self.fs.container,
+    def open(self, key_context: VolumeKeyContext | None = None) -> FS:
+        """Open the snapshot as a filesystem.
+
+        The snapshot is read at the transaction it was taken at, using the volume's object map.
+        For encrypted volumes the unlock context of the parent volume is inherited, because a
+        snapshot shares the volume identity and key generation of the volume it belongs to.
+
+        All state needed to read the snapshot is validated before this method returns, so a
+        snapshot that can not be decrypted never produces a partially readable filesystem.
+
+        Args:
+            key_context: Optionally, an explicit encryption context to use. This is validated
+                against the volume identity and crypto state of both the parent volume and the
+                snapshot before it is used.
+
+        Raises:
+            VolumeLockedError: If the volume is encrypted and neither the parent volume nor an
+                explicit context provides a key.
+            VolumeMismatchError: If an explicit context belongs to another volume, or the snapshot
+                does not belong to the volume it was found in.
+            UnsupportedKeyGenerationError: If the snapshot requires a key generation that is not
+                supported, or does not match the context.
+            UnsupportedEncryptionError: If the volume uses an unsupported encryption mode.
+        """
+        parent = self.fs
+
+        if key_context is not None:
+            if parent.is_encrypted:
+                # Validate against the parent volume first so a context for the wrong volume or
+                # the wrong key generation never reaches the snapshot. Validation does not unlock
+                # the parent: the context only applies where it is explicitly used.
+                key_context.validate(parent)
+            else:
+                raise VolumeMismatchError(
+                    f"Volume {parent.uuid} is not encrypted, refusing an encryption context"
+                )
+        elif parent.is_encrypted:
+            if parent.key_context is None:
+                raise VolumeLockedError(
+                    f"Volume {parent.uuid} is encrypted, unlock it before opening snapshot {self.name!r}"
+                )
+            key_context = parent.key_context
+
+        snap_fs = FS.from_address(
+            parent.container,
             self.value.sblock_oid,
         )
-        fs.omap = self.fs.omap
-        return fs
+
+        if not snap_fs.is_valid() or snap_fs.type != c_apfs.OBJECT_TYPE.FS:
+            raise Error(
+                f"Snapshot {self.name!r} has an invalid superblock at {self.value.sblock_oid:#x}"
+            )
+
+        if snap_fs.uuid != parent.uuid:
+            raise VolumeMismatchError(
+                f"Snapshot {self.name!r} belongs to volume {snap_fs.uuid}, "
+                f"not to the volume it was found in ({parent.uuid})"
+            )
+
+        # A snapshot superblock does not carry its own object map, so share the volume's object map.
+        # This is the only piece of parent state a snapshot needs; all lookups use the snapshot's
+        # own transaction.
+        snap_fs.__dict__["omap"] = parent.omap
+
+        # Resolve the snapshot's virtual objects at the transaction the snapshot was taken at.
+        snap_fs._tree_xid = self.xid
+
+        if key_context is not None:
+            snap_fs.apply_key_context(key_context)
+        elif snap_fs.is_encrypted:
+            raise VolumeLockedError(
+                f"Snapshot {self.name!r} of volume {snap_fs.uuid} is encrypted, unlock it first"
+            )
+
+        # Resolve and validate the root tree now, so unsupported encryption or a bad transaction is
+        # reported here instead of on the first directory access.
+        if not snap_fs.root_tree.root.is_valid():
+            if snap_fs.is_encrypted:
+                raise EncryptionError(
+                    f"Snapshot {self.name!r} could not be decrypted with the given key context "
+                    f"(invalid root tree at xid {self.xid})"
+                )
+            raise Error(f"Snapshot {self.name!r} has an invalid root tree at xid {self.xid}")
+
+        return snap_fs
 
 
 class INode:

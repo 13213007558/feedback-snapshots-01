@@ -9,7 +9,7 @@ from dissect.util.stream import AlignedStream
 
 from dissect.apfs.c_apfs import c_apfs
 from dissect.apfs.cursor import Cursor
-from dissect.apfs.exception import Error
+from dissect.apfs.exception import Error, UnsupportedEncryptionError
 from dissect.apfs.util import cmp_fext, cmp_fs_extent
 
 if TYPE_CHECKING:
@@ -100,14 +100,15 @@ class FileStream(AlignedStream):
             block = self.volume.container._read_block(physical_address + block_in_extent, read_length // self.align)
 
             if self.volume.is_encrypted:
-                if not self.volume._cipher:
-                    raise Error("Volume is encrypted, unlock it first")
+                cipher = self.volume.require_cipher()
 
                 if self.volume.is_onekey:
                     sector = (crypto_id + block_in_extent) * self.volume.container.sectors_per_block
-                    block = self.volume._cipher.decrypt(block, sector)
+                    block = cipher.decrypt(block, sector)
                 else:
-                    raise Error("Multi-key encryption is not supported yet")
+                    raise UnsupportedEncryptionError(
+                        f"Volume {self.volume.uuid} uses multi-key encryption, which is not supported"
+                    )
 
             result.append(block)
             offset += read_length

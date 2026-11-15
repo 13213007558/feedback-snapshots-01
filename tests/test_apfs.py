@@ -9,6 +9,13 @@ import pytest
 
 from dissect.apfs.apfs import APFS, log
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.exception import (
+    EncryptionError,
+    UnsupportedKeyGenerationError,
+    VolumeLockedError,
+    VolumeMismatchError,
+)
+from dissect.apfs.objects.fs import VolumeKeyContext
 from tests.conftest import absolute_path
 
 if TYPE_CHECKING:
@@ -367,7 +374,118 @@ def test_snapshots() -> None:
 
         for i, snapshot in enumerate(volume.snapshots):
             assert snapshot.name == f"Snapshot {i}"
-            assert snapshot.open().get("file").open().read() == f"Snapshot {i}\n".encode()
+            snapshot_fs = snapshot.open()
+            assert snapshot_fs.tree_xid == snapshot.xid
+            assert snapshot_fs.get("file").open().read() == f"Snapshot {i}\n".encode()
+
+
+def test_encrypted_snapshots() -> None:
+    """Test opening snapshots of an encrypted volume.
+
+    The current volume and the snapshot have the same file path with different content, and both
+    must be read at their own transaction with their own content.
+    """
+    with gzip.open(absolute_path("_data/encrypted_snapshot.bin.gz"), "rb") as fh:
+        container = APFS(fh)
+        volume = container.volumes[0]
+
+        assert volume.is_encrypted
+        assert len(volume.snapshots) == 2
+
+        locked, unsupported = volume.snapshots
+
+        # Without unlocking the volume, no snapshot may be opened and no directory may leak out.
+        with pytest.raises(VolumeLockedError):
+            locked.open()
+        with pytest.raises(VolumeLockedError):
+            volume.get("dir/file")
+
+        volume.unlock("password")
+
+        current = volume.get("dir/file")
+        assert current.open().read() == b"\xef\xa3\xbf File System\n"
+
+        snapshot_fs = locked.open()
+        assert snapshot_fs.uuid == volume.uuid
+        assert snapshot_fs.tree_xid == locked.xid
+        assert snapshot_fs.key_context is volume.key_context
+        # The snapshot shares the volume object map, but resolves its own transaction.
+        assert snapshot_fs.omap is volume.omap
+        assert snapshot_fs.root_tree.address != volume.root_tree.address
+
+        snapshot_file = snapshot_fs.get("dir/file")
+        assert snapshot_file.oid == current.oid
+        assert snapshot_file.open().read() == b"Snapshot file content\n"
+
+        # Reading the live volume after opening the snapshot still returns the live content.
+        assert volume.get("dir/file").open().read() == b"\xef\xa3\xbf File System\n"
+
+        # A snapshot that requires a different key generation must fail instead of being opened.
+        with pytest.raises(UnsupportedKeyGenerationError):
+            unsupported.open()
+
+
+def test_snapshot_key_context_volume_mismatch() -> None:
+    """Test that a key context can only be used for the volume it was derived for."""
+    with gzip.open(absolute_path("_data/encrypted_snapshot.bin.gz"), "rb") as fh:
+        container = APFS(fh)
+        volume = container.volumes[0]
+        volume.unlock("password")
+
+        with gzip.open(absolute_path("_data/jhfs_encrypted.bin.gz"), "rb") as other_fh:
+            other_volume = APFS(other_fh).volumes[0]
+            other_volume.unlock("password")
+            other_context = other_volume.key_context
+            other_content = other_volume.get("dir/file").open().read()
+
+        snapshot = volume.snapshots[0]
+        with pytest.raises(VolumeMismatchError):
+            snapshot.open(key_context=other_context)
+
+        # A context for another volume must not have been applied to the snapshot or its parent.
+        assert volume.get("dir/file").open().read() == b"\xef\xa3\xbf File System\n"
+        assert other_content == b"\xef\xa3\xbf File System\n"
+
+        # A well-bound context with the wrong key fails eagerly, before any directory is returned.
+        wrong_key = VolumeKeyContext(volume.uuid, b"\x01" * 32, volume.crypto_state, container_uuid=container.uuid)
+        with pytest.raises(EncryptionError):
+            snapshot.open(key_context=wrong_key)
+
+        # The correct context still works.
+        assert snapshot.open().get("dir/file").open().read() == b"Snapshot file content\n"
+
+        # An explicit context is not silently applied to a parent that was never unlocked: the
+        # snapshot uses it, but the live volume still requires its own unlock.
+        with gzip.open(absolute_path("_data/encrypted_snapshot.bin.gz"), "rb") as fresh_fh:
+            fresh_volume = APFS(fresh_fh).volumes[0]
+            explicit = fresh_volume.snapshots[0].open(key_context=volume.key_context)
+            assert explicit.get("dir/file").open().read() == b"Snapshot file content\n"
+            with pytest.raises(VolumeLockedError):
+                fresh_volume.get("dir/file")
+
+
+def test_snapshot_key_context_unsupported_mode() -> None:
+    """Test that unsupported encryption states fail explicitly instead of partially opening."""
+    with gzip.open(absolute_path("_data/encrypted_snapshot.bin.gz"), "rb") as fh:
+        container = APFS(fh)
+        volume = container.volumes[0]
+        volume.unlock("password")
+
+        snapshot = volume.snapshots[0]
+        snapshot_fs = snapshot.open()
+
+        # Mutating the snapshot's crypto state out from under the context must be rejected when a
+        # new context is applied.
+        snapshot_fs._crypto_state = None
+        snapshot_fs.object.apfs_meta_crypto.key_revision = 2
+        with pytest.raises(UnsupportedKeyGenerationError):
+            snapshot_fs.apply_key_context(volume.key_context)
+
+        # An unencrypted volume refuses an encryption context instead of silently ignoring it.
+        with gzip.open(absolute_path("_data/snapshot.bin.gz"), "rb") as plain_fh:
+            plain_volume = APFS(plain_fh).volumes[0]
+            with pytest.raises(VolumeMismatchError):
+                plain_volume.apply_key_context(volume.key_context)
 
 
 def test_corrupt_checkpoints(caplog: pytest.LogCaptureFixture) -> None:
