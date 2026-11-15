@@ -345,6 +345,15 @@ class LinkTable:
             raise ValueError(f"Link name '{name}' not found in schema")
         return schema.link_id // 2
 
+    @staticmethod
+    def _is_active(record) -> bool:
+        """Return whether a link record is active.
+
+        Deleted (``link_deltime``) and deactivated (``link_deactivetime``) links remain in the
+        ``link_table`` until garbage collection, but are excluded from the active link indexes.
+        """
+        return not record.get("link_deltime") and not record.get("link_deactivetime")
+
     def _links(self, dnt: int, base: int | None = None) -> Iterator[tuple[int, Object]]:
         """Get all linked objects for a given Directory Number Tag (DNT).
 
@@ -363,7 +372,8 @@ class LinkTable:
             if base is not None and record.get("link_base") != base:
                 break
 
-            yield record.get("link_base"), self.db.data.get(dnt=record.get("backlink_DNT"))
+            if self._is_active(record):
+                yield record.get("link_base"), self.db.data.get(dnt=record.get("backlink_DNT"))
             record = cursor.next()
 
     def _has_link(self, link_dnt: int, base: int, backlink_dnt: int) -> bool:
@@ -376,12 +386,20 @@ class LinkTable:
         """
         cursor = self.table.index("link_index").cursor()
 
-        try:
-            cursor.search([link_dnt, base, backlink_dnt])
-        except KeyNotFoundError:
+        # The link_index key includes link_data as its last segment, so an exact search on
+        # (link_dnt, base, backlink_dnt) alone never matches. Seek to the key prefix instead.
+        cursor.seek([link_dnt, base, backlink_dnt])
+        record = cursor.record()
+
+        if record is None:
             return False
-        else:
-            return True
+
+        return (
+            record.get("link_DNT") == link_dnt
+            and record.get("link_base") == base
+            and record.get("backlink_DNT") == backlink_dnt
+            and self._is_active(record)
+        )
 
     def _has_backlink(self, backlink_dnt: int, base: int, link_dnt: int) -> bool:
         """Check if a specific backlink exists between two DNTs and a given link base.
@@ -394,11 +412,11 @@ class LinkTable:
         cursor = self.table.index("backlink_index").cursor()
 
         try:
-            cursor.search([backlink_dnt, base, link_dnt])
+            record = cursor.search([backlink_dnt, base, link_dnt])
         except KeyNotFoundError:
             return False
         else:
-            return True
+            return self._is_active(record)
 
     def _backlinks(self, dnt: int, base: int | None = None) -> Iterator[tuple[int, Object]]:
         """Get all backlink objects for a given Directory Number Tag (DNT).
@@ -418,7 +436,8 @@ class LinkTable:
             if base is not None and record.get("link_base") != base:
                 break
 
-            yield record.get("link_base"), self.db.data.get(dnt=record.get("link_DNT"))
+            if self._is_active(record):
+                yield record.get("link_base"), self.db.data.get(dnt=record.get("link_DNT"))
             record = cursor.next()
 
 
