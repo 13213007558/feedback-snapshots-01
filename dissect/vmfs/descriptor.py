@@ -452,7 +452,7 @@ class FileDescriptor5(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
 
             return _get_uint32_index(pb_buf, secondary_num)
 
@@ -463,11 +463,11 @@ class FileDescriptor5(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
 
             if (block := _get_uint32_index(pb_buf, secondary_num)) == 0:
                 return 0
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
 
             return _get_uint32_index(pb_buf, tertiary_num)
 
@@ -490,13 +490,17 @@ class FileDescriptor5(FileDescriptor):
 
         type = address_type(block)
 
+        # The final block address must be a data block, anything else is a filesystem corruption
+        if type not in (FS3_AddrType.FILE_BLOCK, FS3_AddrType.SUB_BLOCK):
+            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+
         if resource := self.vmfs.resources.get(type):
             block_offset = resource.resolve_address(block)
         elif type == FS3_AddrType.FILE_BLOCK:
             # No resource available (yet), likely still in filesystem initialization phase
             block_offset = FileBlockAddr.parse(block) << self.metadata.blockOffsetShift
         else:
-            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+            raise TypeError(f"No resource available to resolve block {Address(block)} for offset {offset:#x} in {self}")
 
         offset_in_block = offset & (self.block_size - 1)
 
@@ -728,7 +732,7 @@ class FileDescriptor6(FileDescriptor):
 
             # Pointer block data can be stored in the .pbc.sf file itself, in .sbc.sf or as regular file block
             # Use the address type to figure it out
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
             return _get_uint64_index(pb_buf, secondary_num)
 
         if self.zla == FS3_ZeroLevelAddrType.POINTER_BLOCK_DOUBLE:
@@ -738,11 +742,11 @@ class FileDescriptor6(FileDescriptor):
 
             if (block := self.blocks[primary_num]) == 0:
                 return 0
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
 
             if (block := _get_uint64_index(pb_buf, secondary_num)) == 0:
                 return 0
-            pb_buf = self.vmfs.resources.read(block)
+            pb_buf = _read_pointer_block(self, block)
 
             return _get_uint64_index(pb_buf, tertiary_num)
 
@@ -764,6 +768,10 @@ class FileDescriptor6(FileDescriptor):
             return 0, 0xFF
         type = address_type(block)
 
+        # The final block address must be a data block, anything else is a filesystem corruption
+        if type not in (FS3_AddrType.SMALL_FILE_BLOCK, FS3_AddrType.SUB_BLOCK, FS3_AddrType.LARGE_FILE_BLOCK):
+            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+
         if resource := self.vmfs.resources.get(type):
             block_offset = resource.resolve_address(block)
         elif type == FS3_AddrType.SMALL_FILE_BLOCK:
@@ -771,7 +779,7 @@ class FileDescriptor6(FileDescriptor):
             cluster, resource = SmallFileBlockAddr.parse(block)
             block_offset = ((cluster * self.vmfs._sfb_size) + resource) << self.metadata.blockOffsetShift
         else:
-            raise TypeError(f"Invalid block {Address(block)} for offset {offset:#x} in {self}")
+            raise TypeError(f"No resource available to resolve block {Address(block)} for offset {offset:#x} in {self}")
 
         if type == FS3_AddrType.LARGE_FILE_BLOCK:
             offset_in_block = offset & (
@@ -967,6 +975,22 @@ def _dir_link_resolve(
         return _dir_parse_location(link_group.nextGroup)
 
 
+def _read_pointer_block(descriptor: FileDescriptor, address: int) -> bytes:
+    """Read a pointer block through the resource manager, validating the address type first.
+
+    On VMFS5, pointer blocks are stored in the ``.pbc.sf`` or ``.pb2.sf`` resources.
+    On VMFS6, pointer block data can additionally be stored in ``.sbc.sf`` or as a regular (small) file block.
+    """
+    valid_types = [FS3_AddrType.POINTER_BLOCK, FS3_AddrType.POINTER2_BLOCK]
+    if descriptor.vmfs.is_vmfs6:
+        valid_types += [FS3_AddrType.SUB_BLOCK, FS3_AddrType.SMALL_FILE_BLOCK]
+
+    if address_type(address) not in valid_types:
+        raise TypeError(f"Invalid pointer block address {Address(address)} for {descriptor}")
+
+    return descriptor.vmfs.resources.read(address)
+
+
 class BlockStream(AlignedStream):
     """Implements a file-like object for VMFS files.
 
@@ -1037,12 +1061,19 @@ class BestEffortBlockStream(AlignedStream):
         return b"".join(result)
 
 
-_S32 = struct.Struct("<i")
+_S32 = struct.Struct("<I")
 
 
 def _get_uint32_index(buf: bytes, index: int) -> int:
-    """Convenience function to index into a ``uint32`` sized array."""
-    return _S32.unpack(buf[index * 4 : (index * 4) + 4])[0]
+    """Convenience function to index into a ``uint32`` sized array.
+
+    Pointer block entries are unsigned 32-bit addresses. The highest bit can legitimately be set
+    on large filesystems, so these must not be interpreted as signed integers.
+    """
+    offset = index * 4
+    if offset + _S32.size > len(buf):
+        raise ValueError(f"Index {index} out of bounds for uint32 array of {len(buf)} bytes")
+    return _S32.unpack_from(buf, offset)[0]
 
 
 _S64 = struct.Struct("<Q")
@@ -1050,4 +1081,7 @@ _S64 = struct.Struct("<Q")
 
 def _get_uint64_index(buf: bytes, index: int) -> int:
     """Convenience function to index into a ``uint64`` sized array."""
-    return _S64.unpack(buf[index * 8 : (index * 8) + 8])[0]
+    offset = index * 8
+    if offset + _S64.size > len(buf):
+        raise ValueError(f"Index {index} out of bounds for uint64 array of {len(buf)} bytes")
+    return _S64.unpack_from(buf, offset)[0]
