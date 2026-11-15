@@ -17,6 +17,7 @@ from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
 from dissect.squashfs.exceptions import (
     FileNotFoundError,
+    MetadataError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
@@ -126,9 +127,40 @@ class SquashFS:
     def _read_metadata(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
         result = []
         while length:
-            next_block, data = self._read_block(block)
-            remaining = len(data) - offset
+            try:
+                next_block, data = self._read_block(block)
+            except EOFError as error:
+                # The chain ran off the end of the image. Re-raise with the physical frame and
+                # logical offset that could no longer be satisfied, instead of a bare EOF.
+                raise MetadataError(
+                    f"Metadata chain ended unexpectedly at block {block} offset {offset}: {error}",
+                    block,
+                    offset,
+                ) from error
 
+            if offset < 0 or offset >= len(data):
+                if offset > 0 or len(data) != 0:
+                    # A positive offset must always point inside the frame. Skipping here would
+                    # silently assemble a record from the bytes of the following frame.
+                    raise MetadataError(
+                        f"Metadata offset {offset} outside frame of size {len(data)} at block {block}",
+                        block,
+                        offset,
+                    )
+
+                # An empty frame at a chain boundary (offset 0) carries no record bytes. Skip it and
+                # continue, but terminate explicitly once the chain stops advancing instead of
+                # relying on an end-of-file read or a timeout.
+                if next_block == block:
+                    raise MetadataError(
+                        f"Metadata chain made no progress at block {block} offset {offset}",
+                        block,
+                        offset,
+                    )
+                block = next_block
+                continue
+
+            remaining = len(data) - offset
             if remaining <= length:
                 result.append(data[offset:])
                 length -= remaining

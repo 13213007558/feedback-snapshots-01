@@ -3,6 +3,7 @@ from __future__ import annotations
 from dissect.squashfs.exceptions import (
     Error,
     FileNotFoundError,
+    MetadataError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
@@ -14,6 +15,7 @@ __all__ = [
     "FileNotFoundError",
     "FileStream",
     "INode",
+    "MetadataError",
     "NotADirectoryError",
     "NotAFileError",
     "NotASymlinkError",
