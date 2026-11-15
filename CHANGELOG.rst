@@ -1,6 +1,15 @@
 History
 #######
 
+Unreleased
+==========
+
+- Add per-task strictness policies. ``FileScanner``, ``FileWriter``, blocks
+  and options accept a ``strictness=`` policy, and ``strictness_scope()``
+  activates one for a block of work without affecting other tasks.
+  ``set_strictness()`` remains as the compatibility global fallback.
+
+
 2.1.1
 =====
 

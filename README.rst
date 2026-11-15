@@ -170,6 +170,37 @@ the library, as in:
 Recognized values are ``Strictness.FORBID`` (the default),
 ``Strictness.FIX`` (warn about problems, fix *if possible*),
 ``Strictness.WARN`` (warn only), and ``Strictness.NONE`` (no warnings).
+
+``set_strictness()`` sets a process-wide default and is kept for
+backwards compatibility.  When one process handles independent tasks,
+give each reader or writer its own policy instead:
+
+.. code-block:: python
+
+    from pcapng import FileScanner, FileWriter
+    from pcapng.strictness import Strictness
+
+    forensic_blocks = list(FileScanner(f, strictness=Strictness.FORBID))
+    with FileWriter(out, shb, strictness=Strictness.FIX) as writer:
+        ...
+
+A policy can also be activated for a block of work with
+``strictness_scope()``; it is restored on exit, including when an exception
+is raised, and is safe to nest:
+
+.. code-block:: python
+
+    from pcapng.strictness import strictness_scope
+
+    with strictness_scope(Strictness.FIX):
+        blocks = list(FileScanner(fp))
+
+Objects parsed or created inside a scope capture that policy, so diagnostics
+raised later (for example while decoding deferred options or writing blocks)
+still belong to the originating task.  An explicitly configured reader or
+writer keeps its own policy even if unrelated work runs inside a different
+scope.
+
 Circumstances that will result in strictness warnings include:
 
     * Adding multiples of a non-repeatable option to a block

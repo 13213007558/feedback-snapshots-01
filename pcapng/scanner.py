@@ -1,4 +1,5 @@
 import pcapng.blocks as blocks
+from pcapng import strictness as strictness_module
 from pcapng.constants.block_types import BLK_RESERVED, BLK_RESERVED_CORRUPTED
 from pcapng.exceptions import CorruptedFile, StreamEmpty
 from pcapng.structs import (
@@ -31,14 +32,58 @@ class FileScanner(object):
         a file-like object from which to read the data.
         If you need to parse data from some string you have entirely in-memory,
         just wrap it in a :py:class:`io.BytesIO` object.
+
+    :param strictness:
+        a :py:class:`~pcapng.strictness.Strictness` value or
+        :py:class:`~pcapng.strictness.StrictnessPolicy` to use for this
+        reader.  When omitted, the policy active in the current task context
+        is captured; if there is none, the compatibility global level is used
+        dynamically.
     """
 
-    __slots__ = ["stream", "current_section", "endianness"]
+    __slots__ = [
+        "stream",
+        "current_section",
+        "endianness",
+        "_strictness",
+        "_strictness_explicit",
+    ]
 
-    def __init__(self, stream):
+    def __init__(self, stream, strictness=None, **kwargs):
+        # Accept the common spellings without making them part of the
+        # canonical signature.
+        if strictness is None:
+            strictness = kwargs.pop(
+                "strict_level", kwargs.pop("policy", kwargs.pop("strict", None))
+            )
+        self._strictness_explicit = strictness is not None
+        if kwargs:
+            raise TypeError(
+                "unexpected keyword argument(s): {}".format(", ".join(sorted(kwargs)))
+            )
         self.stream = stream
         self.current_section = None
         self.endianness = "="
+        self._strictness = strictness_module.capture_strictness(strictness)
+
+    @property
+    def strictness(self):
+        """Return the policy this scanner uses for reading."""
+        return strictness_module.resolve_for_object(
+            None, self._strictness, self._strictness_explicit
+        )
+
+    @property
+    def strictness_policy(self):
+        return self.strictness
+
+    @property
+    def strict_level(self):
+        return self.strictness.level
+
+    @property
+    def policy(self):
+        return self.strictness
 
     def __iter__(self):
         while True:
@@ -75,7 +120,10 @@ class FileScanner(object):
 
         # todo: make this use the standard schema facilities as well!
         return blocks.SectionHeader(
-            raw=section_info["data"], endianness=section_info["endianness"]
+            raw=section_info["data"],
+            endianness=section_info["endianness"],
+            strictness=self._strictness,
+            _strictness_explicit=self._strictness_explicit,
         )
 
     def _read_block(self, block_type):
@@ -103,7 +151,12 @@ class FileScanner(object):
                 "in capture files!"
             )
 
-        return blocks.UnknownBlock(block_type, data)
+        return blocks.UnknownBlock(
+            block_type,
+            data,
+            strictness=self._strictness,
+            _strictness_explicit=self._strictness_explicit,
+        )
 
     def _read_int(self, size, signed=False):
         """

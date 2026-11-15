@@ -8,7 +8,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
-from pcapng import strictness as strictness
+from pcapng import strictness as strictness_module
 from pcapng._compat import namedtuple
 from pcapng.exceptions import (
     BadMagic,
@@ -292,7 +292,10 @@ class StructField(object):
     __slots__ = []
 
     @abc.abstractmethod
-    def load(self, stream, endianness, seen=None):
+    def load(
+        self, stream, endianness, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
         pass
 
     def __repr__(self):
@@ -317,10 +320,13 @@ class RawBytes(StructField):
     def __init__(self, size):
         self.size = size  # in bytes!
 
-    def load(self, stream, endianness=None, seen=None):
+    def load(
+        self, stream, endianness=None, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
         return read_bytes_padded(stream, self.size)
 
-    def encode(self, value, stream, endianness=None):
+    def encode(self, value, stream, endianness=None, strictness=None):
         write_bytes_padded(stream, value)
 
     def __repr__(self):
@@ -343,11 +349,14 @@ class IntField(StructField):
         self.size = size  # in bits!
         self.signed = signed
 
-    def load(self, stream, endianness, seen=None):
+    def load(
+        self, stream, endianness, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
         number = read_int(stream, self.size, signed=self.signed, endianness=endianness)
         return number
 
-    def encode(self, number, stream, endianness):
+    def encode(self, number, stream, endianness, strictness=None):
         if not isinstance(number, int):
             raise TypeError("'{}' is not numeric".format(number))
         write_int(number, stream, self.size, signed=self.signed, endianness=endianness)
@@ -372,12 +381,21 @@ class OptionsField(StructField):
     def __init__(self, options_schema):
         self.options_schema = options_schema
 
-    def load(self, stream, endianness, seen=None):
+    def load(
+        self, stream, endianness, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
         options = read_options(stream, endianness)
-        return Options(schema=self.options_schema, data=options, endianness=endianness)
+        return Options(
+            schema=self.options_schema,
+            data=options,
+            endianness=endianness,
+            strictness=strictness,
+            _strictness_explicit=strictness_explicit,
+        )
 
-    def encode(self, options, stream, endianness):
-        write_options(stream, options)
+    def encode(self, options, stream, endianness, strictness=None):
+        write_options(stream, options, strictness=strictness)
 
     def __repr__(self):
         return "{0}({1!r})".format(self.__class__.__name__, self.options_schema)
@@ -400,7 +418,10 @@ class PacketBytes(StructField):
     def __init__(self, len_field):
         self.dependency = len_field
 
-    def load(self, stream, endianness, seen=[]):
+    def load(
+        self, stream, endianness, seen=[], strictness=None,
+        strictness_explicit=None,
+    ):
         try:
             length = seen[self.dependency]
         except TypeError:
@@ -417,7 +438,7 @@ class PacketBytes(StructField):
             )
         return read_bytes_padded(stream, length)
 
-    def encode(self, packet, stream, endianness=None):
+    def encode(self, packet, stream, endianness=None, strictness=None):
         if not packet:
             raise ValueError("Packet invalid")
         write_bytes_padded(stream, packet)
@@ -445,19 +466,31 @@ class ListField(StructField):
     def __init__(self, subfield):
         self.subfield = subfield
 
-    def load(self, stream, endianness, seen=None):
-        return list(self._iter_load(stream, endianness))
+    def load(
+        self, stream, endianness, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
+        return list(
+            self._iter_load(stream, endianness, strictness, strictness_explicit)
+        )
 
-    def _iter_load(self, stream, endianness):
+    def _iter_load(
+        self, stream, endianness, strictness=None, strictness_explicit=None
+    ):
         while True:
             try:
-                yield self.subfield.load(stream, endianness)
+                yield self.subfield.load(
+                    stream,
+                    endianness,
+                    strictness=strictness,
+                    strictness_explicit=strictness_explicit,
+                )
             except StreamEmpty:
                 return
 
-    def encode(self, list_data, stream, endianness):
+    def encode(self, list_data, stream, endianness, strictness=None):
         for rec in list_data:
-            self.subfield.encode(rec, stream, endianness)
+            self.subfield.encode(rec, stream, endianness, strictness=strictness)
         self.subfield.encode_finish(stream, endianness)
 
     def __repr__(self):
@@ -487,7 +520,10 @@ class NameResolutionRecordField(StructField):
 
     __slots__ = []
 
-    def load(self, stream, endianness, seen=None):
+    def load(
+        self, stream, endianness, seen=None, strictness=None,
+        strictness_explicit=None,
+    ):
         record_type = read_int(stream, 16, False, endianness)
         record_length = read_int(stream, 16, False, endianness)
 
@@ -512,7 +548,7 @@ class NameResolutionRecordField(StructField):
 
         return {"type": record_type, "raw": data}
 
-    def encode(self, d, stream, endianness):
+    def encode(self, d, stream, endianness, strictness=None):
         if d["type"] == NRB_RECORD_END:
             # Don't let the user add records of this type.
             # We take care of it in `encode_finish()` below
@@ -570,7 +606,7 @@ def read_options(stream, endianness):
     return list(_iter_read_options(stream, endianness))
 
 
-def write_options(stream, options):
+def write_options(stream, options, strictness=None):
     """
     Each option is composed by:
 
@@ -586,16 +622,22 @@ def write_options(stream, options):
         # Options are optional; if there are none we don't need opt_endofopt
         return
 
+    policy = strictness_module.resolve_for_object(
+        strictness,
+        getattr(options, "_strictness", None),
+        getattr(options, "_strictness_explicit", False),
+    )
+
     for key in options:
         code = options._field_names[key]
         values = options.get_all_raw(key)
         if len(values) > 1 and not options.schema[code].multiple:
-            strictness.problem(
+            policy.problem(
                 "writing repeated option {} '{}' not permitted by pcapng spec".format(
                     code, options._get_name_alias(code)
                 )
             )
-            if strictness.should_fix():
+            if policy.should_fix():
                 values = values[:1]
         for value in values:
             write_int(code, stream, 16, False, options.endianness)
@@ -703,13 +745,26 @@ class Options(Mapping):
         "_field_names",
         "data",
         "endianness",
+        "_strictness",
+        "_strictness_explicit",
     ]
 
-    def __init__(self, schema, data, endianness):
+    def __init__(
+        self, schema, data, endianness, strictness=None,
+        _strictness_explicit=None,
+    ):
         self.schema = {}  # Schema of option fields: {<code>: Option(...)}
         self._field_names = {}  # Map names to codes
         self.data = defaultdict(list)  # option data, with numeric option IDs as keys
         self.endianness = endianness  # one of '<>!='
+        # Keep the policy of the task that parsed/created these options, so
+        # deferred diagnostics stay attributable to the right request.
+        self._strictness_explicit = (
+            strictness is not None
+            if _strictness_explicit is None
+            else _strictness_explicit
+        )
+        self._strictness = strictness_module.capture_strictness(strictness)
 
         # This is the default schema, common to all objects
         for item in [
@@ -729,6 +784,30 @@ class Options(Mapping):
 
         # Update raw data with current values
         self._update_data(data)
+
+    # -------------------- Strictness policy --------------------
+
+    @property
+    def strictness(self):
+        "Return the policy that governs deferred option diagnostics."
+        return strictness_module.resolve_for_object(
+            None, self._strictness, self._strictness_explicit
+        )
+
+    @property
+    def strictness_policy(self):
+        return self.strictness
+
+    @property
+    def strict_level(self):
+        return self.strictness.level
+
+    @property
+    def policy(self):
+        return self.strictness
+
+    def _problem(self, msg):
+        return self.strictness.problem(msg)
 
     # -------------------- Nice interface :) --------------------
 
@@ -760,8 +839,7 @@ class Options(Mapping):
             value, (str, bytes, bytearray)
         ):
             # We're being assigned a list/iterable, use its values for our list
-            self.data[code] = list(value)
-            self._check_multiples(code)
+            self.data[code] = self._check_multiples(code, list(value))
         else:
             # We're being assigned a single value, store as a one-item list
             self.data[code] = [value]
@@ -796,8 +874,10 @@ class Options(Mapping):
     def add(self, name, value):
         """Add a value to the given-named option"""
         code = self._resolve_name(name)
-        self.data[code].append(value)
-        self._check_multiples(code)
+        values = list(self.data.get(code, ())) + [value]
+        # Check before mutating, so a strict rejection leaves the option
+        # untouched for the task that owns this object.
+        self.data[code] = self._check_multiples(code, values)
 
     def __repr__(self):
         args = dict(self.iter_all_items())
@@ -817,22 +897,34 @@ class Options(Mapping):
                     name = "{} '{}'".format(code, self.schema[code].name)
                 except KeyError:
                     name = "{} (unknown)".format(code)
-                # This code gets called when reading a file. We don't want
-                # to potentially abort in this case, just warn
-                strictness.warn(
+                # This diagnostic is deferred until the options are decoded,
+                # which can happen well after the file was opened.  A strict
+                # task rejects the sample; a tolerant task receives its own
+                # warning, attributed through this object's captured policy.
+                self._problem(
                     "repeated option {} not permitted by pcapng spec".format(name)
                 )
 
-    def _check_multiples(self, code):
-        """Check if a non-repeatable option is repeated"""
-        if len(self.data[code]) > 1 and not self.schema[code].multiple:
-            strictness.problem(
+    def _check_multiples(self, code, values=None):
+        """
+        Check whether a non-repeatable option would be repeated.
+
+        Returns the values that should be stored: all of them under WARN,
+        and only the first under FIX.  Under FORBID this raises before the
+        caller mutates the option.
+        """
+        if values is None:
+            values = self.data.get(code, ())
+        if len(values) > 1 and not self.schema[code].multiple:
+            policy = self.strictness
+            policy.problem(
                 "repeated option {} '{}' not permitted by pcapng spec".format(
                     code, self._get_name_alias(code)
                 )
             )
-            if strictness.should_fix():
-                self.data[code] = self.data[code][:1]
+            if policy.should_fix():
+                return values[:1]
+        return values
 
     def _resolve_name(self, name):
         code = self._field_names.get(name, name)
@@ -1004,7 +1096,9 @@ class Options(Mapping):
         raise ValueError("Unsupported field type: {0}".format(ftype))
 
 
-def struct_decode(schema, stream, endianness="="):
+def struct_decode(
+    schema, stream, endianness="=", strictness=None, strictness_explicit=None
+):
     """
     Decode structured data from a stream, following a schema.
 
@@ -1029,17 +1123,33 @@ def struct_decode(schema, stream, endianness="="):
 
     decoded = {}
     for name, field, default in schema:
-        decoded[name] = field.load(stream, endianness=endianness, seen=decoded)
+        decoded[name] = field.load(
+            stream,
+            endianness=endianness,
+            seen=decoded,
+            strictness=strictness,
+            strictness_explicit=strictness_explicit,
+        )
     return decoded
 
 
 def block_decode(block, stream):
-    return struct_decode(block.schema, stream, block.section.endianness)
+    return struct_decode(
+        block.schema,
+        stream,
+        block.section.endianness,
+        strictness=block.section.strictness,
+    )
 
 
-def struct_encode(schema, obj, outstream, endianness="="):
+def struct_encode(schema, obj, outstream, endianness="=", strictness=None):
     """
     Encode structured data to a stream.
     """
     for name, field, default in schema:
-        field.encode(getattr(obj, name), outstream, endianness=endianness)
+        field.encode(
+            getattr(obj, name),
+            outstream,
+            endianness=endianness,
+            strictness=strictness,
+        )

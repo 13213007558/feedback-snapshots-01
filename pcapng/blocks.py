@@ -13,7 +13,7 @@ better access to decoded information, ...
 import io
 import itertools
 
-from pcapng import strictness as strictness
+from pcapng import strictness as strictness_module
 from pcapng.constants import link_types
 from pcapng.structs import (
     IntField,
@@ -42,12 +42,28 @@ class Block(object):
         # These are in addition to the above two properties
         "magic_number",
         "_decoded",
+        "_strictness",
+        "_strictness_explicit",
     ]
 
     def __init__(self, **kwargs):
+        explicit_strictness = kwargs.pop("strictness", None)
+        explicit_flag = kwargs.pop("_strictness_explicit", None)
+        self._strictness_explicit = (
+            explicit_strictness is not None
+            if explicit_flag is None
+            else explicit_flag
+        )
+        self._strictness = strictness_module.capture_strictness(
+            explicit_strictness
+        )
         if "raw" in kwargs:
             self._decoded = struct_decode(
-                self.schema, io.BytesIO(kwargs["raw"]), kwargs["endianness"]
+                self.schema,
+                io.BytesIO(kwargs["raw"]),
+                kwargs["endianness"],
+                strictness=self._strictness,
+                strictness_explicit=self._strictness_explicit,
             )
         else:
             self._decoded = {}
@@ -57,6 +73,8 @@ class Block(object):
                         schema=packed_type.options_schema,
                         data={},
                         endianness=kwargs["endianness"],
+                        strictness=self._strictness,
+                        _strictness_explicit=self._strictness_explicit,
                     )
                     if "options" in kwargs:
                         for oky, ovl in kwargs["options"].items():
@@ -67,6 +85,29 @@ class Block(object):
                     except KeyError:
                         self._decoded[key] = default
 
+    @property
+    def strictness(self):
+        "Return the policy that governs checks on this block."
+        return strictness_module.resolve_for_object(
+            None, self._strictness, self._strictness_explicit
+        )
+
+    @property
+    def strictness_policy(self):
+        return self.strictness
+
+    @property
+    def strict_level(self):
+        return self.strictness.level
+
+    # Short alias, symmetric with the Options API.
+    @property
+    def policy(self):
+        return self.strictness
+
+    def _problem(self, msg):
+        return self.strictness.problem(msg)
+
     def __eq__(self, other):
         if self.__class__ != other.__class__:
             return False
@@ -74,10 +115,13 @@ class Block(object):
         # Use `getattr()` so eg. @property calls are used
         return [getattr(self, k) for k in keys] == [getattr(other, k) for k in keys]
 
-    def _write(self, outstream):
+    def _write(self, outstream, strictness=None):
         """Writes this block into the given output stream"""
+        policy = strictness_module.resolve_for_object(
+            strictness, self._strictness, self._strictness_explicit
+        )
         encoded_block = io.BytesIO()
-        self._encode(encoded_block)
+        self._encode(encoded_block, strictness=policy)
         encoded_block = encoded_block.getvalue()
         subblock_length = len(encoded_block)
         if subblock_length == 0:
@@ -90,11 +134,14 @@ class Block(object):
         write_bytes_padded(outstream, encoded_block)
         write_int(block_length, outstream, 32, endianness=self.section.endianness)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, strictness=None):
         """Encodes the fields of this block into raw data"""
         for name, field, default in self.schema:
             field.encode(
-                getattr(self, name), outstream, endianness=self.section.endianness
+                getattr(self, name),
+                outstream,
+                endianness=self.section.endianness,
+                strictness=strictness,
             )
 
     def __getattr__(self, name):
@@ -197,13 +244,19 @@ class SectionHeader(Block):
         self.interface_stats = {}
         super(SectionHeader, self).__init__(endianness=endianness, **kwargs)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, strictness=None):
         write_int(0x1A2B3C4D, outstream, 32, endianness=self.endianness)
-        super(SectionHeader, self)._encode(outstream)
+        super(SectionHeader, self)._encode(outstream, strictness=strictness)
 
     def new_member(self, cls, **kwargs):
         """Helper method to create a block that's a member of this section"""
         assert issubclass(cls, SectionMemberBlock)
+        if "_strictness_explicit" not in kwargs and "strictness" not in kwargs:
+            # Propagate the section's "captured vs explicitly configured"
+            # nature, so a member created inside one task scope can still be
+            # governed by a nested scope later.
+            kwargs["_strictness_explicit"] = self._strictness_explicit
+        kwargs.setdefault("strictness", self._strictness)
         blk = cls(section=self, endianness=self.endianness, **kwargs)
         # Some blocks (eg. SPB) don't have options
         if any([x[0] == "options" for x in blk.schema]):
@@ -362,17 +415,20 @@ class BlockWithInterfaceMixin(object):
         # by looking up the interface_id
         return self.section.interfaces[self.interface_id]
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, strictness=None):
+        policy = strictness_module.resolve_for_object(
+            strictness, self._strictness, self._strictness_explicit
+        )
         if len(self.section.interfaces) < 1:
-            strictness.problem(
+            policy.problem(
                 "writing {cls} for section with no interfaces".format(
                     cls=self.__class__.__name__
                 )
             )
-            if strictness.should_fix():
+            if policy.should_fix():
                 # Only way to "fix" is to not write the block
                 return
-        super(BlockWithInterfaceMixin, self)._encode(outstream)
+        super(BlockWithInterfaceMixin, self)._encode(outstream, strictness=policy)
 
 
 class BasePacketBlock(SectionMemberBlock, BlockWithInterfaceMixin):
@@ -463,10 +519,25 @@ class SimplePacket(BasePacketBlock):
     def __init__(self, section, **kwargs):
         self.section = section
         if "raw" in kwargs:
+            explicit_strictness = kwargs.pop("strictness", None)
+            explicit_flag = kwargs.pop("_strictness_explicit", None)
+            self._strictness_explicit = (
+                explicit_strictness is not None
+                if explicit_flag is None
+                else explicit_flag
+            )
+            self._strictness = strictness_module.capture_strictness(
+                explicit_strictness
+            )
             # Since we can't be sure of the packet length without the snap length,
             # we have to do a bit of work here
             stream = io.BytesIO(kwargs["raw"])
-            self._decoded = struct_decode(self.schema[:1], stream, kwargs["endianness"])
+            self._decoded = struct_decode(
+                self.schema[:1],
+                stream,
+                kwargs["endianness"],
+                strictness=self.strictness,
+            )
             # Now we can get our ``captured_len`` property which is required
             # to really know how much data we can load
             rb = RawBytes(self.captured_len)
@@ -498,7 +569,10 @@ class SimplePacket(BasePacketBlock):
         else:
             return min(snap_len, self.packet_len)
 
-    def _encode(self, outstream):
+    def _encode(self, outstream, strictness=None):
+        policy = strictness_module.resolve_for_object(
+            strictness, self._strictness, self._strictness_explicit
+        )
         fld_size = IntField(32, False)
         fld_data = RawBytes(0)
         if len(self.section.interfaces) > 1:
@@ -510,10 +584,10 @@ class SimplePacket(BasePacketBlock):
             # of the impossibility to refer to the correct one (it does not
             # contain any Interface ID field)." Why would it say "the first"
             # IDB and not "the only" IDB if this was really forbidden?
-            strictness.problem(
+            policy.problem(
                 "writing SimplePacket for section with multiple interfaces"
             )
-            if strictness.should_fix():
+            if policy.should_fix():
                 # Can't fix this. The IDBs have already been written.
                 pass
         snap_len = self.interface.snaplen
@@ -574,6 +648,8 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
                 pass
         return self.section.new_member(
             EnhancedPacket,
+            strictness=self._strictness,
+            _strictness_explicit=self._strictness_explicit,
             interface_id=self.interface_id,
             timestamp_high=self.timestamp_high,
             timestamp_low=self.timestamp_low,
@@ -584,12 +660,15 @@ class ObsoletePacket(BasePacketBlock, BlockWithTimestampMixin):
 
     # Do this check in _write() instead of _encode() to ensure the block gets written
     # with the correct magic number.
-    def _write(self, outstream):
-        strictness.problem("Packet Block is obsolete and must not be used")
-        if strictness.should_fix():
-            self.enhanced()._write(outstream)
+    def _write(self, outstream, strictness=None):
+        policy = strictness_module.resolve_for_object(
+            strictness, self._strictness, self._strictness_explicit
+        )
+        policy.problem("Packet Block is obsolete and must not be used")
+        if policy.should_fix():
+            self.enhanced()._write(outstream, strictness=policy)
         else:
-            super(ObsoletePacket, self)._write(outstream)
+            super(ObsoletePacket, self)._write(outstream, strictness=policy)
 
 
 @register_block
@@ -669,9 +748,15 @@ class UnknownBlock(Block):
 
     __slots__ = ["block_type", "data"]
 
-    def __init__(self, block_type, data):
+    def __init__(self, block_type, data, strictness=None, _strictness_explicit=None):
         self.block_type = block_type
         self.data = data
+        self._strictness_explicit = (
+            strictness is not None
+            if _strictness_explicit is None
+            else _strictness_explicit
+        )
+        self._strictness = strictness_module.capture_strictness(strictness)
 
     def __repr__(self):
         return "UnknownBlock(0x{0:08X}, {1!r})".format(self.block_type, self.data)
