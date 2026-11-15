@@ -39,3 +39,12 @@ def test_recno(recno_db: BinaryIO) -> None:
     assert len(records) == 2
     assert records[0] == (42, b"thanks for all the fish")
     assert records[1] == (69, b"haha funny number")
+
+    # The database has 69 physical slots, of which only records 42 and 69 are live.
+    entries = list(db.recno_entries())
+    assert len(entries) == 69
+    assert [entry.recno for entry in entries if entry.live] == [42, 69]
+    assert all(entry.deleted for entry in entries if not entry.live)
+
+    gaps = list(db.recno_gaps())
+    assert [(gap.start, gap.end) for gap in gaps] == [(1, 41), (43, 68)]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -14,6 +15,109 @@ DBT = tuple[
     bytes,
 ]
 """An internal page entry structure + data (loosely related to Data-Base Thang)."""
+
+
+@dataclass(frozen=True)
+class RecnoLeaf:
+    """A physical leaf page, or an unavailable subtree, in a ``DB_RECNO`` tree.
+
+    Attributes:
+        pgno: Page number of the leaf page or of the unavailable subtree root.
+        base: Record number of the first slot in this leaf.
+        nrecs: Number of record numbers this leaf spans, as declared by its parent.
+        entries: Number of physical slots on the page, or ``None`` if the page is unreadable.
+        error: Reason the page could not be read, if any.
+    """
+
+    pgno: int
+    base: int
+    nrecs: int
+    entries: int | None = None
+    error: str | None = None
+
+    @property
+    def end(self) -> int:
+        """Record number of the last slot in this leaf."""
+        return self.base + self.nrecs - 1
+
+
+@dataclass(frozen=True)
+class RecnoAnomaly:
+    """A structural inconsistency found while restoring ``DB_RECNO`` record numbers.
+
+    Attributes:
+        kind: One of ``unreadable_page``, ``cycle``, ``short_leaf``, ``long_leaf``,
+            ``subtree_count_mismatch`` or ``unexpected_page_type``.
+        pgno: Page number the anomaly was found on.
+        parent_pgno: Page number of the parent page, if any.
+        base: Record number the page should start at.
+        declared: Record count declared by the parent.
+        actual: Record count actually present.
+        detail: Human readable details.
+    """
+
+    kind: str
+    pgno: int
+    parent_pgno: int | None = None
+    base: int | None = None
+    declared: int | None = None
+    actual: int | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class RecnoEntry:
+    """A single physical slot in a ``DB_RECNO`` tree.
+
+    Record numbers are derived from the slot position in its leaf, offset by the record counts of
+    preceding subtrees. They are never derived from how many live records were yielded before, so
+    deleted slots and unavailable pages leave stable holes in the numbering.
+
+    Attributes:
+        recno: The record number of this slot, including deleted slots.
+        data: The record data, or ``None`` for deleted, missing or unreadable slots.
+        pgno: Page number of the leaf page holding the slot.
+        slot: Slot index within the leaf page.
+        deleted: Whether the slot has the ``B_DELETE`` flag set.
+        error: Reason the slot data could not be read, if any.
+        page_error: Whether the error is caused by the whole page being unavailable.
+        residual: Bytes still present in a deleted slot, according to its declared length. These
+            bytes are never reported as a live record.
+        raw_type: The raw type byte of the slot, including the delete flag.
+    """
+
+    recno: int
+    data: bytes | None
+    pgno: int
+    slot: int
+    deleted: bool = False
+    error: str | None = None
+    page_error: bool = False
+    residual: bytes = b""
+    raw_type: int | None = None
+
+    @property
+    def live(self) -> bool:
+        """Return whether this slot contains a live record with readable data."""
+        return not self.deleted and self.error is None and self.data is not None
+
+
+@dataclass(frozen=True)
+class RecnoGap:
+    """A contiguous range of record numbers without a live record.
+
+    Attributes:
+        start: First record number in the range (inclusive).
+        end: Last record number in the range (inclusive).
+        pgno: Page number the range belongs to, or ``None`` if unknown.
+        reason: Why the range has no live record: ``deleted``, ``missing``, ``unreadable_slot``
+            or ``unreadable_page``.
+    """
+
+    start: int
+    end: int
+    pgno: int | None = None
+    reason: str = "deleted"
 
 
 class DB:
@@ -72,23 +176,237 @@ class DB:
         return Page(self, pgno)
 
     def records(self) -> Iterator[tuple[bytes | int, bytes]]:
-        """Iterate over all records in the database."""
+        """Iterate over all live records in the database.
+
+        For ``DB_RECNO`` databases the key is the physical record number, so numbered holes caused
+        by deleted slots, unreadable slots or unreadable pages are preserved. Use
+        :meth:`recno_entries` to inspect those holes and :meth:`recno_gaps` for their ranges.
+        """
+        if self.is_recno:
+            for entry in self.recno_entries():
+                if entry.live:
+                    assert entry.data is not None
+                    yield entry.recno, entry.data
+            return
+
         it = self._iter_db()
 
-        if (self.is_btree and not self.is_recno) or self.is_hash:
+        if self.is_btree or self.is_hash:
             # Hash and Btree are stored in pairs
             while entry := next(it, None):
                 _, key = entry
                 _, data = next(it)
                 yield bytes(key), bytes(data)
-        elif self.is_recno:
-            i = 0
-            while entry := next(it, None):
-                i += 1
-                dbt, data = entry
-                if dbt.type & c_db.B_DELETE:
+
+    def recno_entries(self) -> Iterator[RecnoEntry]:
+        """Iterate over every physical slot in a ``DB_RECNO`` tree, including deleted slots.
+
+        Record numbers come from the slot position in its leaf plus the subtree record counts
+        stored in the parent ``RINTERNAL`` entries. Deleted slots keep their number but are
+        reported with ``deleted=True`` and without data; bytes still present in such a slot are
+        only exposed as ``residual`` and are never promoted to a live record.
+        """
+        if not self.is_recno:
+            raise TypeError("Not a DB_RECNO database")
+
+        for leaf in self.recno_leaves():
+            if leaf.error is not None:
+                for slot in range(leaf.nrecs):
+                    yield RecnoEntry(leaf.base + slot, None, leaf.pgno, slot, error=leaf.error, page_error=True)
+                continue
+
+            page = self.page(leaf.pgno)
+            lookup = _recno_lookup(page)
+            for slot in range(leaf.nrecs):
+                yield self._recno_entry(page, leaf, slot, lookup)
+
+    def recno_leaves(self) -> Iterator[RecnoLeaf]:
+        """Iterate over the leaf pages of a ``DB_RECNO`` tree in record number order.
+
+        Each leaf carries the record number of its first slot (``base``) and the record count
+        declared by its parent (``nrecs``). Subtrees that cannot be read still consume their
+        declared range, so record numbers after them do not shift.
+        """
+        if not self.is_recno:
+            raise TypeError("Not a DB_RECNO database")
+
+        anomalies: list[RecnoAnomaly] = []
+        yield from self._recno_walk(self.meta.root, 1, None, None, set(), anomalies)
+
+    def recno_gaps(self) -> Iterator[RecnoGap]:
+        """Iterate over contiguous ranges of record numbers without a live record.
+
+        A gap can be caused by deleted slots, missing slots or unreadable subtrees. Gaps never
+        cross a page boundary and carry the page number and reason for that page, so a hole can
+        be explained from the page layout. Bounds are derived from the same structural record
+        numbering as :meth:`recno_entries`.
+        """
+        if not self.is_recno:
+            raise TypeError("Not a DB_RECNO database")
+
+        for leaf in self.recno_leaves():
+            if leaf.error is not None:
+                if leaf.nrecs:
+                    yield RecnoGap(leaf.base, leaf.end, leaf.pgno, "unreadable_page")
+                continue
+
+            page = self.page(leaf.pgno)
+            lookup = _recno_lookup(page)
+            start = None
+            start_reason = None
+            previous = None
+
+            for slot in range(leaf.nrecs):
+                entry = self._recno_entry(page, leaf, slot, lookup)
+                if entry.live:
+                    if start is not None:
+                        yield RecnoGap(start, previous, leaf.pgno, start_reason)
+                        start = None
                     continue
-                yield i, bytes(data)
+
+                if lookup is None:
+                    reason = "unreadable_slot"
+                elif slot >= len(lookup):
+                    reason = "missing"
+                elif entry.page_error:
+                    reason = "unreadable_page"
+                elif entry.deleted:
+                    reason = "deleted"
+                elif entry.error is not None:
+                    reason = "unreadable_slot"
+                else:
+                    reason = "missing"
+
+                if start is not None and reason != start_reason:
+                    yield RecnoGap(start, previous, leaf.pgno, start_reason)
+                    start = entry.recno
+                    start_reason = reason
+                elif start is None:
+                    start = entry.recno
+                    start_reason = reason
+                previous = entry.recno
+
+            if start is not None:
+                yield RecnoGap(start, previous, leaf.pgno, start_reason)
+
+    def recno_anomalies(self) -> Iterator[RecnoAnomaly]:
+        """Iterate over structural inconsistencies found while walking a ``DB_RECNO`` tree.
+
+        The entry and gap iterators silently keep numbering stable around such problems; this
+        iterator explains them, for example when a leaf holds fewer slots than its parent declares.
+        """
+        if not self.is_recno:
+            raise TypeError("Not a DB_RECNO database")
+
+        anomalies: list[RecnoAnomaly] = []
+        for _ in self._recno_walk(self.meta.root, 1, None, None, set(), anomalies):
+            pass
+        yield from anomalies
+
+    def _recno_walk(
+        self,
+        pgno: int,
+        base: int,
+        nrecs: int | None,
+        parent_pgno: int | None,
+        visited: set[int],
+        anomalies: list[RecnoAnomaly],
+    ) -> Iterator[RecnoLeaf]:
+        if pgno in visited:
+            anomalies.append(
+                RecnoAnomaly("cycle", pgno, parent_pgno, base, nrecs, detail="page referenced more than once")
+            )
+            if nrecs:
+                yield RecnoLeaf(pgno, base, nrecs, None, "page referenced more than once")
+            return
+        visited.add(pgno)
+
+        try:
+            page = self.page(pgno)
+            page_type = page.header.type
+            entries = page.header.entries
+        except Exception as e:
+            reason = _reason(e)
+            anomalies.append(RecnoAnomaly("unreadable_page", pgno, parent_pgno, base, nrecs, detail=reason))
+            if nrecs is not None:
+                yield RecnoLeaf(pgno, base, nrecs, None, reason)
+            return
+
+        if page_type == c_db.P_IRECNO:
+            try:
+                children = [(entry.pgno, entry.nrecs) for entry, _ in page.entries()]
+            except Exception as e:
+                reason = _reason(e)
+                anomalies.append(RecnoAnomaly("unreadable_page", pgno, parent_pgno, base, nrecs, detail=reason))
+                if nrecs is not None:
+                    yield RecnoLeaf(pgno, base, nrecs, None, reason)
+                return
+
+            child_base = base
+            for child_pgno, child_nrecs in children:
+                yield from self._recno_walk(child_pgno, child_base, child_nrecs, pgno, visited, anomalies)
+                child_base += child_nrecs
+
+            if nrecs is not None and child_base - base != nrecs:
+                anomalies.append(
+                    RecnoAnomaly("subtree_count_mismatch", pgno, parent_pgno, base, nrecs, child_base - base)
+                )
+            return
+
+        if page_type == c_db.P_LRECNO:
+            if nrecs is not None and entries != nrecs:
+                kind = "short_leaf" if entries < nrecs else "long_leaf"
+                anomalies.append(RecnoAnomaly(kind, pgno, parent_pgno, base, nrecs, entries))
+                yield RecnoLeaf(pgno, base, nrecs, entries)
+            else:
+                yield RecnoLeaf(pgno, base, entries, entries)
+            return
+
+        anomalies.append(
+            RecnoAnomaly(
+                "unexpected_page_type",
+                pgno,
+                parent_pgno,
+                base,
+                nrecs,
+                detail=f"expected P_IRECNO or P_LRECNO, got {page_type}",
+            )
+        )
+        if nrecs is not None:
+            yield RecnoLeaf(pgno, base, nrecs, None, f"unexpected page type {page_type}")
+
+    def _recno_entry(self, page: Page, leaf: RecnoLeaf, slot: int, lookup: list[int] | None) -> RecnoEntry:
+        recno = leaf.base + slot
+        if lookup is None:
+            return RecnoEntry(recno, None, leaf.pgno, slot, error="slot lookup table unreadable")
+        if slot >= len(lookup):
+            return RecnoEntry(recno, None, leaf.pgno, slot)
+
+        offset = lookup[slot]
+        buf = memoryview(page.raw)[offset:]
+        if len(buf) < len(c_db.BKEYDATA):
+            return RecnoEntry(recno, None, leaf.pgno, slot, error="slot header out of bounds")
+
+        entry = c_db.BKEYDATA(buf)
+        deleted = bool(entry.type & c_db.B_DELETE)
+        if entry.type & ~c_db.B_DELETE == c_db.B_OVERFLOW:
+            if deleted:
+                return RecnoEntry(recno, None, leaf.pgno, slot, True, raw_type=entry.type)
+            try:
+                overflow = c_db.BOVERFLOW(buf)
+                data = overflow_data(self, overflow.pgno, overflow.tlen)
+            except Exception as e:
+                return RecnoEntry(recno, None, leaf.pgno, slot, False, _reason(e), raw_type=entry.type)
+            return RecnoEntry(recno, data, leaf.pgno, slot, False, raw_type=entry.type)
+
+        data = bytes(buf[len(c_db.BKEYDATA) : len(c_db.BKEYDATA) + entry.len])
+        if len(data) != entry.len:
+            return RecnoEntry(recno, None, leaf.pgno, slot, deleted, "slot data out of bounds", raw_type=entry.type)
+
+        if deleted:
+            return RecnoEntry(recno, None, leaf.pgno, slot, True, residual=data, raw_type=entry.type)
+
+        return RecnoEntry(recno, data, leaf.pgno, slot, False, raw_type=entry.type)
 
     def _iter_db(self) -> Iterator[DBT]:
         if self.is_btree:
@@ -122,6 +440,19 @@ class DB:
 
         if page.header.next_pgno:
             yield from self._walk_hash(page.header.next_pgno)
+
+
+def _recno_lookup(page: Page) -> list[int] | None:
+    """Read a leaf page's slot offset table, or ``None`` if the page is too short to hold it."""
+    try:
+        return page.lookup
+    except Exception:
+        return None
+
+
+def _reason(error: Exception) -> str:
+    """Human readable reason for an error, falling back to the exception type name."""
+    return str(error) or type(error).__name__
 
 
 class Page:
@@ -218,7 +549,7 @@ class Page:
     def entries(self) -> Iterator[DBT]:
         """Iterate over all entries in the page."""
         if not self.header.entries:
-            raise TypeError("Page doesn't have iterable entries")
+            return
 
         for idx in range(self.header.entries):
             yield self.entry(idx)
