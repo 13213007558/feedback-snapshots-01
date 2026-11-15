@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from functools import cached_property
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -324,18 +325,32 @@ class ClassInstance:
 
         return properties
 
-    @property
+    @cached_property
     def key(self) -> InstanceKey:
         key = InstanceKey()
         for prop_name in self.class_.class_definition.keys:
             key[prop_name] = self.properties[prop_name].value
         return key
 
+    @cached_property
+    def identity(self) -> InstanceIdentity:
+        return InstanceIdentity.from_key(
+            namespace=self.class_.namespace.name,
+            class_name=self.class_.name,
+            key=self.key,
+        )
+
 
 class InstanceKey(dict):
     """A dictionary subclass that allows for attribute-style access and assignment.
 
-    Is represented as a string in the format "key1=value1;key2=value2" or "default" if empty.
+    Holds the key properties of a class instance in their declared order. Its string
+    representation is a display convenience in the format ``key1=value1;key2=value2``
+    or ``default`` if the instance has no key properties.
+
+    The textual representation is not a unique identifier: values may contain ``=`` or
+    ``;`` and distinct value types may render identically. Use
+    :class:`InstanceIdentity` for comparison and deduplication.
 
     Example:
         >>> d = InstanceKey()
@@ -344,16 +359,102 @@ class InstanceKey(dict):
         "bar"
     """
 
+    __slots__ = ()
+
     def __getattr__(self, key: str) -> Any:
         return self[key]
 
-    def __setattr__(self, key: str, value: Any):
+    def __setattr__(self, key: str, value: Any) -> None:
         self[key] = value
 
     def __str__(self) -> str:
         if len(self) == 0:
             return "default"
         return ";".join([f"{key}={value}" for key, value in self.items()])
+
+
+def _freeze_key_value(value: Any) -> tuple[str, Any]:
+    """Reduce an instance key value to a hashable token that keeps its type.
+
+    Strings and numbers that render the same (for example ``1`` and ``"1"``) get
+    different tokens, and array-valued keys are compared element by element.
+    """
+    if isinstance(value, bool):
+        return "bool", value
+    if isinstance(value, int):
+        return "int", value
+    if isinstance(value, float):
+        return "float", value
+    if isinstance(value, str):
+        return "str", value
+    if isinstance(value, (list, tuple)):
+        return "array", tuple(_freeze_key_value(item) for item in value)
+    if value is None:
+        return "none", None
+    return type(value).__name__, value
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceIdentity:
+    """Structural identity of a CIM instance, bound to a namespace and class.
+
+    Two instances are the same object only when they live in the same namespace, are
+    instances of the same class and carry the same key values with the same value
+    types. Comparison is order independent and type aware, so it neither depends on
+    the textual representation of :class:`InstanceKey` nor merges instances of
+    different classes that happen to have matching key dictionaries.
+    """
+
+    namespace: str
+    class_name: str
+    _tokens: frozenset[tuple[str, tuple[str, Any]]]
+    key: InstanceKey = field(compare=False)
+
+    @classmethod
+    def from_key(cls, namespace: str, class_name: str, key: InstanceKey | dict[str, Any]) -> InstanceIdentity:
+        tokens = frozenset((name, _freeze_key_value(value)) for name, value in key.items())
+        display_key = key if isinstance(key, InstanceKey) else InstanceKey(key)
+        return cls(
+            namespace=namespace.lower(),
+            class_name=class_name.lower(),
+            _tokens=tokens,
+            key=display_key,
+        )
+
+    @property
+    def is_default(self) -> bool:
+        """Whether this is a keyless (singleton) instance."""
+        return len(self.key) == 0
+
+    @property
+    def name(self) -> str:
+        """The display string of the key, kept for the legacy text entry points."""
+        return str(self.key)
+
+    @property
+    def components(self) -> InstanceKey:
+        """The structured key components used for comparison."""
+        return self.key
+
+    @property
+    def value_types(self) -> dict[str, str]:
+        """The value type token of every key component, keyed by component name."""
+        return {name: type_name for name, (type_name, _) in self._tokens}
+
+    def explain(self) -> str:
+        """Render the deduplication basis in an unambiguous, order-independent form."""
+        if self.is_default:
+            rendered = "default"
+        else:
+            parts = [f"{name}:{type_name}={value!r}" for name, (type_name, value) in sorted(self._tokens)]
+            rendered = ";".join(parts)
+        return f"{self.namespace}/{self.class_name}[{rendered}]"
+
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return f"<InstanceIdentity {self.explain()}>"
 
 
 class Qualifier:

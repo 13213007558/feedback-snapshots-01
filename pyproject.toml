@@ -130,6 +130,11 @@ known-first-party = ["dissect.cim"]
 known-third-party = ["dissect"]
 required-imports = ["from __future__ import annotations"]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: enumeration tests that parse many index references",
+]
+
 [tool.setuptools.packages.find]
 include = ["dissect.*"]
 

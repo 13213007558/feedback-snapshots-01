@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from functools import cached_property
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +21,7 @@ from dissect.cim.c_cim import (
 from dissect.cim.classes import (
     ClassDefinition,
     ClassInstance,
+    InstanceIdentity,
     PropertyDefaultValues,
 )
 from dissect.cim.exceptions import Error, InvalidDatabaseError
@@ -277,27 +279,61 @@ class Class:
                 off += len(prop.ctype)
         return off
 
-    def instance(self, key: str) -> Instance:
+    def instance(self, key: str | dict[str, Any]) -> Instance:
+        """Look up a single instance by its structured key or legacy display string.
+
+        A mapping is compared structurally (order independent, type aware), while a
+        string is matched against the display representation of
+        :class:`~dissect.cim.classes.InstanceKey` to keep the legacy entry point
+        working.
+        """
+        target: InstanceIdentity | str
+        target = key if isinstance(key, str) else InstanceIdentity.from_key(self.namespace.name, self.name, key)
+
         for instance in self.instances:
-            if instance.key == key:
+            if isinstance(target, InstanceIdentity):
+                if target == instance.identity:
+                    return instance
+            elif target == instance.identity.name:
                 return instance
 
         raise IndexError
 
-    @property
-    def instances(self) -> Iterator[Instance]:
-        yielded = set()
-
+    def _instance_records(self) -> Iterator[InstanceRecord]:
         q = self.cim.key().NS(self.namespace.name).CI(self.name).IL()
 
         for ref in q.references():
             class_instance = self.cim.get_class_instance(self, ref)
             instance = Instance(self.cim, self.namespace, self, class_instance)
-            ikey = str(instance.key)
+            yield InstanceRecord(instance=instance, reference=ref)
 
-            if ikey not in yielded:
-                yield instance
-                yielded.add(ikey)
+    @property
+    def instances(self) -> Iterator[Instance]:
+        yielded: set[InstanceIdentity] = set()
+
+        for record in self._instance_records():
+            identity = record.instance.identity
+            if identity not in yielded:
+                yield record.instance
+                yielded.add(identity)
+
+    def instance_dedup_report(self) -> list[InstanceRecordGroup]:
+        """Group all raw index references by structural instance identity.
+
+        Returns one group per distinct instance, including the duplicate references
+        collapsed during enumeration so the deduplication basis can be explained.
+        """
+        groups: dict[InstanceIdentity, InstanceRecordGroup] = {}
+        order: list[InstanceIdentity] = []
+
+        for record in self._instance_records():
+            identity = record.instance.identity
+            if identity not in groups:
+                groups[identity] = InstanceRecordGroup(identity=identity, records=[])
+                order.append(identity)
+            groups[identity].records.append(record)
+
+        return [groups[identity] for identity in order]
 
 
 class Instance:
@@ -311,6 +347,10 @@ class Instance:
     @property
     def key(self) -> InstanceKey:
         return self.class_instance.key
+
+    @property
+    def identity(self) -> InstanceIdentity:
+        return self.class_instance.identity
 
     @property
     def name(self) -> str:
@@ -331,6 +371,30 @@ class Instance:
     @property
     def properties(self) -> dict[str, ClassInstanceProperty]:
         return self.class_instance.properties
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceRecord:
+    """A parsed instance together with the raw index reference it came from."""
+
+    instance: Instance = field(compare=False)
+    reference: Key
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceRecordGroup:
+    """All raw references that resolve to the same structural instance identity."""
+
+    identity: InstanceIdentity
+    records: list[InstanceRecord] = field(compare=False)
+
+    @property
+    def reference_count(self) -> int:
+        return len(self.records)
+
+    @property
+    def duplicate_count(self) -> int:
+        return len(self.records) - 1
 
 
 class Property:
