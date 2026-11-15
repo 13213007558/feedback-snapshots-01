@@ -4,13 +4,27 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from dissect.database.bbolt.c_bbolt import BucketLeafFlag, PageFlag, c_bbolt
+from dissect.database.bbolt.exception import InvalidDatabase
+from dissect.database.bbolt.meta import select_meta
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from dissect.database.bbolt.meta import MetaSelection
+
 
 class Bbolt:
     """bbolt database implementation.
+
+    bbolt keeps two meta pages in the first two pages of the file. A crash can
+    leave the newest of the two damaged while the older one is still a complete,
+    committed snapshot. On open, both meta pages are validated and the newest
+    snapshot with a verified checksum and a self-consistent page graph is used.
+    If neither candidate can be trusted, or two valid candidates describe
+    conflicting transaction views, opening fails instead of mixing pages.
+
+    The decision and the evidence behind it are available through
+    :attr:`meta_selection` and :meth:`explain_selection`.
 
     References:
         - https://github.com/etcd-io/bbolt
@@ -28,17 +42,40 @@ class Bbolt:
         else:
             raise TypeError("Argument fh must be Path or BytesIO-like object")
 
-        self.meta = c_bbolt.Meta(self.fh)
+        self.meta_selection: MetaSelection = select_meta(self.fh)
+
+        if self.meta_selection.selected is None:
+            if self.path is not None:
+                self.fh.close()
+            raise InvalidDatabase(self.meta_selection.explain())
+
+        self.meta = self.meta_selection.selected.meta
+        self.meta_index = self.meta_selection.selected_index
         self.version = self.meta.version
         self.page_size = self.meta.pageSize
+        self.root_pgid = self.meta_selection.selected.root
+        self.high_water = self.meta_selection.selected.high_water
+        self.txid = self.meta_selection.selected.txid
 
         if self.meta.magic != c_bbolt.Magic:
             raise ValueError(f"Unexpected bbolt meta magic value {self.meta.magic:x}")
 
-        self.root = Page(self, self.meta.root.root)
+        try:
+            self.root = Page(self, self.root_pgid)
+        except Exception:
+            if self.path is not None:
+                self.fh.close()
+            raise
 
     def __repr__(self) -> str:
-        return f"<Bbolt version={self.version} page_size={self.page_size} path={self.path or self.fh}>"
+        return (
+            f"<Bbolt version={self.version} page_size={self.page_size} txid={self.txid} "
+            f"meta={self.meta_index} path={self.path or self.fh}>"
+        )
+
+    def explain_selection(self) -> str:
+        """Return a human readable explanation of the meta page selection."""
+        return self.meta_selection.explain()
 
     def _iter(self, type: Literal["page", "value"], path: str | None, sep: str) -> Page | bytes | None:
         """Iterate over :class:`Page`` and :class:`Inode` until the requested page or key value is found."""
@@ -53,8 +90,8 @@ class Bbolt:
             for inode in page.inodes():
                 if inode.key == part:
                     if inode.flags == BucketLeafFlag:
-                        # Read the page inside the inode
-                        if inode.value.startswith(16 * b"\x00"):
+                        # An inline bucket has no root page; its page follows the 16 byte bucket header
+                        if len(inode.value) >= 16 and not c_bbolt.InBucket(inode.value).root:
                             page = Page(self, 0, inode._value_offset + 0x10)
 
                         # Read the page this inode points to
@@ -108,10 +145,7 @@ class Page:
         self.db = db
         self.pgid = pgid
 
-        if not offset:
-            self.offset = db.fh.seek(pgid * db.page_size)
-        else:
-            self.offset = db.fh.seek(offset)
+        self.offset = db.fh.seek(pgid * db.page_size) if not offset else db.fh.seek(offset)
 
         self.page = c_bbolt.Page(db.fh)
 
