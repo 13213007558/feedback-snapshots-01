@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 from uuid import UUID
 
+from dissect.database.ese.ntds.identity import ObjectIdentity
 from dissect.database.ese.ntds.util import InstanceType, SystemFlag, decode_value
 
 if TYPE_CHECKING:
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from dissect.database.ese.ntds.database import Database
+    from dissect.database.ese.ntds.identity import ObjectIdentity
     from dissect.database.ese.ntds.sd import SecurityDescriptor
     from dissect.database.ese.ntds.util import DN
     from dissect.database.ese.record import Record
@@ -264,6 +266,16 @@ class Object:
         return self.get("distinguishedName")
 
     dn = distinguished_name
+
+    @cached_property
+    def identity(self) -> ObjectIdentity:
+        """Return the in-database identity of this object.
+
+        Unlike :attr:`distinguished_name`, which is a displayable path, the identity preserves the raw
+        record, GUID, name(s) and parent reference separately, and is the recommended key for offline
+        correlation.
+        """
+        return ObjectIdentity.from_object(self)
 
     @cached_property
     def sd(self) -> SecurityDescriptor | None:

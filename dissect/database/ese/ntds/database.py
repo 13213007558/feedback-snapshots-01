@@ -224,25 +224,45 @@ class DataTable:
     def _make_dn(self, dnt: int) -> DN:
         """Construct Distinguished Name (DN) from a Directory Number Tag (DNT) value.
 
-        This method walks up the parent hierarchy to build the full DN path.
+        This method walks up the parent hierarchy to build the full DN path. The walk is iterative:
+        a cycle in the parent chain raises a diagnostic :class:`ValueError` instead of exhausting
+        the recursion limit.
 
         Args:
             dnt: The DNT to construct the DN for.
+
+        Raises:
+            ValueError: If a cycle is detected in the parent chain.
         """
-        obj = self.get(dnt)
+        chain = []
+        seen = set()
 
-        if obj.dnt in (0, 2):  # Root object
-            return ""
+        current = dnt
+        while current not in (0, 2):  # Root objects
+            if current in seen:
+                trail = " -> ".join(str(obj.dnt) for obj in chain)
+                raise ValueError(f"Cycle detected in parent chain of DNT {dnt}: {trail} -> {current}")
+            seen.add(current)
 
-        rdn_key = obj.get("RdnType")
-        rdn_value = obj.get("name").replace(",", "\\,")
-        if not rdn_key or not rdn_value:
-            return ""
+            obj = self.get(current)
+            chain.append(obj)
+            current = obj.pdnt
 
-        parent_dn = self._make_dn(obj.pdnt)
-        dn = f"{rdn_key}={rdn_value}".upper() + (f",{parent_dn}" if parent_dn else "")
+        parent_dn = None
+        dn = ""
+        for obj in reversed(chain):
+            rdn_key = obj.get("RdnType")
+            name = obj.get("name")
+            rdn_value = name.replace(",", "\\,") if name else None
+            if not rdn_key or not rdn_value:
+                # An object without a usable RDN breaks the chain, just like the root object does
+                dn, parent_dn = "", None
+                continue
 
-        return DN(dn, obj, parent_dn if parent_dn else None)
+            dn = f"{rdn_key}={rdn_value}".upper() + (f",{dn}" if dn else "")
+            parent_dn = DN(dn, obj, parent_dn)
+
+        return parent_dn if parent_dn is not None else ""
 
     def _get_index(self, attribute: str) -> Index:
         """Get the index for a given attribute name.
