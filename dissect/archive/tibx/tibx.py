@@ -7,6 +7,11 @@ the newest extent -- keyed by the slice id that wrote it, which is the only reli
 global recency signal. Sparse gaps between intervals are genuine unallocated space and
 read back as zeros. Only the segments backing a requested range are fetched and
 decompressed, so reads are fully lazy.
+
+Every read is made through a recovery point view (:class:`RecoveryPointView`): the
+archive's own methods use the currently selected point, while :meth:`TIBX.view` hands out
+a view that stays bound to the point it was opened for. Views share the decompressed
+segment cache; only the per-point extent and imap state is theirs.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import datetime
 import heapq
 import re
 import uuid
+import weakref
 from array import array
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
@@ -81,7 +87,7 @@ SPLIT_PART_RE = re.compile(r"^(?P<stem>.+?)-(?P<num>\d{4})\.tibx$", re.IGNORECAS
 # filesystem this parser does not recognise. The two populations are far apart in practice:
 # across the sample corpora the largest metadata stream is ~2.6 KB and the smallest real
 # partition is 16 MB, so this sits in the middle of a gap of some four orders of magnitude.
-# On real disks two kinds of metadata do reach it; see TIBX._is_volume.
+# On real disks two kinds of metadata do reach it; see _is_volume.
 MIN_VOLUME_SIZE = 1 << 20
 
 # Partitions are imaged in whole sectors of at least this size
@@ -148,12 +154,188 @@ class ItemStream(NamedTuple):
     size: int
 
 
+class RecoveryPointView:
+    """The archive as it stood after one backup: a bound recovery point and its resolved state.
+
+    A view is the unit of consistency for reads. It fixes the slice limit when it is created
+    and everything it hands out -- its extents, streams, volumes and their sizes -- resolves
+    against that limit, not against whatever :meth:`TIBX.use_recovery_point` selects later.
+    Volumes opened from a view therefore keep reading, and keep reporting, the backup they
+    were opened for even while another view is selected elsewhere.
+
+    Views share everything that cannot change between recovery points: the archive's page
+    store, its segment index and layout, and the archive-level decompressed segment cache.
+    Only the per-point extent table and imap snapshot are held here, and those are shared by
+    every volume of the view rather than rebuilt per volume. Use :meth:`TIBX.view` to obtain
+    one; :meth:`TIBX.volumes` and friends serve the currently selected point's view.
+    """
+
+    def __init__(self, tibx: TIBX, point: RecoveryPoint | None):
+        self.tibx = tibx
+        # None is the live root: every extent the archive holds, whatever its slice
+        self.point = point
+        self.slice_limit = None if point is None else point.slice_id
+        self._extents: ExtentTable | None = None
+        self._streams: list[TibxVolume] | None = None
+        self._volumes: list[TibxVolume] | None = None
+        self._item_versions: dict[bytes, ItemStream] | None = None
+        self._stream_sizes: dict[int, int] | None = None
+        tibx._views.add(self)
+
+    def __repr__(self) -> str:
+        point = "latest" if self.point is None else f"index={self.point.index} slice={self.slice_limit}"
+        return f"<RecoveryPointView {point}>"
+
+    def _in_view(self, slice_id: int) -> bool:
+        return self.slice_limit is None or slice_id <= self.slice_limit
+
+    def _release(self) -> None:
+        """Drop this view's caches, breaking the volume cycle on close.
+
+        Reads through volumes handed out before :meth:`TIBX.close` fail anyway once the
+        archive is closed; this lets the archive and those volumes be freed by reference
+        counting rather than whenever the cyclic GC runs.
+        """
+        self._extents = None
+        self._streams = None
+        self._reset_imap_state()
+
+    def _reset_imap_state(self) -> None:
+        """Drop what the imap said, which changes when the archive is unlocked.
+
+        The data_map and the segment layout do not: they are stored unencrypted. Keeping
+        them lets volumes handed out before an unlock keep their extent table while
+        picking up the now-readable item list.
+        """
+        self._volumes = None
+        self._item_versions = None
+        self._stream_sizes = None
+
+    @property
+    def extents(self) -> ExtentTable:
+        """The data_map extents of this view: all of them, or those up to the view's slice."""
+        if self._extents is None:
+            extents = self.tibx._unfiltered_extents()
+            if self.slice_limit is not None:
+                extents = extents.select(map(le, extents.slice_ids, repeat(self.slice_limit)))
+            self._extents = extents
+        return self._extents
+
+    def streams(self) -> list[TibxVolume]:
+        """Every data_map stream in this view, newest backup generation first, then largest first."""
+        if self._streams is None:
+            extents = self.extents
+            streams = [TibxVolume(self, vid, start, stop) for vid, start, stop in extents.volume_ranges()]
+            streams.sort(key=_stream_order, reverse=True)
+            self._streams = streams
+        return self._streams
+
+    def volumes(self) -> list[TibxVolume]:
+        """The backed-up volumes of this view, newest backup generation first, then largest first.
+
+        The selection is the one :meth:`TIBX.volumes` documents, but every comparison is
+        against this view's own slice limit and imap snapshot.
+        """
+        if self._volumes is None:
+            if self.tibx.archive_type == "file":
+                volumes = []
+            elif self._names_partitions():
+                # Every partition record in this view, deleted or incomplete ones included:
+                # when the imap speaks of partitions, only its live complete versions are
+                # volumes. Falling back to content classification here would resurrect a
+                # deleted partition from the stream its older version still occupies.
+                partitions = self.partitions()
+                named = {partition.id for partition in partitions}
+                if self._streams is not None:
+                    volumes = [stream for stream in self._streams if stream.volume_id in named]
+                else:
+                    # Only the streams of the partitions: resolving every stream's extents
+                    # costs seconds per backup on a large archive
+                    extents = self.extents
+                    volumes = [
+                        TibxVolume(self, vid, start, stop)
+                        for vid, start, stop in extents.volume_ranges()
+                        if vid in named
+                    ]
+                    volumes.sort(key=_stream_order, reverse=True)
+                stored = {volume.volume_id for volume in volumes}
+                volumes.extend(
+                    TibxVolume(self, partition.id, 0, 0)
+                    for partition in partitions
+                    if partition.id not in stored
+                )
+            else:
+                streams = self.streams()
+                bitmap_spans = _bitmap_spans(streams)
+                volumes = [stream for stream in streams if _is_volume(stream, bitmap_spans)]
+            self._volumes = volumes
+        return self._volumes
+
+    def _names_partitions(self) -> bool:
+        """Whether the imap in this view names any partition, live or deleted/incomplete."""
+        return any(PARTITION_NAME_RE.fullmatch(record.name) for record in self._versions().values())
+
+    def partitions(self) -> list[ItemStream]:
+        """The partitions of this view, as the imap names them, by the record of their data stream.
+
+        Empty if the imap names no partition, or if it is encrypted and the archive locked.
+        """
+        return [
+            record
+            for record in self._versions().values()
+            if PARTITION_NAME_RE.fullmatch(record.name)
+            and record.flags & c_tibx.ItemFlags.COMPLETE
+            and not record.flags & c_tibx.ItemFlags.DELETED
+        ]
+
+    def _versions(self) -> dict[bytes, ItemStream]:
+        """The newest record of every imap item in this view, deleted and incomplete ones included.
+
+        An item's version in a backup is its newest record up to that backup, as Acronis
+        lists items. Keeping the tombstone here lets :meth:`stream_size` hide a deleted
+        stream's older size; :meth:`partitions` filters those out of the volume list.
+        """
+        if self._item_versions is None:
+            try:
+                records = self.tibx._item_streams()
+            except InvalidPasswordError:
+                records = []
+            versions: dict[bytes, ItemStream] = {}
+            for record in records:
+                if record.index == 0 and self._in_view(record.slice_id):
+                    version = versions.get(record.name)
+                    if version is None or record.slice_id > version.slice_id:
+                        versions[record.name] = record
+            self._item_versions = versions
+        return self._item_versions
+
+    def stream_size(self, volume_id: int) -> int | None:
+        """The size the imap gives data_map stream ``volume_id`` in this view.
+
+        ``None`` if the imap does not name the stream in this view, or if it is encrypted
+        and the archive is locked. The size comes from the newest version of the *item*
+        in this view: when that version is a deletion tombstone it carries no stream at
+        all, so the stream its older version used gets no size here either. A version
+        that is only incomplete still reports its size: the stream exists, it just is not
+        listed as a volume until its backup completes.
+        """
+        if self._stream_sizes is None:
+            self._stream_sizes = {
+                record.id: record.size
+                for record in self._versions().values()
+                if not record.flags & c_tibx.ItemFlags.DELETED
+            }
+        return self._stream_sizes.get(volume_id)
+
+
 class TIBX:
     """An Acronis TIBX ("archive3") backup archive.
 
     Opens at the latest recovery point. Use :meth:`recovery_points` to enumerate the
     backups the archive records and :meth:`use_recovery_point` to select an earlier one
-    in a chain.
+    in a chain. :meth:`view` returns a recovery point view that stays bound to its point:
+    volumes and streams obtained from it keep reading that backup after another point is
+    selected, while the archive's own :meth:`volumes` and reads follow the selection.
 
     Args:
         fh: A file-like object of the archive, or the ordered file-like objects of a
@@ -178,8 +360,9 @@ class TIBX:
             self._check_files(files)
 
         self._recovery_points: list[RecoveryPoint] | None = None
-        self._slice_limit: int | None = None
         self._data_key = None
+        self._views: weakref.WeakSet[RecoveryPointView] = weakref.WeakSet()
+        self._current_view: RecoveryPointView | None = None
         self._reset_snapshot_caches()
 
     def _reset_snapshot_caches(self) -> None:
@@ -198,11 +381,11 @@ class TIBX:
     def _reset_view_caches(self) -> None:
         # Everything that depends on the selected recovery point. A segment's plaintext,
         # its location and the layout of the extents it holds do not: a segment is written
-        # by one backup, and later backups only reference it again.
-        self._extents: ExtentTable | None = None
-        self._streams: list[TibxVolume] | None = None
-        self._volumes: list[TibxVolume] | None = None
-        self._stream_sizes: dict[int, int] | None = None
+        # by one backup, and later backups only reference it again. Volumes keep the view
+        # they were opened from, so dropping this one does not disturb them.
+        if self._current_view is not None:
+            self._current_view._release()
+        self._current_view = None
 
     def _clear_segment_cache(self) -> None:
         self._segment_cache: OrderedDict[int, bytes] = OrderedDict()
@@ -271,6 +454,10 @@ class TIBX:
             except OSError:  # noqa: PERF203
                 pass
         self._handles = []
+        # A view and its volumes reference each other and the archive; drop every view's
+        # side so a closed archive is freed by reference counting, not by the cycle GC.
+        for view in list(self._views):
+            view._release()
         self._reset_snapshot_caches()
 
     def __enter__(self) -> Self:
@@ -365,6 +552,10 @@ class TIBX:
         self._data_key = unwrap_data_key(self.header, password)
         self._clear_segment_cache()
         self._reset_imap_caches()
+        # Views handed out while the archive was locked cached an empty imap; let them
+        # see the items and sizes the password just made readable
+        for view in list(self._views):
+            view._reset_imap_state()
 
     def recovery_points(self) -> list[RecoveryPoint]:
         """The backups in this archive, oldest first.
@@ -402,7 +593,11 @@ class TIBX:
         return self._recovery_points
 
     def use_recovery_point(self, recovery_point: int | str = "latest") -> None:
-        """Select which recovery point volumes and reads reflect.
+        """Select which recovery point this archive's volumes and reads reflect.
+
+        Selection only changes what this archive hands out from now on. Views and volumes
+        obtained before the call -- through :meth:`view`, :meth:`volumes` or :meth:`streams`
+        -- stay bound to the point they were opened for.
 
         Args:
             recovery_point: ``"latest"`` (the live root, default), ``"oldest"``, or an
@@ -411,27 +606,60 @@ class TIBX:
         Raises:
             ~dissect.archive.tibx.exception.InvalidArchiveError: If an integer index is out of range.
         """
+        self._current_view = self._make_view(recovery_point)
+
+    def view(self, recovery_point: int | str | None = None) -> RecoveryPointView:
+        """Return a view bound to a recovery point.
+
+        With no argument the view is the one this archive currently has selected, so it
+        reflects the last :meth:`use_recovery_point`. Pass ``"latest"`` for the live root
+        regardless of the selection, or an index/``"oldest"`` as :meth:`use_recovery_point`
+        takes them. A view fixes its slice limit when created. Its volumes keep resolving
+        extents and imap sizes against that backup even after another point is selected;
+        the decompressed segment cache is shared with the archive and every other view.
+
+        Raises:
+            ~dissect.archive.tibx.exception.InvalidArchiveError: If an integer index is out of range.
+        """
+        if recovery_point is None:
+            return self._view
+        return self._make_view(recovery_point)
+
+    @property
+    def recovery_point(self) -> RecoveryPoint | None:
+        """The recovery point this archive currently selects, or None for the live root (latest)."""
+        return self._view.point
+
+    def _resolve_point(self, recovery_point: int | str) -> RecoveryPoint | None:
+        """The point ``recovery_point`` names, or None for the live root."""
         if recovery_point == "latest":
-            self._slice_limit = None
-        else:
-            points = self.recovery_points()
-            if not points:
-                raise InvalidArchiveError("archive records no backups to select from")
-            if recovery_point == "oldest":
-                chosen = points[0]
-            else:
-                try:
-                    index = int(recovery_point)
-                except (TypeError, ValueError):
-                    raise InvalidArchiveError(f"invalid recovery point {recovery_point!r}")
-                if not 0 <= index < len(points):
-                    raise InvalidArchiveError(f"recovery point {index} out of range (0..{len(points) - 1})")
-                chosen = points[index]
-            # Extents carry the slice that wrote them, and resolve_extents already treats
-            # slice_id as the primary recency signal -- so dropping everything newer than
-            # the chosen slice is exactly the archive as it stood after that backup.
-            self._slice_limit = chosen.slice_id
-        self._reset_view_caches()
+            return None
+        points = self.recovery_points()
+        if not points:
+            raise InvalidArchiveError("archive records no backups to select from")
+        if recovery_point == "oldest":
+            return points[0]
+        try:
+            index = int(recovery_point)
+        except (TypeError, ValueError):
+            raise InvalidArchiveError(f"invalid recovery point {recovery_point!r}")
+        if not 0 <= index < len(points):
+            raise InvalidArchiveError(f"recovery point {index} out of range (0..{len(points) - 1})")
+        return points[index]
+
+    def _make_view(self, recovery_point: int | str) -> RecoveryPointView:
+        """A new view for ``recovery_point``. Extents carry the slice that wrote them, and
+        resolve_extents treats slice_id as the primary recency signal, so dropping those
+        newer than the chosen slice is exactly the archive as it stood after that backup.
+        """
+        return RecoveryPointView(self, self._resolve_point(recovery_point))
+
+    @property
+    def _view(self) -> RecoveryPointView:
+        """The view of the currently selected recovery point."""
+        if self._current_view is None:
+            self._current_view = RecoveryPointView(self, None)
+        return self._current_view
 
     def disks(self) -> list:
         """Whole-disk views of this archive.
@@ -446,12 +674,7 @@ class TIBX:
     @property
     def extents(self) -> ExtentTable:
         """The data_map extents in view: all of them, or those up to the selected slice."""
-        if self._extents is None:
-            extents = self._unfiltered_extents()
-            if self._slice_limit is not None:
-                extents = extents.select(map(le, extents.slice_ids, repeat(self._slice_limit)))
-            self._extents = extents
-        return self._extents
+        return self._view.extents
 
     def _unfiltered_extents(self) -> ExtentTable:
         """Every data_map extent, whatever recovery point is selected."""
@@ -471,12 +694,7 @@ class TIBX:
         Most callers want :meth:`volumes`; this is here for inspecting an archive's
         internals without having to reach into the data_map.
         """
-        if self._streams is None:
-            extents = self.extents
-            streams = [TibxVolume(self, vid, extents, start, stop) for vid, start, stop in extents.volume_ranges()]
-            streams.sort(key=_stream_order, reverse=True)
-            self._streams = streams
-        return self._streams
+        return self._view.streams()
 
     def volumes(self) -> list[TibxVolume]:
         """The backed-up volumes of the selected recovery point, newest backup generation first, then largest first.
@@ -504,62 +722,7 @@ class TIBX:
         unrecognised partition, something ``acrocmd list content`` reports as a partition of
         type ``None``. Use :meth:`streams` for the unfiltered list.
         """
-        if self._volumes is None:
-            if self.archive_type == "file":
-                volumes = []
-            elif partitions := self._partitions():
-                named = {partition.id for partition in partitions}
-                if self._streams is not None:
-                    volumes = [stream for stream in self._streams if stream.volume_id in named]
-                else:
-                    # Only the streams of the partitions: resolving every stream's extents
-                    # costs seconds per backup on a large archive
-                    extents = self.extents
-                    volumes = [
-                        TibxVolume(self, vid, extents, start, stop)
-                        for vid, start, stop in extents.volume_ranges()
-                        if vid in named
-                    ]
-                    volumes.sort(key=_stream_order, reverse=True)
-                stored = {volume.volume_id for volume in volumes}
-                volumes.extend(
-                    TibxVolume(self, partition.id, self.extents, 0, 0)
-                    for partition in partitions
-                    if partition.id not in stored
-                )
-            else:
-                streams = self.streams()
-                bitmap_spans = _bitmap_spans(streams)
-                volumes = [stream for stream in streams if self._is_volume(stream, bitmap_spans)]
-            self._volumes = volumes
-        return self._volumes
-
-    def _partitions(self) -> list[ItemStream]:
-        """The partitions of the selected recovery point, as the imap names them, by the record of their data stream.
-
-        Empty if the imap names no partition, or if it is encrypted and the archive locked.
-        """
-        try:
-            records = self._item_streams()
-        except InvalidPasswordError:
-            return []
-        # An item's version in a backup is its newest record up to that backup, as Acronis
-        # lists items; one that is deleted or incomplete is not there
-        versions: dict[bytes, ItemStream] = {}
-        for record in records:
-            if (
-                record.index == 0
-                and (self._slice_limit is None or record.slice_id <= self._slice_limit)
-                and PARTITION_NAME_RE.fullmatch(record.name)
-            ):
-                version = versions.get(record.name)
-                if version is None or record.slice_id > version.slice_id:
-                    versions[record.name] = record
-        return [
-            record
-            for record in versions.values()
-            if record.flags & c_tibx.ItemFlags.COMPLETE and not record.flags & c_tibx.ItemFlags.DELETED
-        ]
+        return self._view.volumes()
 
     def _item_streams(self) -> list[ItemStream]:
         """Every data stream the imap (TLV[0]) names.
@@ -596,60 +759,6 @@ class TIBX:
                         )
             self._item_streams_cache = records
         return self._item_streams_cache
-
-    def _stream_size(self, volume_id: int) -> int | None:
-        """The size the imap gives data_map stream ``volume_id``, as of the selected recovery point.
-
-        ``None`` if the imap does not name the stream, or if it is encrypted and the archive
-        is locked.
-        """
-        if self._stream_sizes is None:
-            try:
-                records = self._item_streams()
-            except InvalidPasswordError:
-                return None
-            # Oldest backup first, so the newest one in view decides
-            self._stream_sizes = {
-                record.id: record.size
-                for record in sorted(records)
-                if (self._slice_limit is None or record.slice_id <= self._slice_limit)
-                and not record.flags & c_tibx.ItemFlags.DELETED
-            }
-        return self._stream_sizes.get(volume_id)
-
-    @staticmethod
-    def _is_volume(stream: TibxVolume, bitmap_spans: set[int]) -> bool:
-        """Whether a data_map stream is a backed-up volume rather than Acronis metadata.
-
-        Size alone does not tell the two apart on real disks. A volume's allocation bitmap
-        holds a bit per cluster, so it reaches :data:`MIN_VOLUME_SIZE` for any volume over
-        32 GiB, and the bootstrap region before a disk's first partition is a whole 1 MiB
-        on a disk partitioned the Windows way. But a partition is imaged in whole sectors,
-        so its span is sector-aligned where a bitmap's mostly is not, and the bootstrap
-        region starts with the disk's partition table. A bitmap that is a whole number of
-        sectors after all, like that of a 100 GiB volume with 4 KiB clusters, still has
-        the span of a bit per cluster of another stream, rounded up to a byte (see
-        :func:`_bitmap_spans`), or starts with a sector of set bits, which no partition,
-        formatted or not, does.
-
-        The size tests run on :attr:`TibxVolume.span`, which comes from the data_map and
-        needs no read. That matters for an encrypted archive that has not been unlocked:
-        listing what a locked archive contains must not require the password, so a stream
-        that cannot be read is judged by its span alone.
-        """
-        try:
-            head = stream.read(0, 2048)
-        except Error:
-            # Locked, or unreadable for any other reason
-            head = None
-
-        if head is not None and _boot_sector_size(head):
-            return True
-        if stream.span < MIN_VOLUME_SIZE or stream.span % SECTOR_SIZE or stream.span in bitmap_spans:
-            return False
-        if head is None:
-            return True
-        return head[:SECTOR_SIZE] != b"\xff" * SECTOR_SIZE and not _is_partition_table(head, stream.span)
 
     def extent_base(self, extent: Extent) -> int:
         """The within-segment byte offset where ``extent``'s data starts.
@@ -711,12 +820,17 @@ class TIBX:
 class TibxVolume:
     """One backed-up volume (a data_map volume stream) inside a TIBX archive.
 
-    Its extents are the rows ``start`` up to ``stop`` of the archive's extent table.
+    A volume belongs to exactly one :class:`RecoveryPointView`: its extent table and its
+    imap size both resolve against that view's point, whatever the archive selects later.
+    The archive itself is only used for the data that cannot differ between points -- the
+    shared decompressed segment cache and the segment layout.
     """
 
-    def __init__(self, tibx: TIBX, volume_id: int, table: ExtentTable, start: int = 0, stop: int | None = None):
-        self.tibx = tibx
+    def __init__(self, view: RecoveryPointView, volume_id: int, start: int = 0, stop: int | None = None):
+        self.view = view
+        self.tibx = view.tibx
         self.volume_id = volume_id
+        table = view.extents
         self._table = table
         self._first = start
         self._last = len(table) if stop is None else stop
@@ -730,7 +844,7 @@ class TibxVolume:
     def __repr__(self) -> str:
         # The span, not the size: that would read the boot sector, which needs the password
         # on an encrypted archive
-        return f"<TibxVolume volume_id={self.volume_id:#x} span={self.span}>"
+        return f"<TibxVolume volume_id={self.volume_id:#x} span={self.span} view={self.view!r}>"
 
     @property
     def extents(self) -> ExtentTable:
@@ -748,15 +862,15 @@ class TibxVolume:
 
     @property
     def size(self) -> int:
-        """The volume size in bytes, as the imap records it.
+        """The volume size in bytes, as the imap records it in this volume's view.
 
         That is the partition's size: an NTFS boot sector leaves the partition's last
         sector out, and a sparse volume's boot sector can say far more than the data_map
-        holds. Without an imap record, as for an encrypted archive that is locked, the size
-        comes from the boot sector, capped by the data_map span.
+        holds. Without an imap record in the volume's view, as for an encrypted archive that
+        is locked, the size comes from the boot sector, capped by the data_map span.
         """
         if self._size is None:
-            size = self.tibx._stream_size(self.volume_id)
+            size = self.view.stream_size(self.volume_id)
             if size is None:
                 span = self._span
                 size = _boot_sector_size(self.read(0, 2048))
@@ -1083,6 +1197,40 @@ def _bitmap_spans(streams: list[TibxVolume]) -> set[int]:
             clusters = -(-stream.span // cluster_size)
             spans.add(-(-clusters // 8))
     return spans
+
+
+def _is_volume(stream: TibxVolume, bitmap_spans: set[int]) -> bool:
+    """Whether a data_map stream is a backed-up volume rather than Acronis metadata.
+
+    Size alone does not tell the two apart on real disks. A volume's allocation bitmap
+    holds a bit per cluster, so it reaches :data:`MIN_VOLUME_SIZE` for any volume over
+    32 GiB, and the bootstrap region before a disk's first partition is a whole 1 MiB
+    on a disk partitioned the Windows way. But a partition is imaged in whole sectors,
+    so its span is sector-aligned where a bitmap's mostly is not, and the bootstrap
+    region starts with the disk's partition table. A bitmap that is a whole number of
+    sectors after all, like that of a 100 GiB volume with 4 KiB clusters, still has
+    the span of a bit per cluster of another stream, rounded up to a byte (see
+    :func:`_bitmap_spans`), or starts with a sector of set bits, which no partition,
+    formatted or not, does.
+
+    The size tests run on :attr:`TibxVolume.span`, which comes from the data_map and
+    needs no read. That matters for an encrypted archive that has not been unlocked:
+    listing what a locked archive contains must not require the password, so a stream
+    that cannot be read is judged by its span alone.
+    """
+    try:
+        head = stream.read(0, 2048)
+    except Error:
+        # Locked, or unreadable for any other reason
+        head = None
+
+    if head is not None and _boot_sector_size(head):
+        return True
+    if stream.span < MIN_VOLUME_SIZE or stream.span % SECTOR_SIZE or stream.span in bitmap_spans:
+        return False
+    if head is None:
+        return True
+    return head[:SECTOR_SIZE] != b"\xff" * SECTOR_SIZE and not _is_partition_table(head, stream.span)
 
 
 def _is_partition_table(head: bytes, span: int) -> bool:

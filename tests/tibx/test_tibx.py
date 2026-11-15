@@ -464,8 +464,9 @@ def test_discard_extent_masks_older_data() -> None:
     discard = Extent(
         volume_id=10, source_offset=0x1000, extent_length=0x1000, slice_id=3, extent_id=2, segment_id=0, extent_index=0
     )
-    tibx._extents = ExtentTable.from_extents([*tibx.extents, discard])
-    tibx._volumes = None
+    view = tibx._view
+    view._extents = ExtentTable.from_extents([*tibx.extents, discard])
+    view._volumes = None
 
     volume = tibx.streams()[0]
     assert volume.read(0, 0x1000) == b"A" * 0x1000
@@ -476,7 +477,7 @@ def test_discard_extent_masks_older_data() -> None:
 def test_segment_shorter_than_its_extent_reads_zeros() -> None:
     # Damaged archive: the data_map maps more bytes than the segment holds
     tibx = _open(build_lsm_archive([ExtentSpec(10, 0, b"A" * 0x1000)]))
-    tibx._extents = ExtentTable.from_extents([tibx.extents[0]._replace(extent_length=0x3000)])
+    tibx._view._extents = ExtentTable.from_extents([tibx.extents[0]._replace(extent_length=0x3000)])
     volume = tibx.streams()[0]
 
     assert volume.read(0, 0x3000) == b"A" * 0x1000 + b"\x00" * 0x2000
