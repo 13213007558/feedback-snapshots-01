@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from dissect.vmfs.descriptor import DirEntry, FileDescriptor
+from dissect.vmfs.descriptor import (
+    BlockReadReason,
+    DirEntry,
+    FileDescriptor,
+    ReadSegment,
+)
 from dissect.vmfs.exception import (
     Error,
     FileNotFoundError,
@@ -14,6 +19,7 @@ from dissect.vmfs.vmfs import VMFS
 __all__ = [
     "LVM",
     "VMFS",
+    "BlockReadReason",
     "Device",
     "DirEntry",
     "Error",
@@ -22,5 +28,6 @@ __all__ = [
     "InvalidHeader",
     "NotADirectoryError",
     "NotASymlinkError",
+    "ReadSegment",
     "Volume",
 ]

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import stat
 import struct
+from enum import Enum
 from functools import cached_property
 from textwrap import dedent
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 
 from dissect.util import ts
 from dissect.util.hash.jenkins import lookup8_quads
@@ -33,6 +34,54 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from dissect.vmfs.vmfs import VMFS
+
+
+class BlockReadReason(Enum):
+    """Why the bytes of a file region are returned the way they are.
+
+    This distinguishes content that genuinely lives on disk from content that is logically zero. The distinction
+    matters for forensics: a region of zero bytes can either come from actual zero bytes on disk, from a block that is
+    still unallocated, or from a to-be-zeroed (TBZ) marker that logically overwrites stale disk bytes.
+    """
+
+    DATA = "data"
+    """The region is backed by real bytes on disk and no TBZ marker applies."""
+
+    TO_BE_ZEROED = "to-be-zeroed"
+    """The region is logically zero because a TBZ marker applies; stale disk bytes must not be returned."""
+
+    UNALLOCATED = "unallocated"
+    """The region has no block address at all and reads as logical zero (a sparse hole)."""
+
+
+class ReadSegment(NamedTuple):
+    """A contiguous region of a file read together with the reason for its contents.
+
+    Attributes:
+        offset: The offset of the segment relative to the start of the file.
+        length: The length of the segment in bytes.
+        reason: How the contents of this segment must be interpreted.
+    """
+
+    offset: int
+    length: int
+    reason: BlockReadReason
+
+
+class ResolvedBlock(NamedTuple):
+    """The result of resolving a file offset to a location on disk.
+
+    Attributes:
+        disk_offset: The offset on disk corresponding to the requested file offset.
+        reason: How the block backing this offset must be interpreted.
+        tbz: The raw TBZ value of the block address. A single bit on VMFS5, an 8 bit bitmap on VMFS6.
+        tbz_granularity_shift: Log2 of the size covered by a single TBZ bitmap bit.
+    """
+
+    disk_offset: int
+    reason: BlockReadReason
+    tbz: int
+    tbz_granularity_shift: int
 
 
 class DirEntry:
@@ -257,6 +306,15 @@ class FileDescriptor:
         """The file specific block size of this file."""
         return self.metadata.blockSize
 
+    @property
+    def tbz_granularity_shift(self) -> int:
+        """Log2 of the size covered by a single TBZ bitmap bit.
+
+        On VMFS5 a block only has a single TBZ bit, so the granularity equals the block size. On VMFS6 the block
+        address carries an 8 bit TBZ bitmap, where each bit covers a ``tbzGranularityShift`` sized region of the block.
+        """
+        return self.metadata.tbzGranularityShift
+
     @cached_property
     def atime(self) -> datetime:
         """The last access time of this file."""
@@ -345,9 +403,18 @@ class FileDescriptor:
         """Resolve a given offset to a block address."""
         raise NotImplementedError
 
-    def _resolve_offset(self, offset: int) -> tuple[int, int]:
-        """Resolve any offset in the file to an offset on disk."""
+    def _resolve_block(self, offset: int) -> ResolvedBlock:
+        """Resolve any offset in the file to an offset on disk, together with its TBZ interpretation."""
         raise NotImplementedError
+
+    def _resolve_offset(self, offset: int) -> tuple[int, int]:
+        """Resolve any offset in a file to an offset on disk.
+
+        Returns a tuple of the resolved offset on disk and the raw TBZ value of the block. On VMFS5 this is a single
+        bit, on VMFS6 this is an 8 bit bitmap. Prefer :meth:`_resolve_block` for TBZ aware reads.
+        """
+        resolved = self._resolve_block(offset)
+        return resolved.disk_offset, resolved.tbz
 
     def _resolve_resident_offset(self, offset: int) -> int:
         """Resolve any offset in a file to an offset on disk for resident files.
@@ -473,20 +540,24 @@ class FileDescriptor5(FileDescriptor):
 
         raise TypeError(f"Unsupported ZLA type {FS3_ZeroLevelAddrType(self.zla)} for VMFS5")
 
-    def _resolve_offset(self, offset: int) -> tuple[int, int]:
-        """Resolve any offset in a file to an offset on disk.
+    def _resolve_block(self, offset: int) -> ResolvedBlock:
+        """Resolve any offset in the file to an offset on disk, together with its TBZ interpretation.
 
-        Returns a tuple of the resolved offset on disk and the TBZ bit of the block.
+        VMFS5 file blocks only carry a single TBZ bit, which applies to the whole block. A missing block address (a
+        zero pointer) is a sparse hole and must not be confused with a TBZ marker.
 
         References:
             - ``Fil3_ResolveFileOffsetAndGetBlockTypeVMFS5``
         """
+        # VMFS5 only has a single TBZ bit that covers the whole block, so the effective granularity is the block size
+        granularity_shift = self.metadata.blockOffsetShift
+
         if self.zla == FS3_ZeroLevelAddrType.FILE_DESCRIPTOR_RESIDENT:
-            return self._resolve_resident_offset(offset), 0
+            return ResolvedBlock(self._resolve_resident_offset(offset), BlockReadReason.DATA, 0, granularity_shift)
 
         if (block := self._offset_to_block_address(offset)) == 0:
-            # Return early with a TBZ set for 0 blocks
-            return 0, 1
+            # A zero pointer means the block was never allocated: it is a sparse hole, not a TBZ marked block
+            return ResolvedBlock(0, BlockReadReason.UNALLOCATED, 1, granularity_shift)
 
         type = address_type(block)
 
@@ -505,7 +576,19 @@ class FileDescriptor5(FileDescriptor):
             # Mask directly instead of going through Address to avoid unnecessary overhead
             tbz = (block & 0x20) >> 5
 
-        return block_offset + offset_in_block, tbz
+        reason = BlockReadReason.TO_BE_ZEROED if tbz else BlockReadReason.DATA
+        return ResolvedBlock(block_offset + offset_in_block, reason, tbz, granularity_shift)
+
+    def _resolve_offset(self, offset: int) -> tuple[int, int]:
+        """Resolve any offset in a file to an offset on disk.
+
+        Returns a tuple of the resolved offset on disk and the TBZ bit of the block.
+
+        References:
+            - ``Fil3_ResolveFileOffsetAndGetBlockTypeVMFS5``
+        """
+        resolved = self._resolve_block(offset)
+        return resolved.disk_offset, resolved.tbz
 
 
 class FileDescriptor6(FileDescriptor):
@@ -748,20 +831,24 @@ class FileDescriptor6(FileDescriptor):
 
         raise TypeError(f"Unsupported ZLA type {FS3_ZeroLevelAddrType(self.zla)} for VMFS6")
 
-    def _resolve_offset(self, offset: int) -> tuple[int, int]:
-        """Resolve any offset in a file to an offset on disk.
+    def _resolve_block(self, offset: int) -> ResolvedBlock:
+        """Resolve any offset in the file to an offset on disk, together with its TBZ interpretation.
 
-        Returns a tuple of the offset on disk and the TBZ bitmap of the block.
+        VMFS6 small and large file blocks carry an 8 bit TBZ bitmap. Each bit covers a ``tbzGranularityShift`` sized
+        region of the block, so a single set bit must only zero that region instead of the entire block. A missing
+        block address (a zero pointer) is a sparse hole and must not be confused with a TBZ marker.
 
         References:
             - ``Fil3_ResolveFileOffsetAndGetBlockTypeVMFS6``
         """
+        granularity_shift = self.tbz_granularity_shift
+
         if self.zla == FS3_ZeroLevelAddrType.FILE_DESCRIPTOR_RESIDENT:
-            return self._resolve_resident_offset(offset), 0
+            return ResolvedBlock(self._resolve_resident_offset(offset), BlockReadReason.DATA, 0, granularity_shift)
 
         if (block := self._offset_to_block_address(offset)) == 0:
-            # Return early with a TBZ set for 0 blocks
-            return 0, 0xFF
+            # A zero pointer means the block was never allocated: it is a sparse hole, not a TBZ marked block
+            return ResolvedBlock(0, BlockReadReason.UNALLOCATED, 0xFF, granularity_shift)
         type = address_type(block)
 
         if resource := self.vmfs.resources.get(type):
@@ -789,7 +876,19 @@ class FileDescriptor6(FileDescriptor):
             # Mask directly instead of going through Address to avoid unnecessary overhead
             tbz = (block >> 7) & 0xFF
 
-        return block_offset + offset_in_block, tbz
+        reason = BlockReadReason.TO_BE_ZEROED if tbz else BlockReadReason.DATA
+        return ResolvedBlock(block_offset + offset_in_block, reason, tbz, granularity_shift)
+
+    def _resolve_offset(self, offset: int) -> tuple[int, int]:
+        """Resolve any offset in a file to an offset on disk.
+
+        Returns a tuple of the offset on disk and the raw TBZ bitmap of the block.
+
+        References:
+            - ``Fil3_ResolveFileOffsetAndGetBlockTypeVMFS6``
+        """
+        resolved = self._resolve_block(offset)
+        return resolved.disk_offset, resolved.tbz
 
 
 def _iter_dir_allocation_map(buf: bytes) -> Iterator[tuple[int, bool, bool]]:
@@ -980,7 +1079,13 @@ class BlockStream(AlignedStream):
     Eventual file blocks can also differ between FB (filesystem block), SB (sub/small block) and
     LFB (large filesystem block).
 
-    See :func:`FileDescriptor5._resolve_offset` and :func:`FileDescriptor6._resolve_offset` for more information on how
+    Reads are to-be-zeroed (TBZ) aware. On VMFS5 a block has a single TBZ bit covering the whole block, while VMFS6
+    small and large file blocks carry an 8 bit TBZ bitmap where each bit covers a ``tbzGranularityShift`` sized region.
+    TBZ regions and sparse holes (unallocated blocks) are returned as logical zeros without touching the underlying
+    disk, so stale bytes left behind in a TBZ region can never leak across SFB/LFB boundaries. Use :meth:`explain` to
+    tell whether returned zeros originate from a TBZ marker, a sparse hole or actual zero bytes on disk.
+
+    See :func:`FileDescriptor5._resolve_block` and :func:`FileDescriptor6._resolve_block` for more information on how
     to resolve offsets.
     """
 
@@ -988,25 +1093,77 @@ class BlockStream(AlignedStream):
         self.descriptor = descriptor
         super().__init__(self.descriptor.size, align=self.descriptor.block_size)
 
+    def explain(self, offset: int, length: int) -> Iterator[ReadSegment]:
+        """Explain how the requested file region is interpreted.
+
+        The region is split into contiguous :class:`ReadSegment` objects on both block and TBZ granularity
+        boundaries. Each segment states whether its bytes come from disk, are logically zero because of a TBZ marker,
+        or are logically zero because the underlying block was never allocated. This is the evidence to use when a
+        read returns zeros.
+        """
+        for segment_offset, segment_length, reason, _ in self._iter_segments(offset, length):
+            yield ReadSegment(segment_offset, segment_length, reason)
+
     def _read(self, offset: int, length: int) -> bytes:
         result = []
         fh = self.descriptor.vmfs.fh
 
-        while length > 0:
-            read_length = min(length, self.descriptor.block_size - offset % self.descriptor.block_size)
-
-            read_offset, tbz = self.descriptor._resolve_offset(offset)
-            if tbz:
-                # If the TBZ bit is set, return a zeroed block
-                result.append(b"\x00" * read_length)
+        for segment_offset, segment_length, reason, disk_offset in self._iter_segments(offset, length):
+            if reason == BlockReadReason.DATA:
+                fh.seek(disk_offset)
+                result.append(fh.read(segment_length))
             else:
-                fh.seek(read_offset)
-                result.append(fh.read(read_length))
-
-            length -= read_length
-            offset += read_length
+                # TBZ marked regions and unallocated blocks are logical zeros; never read stale disk bytes
+                result.append(b"\x00" * segment_length)
 
         return b"".join(result)
+
+    def _iter_segments(
+        self, offset: int, length: int
+    ) -> Iterator[tuple[int, int, BlockReadReason, int]]:
+        """Yield ``(offset, length, reason, disk_offset)`` tuples split on block and TBZ boundaries.
+
+        ``disk_offset`` is only meaningful for :attr:`BlockReadReason.DATA` segments. Each block is resolved only
+        once; sub-regions of a TBZ marked block derive their disk offset from the block's base offset.
+        """
+        block_size = self.descriptor.block_size
+        block_mask = block_size - 1
+
+        resolved_block_start = -1
+        resolved = None
+
+        while length > 0:
+            block_start = offset & ~block_mask
+            block_end = min(offset + length, block_start + block_size)
+
+            if block_start != resolved_block_start:
+                # Resolve at the start of the block to get its base offset and TBZ information once
+                resolved = self.descriptor._resolve_block(block_start)
+                resolved_block_start = block_start
+
+            disk_offset = resolved.disk_offset + (offset - block_start)
+
+            if resolved.reason in (BlockReadReason.DATA, BlockReadReason.UNALLOCATED):
+                segment_length = block_end - offset
+                yield offset, segment_length, resolved.reason, disk_offset
+            else:
+                # Split the TBZ marked block into its individual granularity regions so that only the marked
+                # regions read as zero and the remaining regions still return their on-disk content
+                granularity = 1 << resolved.tbz_granularity_shift
+                region_end = min(block_end, (offset + granularity) & ~(granularity - 1))
+                segment_length = region_end - offset
+                # The address only carries 8 bitmap bits, so regions beyond those are never TBZ marked. Not masking
+                # the index here is deliberate: an LFB is larger than 8 granularity regions and must keep returning
+                # its on-disk content past the bitmap instead of wrapping around to the first bits.
+                region_index = (offset - block_start) >> resolved.tbz_granularity_shift
+                if region_index < 8 and ((resolved.tbz >> region_index) & 1):
+                    reason = BlockReadReason.TO_BE_ZEROED
+                else:
+                    reason = BlockReadReason.DATA
+                yield offset, segment_length, reason, disk_offset
+
+            offset += segment_length
+            length -= segment_length
 
 
 class BestEffortBlockStream(AlignedStream):
