@@ -132,63 +132,59 @@ class ResourceFile:
                 + (group * md.clusterGroupSize)
             )
 
-        parent_resources_per_group = (md.parentClustersPerGroup * md.parentResourcesPerCluster) // md.clustersPerGroup
-        parent_group, parent_cluster_in_group = divmod(group, parent_resources_per_group)
+        # VMFS6 resource optimized layout: the child cluster groups are stored in the data area
+        # of the parent cluster groups, after the parent cluster headers
+        child_clusters_per_parent_group = md.parentClustersPerGroup * md.parentResourcesPerCluster
+        child_groups_per_parent_group = child_clusters_per_parent_group // md.clustersPerGroup
+        parent_group, child_group_in_parent = divmod(group, child_groups_per_parent_group)
 
         return (
             # Base offset for cluster groups
             md.clusterGroupOffset
             # Offset for the parent cluster group
             + (parent_group * md.parentClusterGroupSize)
-            # Skip the cluster headers for the parent cluster group
+            # Skip the cluster headers of the parent cluster group
             + (md.parentClustersPerGroup * self._cluster_header_size)
-            # Offset for the cluster group within the parent cluster group
-            + (parent_cluster_in_group * md.clusterGroupSize)
+            # Offset for the child cluster group within the parent cluster group
+            + (child_group_in_parent * md.clusterGroupSize)
         )
 
     def _cluster_header_offset(self, cluster: int) -> int:
         """Calculate the offset of a cluster header in the resource file."""
         md = self.metadata
-
-        if self.vmfs.is_vmfs5 or (self.vmfs.is_vmfs6 and md.flags & 2 == 0):
-            group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
-            return (
-                # Base offset for cluster groups
-                md.clusterGroupOffset
-                # Offset for the cluster group
-                + (group * md.clusterGroupSize)
-                # Offset for the cluster header within the group
-                + (cluster_in_group * self._cluster_header_size)
-            )
-
-        parent_resources_per_group = md.parentClustersPerGroup * md.parentResourcesPerCluster
-        parent_group, parent_cluster_in_group = divmod(cluster, parent_resources_per_group)
+        group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
 
         return (
-            # Base offset for cluster groups
-            md.clusterGroupOffset
-            # Offset for the parent cluster group
-            + (parent_group * md.parentClusterGroupSize)
-            # Skip the cluster headers for the parent cluster group
-            + (md.parentClustersPerGroup * self._cluster_header_size)
-            # Offset to the cluster in the parent cluster group
-            + parent_cluster_in_group
+            # Offset of the cluster group the cluster belongs to
+            self._cluster_group_offset(group)
+            # Offset for the cluster header within the group
+            + (cluster_in_group * self._cluster_header_size)
         )
 
     def _resource_offset(self, cluster: int, resource: int) -> int:
         """Calculate the offset of a specific resource into the resource file based on its address."""
         md = self.metadata
+
+        if resource >= md.resourcesPerCluster:
+            raise ValueError(f"Resource {resource} out of bounds: {md.resourcesPerCluster} resources per cluster")
+
+        num_clusters = md.numClusterGroups * md.clustersPerGroup
+        if cluster >= num_clusters:
+            raise ValueError(f"Cluster {cluster} out of bounds: {num_clusters} clusters")
+
+        num_resources = (md.numResourcesHi << 32) | md.numResourcesLo
+        if (cluster * md.resourcesPerCluster) + resource >= num_resources:
+            raise ValueError(f"Resource {resource} in cluster {cluster} out of bounds: {num_resources} resources")
+
         group, cluster_in_group = divmod(cluster, md.clustersPerGroup)
 
         return (
-            # Base offset for cluster groups
-            md.clusterGroupOffset
-            # Offset for the cluster group
-            + (group * md.clusterGroupSize)
-            # Offset for the cluster header within the group
-            + (cluster_in_group * self._cluster_size)
+            # Offset of the cluster group the cluster belongs to
+            self._cluster_group_offset(group)
             # Offset for the resource data of the cluster
             + self._cluster_data_offset
+            # Offset for the cluster data within the group
+            + (cluster_in_group * self._cluster_size)
             # Offset for the specific resource within the cluster
             + (resource * md.resourceSize)
         )
