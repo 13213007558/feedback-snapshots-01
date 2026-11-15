@@ -216,10 +216,17 @@ class SQLite3:
             # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
             data = frame.data
 
-        elif self.wal:
-            # Check if the latest valid instance of the page is committed (either the frame itself
-            # is the commit frame or it is included in a commit's frames). If so, return that frame's data.
+        elif self.wal and self.wal.header_checksum_valid:
+            # Apply the newest valid WAL generation, like SQLite itself does: only
+            # commits with salts matching the current WAL header, latest commit first.
+            # Older generations remain available as raw evidence and through checkpoints.
+            header_salts = (self.wal.header.salt1, self.wal.header.salt2)
             for commit in reversed(self.wal.commits):
+                if not commit.frames:
+                    continue
+                first_frame = commit.frames[0]
+                if (first_frame.header.salt1, first_frame.header.salt2) != header_salts:
+                    continue
                 if (frame := commit.get(num)) and frame.valid:
                     data = frame.data
                     break
