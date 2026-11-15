@@ -1,14 +1,59 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
+import io
 import struct
+from binascii import crc32
 from typing import BinaryIO
 
 import pytest
 
 from dissect.fve.bde import bde, c_bde, is_bde_volume
 from dissect.fve.bde.information import KeyDatum
-from tests._util import open_file, open_file_gz
+from dissect.fve.bde.key import derive_user_key, stretch
+from dissect.fve.exception import InvalidHeaderError
+from tests._util import absolute_path, open_file, open_file_gz
+
+
+def _tampered_information_image(
+    test_file: str, tamper_information: bool = True, tamper_integrity_mac: bool = False
+) -> bytes:
+    """Return an image with an outer CRC32 that passes but a failing inner integrity check.
+
+    The outer CRC32 is recomputed after tampering, so the (insufficient) outer check stays valid while
+    the VMK-authenticated SHA256 integrity check is made to fail.
+    """
+    raw = gzip.decompress(absolute_path(test_file).read_bytes())
+
+    probe = bde.BDE(io.BytesIO(raw))
+    info = probe.information
+    info_offset = info.offset
+    validation_offset = info_offset + info.size
+
+    image = bytearray(raw)
+    if tamper_information:
+        # Flip a byte inside the Information buffer (part of the description string)
+        tamper_offset = info_offset + info._buf.find(b"D\x00E\x00S\x00K\x00T\x00O\x00P\x00")
+        image[tamper_offset] ^= 0x01
+
+    if tamper_integrity_mac:
+        # Flip a byte in the AES-CCM MAC of the integrity datum (FVE_VALIDATION is 8 bytes, then the datum)
+        integrity_datum = info.validation.integrity_check
+        assert integrity_datum is not None
+        mac_offset = (
+            validation_offset
+            + len(c_bde.c_bde.FVE_VALIDATION)
+            + len(c_bde.c_bde.FVE_DATUM)
+            + len(c_bde.c_bde.FVE_NONCE)
+        )
+        image[mac_offset] ^= 0xFF
+
+    # Recompute the outer CRC32 so the outer validation passes despite the tampering
+    image[validation_offset + 4 : validation_offset + 8] = struct.pack(
+        "<I", crc32(bytes(image[info_offset:validation_offset]))
+    )
+    return bytes(image)
 
 
 def _verify_crypto_stream(bde_obj: bde.BDE) -> None:
@@ -345,3 +390,90 @@ def test_bde_wrong_keys() -> None:
 
         with pytest.raises(ValueError, match="Unable to unlock with BEK"):
             bde_obj.unlock_with_bek(bek_fh)
+
+
+PASSPHRASE_TEST_FILE = "_data/bde/aes_128.bin.gz"
+PASSPHRASE = "password12!@"
+
+
+def test_bde_integrity_digest_mismatch_rejected() -> None:
+    """An outer-valid CRC with a mismatched authenticated digest must be rejected."""
+    image = _tampered_information_image(PASSPHRASE_TEST_FILE)
+
+    bde_obj = bde.BDE(io.BytesIO(image))
+    assert bde_obj.information.is_valid()
+
+    with pytest.raises(InvalidHeaderError, match="integrity check failed"):
+        bde_obj.unlock_with_passphrase(PASSPHRASE)
+
+    # A failed unlock must not leave a partially unlocked, openable volume behind
+    assert not bde_obj.unlocked
+    assert bde_obj._fvek is None
+    assert bde_obj._vmk is None
+    with pytest.raises(ValueError, match="Volume is locked"):
+        bde_obj.open()
+
+
+def test_bde_integrity_digest_mismatch_not_reported_as_wrong_password() -> None:
+    """Corruption must surface as an integrity error, not be rewritten into a wrong-password error."""
+    image = _tampered_information_image(PASSPHRASE_TEST_FILE)
+
+    bde_obj = bde.BDE(io.BytesIO(image))
+    with pytest.raises(InvalidHeaderError) as exc_info:
+        bde_obj.unlock_with_passphrase(PASSPHRASE)
+
+    assert "Unable to unlock with given passphrase" not in str(exc_info.value)
+
+
+def test_bde_integrity_ccm_authentication_failure_rejected() -> None:
+    """A tampered integrity datum MAC (CCM auth failure) must be rejected with an integrity error."""
+    image = _tampered_information_image(PASSPHRASE_TEST_FILE, tamper_information=False, tamper_integrity_mac=True)
+
+    bde_obj = bde.BDE(io.BytesIO(image))
+    assert bde_obj.information.is_valid()
+
+    with pytest.raises(InvalidHeaderError, match="Failed to authenticate"):
+        bde_obj.unlock_with_passphrase(PASSPHRASE)
+    assert not bde_obj.unlocked
+
+
+def test_bde_integrity_check_uses_decrypted_vmk() -> None:
+    """The integrity datum is authenticated with the VMK recovered through the full unlock chain."""
+    image = _tampered_information_image(PASSPHRASE_TEST_FILE)
+
+    bde_obj = bde.BDE(io.BytesIO(image))
+    vmk_info = next(bde_obj.information.dataset.find_passphrase_vmk())
+    stretch_key = vmk_info.stretch_key(None)
+    vmk = vmk_info.decrypt(stretch(derive_user_key(PASSPHRASE), stretch_key.salt))
+
+    # The VMK itself still unwraps, only the metadata digest no longer matches
+    assert isinstance(vmk, KeyDatum)
+    with pytest.raises(InvalidHeaderError, match="integrity check failed"):
+        bde_obj.information.check_integrity(vmk)
+
+
+def test_bde_valid_sample_unaffected_after_corruption_rejection() -> None:
+    """Rejecting a corrupted image must not affect unlocking an independent valid sample."""
+    corrupted = bde.BDE(io.BytesIO(_tampered_information_image(PASSPHRASE_TEST_FILE)))
+    with pytest.raises(InvalidHeaderError):
+        corrupted.unlock_with_passphrase(PASSPHRASE)
+    assert not corrupted.unlocked
+
+    # A separate, pristine BDE object on the original sample still unlocks and reads plaintext
+    with contextlib.contextmanager(open_file_gz)(PASSPHRASE_TEST_FILE) as fh:
+        valid = bde.BDE(fh)
+        valid.unlock_with_passphrase(PASSPHRASE)
+        assert valid.unlocked
+        _verify_crypto_stream(valid)
+
+
+def test_bde_legacy_information_without_integrity_datum(bde_vista: BinaryIO) -> None:
+    """Legacy (version 1) volumes have no integrity datum and fall back to the outer CRC32."""
+    bde_obj = bde.BDE(bde_vista)
+
+    assert bde_obj.version == 1
+    assert bde_obj.information.validation.integrity_check is None
+    assert bde_obj.information.check_integrity(b"\x00" * 32) is bde_obj.information.is_valid()
+
+    bde_obj.unlock_with_recovery_password("517506-503998-044583-576191-587004-635965-501270-087802")
+    assert bde_obj.unlocked

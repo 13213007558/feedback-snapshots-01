@@ -71,11 +71,31 @@ class Information:
         return self._valid_checksum
 
     def check_integrity(self, key: KeyDatum | bytes) -> bool:
-        """Check the integrity of this Information block."""
-        if self.validation.integrity_check:
+        """Check the integrity of this Information block.
+
+        On version 2 and newer the authoritative check is the AES-CCM encrypted integrity datum: decrypting
+        it with the VMK yields a SHA256 digest that must match the entire Information buffer. The outer
+        CRC32 alone is not sufficient, as it can be recomputed by an attacker after tampering.
+
+        Raises ``InvalidHeaderError`` when the integrity datum cannot be authenticated (for example because
+        the metadata was tampered with) or when the decrypted digest does not match. On version 1 (legacy
+        Vista volumes) there is no integrity datum, so the CRC32 validation is used instead.
+        """
+        if not self.validation.integrity_check:
+            return self.is_valid()
+
+        try:
             datum = self.validation.integrity_check.unbox(key)
-            return hashlib.sha256(self._buf).digest() == datum.data
-        return self.is_valid()
+        except ValueError as e:
+            raise InvalidHeaderError(
+                "Failed to authenticate BDE information integrity check: metadata is tampered or corrupted"
+            ) from e
+
+        if hashlib.sha256(self._buf).digest() != datum.data:
+            raise InvalidHeaderError(
+                "BDE information integrity check failed: decrypted SHA256 digest does not match the metadata"
+            )
+        return True
 
     @property
     def size(self) -> int:

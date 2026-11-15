@@ -153,7 +153,10 @@ class BDE:
 
     def unlock(self, key: KeyDatum | bytes) -> BDE:
         """Unlock this volume with the specified encryption key."""
-        self.information.check_integrity(key)
+        if not self.information.check_integrity(key):
+            raise InvalidHeaderError(
+                "BDE information integrity check failed: outer CRC32 mismatch and no integrity datum present"
+            )
 
         if not (fvek := self.information.dataset.find_fvek()):
             raise ValueError("No FVEK found")
@@ -162,6 +165,8 @@ class BDE:
         if not isinstance(fvek, KeyDatum):
             raise TypeError("Invalid unboxed FVEK")
 
+        # Only expose the unlocked state after the metadata authenticated and the FVEK was unboxed,
+        # so a failed unlock never leaves a partially unlocked volume behind.
         if isinstance(key, KeyDatum):
             self._vmk_datum = key
             self._vmk = key.data
@@ -218,9 +223,10 @@ class BDE:
         for vmk in self.information.dataset.find_external_vmk():
             try:
                 decrypted_key = vmk.decrypt(key)
-                return self.unlock(decrypted_key)
-            except Exception:  # noqa: PERF203
-                pass
+            except ValueError:
+                # This external key does not match this VMK, try the next one.
+                continue
+            return self.unlock(decrypted_key)
         raise ValueError("Unable to unlock with external key")
 
     def unlock_with_fvek(self, key: bytes) -> BDE:
