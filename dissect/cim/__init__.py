@@ -7,11 +7,25 @@ from dissect.cim.exceptions import (
     ReferenceNotFoundError,
     UnmappedPageError,
 )
+from dissect.cim.subscriptions import (
+    BindingEvidence,
+    EventConsumerEvidence,
+    EventFilterEvidence,
+    SubscriptionChain,
+    SubscriptionReport,
+    enumerate_subscriptions,
+)
 
 __all__ = [
     "CIM",
+    "BindingEvidence",
     "Error",
+    "EventConsumerEvidence",
+    "EventFilterEvidence",
     "InvalidDatabaseError",
     "ReferenceNotFoundError",
+    "SubscriptionChain",
+    "SubscriptionReport",
     "UnmappedPageError",
+    "enumerate_subscriptions",
 ]
