@@ -29,5 +29,9 @@ class InvalidBlock(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
 
 
+class InvalidChunk(Error, ValueError):
+    """Related to AD1 file chunk tables."""
+
+
 class UnsupportedVersion(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""

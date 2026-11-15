@@ -5,6 +5,7 @@ from dissect.evidence.ad1.stream import AD1Stream, FileStream
 from dissect.evidence.exception import (
     Error,
     FileNotFoundError,
+    InvalidChunk,
     NotADirectoryError,
     NotASymlinkError,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "FileMeta",
     "FileNotFoundError",
     "FileStream",
+    "InvalidChunk",
     "LogicalImage",
     "MetaType",
     "NotADirectoryError",

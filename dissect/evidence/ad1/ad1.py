@@ -424,11 +424,24 @@ class FileEntry:
         reparse_point = c_ad1.ReparsePoint(self.open())
         return reparse_point.link.strip("\00").split("\00")[-1]
 
-    def open(self) -> FileStream:
-        """Open the file entry for reading."""
+    def open(self, *, max_reads: int | None = None, max_decompressed: int | None = None) -> FileStream:
+        """Open the file entry for reading.
+
+        Args:
+            max_reads: Maximum number of reads from the underlying container.
+                Defaults to :attr:`FileStream`'s default budget.
+            max_decompressed: Maximum number of decompressed bytes.
+                Defaults to :attr:`FileStream`'s default budget.
+        """
         if self.is_dir():
             raise IsADirectoryError(self.name)
-        return FileStream(self)
+
+        kwargs = {}
+        if max_reads is not None:
+            kwargs["max_reads"] = max_reads
+        if max_decompressed is not None:
+            kwargs["max_decompressed"] = max_decompressed
+        return FileStream(self, **kwargs)
 
 
 class VirtualEntry(FileEntry):
