@@ -1,6 +1,18 @@
 History
 #######
 
+Unreleased
+==========
+
+- Separate the raw reading view from the edit view.  Derived values that
+  depend on mutable section/interface metadata (timestamps, Simple Packet
+  captured length, interface/section endianness) no longer change after the
+  metadata is edited.  ``Block.raw_view`` is a snapshot taken when the block
+  is decoded; ``Block.edit_view`` follows the current metadata; direct
+  attribute access keeps its previous behaviour.  ``Block.edit_log`` records
+  field and option edits on the block that owns them, and ``copy`` /
+  ``deepcopy`` now copy blocks (and sections) without recursion.
+
 2.1.1
 =====
 

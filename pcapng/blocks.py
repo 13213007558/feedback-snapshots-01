@@ -10,8 +10,8 @@ better access to decoded information, ...
 """
 
 
+import copy
 import io
-import itertools
 
 from pcapng import strictness as strictness
 from pcapng.constants import link_types
@@ -33,8 +33,375 @@ from pcapng.utils import unpack_timestamp_resolution
 KNOWN_BLOCKS = {}
 
 
+def _slot_names(cls):
+    """Return all ``__slots__`` names declared by ``cls`` and its bases."""
+    names = []
+    for base in cls.__mro__:
+        for name in getattr(base, "__slots__", ()):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _copy_decoded(decoded, memo=None):
+    """Copy a decoded-fields mapping, keeping ``Options`` independent."""
+    new = {}
+    for key, value in decoded.items():
+        if memo is None:
+            new[key] = copy.deepcopy(value)
+        else:
+            new[key] = copy.deepcopy(value, memo)
+    return new
+
+
+def _rebind_options(block):
+    """Re-attach the edit hook after a block has been copied."""
+    try:
+        decoded = object.__getattribute__(block, "_decoded")
+    except AttributeError:
+        return
+    options = decoded.get("options")
+    if isinstance(options, Options):
+        options.on_change = block._options_changed
+
+
+def _copy_raw_state(state, memo=None):
+    if state is None:
+        return None
+    clone = {}
+    for key, value in state.items():
+        if value is None or isinstance(value, _InterfaceSnapshot):
+            # Snapshots are immutable; sharing one cannot couple two blocks.
+            clone[key] = value
+        else:
+            clone[key] = copy.deepcopy(value, memo)
+    return clone
+
+
+_INTERNAL_ATTRS = frozenset(
+    (
+        "_decoded",
+        "_raw_state",
+        "_from_raw",
+        "_tracking",
+        "_edit_log",
+        "section",
+    )
+)
+
+
+class EditRecord(object):
+    """One recorded change to a block's fields or options."""
+
+    __slots__ = ("index", "source", "name", "before", "after")
+
+    def __init__(self, index, source, name, before, after):
+        self.index = index
+        self.source = source
+        self.name = name
+        self.before = before
+        self.after = after
+
+    def __eq__(self, other):
+        if not isinstance(other, EditRecord):
+            return NotImplemented
+        return (
+            self.index,
+            self.source,
+            self.name,
+            self.before,
+            self.after,
+        ) == (
+            other.index,
+            other.source,
+            other.name,
+            other.before,
+            other.after,
+        )
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __repr__(self):
+        return (
+            "EditRecord(index={0}, source={1!r}, name={2!r}, "
+            "before={3!r}, after={4!r})"
+        ).format(self.index, self.source, self.name, self.before, self.after)
+
+
+def _snapshot_block(block):
+    """
+    Return a stable dictionary of a block's interpretation values.
+
+    Schema fields are deep-copied, and derived values are resolved once, using
+    the metadata that is in effect right now.  The result intentionally holds
+    no reference to the mutable section graph.
+    """
+    values = {}
+    for name, field, default in getattr(block, "schema", ()):
+        try:
+            value = copy.deepcopy(getattr(block, name))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if isinstance(value, Options):
+            # Snapshots are inert: they must not report edits to the block.
+            value.on_change = None
+        values[name] = value
+
+    def capture(key, getter):
+        try:
+            values[key] = getter()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+
+    capture("endianness", lambda: block.endianness)
+    if not isinstance(block, SectionHeader):
+        capture("endianness", lambda: block.section.endianness)
+
+    if isinstance(block, SectionHeader):
+        capture("version", lambda: block.version)
+        capture("length", lambda: block.length)
+
+    if isinstance(block, InterfaceDescription):
+        capture("interface_id", lambda: block.interface_id)
+        capture("timestamp_resolution", lambda: block.timestamp_resolution)
+        capture("link_type_description", lambda: block.link_type_description)
+        capture(
+            "statistics",
+            lambda: block.section.interface_stats.get(block.interface_id),
+        )
+
+    if isinstance(block, BlockWithInterfaceMixin):
+        capture("interface_id", lambda: block.interface_id)
+        capture("interface", lambda: _InterfaceSnapshot(block.interface))
+        capture(
+            "link_type_description",
+            lambda: block.interface.link_type_description,
+        )
+
+    if isinstance(block, BlockWithTimestampMixin):
+        capture("timestamp_resolution", lambda: block.timestamp_resolution)
+        capture("timestamp", lambda: block.timestamp)
+
+    if isinstance(block, BasePacketBlock):
+        capture("captured_len", lambda: block.captured_len)
+        capture("packet_len", lambda: block.packet_len)
+    return values
+
+
+class _InterfaceSnapshot(object):
+    """Read-only snapshot of the interface metadata used to decode a block."""
+
+    __slots__ = (
+        "interface_id",
+        "link_type",
+        "link_type_description",
+        "snaplen",
+        "timestamp_resolution",
+        "options",
+        "statistics",
+    )
+
+    def __init__(self, interface):
+        self.interface_id = interface.interface_id
+        self.link_type = interface.link_type
+        self.link_type_description = interface.link_type_description
+        self.snaplen = interface.snaplen
+        self.timestamp_resolution = interface.timestamp_resolution
+        self.options = copy.deepcopy(interface.options)
+        self.options.on_change = None
+        self.statistics = interface.statistics
+
+    def __eq__(self, other):
+        if isinstance(other, _InterfaceSnapshot):
+            return self._key() == other._key()
+        if isinstance(other, InterfaceDescription):
+            return self._key() == _InterfaceSnapshot(other)._key()
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash((self.interface_id, self.link_type, self.snaplen))
+
+    def __deepcopy__(self, memo):
+        clone = object.__new__(_InterfaceSnapshot)
+        memo[id(self)] = clone
+        for name in self.__slots__:
+            object.__setattr__(clone, name, getattr(self, name))
+        clone.options = copy.deepcopy(self.options, memo)
+        clone.options.on_change = None
+        return clone
+
+    def _key(self):
+        return (
+            self.interface_id,
+            self.link_type,
+            self.snaplen,
+            self.timestamp_resolution,
+            dict(self.options),
+        )
+
+    def __repr__(self):
+        return (
+            "<interface snapshot id={0} link_type={1} snaplen={2} "
+            "timestamp_resolution={3!r}>"
+        ).format(
+            self.interface_id,
+            self.link_type,
+            self.snaplen,
+            self.timestamp_resolution,
+        )
+
+
+
+class BlockView(object):
+    """
+    Read-only view over a block.
+
+    Two views are exposed by :py:class:`Block`:
+
+    * :py:attr:`Block.raw_view` contains the values decoded when the block was
+      read (or constructed), together with the interface/section metadata that
+      was effective at that moment.  It does not follow later edits.
+    * :py:attr:`Block.edit_view` computes values from the block's current
+      fields and the section/interface metadata that is current *now*.
+
+    A view supports both attribute and item access, and :py:meth:`diff` can be
+    used to make the difference between the two views explicit.
+    """
+
+    __slots__ = ("_block", "_raw")
+
+    def __init__(self, block, raw):
+        object.__setattr__(self, "_block", block)
+        object.__setattr__(self, "_raw", bool(raw))
+
+    @property
+    def is_raw(self):
+        return self._raw
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        try:
+            return self._block._view_value(name, self._raw)
+        except KeyError:
+            raise AttributeError(name)
+
+    def __getitem__(self, name):
+        return getattr(self, name)
+
+    def __contains__(self, name):
+        try:
+            getattr(self, name)
+        except AttributeError:
+            return False
+        return True
+
+    def __dir__(self):
+        names = set(super(BlockView, self).__dir__())
+        names.update(self.as_dict().keys())
+        return sorted(names)
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def items(self):
+        return self.as_dict().items()
+
+    def as_dict(self):
+        names = [x[0] for x in getattr(self._block, "schema", ())]
+        names.extend(
+            [
+                "interface_id",
+                "timestamp",
+                "timestamp_resolution",
+                "captured_len",
+                "packet_len",
+                "interface",
+                "statistics",
+                "link_type_description",
+                "version",
+                "length",
+                "endianness",
+            ]
+        )
+        result = {}
+        for name in names:
+            try:
+                result[name] = getattr(self, name)
+            except (AttributeError, KeyError):
+                pass
+        # Derived values shared by both views, resolved through the view so
+        # that the raw side uses the captured interface/section metadata.
+        if "endianness" not in result:
+            try:
+                result["endianness"] = self._block.section.endianness
+            except AttributeError:
+                pass
+        if "link_type_description" not in result:
+            try:
+                result["link_type_description"] = self.interface.link_type_description
+            except (AttributeError, KeyError):
+                pass
+        return result
+
+    def diff(self, other=None):
+        """
+        Return ``{name: (raw_value, edit_value)}`` for differing values.
+
+        Without an argument, compare the block's raw and edit views in a stable
+        direction (raw first, edit second), regardless of which view called it.
+        """
+        if other is None:
+            raw = self._block.raw_view
+            edit = self._block.edit_view
+            left, right = raw.as_dict(), edit.as_dict()
+        else:
+            left, right = self.as_dict(), other.as_dict()
+        names = set(left) | set(right)
+        result = {}
+        for name in names:
+            if name not in left or name not in right:
+                result[name] = (left.get(name), right.get(name))
+                continue
+            try:
+                equal = left[name] == right[name]
+            except Exception:
+                equal = False
+            if not equal:
+                result[name] = (left[name], right[name])
+        return result
+
+    def __repr__(self):
+        kind = "raw" if self._raw else "edit"
+        return "<{0} view {1!r}>".format(kind, self._block)
+
+
+
 class Block(object):
-    """Base class for blocks"""
+    """Base class for blocks
+
+    Blocks keep two interpretations of their data:
+
+    * the *raw* view, snapshotted at the moment the block was decoded or
+      constructed, and
+    * the *edit* view, computed from the current fields and the section /
+      interface metadata as they are now.
+
+    Reading attributes directly (``block.packet_len``, ``block.timestamp``)
+    keeps the historical behaviour and follows edits.  Use
+    :py:attr:`raw_view` when the value must be tied to the bytes that were
+    actually read.
+    """
 
     schema = []
     readonly_fields = set()
@@ -42,9 +409,16 @@ class Block(object):
         # These are in addition to the above two properties
         "magic_number",
         "_decoded",
+        "_raw_state",
+        "_from_raw",
+        "_tracking",
+        "_edit_log",
     ]
+    _edit_log_limit = 1000
 
     def __init__(self, **kwargs):
+        object.__setattr__(self, "_tracking", False)
+        self._init_tracking(from_raw="raw" in kwargs)
         if "raw" in kwargs:
             self._decoded = struct_decode(
                 self.schema, io.BytesIO(kwargs["raw"]), kwargs["endianness"]
@@ -57,6 +431,7 @@ class Block(object):
                         schema=packed_type.options_schema,
                         data={},
                         endianness=kwargs["endianness"],
+                        on_change=self._options_changed,
                     )
                     if "options" in kwargs:
                         for oky, ovl in kwargs["options"].items():
@@ -66,6 +441,156 @@ class Block(object):
                         self._decoded[key] = kwargs[key]
                     except KeyError:
                         self._decoded[key] = default
+
+        # Options parsed from raw data need the hook attached after decoding.
+        _rebind_options(self)
+        object.__setattr__(self, "_tracking", True)
+
+    # ------------------------------------------------------------------
+    # Tracking / views
+    # ------------------------------------------------------------------
+
+    def _init_tracking(self, from_raw):
+        object.__setattr__(self, "_from_raw", bool(from_raw))
+        object.__setattr__(self, "_raw_state", None)
+        object.__setattr__(self, "_edit_log", [])
+
+    @property
+    def raw_view(self):
+        """Snapshot of the block as it was decoded/constructed."""
+        return BlockView(self, raw=True)
+
+    @property
+    def edit_view(self):
+        """Values computed from the block's current fields and metadata."""
+        return BlockView(self, raw=False)
+
+    @property
+    def from_raw(self):
+        """Whether this block was decoded from a capture stream."""
+        return self._from_raw
+
+    @property
+    def edited(self):
+        """Whether a schema field or option has been changed since parsing."""
+        try:
+            return bool(object.__getattribute__(self, "_edit_log"))
+        except AttributeError:
+            return False
+
+    @property
+    def edit_log(self):
+        """Immutable sequence of recorded edits."""
+        try:
+            return tuple(object.__getattribute__(self, "_edit_log"))
+        except AttributeError:
+            return ()
+
+    def _view_value(self, name, raw):
+        if raw:
+            try:
+                state = object.__getattribute__(self, "_raw_state")
+            except AttributeError:
+                state = None
+            if state is not None:
+                if name not in state:
+                    # The raw view is intentionally closed: it never falls
+                    # back to live metadata that the snapshot did not see.
+                    raise AttributeError(name)
+                value = state[name]
+                if isinstance(value, (_InterfaceSnapshot, Options)):
+                    # The raw view is evidence: callers must not be able to
+                    # mutate the stored snapshot through a returned object.
+                    return copy.deepcopy(value)
+                return value
+        if name == "endianness":
+            try:
+                return self.section.endianness
+            except AttributeError:
+                raise AttributeError(name)
+        return getattr(self, name)
+
+    def _set_raw_value(self, name, value):
+        """
+        Record metadata discovered while reading, without refreshing edits.
+
+        Used for capture facts that only become known later in the stream
+        (an interface id assigned at registration, an ISB read after its IDB).
+        It must never be used for user edits.
+        """
+        state = object.__getattribute__(self, "_raw_state")
+        if state is not None:
+            if isinstance(value, Block):
+                # Metadata links identify another capture block; copying it
+                # would create a detached object that is not the evidence.
+                state[name] = value
+            else:
+                state[name] = copy.deepcopy(value)
+
+    def _capture_raw_state(self):
+        """Freeze the current interpretation as the block's raw view."""
+        try:
+            snapshot = _snapshot_block(self)
+        except Exception:
+            # A half-built block has no meaningful snapshot yet; views then
+            # fall back to live values instead of breaking construction.
+            snapshot = None
+        object.__setattr__(self, "_raw_state", snapshot)
+
+    def _options_changed(self, name, before, after):
+        self._record_edit("options", name, before, after)
+
+    def _record_edit(self, source, name, before, after):
+        if not getattr(self, "_tracking", False):
+            return
+        log = object.__getattribute__(self, "_edit_log")
+        try:
+            before = copy.deepcopy(before)
+        except Exception:
+            pass
+        try:
+            after = copy.deepcopy(after)
+        except Exception:
+            pass
+        log.append(EditRecord(len(log), source, name, before, after))
+        if len(log) > self._edit_log_limit:
+            del log[: len(log) - self._edit_log_limit]
+
+    def __copy__(self):
+        return self._copy_block(deep_sections=False)
+
+    def __deepcopy__(self, memo):
+        clone = self._copy_block(deep_sections=True, memo=memo)
+        memo[id(self)] = clone
+        return clone
+
+    def _copy_block(self, deep_sections, memo=None):
+        """Copy a block with independent fields, options and edit history."""
+        cls = type(self)
+        clone = object.__new__(cls)
+        if memo is None:
+            memo = {}
+        memo[id(self)] = clone
+        for name in _slot_names(cls):
+            if name == "magic_number":
+                continue
+            if name == "section" and not deep_sections:
+                value = object.__getattribute__(self, name)
+            elif name == "_decoded":
+                value = _copy_decoded(object.__getattribute__(self, name), memo)
+            elif name == "_raw_state":
+                value = _copy_raw_state(object.__getattribute__(self, name), memo)
+            elif name == "_edit_log":
+                value = list(object.__getattribute__(self, name))
+            else:
+                try:
+                    value = object.__getattribute__(self, name)
+                except AttributeError:
+                    continue
+                value = copy.deepcopy(value, memo)
+            object.__setattr__(clone, name, value)
+        _rebind_options(clone)
+        return clone
 
     def __eq__(self, other):
         if self.__class__ != other.__class__:
@@ -92,16 +617,29 @@ class Block(object):
 
     def _encode(self, outstream):
         """Encodes the fields of this block into raw data"""
+        endianness = self.section.endianness
         for name, field, default in self.schema:
-            field.encode(
-                getattr(self, name), outstream, endianness=self.section.endianness
-            )
+            value = getattr(self, name)
+            if isinstance(field, OptionsField) and isinstance(value, Options):
+                # Options cache the section endianness used to decode them.
+                # Writing must use the section's current endianness, or the
+                # block header and its option headers would disagree.
+                value.endianness = endianness
+            field.encode(value, outstream, endianness=endianness)
 
     def __getattr__(self, name):
         # __getattr__ is only called when getting an attribute that
-        # this object doesn't have.
+        # this object doesn't have.  Never route our own bookkeeping
+        # attributes through the schema dictionary: during copy/pickle
+        # they are not initialised yet and recursion would follow.
+        if name in _INTERNAL_ATTRS or name.startswith("__"):
+            raise AttributeError(name)
         try:
-            return self._decoded[name]
+            decoded = object.__getattribute__(self, "_decoded")
+        except AttributeError as e:
+            raise AttributeError(name) from e
+        try:
+            return decoded[name]
         except KeyError as e:
             raise AttributeError(name) from e
 
@@ -114,17 +652,28 @@ class Block(object):
             # It's not an attribute.
             # Proceed with our nice interface to the schema.
             pass
+        if name.startswith("__") or name in _INTERNAL_ATTRS:
+            # Bookkeeping attributes are never schema fields.  This matters
+            # during unpickling, when they are restored one at a time.
+            return object.__setattr__(self, name, value)
         if name in self.readonly_fields:
             raise AttributeError(
                 "'{cls}' object property '{prop}' is read-only".format(
                     prop=name, cls=self.__class__.__name__
                 )
             )
-        if self._decoded is None:
-            self._decoded = {}
+        try:
+            decoded = object.__getattribute__(self, "_decoded")
+        except AttributeError:
+            decoded = None
+        if decoded is None:
+            decoded = {}
             for key, packed_type, default in self.schema:
-                self._decoded[key] = None
-        self._decoded[name] = value
+                decoded[key] = None
+            object.__setattr__(self, "_decoded", decoded)
+        old_value = decoded.get(name)
+        decoded[name] = value
+        self._record_edit("field", name, old_value, value)
 
     def __repr__(self):
         args = []
@@ -147,6 +696,7 @@ class SectionMemberBlock(Block):
     def __init__(self, section, **kwargs):
         super(SectionMemberBlock, self).__init__(**kwargs)
         self.section = section
+        self._capture_raw_state()
 
 
 def register_block(block):
@@ -192,10 +742,11 @@ class SectionHeader(Block):
 
     def __init__(self, endianness="<", **kwargs):
         self.endianness = endianness
-        self._interfaces_id = itertools.count(0)
+        self._interfaces_id = 0
         self.interfaces = {}
         self.interface_stats = {}
         super(SectionHeader, self).__init__(endianness=endianness, **kwargs)
+        self._capture_raw_state()
 
     def _encode(self, outstream):
         write_int(0x1A2B3C4D, outstream, 32, endianness=self.endianness)
@@ -212,12 +763,16 @@ class SectionHeader(Block):
             self.register_interface(blk)
         elif isinstance(blk, InterfaceStatistics):
             self.add_interface_stats(blk)
+        # Registration assigns the interface id (and may attach statistics),
+        # so refresh the raw snapshot to include that read-time metadata.
+        blk._capture_raw_state()
         return blk
 
     def register_interface(self, interface):
         """Helper method to register an interface within this section"""
         assert isinstance(interface, InterfaceDescription)
-        interface_id = next(self._interfaces_id)
+        interface_id = self._interfaces_id
+        self._interfaces_id = interface_id + 1
         interface.interface_id = interface_id
         self.interfaces[interface_id] = interface
 
@@ -225,6 +780,11 @@ class SectionHeader(Block):
         """Helper method to register interface stats within this section"""
         assert isinstance(interface_stats, InterfaceStatistics)
         self.interface_stats[interface_stats.interface_id] = interface_stats
+        interface = self.interfaces.get(interface_stats.interface_id)
+        if interface is not None:
+            # The ISB was read after its IDB; this is read-time discovery,
+            # not an edit, so only the raw snapshot gains the reference.
+            interface._set_raw_value("statistics", interface_stats)
 
     @property
     def version(self):
@@ -463,6 +1023,8 @@ class SimplePacket(BasePacketBlock):
     def __init__(self, section, **kwargs):
         self.section = section
         if "raw" in kwargs:
+            object.__setattr__(self, "_tracking", False)
+            self._init_tracking(from_raw=True)
             # Since we can't be sure of the packet length without the snap length,
             # we have to do a bit of work here
             stream = io.BytesIO(kwargs["raw"])
@@ -471,6 +1033,8 @@ class SimplePacket(BasePacketBlock):
             # to really know how much data we can load
             rb = RawBytes(self.captured_len)
             self._decoded["packet_data"] = rb.load(stream)
+            self._capture_raw_state()
+            object.__setattr__(self, "_tracking", True)
         else:
             super(SimplePacket, self).__init__(section, **kwargs)
 

@@ -3,6 +3,7 @@ Module providing facilities for handling struct-like data.
 """
 
 import abc
+import copy
 import struct
 import warnings
 from collections import defaultdict
@@ -649,6 +650,9 @@ class EPBFlags(FlagWord):
 Option = namedtuple(
     "Option", ("code", "name", "ftype", "multiple"), defaults=(None, False)
 )
+# The tuple is created through ``_compat`` for py2 compatibility, but it is a
+# public type of this module: make it picklable/copyable under its real name.
+Option.__module__ = __name__
 
 
 class Options(Mapping):
@@ -703,13 +707,15 @@ class Options(Mapping):
         "_field_names",
         "data",
         "endianness",
+        "on_change",
     ]
 
-    def __init__(self, schema, data, endianness):
+    def __init__(self, schema, data, endianness, on_change=None):
         self.schema = {}  # Schema of option fields: {<code>: Option(...)}
         self._field_names = {}  # Map names to codes
         self.data = defaultdict(list)  # option data, with numeric option IDs as keys
         self.endianness = endianness  # one of '<>!='
+        self.on_change = on_change
 
         # This is the default schema, common to all objects
         for item in [
@@ -756,6 +762,7 @@ class Options(Mapping):
         # which means that, if value is a string, each character gets added
         # separately. Workaround: wrap the string in [ ], or use ``add()``
         code = self._resolve_name(name)
+        before = copy.deepcopy(self.data.get(code))
         if isinstance(value, Iterable) and not isinstance(
             value, (str, bytes, bytearray)
         ):
@@ -765,10 +772,13 @@ class Options(Mapping):
         else:
             # We're being assigned a single value, store as a one-item list
             self.data[code] = [value]
+        self._notify_change(code, before)
 
     def __delitem__(self, name):
         code = self._resolve_name(name)
+        before = copy.deepcopy(self.data.get(code))
         del self.data[code]
+        self._notify_change(code, before)
 
     def get_all(self, name):
         """Get all values for the given option"""
@@ -796,8 +806,32 @@ class Options(Mapping):
     def add(self, name, value):
         """Add a value to the given-named option"""
         code = self._resolve_name(name)
+        before = copy.deepcopy(self.data.get(code))
         self.data[code].append(value)
         self._check_multiples(code)
+        self._notify_change(code, before)
+
+    def __copy__(self):
+        return self._copy_options(deep=False)
+
+    def __deepcopy__(self, memo):
+        clone = self._copy_options(deep=True, memo=memo)
+        memo[id(self)] = clone
+        return clone
+
+    def _copy_options(self, deep, memo=None):
+        clone = object.__new__(self.__class__)
+        clone.schema = self.schema
+        clone._field_names = self._field_names
+        clone.data = defaultdict(list)
+        for code, values in self.data.items():
+            if deep:
+                clone.data[code] = copy.deepcopy(values, memo)
+            else:
+                clone.data[code] = list(values)
+        clone.endianness = self.endianness
+        clone.on_change = self.on_change
+        return clone
 
     def __repr__(self):
         args = dict(self.iter_all_items())
@@ -805,6 +839,12 @@ class Options(Mapping):
         return "{0}({1!r})".format(name, args)
 
     # -------------------- Internal methods --------------------
+
+    def _notify_change(self, code, before):
+        callback = self.on_change
+        if callback is None:
+            return
+        callback(self._get_name_alias(code), before, list(self.data[code]))
 
     def _update_data(self, data):
         if data is None:

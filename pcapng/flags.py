@@ -178,9 +178,12 @@ class FlagWord(object):
         return rv + ">"
 
     def __getattr__(self, name):
+        if name.startswith("__") or name in ("_schema", "_nbits", "_value"):
+            raise AttributeError(name)
         try:
-            v = self._schema[name]
-        except KeyError:
+            schema = object.__getattribute__(self, "_schema")
+            v = schema[name]
+        except (AttributeError, KeyError):
             raise AttributeError(name)
         return v.get()
 
@@ -189,6 +192,8 @@ class FlagWord(object):
             return object.__setattr__(self, name, val)
         except AttributeError:
             pass
+        if name.startswith("__") or name in ("_schema", "_nbits", "_value"):
+            raise AttributeError(name)
         try:
             v = self._schema[name]
         except KeyError:
