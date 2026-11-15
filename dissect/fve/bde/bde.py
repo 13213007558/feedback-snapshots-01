@@ -31,6 +31,7 @@ from dissect.fve.bde.c_bde import (
 from dissect.fve.bde.eow import EowInformation
 from dissect.fve.bde.information import Dataset, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
+from dissect.fve.bde.protector import Protector
 from dissect.fve.crypto import create_cipher
 from dissect.fve.exception import InvalidHeaderError
 
@@ -102,6 +103,24 @@ class BDE:
             type_=FVE_DATUM_TYPE.VOLUME_MASTER_KEY_INFO,
         )
         return [d.priority for d in datums]
+
+    @property
+    def protectors(self) -> list[Protector]:
+        """Return a read-only inventory of the volume's key protectors.
+
+        Reading the inventory only parses metadata. It does not derive keys, unbox the FVEK or
+        change the volume's unlock state.
+        """
+        return [
+            Protector.from_vmk(datum, datum_index=index)
+            for index, datum in enumerate(self.information.dataset.data)
+            if datum.role == FVE_DATUM_ROLE.VOLUME_MASTER_KEY_INFO
+            and datum.type == FVE_DATUM_TYPE.VOLUME_MASTER_KEY_INFO
+        ]
+
+    def protector_inventory(self) -> list[Protector]:
+        """Return a read-only inventory of the volume's key protectors."""
+        return self.protectors
 
     @property
     def sector_size(self) -> int:
