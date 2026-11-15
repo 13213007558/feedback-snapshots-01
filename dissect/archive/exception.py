@@ -23,3 +23,11 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotAReparsePointError(Error):
     pass
+
+
+class InvalidSecurityBlockError(Error):
+    pass
+
+
+class InvalidSecurityIdError(Error):
+    pass

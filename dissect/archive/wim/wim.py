@@ -11,6 +11,8 @@ from dissect.util.ts import wintimestamp
 from dissect.archive.exception import (
     FileNotFoundError,
     InvalidHeaderError,
+    InvalidSecurityBlockError,
+    InvalidSecurityIdError,
     NotADirectoryError,
     NotAReparsePointError,
 )
@@ -30,6 +32,9 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
+
+# SecurityId value used by directory entries that have no security descriptor
+NO_SECURITY_ID = 0xFFFFFFFF
 
 
 class WIM:
@@ -203,14 +208,68 @@ class Image:
 
 
 class SecurityBlock:
+    """Security descriptor table of a single WIM image.
+
+    Directory entries reference a descriptor by their ``SecurityId``, which is an index into
+    this table. Empty entries are kept as ``None`` placeholders so the on-disk index space is
+    preserved and IDs never shift. Each image has its own ``SecurityBlock`` instance.
+    """
+
     def __init__(self, fh: BinaryIO):
+        start = fh.tell()
         self.header = c_wim._SECURITYBLOCK_DISK(fh)
-        self.descriptors = []
-        for size in self.header.EntryLength:
+
+        num_entries = self.header.NumEntries
+        sizes = list(self.header.EntryLength)
+
+        # TotalLength covers the 8 byte header, the entry length table and the descriptor data.
+        # Entry lengths are exact descriptor lengths (not 8-byte aligned) and must tile the data
+        # region exactly, so the table ends at start + TotalLength with no gaps or overlaps.
+        data_length = self.header.TotalLength - 8 - 8 * num_entries
+        if data_length < 0 or sum(sizes) != data_length:
+            raise InvalidSecurityBlockError(
+                f"Security block table end mismatch: TotalLength {self.header.TotalLength} implies "
+                f"{data_length} bytes of descriptor data, but entry lengths sum to {sum(sizes)}"
+            )
+
+        self.descriptors: list[bytes | None] = []
+        for index, size in enumerate(sizes):
             if size == 0:
+                # Empty placeholder, keep the index occupied
+                self.descriptors.append(None)
                 continue
 
-            self.descriptors.append(fh.read(size))
+            buf = fh.read(size)
+            if len(buf) != size:
+                raise InvalidSecurityBlockError(
+                    f"Security descriptor {index} is truncated: expected {size} bytes, got {len(buf)}"
+                )
+            self.descriptors.append(buf)
+
+        if fh.tell() - start != self.header.TotalLength:
+            raise InvalidSecurityBlockError(
+                f"Security block ended at {fh.tell() - start}, expected {self.header.TotalLength}"
+            )
+
+    def __len__(self) -> int:
+        return len(self.descriptors)
+
+    def get(self, security_id: int) -> bytes | None:
+        """Return the raw security descriptor bytes for the given security ID.
+
+        Returns ``None`` if the ID is ``NO_SECURITY_ID`` (entry has no descriptor) or refers to
+        an empty placeholder entry. Raises ``InvalidSecurityIdError`` if the ID is out of range
+        of this table.
+        """
+        if security_id == NO_SECURITY_ID:
+            return None
+
+        if security_id >= len(self.descriptors):
+            raise InvalidSecurityIdError(
+                f"Security ID {security_id} is out of range, table has {len(self.descriptors)} entries"
+            )
+
+        return self.descriptors[security_id]
 
 
 class DirectoryEntry:
@@ -262,6 +321,21 @@ class DirectoryEntry:
 
     def __repr__(self) -> str:
         return f"<DirectoryEntry name={self.name!r}>"
+
+    @property
+    def security_id(self) -> int:
+        """Return the raw security ID of this entry (``NO_SECURITY_ID`` means no descriptor)."""
+        return self.entry.SecurityId
+
+    @property
+    def security_descriptor(self) -> bytes | None:
+        """Return the raw security descriptor bytes of this entry from its own image's table.
+
+        Returns ``None`` if the entry has no security descriptor (``NO_SECURITY_ID``) or refers
+        to an empty placeholder entry. Raises ``InvalidSecurityIdError`` if the ID is out of
+        range of the image's security table.
+        """
+        return self.image.security.get(self.entry.SecurityId)
 
     def is_dir(self) -> bool:
         """Return whether this entry is a directory."""
