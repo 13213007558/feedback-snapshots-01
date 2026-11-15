@@ -452,26 +452,42 @@ class FileStream(RunlistStream):
             v & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK for v, _ in self.runlist[:run_idx]
         )
 
-        while length > 0:
+        while length > 0 and offset < size:
             if run_idx >= runlist_len:
                 # We somehow requested more data than we have runs for
                 break
 
             run_block_size, run_block_count = self.runlist[run_idx]
 
+            # Run start in blocks. For squashfs runs all count as a single block, except for the
+            # fragment run, which is counted in bytes (because that's the number of bytes in the
+            # fragment that belong to this file).
+            run_block_start = 0 if run_idx == 0 else self._runlist_offsets[run_idx - 1]
+            run_pos = offset - run_block_start * self.block_size
+
             # For squashfs we use 0 to indicate a sparse block and None to indicate a fragment
             if run_block_size is None:
-                result.append(self.fs._read_fragment(self.fragment, self.fragment_offset, run_block_count))
-                offset += run_block_count
-                length -= run_block_count
+                # A fragment offset is the offset into the decompressed fragment block that is shared
+                # between multiple files, so account for our position within the run and only return
+                # bytes that belong to this file.
+                run_remaining = run_block_count - run_pos
+                read_count = min(run_remaining, length, size - offset)
+                if read_count <= 0:
+                    break
+
+                result.append(self.fs._read_fragment(self.fragment, self.fragment_offset + run_pos, read_count))
+                offset += read_count
+                length -= read_count
             else:
-                run_pos = offset - run_idx * self.block_size
                 run_remaining = self.block_size - run_pos
 
                 # Sometimes the self.size is way larger than what we actually have runs for?
                 # Stop reading if we reach a negative run_remaining
-                if run_remaining < 0:
-                    break
+                if run_remaining <= 0:
+                    # Block was already fully consumed, move on to the next one
+                    start_block += run_block_size & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
+                    run_idx += 1
+                    continue
 
                 read_count = min(size - offset, min(run_remaining, length))
 
@@ -480,10 +496,11 @@ class FileStream(RunlistStream):
                     result.append(b"\x00" * read_count)
                 else:
                     start_block, data = self.fs._read_block(start_block, run_block_size)
-                    result.append(data[:read_count])
+                    result.append(data[run_pos : run_pos + read_count])
 
                 offset += read_count
                 length -= read_count
-                run_idx += 1
+
+            run_idx += 1
 
         return b"".join(result)
