@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import enum
 import itertools
 import re
+import struct
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -18,12 +21,12 @@ from dissect.database.sqlite3.util import parse_table_columns_constraints
 from dissect.database.sqlite3.wal import WAL
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from types import TracebackType
 
     from typing_extensions import Self
 
-    from dissect.database.sqlite3.wal import Checkpoint
+    from dissect.database.sqlite3.wal import Checkpoint, Frame
 
 ENCODING = {
     1: "utf-8",
@@ -51,6 +54,211 @@ SERIAL_TYPES = {
     8: lambda fh: 0,
     9: lambda fh: 1,
 }
+
+
+class StorageClass(enum.Enum):
+    """The physical storage class of a value in a record.
+
+    This is the type actually used by a record. It is independent of the type
+    declared for the column in the table definition.
+    """
+
+    NULL = "null"
+    INTEGER = "integer"
+    REAL = "real"
+    TEXT = "text"
+    BLOB = "blob"
+    RESERVED = "reserved"
+
+
+# Serial type -> (storage class, size in bytes). Types >= 12 are text or blob.
+SERIAL_TYPE_INFO = {
+    0: (StorageClass.NULL, 0),
+    1: (StorageClass.INTEGER, 1),
+    2: (StorageClass.INTEGER, 2),
+    3: (StorageClass.INTEGER, 3),
+    4: (StorageClass.INTEGER, 4),
+    5: (StorageClass.INTEGER, 6),
+    6: (StorageClass.INTEGER, 8),
+    7: (StorageClass.REAL, 8),
+    8: (StorageClass.INTEGER, 0),
+    9: (StorageClass.INTEGER, 0),
+    10: (StorageClass.RESERVED, 0),
+    11: (StorageClass.RESERVED, 0),
+}
+
+CONSTRAINT_KEYWORDS = {
+    "CONSTRAINT",
+    "PRIMARY",
+    "NOT",
+    "NULL",
+    "UNIQUE",
+    "CHECK",
+    "DEFAULT",
+    "COLLATE",
+    "REFERENCES",
+    "GENERATED",
+    "AS",
+}
+
+
+def serial_type_info(serial_type: int) -> tuple[StorageClass, int]:
+    """Return the storage class and payload size for a serial type.
+
+    See https://www.sqlite.org/fileformat.html#record_format.
+    """
+    if serial_type >= 12:
+        size = (serial_type - 12) // 2
+        return (StorageClass.TEXT if serial_type % 2 else StorageClass.BLOB, size)
+
+    return SERIAL_TYPE_INFO.get(serial_type, (StorageClass.RESERVED, 0))
+
+
+_DECLARED_TYPE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*(\([^)]*\))?")
+
+
+def get_declared_type(description: str) -> str | None:
+    """Return the declared type from a column definition.
+
+    The declared type is the part of the column definition before the first
+    constraint keyword. If a column has no declared type, ``None`` is returned.
+    """
+    match = _DECLARED_TYPE_RE.match(description)
+    if not match:
+        return None
+
+    words = match.group(1).split()
+    for idx, word in enumerate(words):
+        if word.upper() in CONSTRAINT_KEYWORDS:
+            words = words[:idx]
+            break
+
+    if not words:
+        return None
+
+    declared_type = " ".join(words)
+    if match.group(2):
+        # Only include an argument list when it directly follows the type name.
+        trailing = description[match.start(1) :].lstrip()
+        if trailing and re.match(r"^(?:" + re.escape(declared_type) + r")\s*\(", trailing, re.IGNORECASE):
+            declared_type += match.group(2)
+
+    return declared_type
+
+
+@dataclass(frozen=True)
+class DataRun:
+    """A contiguous run of bytes belonging to a record.
+
+    Values in a SQLite record can be split across the page that contains the
+    record and one or more overflow pages. A run describes one such piece:
+
+    Args:
+        page: The page number containing this run.
+        page_offset: The offset of the run in the page data as returned by
+            :meth:`SQLite3.raw_page`.
+        length: The number of bytes in this run.
+        source: Where the page was read from: ``"database"``, ``"wal"`` or
+            ``"checkpoint"``.
+        file_offset: The offset of the run in the main database file. This is
+            only set when the run was read from the main database file; a run
+            from a WAL frame has no file range.
+    """
+
+    page: int
+    page_offset: int
+    length: int
+    source: str = "database"
+    file_offset: int | None = None
+
+    @property
+    def page_range(self) -> tuple[int, int]:
+        """Return the ``(start, end)`` byte range within the page data."""
+        return self.page_offset, self.page_offset + self.length
+
+    @property
+    def file_range(self) -> tuple[int, int] | None:
+        """Return the ``(start, end)`` byte range in the main database file, if known."""
+        if self.file_offset is None:
+            return None
+        return self.file_offset, self.file_offset + self.length
+
+
+@dataclass
+class Field:
+    """A single value as it is stored in a SQLite record.
+
+    A field keeps the information needed to trace a value back to the record:
+    the serial type and storage class that were actually used, the raw bytes,
+    the offset in the record payload, the physical page runs that contain those
+    bytes, the decoded value and any decoding error. It also references the
+    column the value was interpreted as, if any, so the declared column type
+    can be compared to the storage class of this particular value.
+
+    Fields are only created for values that are physically present in a record.
+    Columns that are filled with a table default because they are absent from
+    the record are not represented as a :class:`Field`.
+    """
+
+    index: int
+    column: Column | None
+    serial_type: int
+    storage_class: StorageClass
+    offset: int
+    raw: bytes
+    value: Any = None
+    error: Exception | None = None
+    ranges: tuple[DataRun, ...] = ()
+
+    @property
+    def name(self) -> str | None:
+        """Return the name of the column this field was interpreted as, if any."""
+        return self.column.name if self.column is not None else None
+
+    @property
+    def declared_type(self) -> str | None:
+        """Return the type declared for the column, if this field has a column."""
+        return self.column.declared_type if self.column is not None else None
+
+    @property
+    def length(self) -> int:
+        """Return the number of raw bytes stored for this field."""
+        return len(self.raw)
+
+    @property
+    def raw_range(self) -> tuple[int, int]:
+        """Return the ``(start, end)`` byte range in the record payload."""
+        return self.offset, self.offset + self.length
+
+    @property
+    def file_range(self) -> tuple[int, int] | None:
+        """Return the ``(start, end)`` range in the main database file, if contiguous.
+
+        A field that is split across overflow pages has no single contiguous
+        file range. Use :attr:`ranges` to inspect each physical run.
+        """
+        if len(self.ranges) == 1:
+            return self.ranges[0].file_range
+        return None
+
+    @property
+    def file_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Return the ``(start, end)`` ranges in the main database file for all runs."""
+        return tuple(run.file_range for run in self.ranges if run.file_range is not None)
+
+    @property
+    def decoded(self) -> bool:
+        """Return whether the raw bytes were decoded without error."""
+        return self.error is None
+
+    def __repr__(self) -> str:
+        name = f" name={self.name!r}" if self.name is not None else ""
+        error = f" error={self.error!r}" if self.error is not None else ""
+        return (
+            f"<Field index={self.index}{name} serial_type={self.serial_type} "
+            f"storage_class={self.storage_class.value} length={self.length}{error}>"
+        )
+
 
 # See https://sqlite.org/fileformat2.html#magic_header_string
 SQLITE3_HEADER_MAGIC = b"SQLite format 3\x00"
@@ -136,6 +344,7 @@ class SQLite3:
         self.page_count = max(self.header.page_count, self.wal.highest_page_num) if self.wal else self.header.page_count
 
         self.page = lru_cache(256)(self.page)
+        self.page_source = lru_cache(256)(self.page_source)
 
     def __repr__(self) -> str:
         return f"<SQLite3 path={self.path} fh={self.fh} wal={self.wal} checkpoint={bool(self.checkpoint)} pages={self.page_count}>"  # noqa: E501
@@ -195,6 +404,30 @@ class SQLite3:
 
             yield Index(self, *cell.values)
 
+    def page_source(self, num: int) -> str:
+        """Return where the given page is read from.
+
+        The return value is ``"checkpoint"`` for a specific WAL checkpoint,
+        ``"wal"`` for a committed WAL frame or ``"database"`` for the main
+        database file.
+        """
+        return self._page_frame(num)[0]
+
+    def _page_frame(self, num: int) -> tuple[str, Frame | None]:
+        """Return the source and WAL frame for the given page number."""
+        if (num < 1 or num > self.page_count) and self.page_count > 0:
+            raise InvalidPageNumber("Page number exceeds boundaries")
+
+        if self.checkpoint is not None and (frame := self.checkpoint.get(num)):
+            return "checkpoint", frame
+
+        if self.wal:
+            for commit in reversed(self.wal.commits):
+                if (frame := commit.get(num)) and frame.valid:
+                    return "wal", frame
+
+        return "database", None
+
     def raw_page(self, num: int) -> bytes:
         """Retrieve the raw frame data for the given page number.
 
@@ -211,26 +444,19 @@ class SQLite3:
         if (num < 1 or num > self.page_count) and self.page_count > 0:
             raise InvalidPageNumber("Page number exceeds boundaries")
 
-        data = None
-        if self.checkpoint is not None and (frame := self.checkpoint.get(num)):
-            # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
+        # If a specific WAL checkpoint was provided, use it instead of the on-disk page.
+        # If a WAL is available, check if the latest valid instance of the page is committed
+        # (either the frame itself is the commit frame or it is included in a commit's frames).
+        source, frame = self._page_frame(num)
+        if frame is not None:
             data = frame.data
-
-        elif self.wal:
-            # Check if the latest valid instance of the page is committed (either the frame itself
-            # is the commit frame or it is included in a commit's frames). If so, return that frame's data.
-            for commit in reversed(self.wal.commits):
-                if (frame := commit.get(num)) and frame.valid:
-                    data = frame.data
-                    break
-
-        if data is not None:
             if num == 1:
                 # Page 1 has a database header that needs to be stripped
                 return data[len(c_sqlite3.header) :]
             return data
 
         # Else we read the page from the database file.
+        assert source == "database"
         if num == 1:  # Page 1 is root, skip header
             self.fh.seek(len(c_sqlite3.header))
         else:
@@ -259,7 +485,18 @@ class Column:
 
     def __init__(self, name: str, description: str):
         self.name = name
+        self.description = description
         self.default_value = self._parse_default_value_from_description(description)
+
+    @property
+    def declared_type(self) -> str | None:
+        """Return the type declared for this column, if any.
+
+        SQLite allows a column to have no declared type. In that case this
+        returns ``None``. The declared type does not restrict the storage class
+        actually used by individual records.
+        """
+        return get_declared_type(self.description)
 
     def _parse_default_value_from_description(self, description: str) -> bool | str | int | float | None:
         """Find the default from the description string."""
@@ -341,6 +578,13 @@ class Table:
         self.primary_key, columns, _ = parse_table_columns_constraints(sql)
         self.columns = [Column(name, description) for name, description in columns]
 
+        self.primary_key_column = None
+        if self.primary_key is not None:
+            for column in self.columns:
+                if column.name == self.primary_key:
+                    self.primary_key_column = column
+                    break
+
     def __repr__(self) -> str:
         return f"<Table name={self.name} page={self.page}>"
 
@@ -353,6 +597,19 @@ class Table:
     def rows(self) -> Iterator[Row]:
         for cell in walk_tree(self.sqlite, self.sqlite.page(self.page)):
             yield Row(self, cell)
+
+    def record(self, cell: Cell) -> Record:
+        """Return the evidence :class:`Record` for the given cell."""
+        return Record(self, cell)
+
+    def records(self) -> Iterator[Record]:
+        """Iterate over the evidence records of this table.
+
+        Unlike :meth:`rows`, the returned records preserve the storage class,
+        raw bytes, byte ranges and decoding errors of every stored field.
+        """
+        for cell in walk_tree(self.sqlite, self.sqlite.page(self.page)):
+            yield Record(self, cell)
 
 
 class Index:
@@ -372,6 +629,7 @@ class Row:
     def __init__(self, table: Table, cell: Cell):
         self._table = table
         self._cell = cell
+        self._record = None
         self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
 
         # If there is no primary key or the primary key is a compound key,
@@ -418,6 +676,162 @@ class Row:
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._values.get(key, default)
+
+    @property
+    def record(self) -> Record:
+        """Return the evidence :class:`Record` for this row."""
+        if self._record is None:
+            self._record = Record(self._table, self._cell)
+        return self._record
+
+
+class Record:
+    """A record with lossless field evidence.
+
+    This is the evidence-oriented counterpart of :class:`Row`. It keeps the
+    serial type, storage class, raw bytes, byte ranges and decoding error for
+    each field that is physically present in the record. Column interpretation
+    is attached separately, so the type declared for a column can be compared
+    with the storage class actually used by this record.
+
+    Accessing a record never executes SQL from the database; it only parses
+    the record structure and the bytes of the cell.
+
+    Args:
+        table: The table this record belongs to.
+        cell: The cell containing the record.
+    """
+
+    def __init__(self, table: Table, cell: Cell):
+        self.table = table
+        self.cell = cell
+
+        self.fields: list[Field] = []
+        self._field_map: dict[str, Field] = {}
+        self.unknowns: list[Field] = []
+
+        for field in cell.fields:
+            column = table.columns[field.index] if field.index < len(table.columns) else None
+            bound = replace(field, column=column)
+            self.fields.append(bound)
+            if column is not None:
+                self._field_map[column.name] = bound
+            else:
+                self.unknowns.append(bound)
+
+        # SQLite stores the INTEGER PRIMARY KEY as an alias for the rowid, so
+        # the record often contains a NULL in that column while the actual
+        # key lives in the cell. Keep that relationship explicit instead of
+        # changing the stored field.
+        column = table.primary_key_column
+        if (
+            table.primary_key
+            and column is not None
+            and column.declared_type is not None
+            and column.declared_type.upper() == "INTEGER"
+            and cell.key is not None
+        ):
+            self._rowid_column = table.primary_key
+        else:
+            self._rowid_column = None
+
+    def __repr__(self) -> str:
+        return f"<Record table={self.table.name!r} fields={len(self.fields)}>"
+
+    def __iter__(self) -> Iterator[tuple[str | None, Field]]:
+        for field in self.fields:
+            yield field.name, field
+
+    def __len__(self) -> int:
+        return len(self.fields)
+
+    def __getitem__(self, key: str) -> Field:
+        return self.get(key)
+
+    def __getattr__(self, key: str) -> Any:
+        if key.startswith("_"):
+            return object.__getattribute__(self, key)
+
+        try:
+            return self._field_map[key]
+        except KeyError:
+            raise AttributeError(key) from None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return the evidence field for the given column name."""
+        return self._field_map.get(key, default)
+
+    def value(self, key: str, default: Any = None) -> Any:
+        """Return the decoded value for the given column name.
+
+        For an ``INTEGER PRIMARY KEY`` that is an alias for the rowid, this
+        returns the rowid when the column itself is absent or stored as NULL.
+        Use :meth:`get` to inspect the stored field.
+        """
+        field = self._field_map.get(key)
+        if field is not None:
+            if field.value is None and key == self._rowid_column and field.storage_class is StorageClass.NULL:
+                return self.cell.key
+            return field.value
+        if key == self._rowid_column:
+            return self.cell.key
+        return default
+
+    def field(self, key: str, default: Any = None) -> Field | Any:
+        """Return the stored :class:`Field` for the given column name."""
+        return self._field_map.get(key, default)
+
+    @property
+    def key(self) -> int | None:
+        """Return the rowid of this record, if it has one."""
+        return self.cell.key
+
+    rowid = key
+
+    @property
+    def types(self) -> list[int]:
+        """Return the serial types of this record."""
+        return [field.serial_type for field in self.fields]
+
+    def values(self) -> dict[str, Any]:
+        """Return the decoded values for the columns that are present."""
+        return {field.name: self.value(field.name) for field in self.fields if field.name is not None}
+
+    def as_row(self) -> Row:
+        """Return a convenience :class:`Row` for this record."""
+        return Row(self.table, self.cell)
+
+    def as_dict(self) -> dict[str, dict[str, Any]]:
+        """Return a report-friendly description of every field.
+
+        Each entry describes the actual storage encoding of the field and the
+        declared type of its column as separate values.
+        """
+        return {
+            field.name or f"column_{field.index}": {
+                "index": field.index,
+                "declared_type": field.declared_type,
+                "serial_type": field.serial_type,
+                "storage_class": field.storage_class.value,
+                "length": field.length,
+                "offset": field.offset,
+                "raw_range": field.raw_range,
+                "file_range": field.file_range,
+                "file_ranges": field.file_ranges,
+                "ranges": [
+                    {
+                        "page": run.page,
+                        "source": run.source,
+                        "page_range": run.page_range,
+                        "file_range": run.file_range,
+                    }
+                    for run in field.ranges
+                ],
+                "value": field.value,
+                "error": str(field.error) if field.error is not None else None,
+            }
+            for field in self.fields
+        }
 
 
 class Empty:
@@ -482,8 +896,10 @@ class Cell:
         self.left_page = None
 
         self._data = None
+        self._data_runs = None
         self._types = None
         self._values = None
+        self._fields = None
 
         sqlite = page.sqlite
         cell_buf = BytesIO(page.data[self._offset :])
@@ -511,19 +927,51 @@ class Cell:
     def __repr__(self) -> str:
         return f"<Cell page={self.page.num} offset=0x{self.offset:x}>"
 
+    def _file_offset(self, page_num: int, page_offset: int) -> int | None:
+        """Return the offset in the main database file for a page offset, if applicable."""
+        if self.page.sqlite.page_source(page_num) != "database":
+            # A page from the WAL has no meaningful offset in the main file.
+            return None
+
+        if page_num == 1:
+            # Page 1 is returned without the database header.
+            return len(c_sqlite3.header) + page_offset
+        return (page_num - 1) * self.page.sqlite.page_size + page_offset
+
+    @property
+    def data_runs(self) -> tuple[DataRun, ...]:
+        """Return the physical page runs that contain the record payload."""
+        self._read_data()
+        return self._data_runs
+
     @property
     def data(self) -> bytes:
+        self._read_data()
+        return self._data
+
+    def _read_data(self) -> None:
         if self.size is None:
             raise NoCellData("Cell has no data")
 
-        if not self._data:
+        if self._data is None:
             offset = self._offset + self._record_offset
             page_data = self.page.data
+            runs = []
 
             if self.size <= self.max_payload_size:
-                size = max(self.size, 4)
-
-                buf = page_data[offset : offset + size]
+                # Keep the historical minimum read of 4 bytes so that a very
+                # short record still contains a complete header varint.
+                buf = page_data[offset : offset + max(self.size, 4)]
+                if buf:
+                    runs.append(
+                        DataRun(
+                            page=self.page.num,
+                            page_offset=offset,
+                            length=min(len(buf), self.size),
+                            source=self.page.sqlite.page_source(self.page.num),
+                            file_offset=self._file_offset(self.page.num, offset),
+                        )
+                    )
             else:
                 # If the data does not fit in a single page, there is an
                 # overflow. The last 4 bytes of the first page will contain the
@@ -531,54 +979,87 @@ class Cell:
                 # will have the next overflow page in the first 4 bytes (which
                 # are 0 if there is no next overflow page), followed by the
                 # page data.
-                result = []
-
                 min_local = self.min_payload_size
                 max_local = self.max_payload_size
                 surplus = min_local + (self.size - min_local) % (self.page.sqlite.usable_page_size - 4)
 
                 local_size = surplus if surplus <= max_local else min_local
+                local_size = min(local_size, self.size)
 
-                local_buf = page_data[offset : offset + local_size + 4]
-                result.append(local_buf[:-4])
+                local_buf = page_data[offset : offset + local_size]
+                runs.append(
+                    DataRun(
+                        page=self.page.num,
+                        page_offset=offset,
+                        length=len(local_buf),
+                        source=self.page.sqlite.page_source(self.page.num),
+                        file_offset=self._file_offset(self.page.num, offset),
+                    )
+                )
 
-                overflow_page = c_sqlite3.uint32(local_buf[-4:])
-                overflow_size = self.size - local_size
+                pointer_buf = page_data[offset + local_size : offset + local_size + 4]
+                overflow_page = c_sqlite3.uint32(pointer_buf) if len(pointer_buf) == 4 else 0
+                remaining = self.size - len(local_buf)
+                result = [local_buf]
 
-                while overflow_page:
+                while overflow_page and remaining > 0:
                     # page_size is the total page size, including the 4 bytes
                     # for the next overflow page in front of the page data.
-                    # overflow_size is the size of the page data without the
-                    # extra 4 bytes for the next overflow page, so it needs to
-                    # be added.
-                    data_size = min(overflow_size + 4, self.page.sqlite.usable_page_size)
+                    # Read at most the number of bytes still needed, plus the
+                    # pointer to the next overflow page.
+                    data_size = min(remaining + 4, self.page.sqlite.usable_page_size)
                     page_buf = self.page.sqlite.raw_page(overflow_page)[:data_size]
+                    if len(page_buf) < 4:
+                        break
 
-                    overflow_page = c_sqlite3.uint32(page_buf[:4])
-                    result.append(page_buf[4:])
+                    next_page = c_sqlite3.uint32(page_buf[:4])
+                    chunk = page_buf[4 : 4 + remaining]
+
+                    runs.append(
+                        DataRun(
+                            page=overflow_page,
+                            page_offset=4,
+                            length=len(chunk),
+                            source=self.page.sqlite.page_source(overflow_page),
+                            file_offset=self._file_offset(overflow_page, 4),
+                        )
+                    )
+                    result.append(chunk)
+                    remaining -= len(chunk)
+                    overflow_page = next_page
 
                 buf = b"".join(result)
 
             self._data = buf
-
-        return self._data
+            self._data_runs = tuple(runs)
 
     def _read_record(self) -> None:
-        self._types, self._values = read_record(BytesIO(self.data), self.page.sqlite.encoding)
+        self._types, self._fields = read_record_fields(self.data, self.page.sqlite.encoding, self.data_runs)
+        self._values = [field.value for field in self._fields]
 
     @property
     def types(self) -> list[int]:
-        if not self._types:
+        """Return the serial types of the fields in this record."""
+        if self._types is None:
             self._read_record()
 
         return self._types
 
     @property
     def values(self) -> list[int | float | str | bytes | None]:
-        if not self._values:
+        """Return the decoded values of this record."""
+        if self._values is None:
             self._read_record()
 
         return self._values
+
+    @property
+    def fields(self) -> list[Field]:
+        """Return the evidence fields of this record."""
+        if self._fields is None:
+            self._read_record()
+
+        return self._fields
 
 
 def walk_tree(sqlite: SQLite3, page: Page) -> Iterator[Cell]:
@@ -600,30 +1081,160 @@ def walk_tree(sqlite: SQLite3, page: Page) -> Iterator[Cell]:
 
 
 def read_record(fh: BinaryIO, encoding: str) -> tuple[list[int], list[int | float | str | bytes | None]]:
+    """Read a record and return its serial types and decoded values.
+
+    This is the convenience interface used by :class:`Row`. For an interface
+    that preserves storage information and raw bytes, use
+    :func:`read_record_fields` or :meth:`Table.records`.
+    """
     start = fh.tell()
     size = varint(fh)
     end = start + size
 
     types = []
     while fh.tell() < end:
-        types.append(varint(fh))
+        try:
+            types.append(varint(fh))
+        except EOFError:  # noqa: PERF203
+            break
 
     values = []
-    for type_ in types:
-        if type_ in SERIAL_TYPES:
-            val = SERIAL_TYPES[type_](fh)
-        else:
-            if type_ % 2 == 0:
-                val = fh.read((type_ - 12) // 2)
-            else:
-                try:
-                    val = fh.read((type_ - 13) // 2).decode(encoding)
-                except UnicodeDecodeError as e:
-                    val = e.object
-
-        values.append(val)
+    for serial_type in types:
+        _, length = serial_type_info(serial_type)
+        raw = fh.read(length)
+        values.append(_decode_value(serial_type, raw, encoding)[0])
 
     return types, values
+
+
+def read_record_fields(data: bytes, encoding: str, runs: Sequence[DataRun] = ()) -> tuple[list[int], list[Field]]:
+    """Read a record and return its serial types and evidence fields.
+
+    Args:
+        data: The raw record payload, starting with the record header.
+        encoding: The text encoding of the database.
+        runs: The physical page runs that contain ``data``. Used to populate
+            the byte ranges of each field.
+
+    The returned fields are in record order. Fields are only created for
+    values that are present in the record; absent trailing columns are not
+    materialized. A field that cannot be decoded as text keeps its raw bytes
+    and the decoding error, while all other fields in the record are still
+    returned.
+
+    References:
+        - https://www.sqlite.org/fileformat2.html#record_format
+    """
+    if not data:
+        return [], []
+
+    fh = BytesIO(data)
+    start = fh.tell()
+    try:
+        size = varint(fh)
+    except EOFError:
+        return [], []
+    end = start + size
+
+    types = []
+    while fh.tell() < end:
+        # A truncated header is treated as the end of the field list.
+        if fh.tell() >= len(data):
+            break
+        try:
+            types.append(varint(fh))
+        except EOFError:
+            break
+
+    fields = []
+    offset = end
+    for index, serial_type in enumerate(types):
+        storage_class, length = serial_type_info(serial_type)
+        raw = data[offset : offset + length]
+
+        value, error = _decode_value(serial_type, raw, encoding)
+
+        fields.append(
+            Field(
+                index=index,
+                column=None,
+                serial_type=serial_type,
+                storage_class=storage_class,
+                offset=offset,
+                raw=raw,
+                value=value,
+                error=error,
+                ranges=_map_runs(runs, offset, len(raw)),
+            )
+        )
+        offset += length
+
+    return types, fields
+
+
+def _decode_value(serial_type: int, raw: bytes, encoding: str) -> tuple[Any, Exception | None]:
+    """Decode a single record value, returning the value and any decoding error."""
+    storage_class, _ = serial_type_info(serial_type)
+
+    if storage_class is StorageClass.NULL:
+        return None, None
+
+    if storage_class is StorageClass.INTEGER:
+        if serial_type == 8:
+            return 0, None
+        if serial_type == 9:
+            return 1, None
+        return int.from_bytes(raw, "big", signed=True), None
+
+    if storage_class is StorageClass.REAL:
+        if len(raw) != 8:
+            return None, ValueError(f"Invalid real payload length: {len(raw)}")
+        return struct.unpack(">d", raw)[0], None
+
+    if storage_class is StorageClass.TEXT:
+        try:
+            return raw.decode(encoding), None
+        except UnicodeDecodeError as e:
+            # Preserve both the bytes and the error. Do not let a bad text
+            # field suppress the other fields in the record.
+            return raw, e
+
+    if storage_class is StorageClass.BLOB:
+        return raw, None
+
+    return raw, None
+
+
+def _map_runs(runs: Sequence[DataRun], offset: int, length: int) -> tuple[DataRun, ...]:
+    """Map a range in the record payload to physical page runs."""
+    if not runs or length == 0:
+        return ()
+
+    result = []
+    run_offset = 0
+
+    for run in runs:
+        run_end = run_offset + run.length
+        start = max(offset, run_offset)
+        stop = min(offset + length, run_end)
+
+        if start < stop:
+            delta = start - run_offset
+            result.append(
+                DataRun(
+                    page=run.page,
+                    page_offset=run.page_offset + delta,
+                    length=stop - start,
+                    source=run.source,
+                    file_offset=run.file_offset + delta if run.file_offset is not None else None,
+                )
+            )
+
+        run_offset = run_end
+        if run_offset >= offset + length:
+            break
+
+    return tuple(result)
 
 
 def varint(fh: BinaryIO) -> int:

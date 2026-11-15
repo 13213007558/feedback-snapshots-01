@@ -8,6 +8,30 @@ A Dissect module implementing parsers for various database formats, including:
 
 For more information, please see [the documentation](https://docs.dissect.tools/en/latest/projects/dissect.database/index.html).
 
+## SQLite3 record evidence
+
+The SQLite3 parser keeps a convenience `Row` interface and adds a lossless record view:
+
+```python
+from dissect.database.sqlite3 import SQLite3
+
+with SQLite3("evidence.db") as db:
+    for record in db.table("items").records():
+        field = record.field("value")
+
+        print(field.declared_type)   # e.g. "BLOB", the declared column type
+        print(field.storage_class)   # actual storage class of this record
+        print(field.serial_type)     # serial type, e.g. 7 for a real
+        print(field.raw)             # the bytes as stored
+        print(field.raw_range)       # (start, end) in the record payload
+        print(field.file_ranges)     # byte ranges in the database file
+        print(field.error)           # decoding error, if any
+```
+
+Records are parsed directly from the pages and never execute SQL from the database.
+A field that cannot be decoded as text keeps its bytes and the decoding error; other
+fields in the same record remain available.
+
 ## Installation
 
 `dissect.database` is available on [PyPI](https://pypi.org/project/dissect.database/).
