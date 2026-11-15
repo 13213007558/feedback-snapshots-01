@@ -3,15 +3,16 @@
 # - Veeam agent
 from __future__ import annotations
 
-from functools import cached_property, lru_cache
+from collections import OrderedDict
+from functools import cached_property
 from io import BytesIO
-from typing import TYPE_CHECKING, BinaryIO, Generic, TypeVar
+from typing import TYPE_CHECKING, BinaryIO, Generic, NamedTuple, TypeVar
 from zlib import crc32
 
 from dissect.util.compression import lz4
 from dissect.util.hash.crc32c import crc32c
 from dissect.util.stream import AlignedStream
-from dissect.util.xmemoryview import xmemoryview
+from dissect.util.xmemoryview import xmemoryview as _xmemoryview
 
 from dissect.archive.exception import Error, FileNotFoundError, IsADirectoryError, NotADirectoryError
 from dissect.archive.vbk.c_vbk import PAGE_SIZE, c_vbk
@@ -24,6 +25,79 @@ if TYPE_CHECKING:
 
 class VBKError(Error):
     pass
+
+
+class CacheStats(NamedTuple):
+    """Snapshot of a :class:`_LRUCache`'s counters and current footprint."""
+
+    hits: int
+    misses: int
+    currsize: int
+    maxsize: int
+    retained_bytes: int
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.hits + self.misses
+        return self.hits / total if total else 0.0
+
+
+class _LRUCache:
+    """A small bounded LRU cache owned by a single :class:`VBK` instance.
+
+    Everything cached through here is reachable only from the owning VBK object graph, so once
+    the VBK is garbage collected all cached pages (and the underlying file handle) are released
+    together. No module level or class level cache is involved.
+
+    The retained footprint has a hard upper bound of ``maxsize * value_size`` bytes.
+    """
+
+    __slots__ = ("maxsize", "value_size", "hits", "misses", "_data")
+
+    def __init__(self, maxsize: int, value_size: int):
+        self.maxsize = maxsize
+        self.value_size = value_size
+        self.hits = 0
+        self.misses = 0
+        self._data: OrderedDict = OrderedDict()
+
+    def get(self, key):
+        data = self._data
+        try:
+            value = data.pop(key)
+            self.hits += 1
+        except KeyError:
+            self.misses += 1
+            raise
+        data[key] = value
+        return value
+
+    def put(self, key, value) -> None:
+        data = self._data
+        if key in data:
+            data.move_to_end(key)
+        data[key] = value
+        while len(data) > self.maxsize:
+            data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def stats(self) -> CacheStats:
+        currsize = len(self._data)
+        return CacheStats(
+            hits=self.hits,
+            misses=self.misses,
+            currsize=currsize,
+            maxsize=self.maxsize,
+            retained_bytes=currsize * self.value_size,
+        )
+
+
+#: Maximum number of 4 KiB metadata pages kept per VBK instance (1 MiB of resident metadata).
+DEFAULT_PAGE_CACHE_SIZE = 256
 
 
 class VBK:
@@ -40,10 +114,17 @@ class VBK:
     Args:
         fh: The file handle of the VBK file to read.
         verify: Whether to verify checksums.
+        page_cache_size: Maximum number of metadata pages (each ``PAGE_SIZE`` bytes) cached by
+            this instance. The cache is bounded and belongs to this instance only.
     """
 
-    def __init__(self, fh: BinaryIO, verify: bool = True):
+    def __init__(self, fh: BinaryIO, verify: bool = True, page_cache_size: int = DEFAULT_PAGE_CACHE_SIZE):
         self.fh = fh
+
+        # Single bounded cache for every metadata page read through this instance. All directory
+        # items, property dictionaries and FIB descriptors resolve their pages here, so their
+        # caches share one explicit upper bound instead of each bank keeping its own cache.
+        self._page_cache = _LRUCache(page_cache_size, PAGE_SIZE)
 
         fh.seek(0)
         self.header = c_vbk.StorageHeader(fh)
@@ -81,13 +162,32 @@ class VBK:
     def is_v7(self) -> bool:
         return self.format_version == 7 or self.format_version == 0x10008 or self.format_version >= 9
 
-    def page(self, idx: int) -> bytes:
+    def page(self, idx: int) -> memoryview:
         """Read a page from the VBK file.
+
+        Pages are served from the instance bounded cache and only read from the file handle on a
+        cache miss.
 
         Args:
             idx: The index of the page to read.
         """
-        return self.active_slot.page(idx)
+        cache = self._page_cache
+        try:
+            return cache.get(idx)
+        except KeyError:
+            pass
+
+        page = self.active_slot._read_page(idx)
+        cache.put(idx, page)
+        return page
+
+    def cache_stats(self) -> CacheStats:
+        """Return cache counters and the current retained metadata footprint of this instance."""
+        return self._page_cache.stats()
+
+    def clear_cache(self) -> None:
+        """Drop every cached metadata page held by this instance."""
+        self._page_cache.clear()
 
     def get_meta_blob(self, page: int) -> MetaBlob:
         """Read a meta blob from the VBK file.
@@ -200,13 +300,9 @@ class SnapshotSlot:
         self.vbk.fh.seek(self.offset + 4)  # Skip CRC
         return crc(self.vbk.fh.read(length)) == self.header.CRC
 
-    def page(self, page: int) -> bytes:
-        """Read a page from the snapshot slot.
-
-        Args:
-            idx: The page number to read.
-        """
-        return self.banks[page >> 32].page(page & 0xFFFFFFFF)
+    def _read_page(self, page: int) -> memoryview:
+        """Read a single page from the snapshot slot, bypassing the instance cache."""
+        return self.banks[page >> 32].read_page(page & 0xFFFFFFFF)
 
     def _get_meta_blob(self, page: int) -> MetaBlob:
         """Get a meta blob from the snapshot slot.
@@ -238,8 +334,6 @@ class Bank:
         self.vbk.fh.seek(offset)
         self.header = c_vbk.BankHeader(vbk.fh)
 
-        self.page = lru_cache(128)(self.page)
-
     def __repr__(self) -> str:
         return f"<Bank offset={self.offset:#x} size={self.size:#x}>"
 
@@ -254,8 +348,8 @@ class Bank:
         self.vbk.fh.seek(self.offset)
         return crc(self.vbk.fh.read(self.size)) == crc
 
-    def page(self, page: int) -> memoryview:
-        """Read a page from the bank.
+    def read_page(self, page: int) -> memoryview:
+        """Read a page directly from the bank without consulting the instance cache.
 
         Args:
             page: The page number to read.
@@ -792,9 +886,10 @@ class MetaBlob:
 
     def _read(self) -> Iterator[int, memoryview]:
         page = self.root
+        vbk = self.slot.vbk
 
         while page != -1:
-            buf = self.slot.page(page)
+            buf = vbk.page(page)
             yield page, buf
 
             page = int.from_bytes(buf[:8], "little", signed=True)
@@ -835,12 +930,16 @@ class MetaVector(Generic[T]):
 
         self._entry_size = len(self.type.__struct__)
         self._entries_per_page = PAGE_SIZE // self._entry_size
-        self._pages = list(self.vbk.get_meta_blob(page).pages())
-
-        self.get = lru_cache(128)(self.get)
+        self._blob = self.vbk.get_meta_blob(page)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} type={self.type.__name__} count={self.count}>"
+
+    @cached_property
+    def _pages(self) -> list[int]:
+        # Resolved lazily so merely constructing a vector (for example the root block store while
+        # opening a VBK) does not pull the whole meta blob into memory.
+        return list(self._blob.pages())
 
     def __iter__(self) -> Iterator[T]:
         return (self.get(i) for i in range(self.count))
@@ -892,14 +991,20 @@ class MetaVector2(MetaVector[T]):
         _MAX_TABLE_ENTRIES_PER_PAGE - 4,
         _MAX_TABLE_ENTRIES_PER_PAGE - 1,
     )
+    _LOOKUP_CACHE_SIZE = 128
 
     def __init__(self, vbk: VBK, type_: type[T], page: int, count: int):
         super().__init__(vbk, type_, page, count)
 
-        # It's not actually a meta blob, but the same mechanism is used (next page pointer in the header)
-        # The table itself is essentially a big array of 64 bit integers, so cast it to a memoryview of that
-        self._table = xmemoryview(self.vbk.get_meta_blob(page).data(), "<q")
-        self._lookup_page = lru_cache(128)(self._lookup_page)
+        self._lookup_cache = _LRUCache(self._LOOKUP_CACHE_SIZE, 8)
+
+    @cached_property
+    def _table(self) -> memoryview:
+        # MetaVector2 reuses the root page for both the entry page list and the lookup table, but
+        # the two are parsed differently, so the table gets its own (lazily materialized) blob.
+        # Materialized lazily: opening a VBK must not read the entire lookup table up front.
+        blob = self.vbk.get_meta_blob(self.page)
+        return _xmemoryview(blob.data(), "=q")
 
     def _lookup_page(self, idx: int) -> int:
         """Look up the page number for an entry in the vector.
@@ -907,6 +1012,18 @@ class MetaVector2(MetaVector[T]):
         Args:
             idx: The page index to lookup the page number for.
         """
+        cache = self._lookup_cache
+        try:
+            return cache.get(idx)
+        except KeyError:
+            pass
+
+        page_no = self._compute_lookup_page(idx)
+        cache.put(idx, page_no)
+        return page_no
+
+    def _compute_lookup_page(self, idx: int) -> int:
+        """Compute the page number for an entry in the vector without caching."""
         # MetaVec2 pages are a little special
         # The first page has a 16 byte header:
         # - 8 bytes for the next page number
@@ -985,10 +1102,21 @@ class FibMetaSparseTable:
         self._table_count = (count + self.MAX_ENTRIES_PER_TABLE - 1) // self.MAX_ENTRIES_PER_TABLE
         self._vec = MetaVector(vbk, MetaTableDescriptor, page, self._table_count)
 
-        self._open_table = lru_cache(128)(self._open_table)
+        # Bounded cache of opened descriptor tables, owned by this sparse table (and therefore by
+        # the VBK instance). Values are objects, so retained_bytes is not tracked for this cache.
+        self._table_cache = _LRUCache(128, 0)
 
     def _open_table(self, page: int, count: int) -> MetaVector[FibBlockDescriptor | FibBlockDescriptorV7]:
-        return MetaVector(self.vbk, self.type, page, count)
+        cache = self._table_cache
+        key = (page, count)
+        try:
+            return cache.get(key)
+        except KeyError:
+            pass
+
+        table = MetaVector(self.vbk, self.type, page, count)
+        cache.put(key, table)
+        return table
 
     def get(self, idx: int) -> FibBlockDescriptor | FibBlockDescriptorV7:
         """Get a block descriptor from the sparse table.

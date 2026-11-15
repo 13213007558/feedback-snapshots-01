@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import gzip
 import hashlib
+import io
 import struct
-from unittest.mock import Mock
+import weakref
 
 from dissect.archive.vbk.vbk import (
     PAGE_SIZE,
@@ -12,6 +14,7 @@ from dissect.archive.vbk.vbk import (
     MetaTableDescriptor,
     MetaVector,
     MetaVector2,
+    _LRUCache,
 )
 from tests._util import absolute_path
 
@@ -120,12 +123,201 @@ def test_metavector2_lookup() -> None:
 
     mock_blob = b"".join(raw_blob)
 
-    mock_slot = Mock()
-    mock_slot.page = lambda page: mock_blob[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
-    mock_vbk = Mock(format_version=13)
-    mock_vbk.get_meta_blob = lambda page: MetaBlob(mock_slot, page)
+    class _FakeSlot:
+        def __init__(self, vbk: "_FakeVBK") -> None:
+            self.vbk = vbk
+
+        def page(self, page: int) -> memoryview:
+            return memoryview(mock_blob[page * PAGE_SIZE : (page + 1) * PAGE_SIZE])
+
+    class _FakeVBK:
+        format_version = 13
+
+        def __init__(self) -> None:
+            self._page_cache = _LRUCache(256, PAGE_SIZE)
+
+        def page(self, page: int) -> memoryview:
+            cache = self._page_cache
+            try:
+                return cache.get(page)
+            except KeyError:
+                value = _FakeSlot(self).page(page)
+                cache.put(page, value)
+                return value
+
+        def get_meta_blob(self, page: int) -> MetaBlob:
+            return MetaBlob(_FakeSlot(self), page)
+
+    mock_vbk = _FakeVBK()
     vec = MetaVector2(mock_vbk, MetaTableDescriptor, 0, 4096)
     assert isinstance(vec, MetaVector2)
 
     for i in range(entry):
         assert vec._lookup_page(i) == i
+
+
+class _CountingHandle(io.BytesIO):
+    """File handle that records actual read operations and the distinct pages touched."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.read_calls = 0
+        self.pages_read = set()
+
+    def read(self, n: int = -1) -> bytes:
+        pos = self.tell()
+        data = super().read(n)
+        self.read_calls += 1
+        first = pos // PAGE_SIZE
+        last = (pos + len(data) - 1) // PAGE_SIZE
+        self.pages_read.update(range(first, last + 1))
+        return data
+
+
+def _load_bytes(name: str) -> bytes:
+    with gzip.open(absolute_path(f"_data/vbk/{name}")) as fh:
+        return fh.read()
+
+
+def _first_internal_file(vbk: VBK):
+    for subfolder in vbk.root.iterdir():
+        for item in subfolder.iterdir():
+            if item.is_internal_file():
+                return item
+    raise AssertionError("no internal file found")
+
+
+def test_page_cache_is_bounded() -> None:
+    """The per-instance page cache never exceeds its configured page/byte upper bound."""
+    fh = _CountingHandle(_load_bytes("test13.vbk.gz"))
+    vbk = VBK(fh, page_cache_size=8)
+
+    for idx in range(vbk.block_store.count):
+        vbk.block_store.get(idx)
+    for subfolder in vbk.root.iterdir():
+        for item in subfolder.iterdir():
+            _ = item.properties
+            if item.is_internal_file():
+                with item.open() as stream:
+                    stream.read()
+
+    stats = vbk.cache_stats()
+    assert stats.currsize <= 8
+    assert stats.retained_bytes == stats.currsize * PAGE_SIZE
+    assert stats.retained_bytes <= 8 * PAGE_SIZE
+
+
+def test_repeated_small_query_is_served_from_cache() -> None:
+    """Re-reading a small file reuses cached pages instead of issuing new page reads."""
+    fh = _CountingHandle(_load_bytes("test13.vbk.gz"))
+    vbk = VBK(fh, page_cache_size=32)
+    item = _first_internal_file(vbk)
+
+    with item.open() as stream:
+        first = stream.read(1024)
+    pages_after_first = set(fh.pages_read)
+    misses_after_first = vbk.cache_stats().misses
+
+    for _ in range(3):
+        with item.open() as stream:
+            assert stream.read(1024) == first
+
+    # No new distinct pages and no new misses: the repeated queries hit cached pages.
+    assert fh.pages_read == pages_after_first
+    assert vbk.cache_stats().misses == misses_after_first
+    assert vbk.cache_stats().hits > 0
+
+
+def test_interleaved_instances_are_isolated_and_consistent() -> None:
+    """Two VBK instances of the same bytes keep independent bounded caches and equal content."""
+    raw = _load_bytes("test9.vbk.gz")
+    vbk_a = VBK(io.BytesIO(raw), page_cache_size=16)
+    vbk_b = VBK(io.BytesIO(raw), page_cache_size=16)
+
+    assert vbk_a._page_cache is not vbk_b._page_cache
+
+    item_a = _first_internal_file(vbk_a)
+    item_b = _first_internal_file(vbk_b)
+
+    with item_a.open() as stream_a, item_b.open() as stream_b:
+        # Interleave access across the two instances.
+        chunk_a = stream_a.read(2048)
+        chunk_b = stream_b.read(2048)
+        assert chunk_a == chunk_b
+        assert stream_a.read(2048) == stream_b.read(2048)
+
+    stats_a = vbk_a.cache_stats()
+    stats_b = vbk_b.cache_stats()
+    assert stats_a.currsize <= 16 and stats_b.currsize <= 16
+    assert stats_a.retained_bytes <= 16 * PAGE_SIZE
+    assert stats_b.retained_bytes <= 16 * PAGE_SIZE
+
+    # A third instance of the unchanged source produces identical content.
+    vbk_c = VBK(io.BytesIO(raw), page_cache_size=16)
+    with _first_internal_file(vbk_c).open() as stream_c:
+        assert stream_c.read(2048) == chunk_a
+
+
+def test_releasing_vbk_drops_cache_and_handle() -> None:
+    """No global cache keeps page buffers or the file handle alive after the VBK is released."""
+    raw = _load_bytes("test13.vbk.gz")
+
+    def open_and_read():
+        fh = io.BytesIO(raw)
+        vbk = VBK(fh, page_cache_size=16)
+        with _first_internal_file(vbk).open() as stream:
+            stream.read()
+        return weakref.ref(vbk), weakref.ref(fh)
+
+    vbk_ref, fh_ref = open_and_read()
+    gc.collect()
+
+    assert vbk_ref() is None
+    assert fh_ref() is None
+
+
+def test_clear_cache_drops_retained_pages() -> None:
+    """clear_cache empties the retained footprint while the instance stays usable."""
+    fh = _CountingHandle(_load_bytes("test13.vbk.gz"))
+    vbk = VBK(fh, page_cache_size=32)
+    item = _first_internal_file(vbk)
+    with item.open() as stream:
+        stream.read(1024)
+
+    assert vbk.cache_stats().currsize > 0
+    vbk.clear_cache()
+    stats = vbk.cache_stats()
+    assert stats.currsize == 0
+    assert stats.retained_bytes == 0
+    assert stats.hits == 0 and stats.misses == 0
+
+    # The instance remains functional and repopulates the cache.
+    with item.open() as stream:
+        stream.read(1024)
+    assert vbk.cache_stats().currsize > 0
+
+
+def test_lru_cache_evicts_oldest() -> None:
+    """The internal LRU honours its bound and tracks retained bytes."""
+    cache = _LRUCache(2, PAGE_SIZE)
+    cache.put(0, b"a" * PAGE_SIZE)
+    cache.put(1, b"b" * PAGE_SIZE)
+    assert cache.get(0) == b"a" * PAGE_SIZE
+    cache.put(2, b"c" * PAGE_SIZE)  # evicts key 1 (least recently used)
+
+    stats = cache.stats()
+    assert stats.currsize == 2
+    assert stats.retained_bytes == 2 * PAGE_SIZE
+    assert stats.hits == 1
+
+    try:
+        cache.get(1)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("key 1 should have been evicted")
+
+    evicted_stats = cache.stats()
+    assert evicted_stats.misses == 1
+    assert evicted_stats.retained_bytes == 2 * PAGE_SIZE
+
