@@ -22,6 +22,24 @@ instead of a slower pure Python implementation. Both implementations are provide
 Pre-build wheels are available for most common platforms and the native implementation will automatically be used if available.
 In the rare case that a pre-build wheel is not available, please refer to `dissect.util` for build instructions.
 
+## Permission evidence inventory
+
+For firmware audits, `dissect.squashfs.audit` produces a read-only inventory of objects carrying setuid,
+setgid, sticky or world-writable bits. It never extracts or modifies the image and never consults the local
+account database.
+
+Inode headers store *indices* into the SquashFS ID table rather than numeric UIDs/GIDs. The inventory keeps
+both the raw `uid`/`guid` index and the numeric ID it resolves to, routing basic inodes, extended inodes and
+hard links sharing an index through one parsing path. An out-of-range or truncated table entry is reported as
+an unknown identity (with the original index and reason), never coerced to zero, so a definite root-owned
+setuid file is distinguished from one whose owner cannot be determined. Hard links are counted once per
+underlying inode while retaining every path that reaches it.
+
+```bash
+python -m dissect.squashfs.audit firmware.sqfs            # text evidence report
+python -m dissect.squashfs.audit firmware.sqfs --format json
+```
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
