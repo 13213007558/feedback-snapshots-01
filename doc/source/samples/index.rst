@@ -94,6 +94,7 @@ of these are stand-alone application versions of the shell commands.
 
     read-property.rst
     write-property.rst
+    write-access-policy.rst
     read-batch.rst
     read-bbmd.rst
     who-has.rst

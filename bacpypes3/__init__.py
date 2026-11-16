@@ -84,6 +84,7 @@ from . import appservice
 from . import local
 from . import service
 from . import vendor
+from . import policy
 
 #
 #   Library of useful functions

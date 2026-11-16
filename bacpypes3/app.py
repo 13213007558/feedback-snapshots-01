@@ -65,6 +65,7 @@ from .netservice import (
 )
 from .object import DeviceObject, Object
 from .pdu import Address
+from .policy import WriteAccessDenied, WriteAccessPolicy
 from .primitivedata import ObjectIdentifier, ObjectType
 from .service.cov import ChangeOfValueServices
 
@@ -299,6 +300,7 @@ class Application(
 
     device_object: Optional[DeviceObject] = None
     device_info_cache: DeviceInfoCache
+    write_access_policy: Optional[WriteAccessPolicy] = None
 
     objectName: Dict[str, _Any]
     objectIdentifier: Dict[ObjectIdentifier, _Any]
@@ -308,14 +310,22 @@ class Application(
     _requests: Dict[Address, List[Tuple[APDU, APDUFuture]]]
 
     def __init__(
-        self, *args, device_info_cache: Optional[DeviceInfoCache] = None, **kwargs
+        self,
+        *args,
+        device_info_cache: Optional[DeviceInfoCache] = None,
+        write_access_policy: Optional[WriteAccessPolicy] = None,
+        **kwargs,
     ):
         if _debug:
             Application._debug(
-                "__init__ device_info_cache=%r %r",
+                "__init__ device_info_cache=%r write_access_policy=%r %r",
                 device_info_cache,
+                write_access_policy,
                 kwargs,
             )
+
+        # access policy for property writes, None permits every write
+        self.write_access_policy = write_access_policy
 
         # local objects by ID and name
         self.objectName = {}
@@ -340,16 +350,18 @@ class Application(
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
         aseID=None,
+        write_access_policy: Optional[WriteAccessPolicy] = None,
     ) -> Application:
         """
         Create an instance of an Application given a list of objects.
         """
         if _debug:
             Application._debug(
-                "from_object_list %s device_info_cache=%r aseID=%r",
+                "from_object_list %s device_info_cache=%r aseID=%r policy=%r",
                 repr(objects),
                 device_info_cache,
                 aseID,
+                write_access_policy,
             )
 
         # find the device object
@@ -364,7 +376,11 @@ class Application(
             raise RuntimeError("missing device object")
 
         # create a base instance
-        app = cls(device_info_cache=device_info_cache, aseID=aseID)
+        app = cls(
+            device_info_cache=device_info_cache,
+            aseID=aseID,
+            write_access_policy=write_access_policy,
+        )
 
         # a application service access point will be needed
         app.asap = ApplicationServiceAccessPoint(device_object, app.device_info_cache)
@@ -393,6 +409,7 @@ class Application(
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
         aseID=None,
+        write_access_policy: Optional[WriteAccessPolicy] = None,
     ) -> Application:
         """
         Create an instance of an Application after converting the objects
@@ -477,6 +494,7 @@ class Application(
             device_info_cache=device_info_cache,
             router_info_cache=router_info_cache,
             aseID=aseID,
+            write_access_policy=write_access_policy,
         )
 
     @classmethod
@@ -486,6 +504,7 @@ class Application(
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
         aseID=None,
+        write_access_policy: Optional[WriteAccessPolicy] = None,
     ) -> Application:
         if _debug:
             Application._debug(
@@ -569,6 +588,7 @@ class Application(
             device_info_cache=device_info_cache,
             router_info_cache=router_info_cache,
             aseID=aseID,
+            write_access_policy=write_access_policy,
         )
 
     # -----
@@ -1221,6 +1241,11 @@ class Application(
                     errorCode=err.errorCode,
                     context=apdu,
                 )
+                if isinstance(err, WriteAccessDenied):
+                    # keep the decision attached for callers that have the
+                    # response object in hand and want the policy reason
+                    error_pdu.write_access_decision = err.decision
+
             else:
                 Application._exception(
                     "execution error processing unconfirmed request: %r", err

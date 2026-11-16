@@ -47,6 +47,7 @@ from ..errors import (
 )
 from ..object import DeviceObject
 from ..pdu import Address
+from ..policy import WriteAccessDenied, WriteAccessPolicy, property_value_is_null
 from ..primitivedata import Atomic, Date, Null, ObjectIdentifier, Time, Unsigned
 from ..vendor import VendorInfo, get_vendor_info
 
@@ -65,6 +66,7 @@ class ReadWritePropertyServices:
 
     device_object: Optional[DeviceObject]
     device_info_cache: "DeviceInfoCache"  # noqa: F821
+    write_access_policy: Optional[WriteAccessPolicy] = None
 
     async def read_property(
         self,
@@ -476,20 +478,50 @@ class ReadWritePropertyServices:
                     "    - other property_type: %r", property_type
                 )
 
-        # decode the property value, and null is acceptable when commanding a
-        # a point
-        property_value = apdu.propertyValue.cast_out(
-            property_type, null=(priority is not None)
-        )
-        if _debug:
-            ReadWritePropertyServices._debug(
-                "    - property_value: %r %r", property_value, property_value.__class__
+        # the policy decides on the complete target, including whether this
+        # write would relinquish a priority slot, and must run before the
+        # object changes.
+        decision = None
+        policy = self.write_access_policy
+        if policy is not None:
+            decision = policy.authorize(
+                obj,
+                apdu.propertyIdentifier,
+                property_array_index=array_index,
+                priority=priority,
+                relinquish=property_value_is_null(apdu.propertyValue),
             )
+            if _debug:
+                ReadWritePropertyServices._debug("    - decision: %r", decision)
+            if not decision.allowed:
+                raise WriteAccessDenied(decision)
 
-        # change the value
-        await obj.write_property(
-            apdu.propertyIdentifier, property_value, array_index, priority
-        )
+        try:
+            # decode the property value, and null is acceptable when commanding
+            # a point
+            property_value = apdu.propertyValue.cast_out(
+                property_type, null=(priority is not None)
+            )
+            if _debug:
+                ReadWritePropertyServices._debug(
+                    "    - property_value: %r %r",
+                    property_value,
+                    property_value.__class__,
+                )
+
+            # change the value
+            await obj.write_property(
+                apdu.propertyIdentifier, property_value, array_index, priority
+            )
+        except BaseException:
+            # the write never reached the object, so the slot reservation
+            # must not silently become ownership
+            if decision is not None:
+                policy.cancel(decision)
+            raise
+
+        if decision is not None:
+            policy.note_written(decision)
         if _debug:
             ReadWritePropertyServices._debug("    - success")
 
@@ -600,6 +632,7 @@ class ReadWritePropertyMultipleServices:
 
     device_object: Optional[DeviceObject]
     device_info_cache: "DeviceInfoCache"  # noqa: F821
+    write_access_policy: Optional[WriteAccessPolicy] = None
 
     async def read_property_multiple(
         self,
@@ -1016,31 +1049,22 @@ class ReadWritePropertyMultipleServices:
         # return the result
         await self.response(resp)
 
-    async def do_WritePropertyMultipleRequest(self, apdu) -> None:
-        """Respond to a WritePropertyMultiple Request."""
+    async def _apply_write_property_multiple(self, apdu, policy) -> None:
+        """
+        Apply the write access specifications of a WritePropertyMultiple
+        request.
+
+        With a policy the complete request is resolved and authorized before
+        the first object changes, so a denial leaves every object untouched.
+        Without one the writes are applied in order, matching the historical
+        behaviour.
+        """
         if _debug:
             ReadWritePropertyMultipleServices._debug(
-                "do_WritePropertyMultipleRequest %r", apdu
+                "_apply_write_property_multiple %r policy=%r", apdu, policy
             )
 
-        # make sure at least one object reference exists
-        object_reference_exists = False
-        for write_access_spec in apdu.listOfWriteAccessSpecs:
-            object_identifier = write_access_spec.objectIdentifier
-
-            # wildcard device identifier resolves to the application device object
-            if (
-                object_identifier == ("device", 4194303)
-            ) and self.device_object is not None:
-                object_identifier = self.device_object.objectIdentifier
-
-            if self.get_object_id(object_identifier):
-                object_reference_exists = True
-
-        if not object_reference_exists:
-            raise ObjectError("unknown-object")
-
-        # process each write access specification in order
+        resolved_writes = []
         for write_access_spec in apdu.listOfWriteAccessSpecs:
             object_identifier = write_access_spec.objectIdentifier
 
@@ -1081,35 +1105,136 @@ class ReadWritePropertyMultipleServices:
                         firstFailedWriteAttempt=obj_prop_ref,
                     )
 
-                if issubclass(property_type, Array):
-                    if property_array_index is None:
-                        pass
-                    elif property_array_index == 0:
-                        property_type = Unsigned
-                    else:
-                        property_type = property_type._subtype
+                resolved_writes.append(
+                    (
+                        obj,
+                        object_identifier,
+                        property_identifier,
+                        property_array_index,
+                        priority,
+                        property_type,
+                        prop_value,
+                    )
+                )
 
-                try:
-                    value = prop_value.value.cast_out(
-                        property_type, null=(priority is not None)
-                    )
-                    await obj.write_property(
-                        property_identifier, value, property_array_index, priority
-                    )
-                except ExecutionError as err:
-                    error_type = ErrorType(
-                        errorClass=err.errorClass, errorCode=err.errorCode
-                    )
-                    obj_prop_ref = ObjectPropertyReference(
-                        objectIdentifier=object_identifier,
-                        propertyIdentifier=property_identifier,
-                    )
-                    if property_array_index is not None:
-                        obj_prop_ref.propertyArrayIndex = property_array_index
-                    raise WritePropertyMultipleError(
-                        errorType=error_type,
-                        firstFailedWriteAttempt=obj_prop_ref,
-                    )
+        decisions = None
+        if policy is not None:
+            decisions = policy.preflight(
+                [
+                    {
+                        "obj": obj,
+                        "property_identifier": property_identifier,
+                        "property_array_index": property_array_index,
+                        "priority": priority,
+                        "relinquish": property_value_is_null(prop_value.value),
+                    }
+                    for (
+                        obj,
+                        object_identifier,
+                        property_identifier,
+                        property_array_index,
+                        priority,
+                        property_type,
+                        prop_value,
+                    ) in resolved_writes
+                ]
+            )
+            for decision in decisions:
+                if decision.allowed:
+                    continue
+                target = decision.target
+                error_type = ErrorType(
+                    errorClass=decision.error_class,
+                    errorCode=decision.error_code,
+                )
+                obj_prop_ref = ObjectPropertyReference(
+                    objectIdentifier=target.object_identifier,
+                    propertyIdentifier=target.property_identifier,
+                )
+                if target.property_array_index is not None:
+                    obj_prop_ref.propertyArrayIndex = target.property_array_index
+                raise WritePropertyMultipleError(
+                    errorType=error_type,
+                    firstFailedWriteAttempt=obj_prop_ref,
+                )
+
+        confirmed = 0
+        for write_index, (
+            obj,
+            object_identifier,
+            property_identifier,
+            property_array_index,
+            priority,
+            property_type,
+            prop_value,
+        ) in enumerate(resolved_writes):
+            if issubclass(property_type, Array):
+                if property_array_index is None:
+                    pass
+                elif property_array_index == 0:
+                    property_type = Unsigned
+                else:
+                    property_type = property_type._subtype
+
+            try:
+                value = prop_value.value.cast_out(
+                    property_type, null=(priority is not None)
+                )
+                await obj.write_property(
+                    property_identifier, value, property_array_index, priority
+                )
+            except BaseException as err:
+                if decisions is not None:
+                    # this write and everything after it never reached the
+                    # object; drop their reservations
+                    for decision in decisions[confirmed:]:
+                        policy.cancel(decision)
+
+                if not isinstance(err, ExecutionError):
+                    raise
+                error_type = ErrorType(
+                    errorClass=err.errorClass, errorCode=err.errorCode
+                )
+                obj_prop_ref = ObjectPropertyReference(
+                    objectIdentifier=object_identifier,
+                    propertyIdentifier=property_identifier,
+                )
+                if property_array_index is not None:
+                    obj_prop_ref.propertyArrayIndex = property_array_index
+                raise WritePropertyMultipleError(
+                    errorType=error_type,
+                    firstFailedWriteAttempt=obj_prop_ref,
+                )
+
+            if decisions is not None:
+                policy.note_written(decisions[write_index])
+            confirmed += 1
+
+    async def do_WritePropertyMultipleRequest(self, apdu) -> None:
+        """Respond to a WritePropertyMultiple Request."""
+        if _debug:
+            ReadWritePropertyMultipleServices._debug(
+                "do_WritePropertyMultipleRequest %r", apdu
+            )
+
+        # make sure at least one object reference exists
+        object_reference_exists = False
+        for write_access_spec in apdu.listOfWriteAccessSpecs:
+            object_identifier = write_access_spec.objectIdentifier
+
+            # wildcard device identifier resolves to the application device object
+            if (
+                object_identifier == ("device", 4194303)
+            ) and self.device_object is not None:
+                object_identifier = self.device_object.objectIdentifier
+
+            if self.get_object_id(object_identifier):
+                object_reference_exists = True
+
+        if not object_reference_exists:
+            raise ObjectError("unknown-object")
+
+        await self._apply_write_property_multiple(apdu, policy=self.write_access_policy)
 
         # respond with a simple ack when everything succeeded
         resp = SimpleAckPDU(context=apdu)
