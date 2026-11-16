@@ -32,6 +32,7 @@ from .permitted_alphabet import PRINTABLE_STRING
 from .permitted_alphabet import IA5_STRING
 from .permitted_alphabet import BMP_STRING
 from .permitted_alphabet import VISIBLE_STRING
+from . import unknown_extensions
 
 
 def is_unbound(minimum, maximum):
@@ -156,6 +157,7 @@ class Encoder(object):
         self.value = 0
         self.chunks_number_of_bits = 0
         self.chunks = []
+        self.preserve_unknown_extensions = False
 
     def __iadd__(self, other):
         for value, number_of_bits in other.chunks:
@@ -381,6 +383,7 @@ class Decoder(object):
     def __init__(self, encoded):
         self.number_of_bits = (8 * len(encoded))
         self.total_number_of_bits = self.number_of_bits
+        self.preserve_unknown_extensions = False
 
         if len(encoded) > 0:
             value = int(binascii.hexlify(encoded), 16)
@@ -398,6 +401,10 @@ class Decoder(object):
 
     def number_of_read_bits(self):
         return self.total_number_of_bits - self.number_of_bits
+
+    @property
+    def number_of_bits_left(self):
+        return self.number_of_bits
 
     def skip_bits(self, number_of_bits):
         if number_of_bits > self.number_of_bits:
@@ -724,11 +731,16 @@ class MembersType(Type):
             encoder.append_bit(0)
             self.encode_root(data, encoder)
 
-            if len(self.additions) > 0:
+            if (len(self.additions) > 0
+                    or self.has_preserved_extensions(data, encoder)):
                 if self.encode_additions(data, encoder):
                     encoder.set_bit(offset)
         else:
             self.encode_root(data, encoder)
+
+    def has_preserved_extensions(self, data, encoder):
+        return (getattr(encoder, 'preserve_unknown_extensions', False)
+                and unknown_extensions.get_unknown_extensions(data) is not None)
 
     def encode_root(self, data, encoder):
         for optional in self.optionals:
@@ -742,16 +754,28 @@ class MembersType(Type):
         for member in self.root_members:
             self.encode_member(member, data, encoder)
 
+    def get_preserved_extensions(self, data):
+        return unknown_extensions.get_unknown_extensions(data)
+
     def encode_additions(self, data, encoder):
         # Encode extension additions.
         presence_bits = 0
         addition_encoders = []
         number_of_precence_bits = 0
+        preserved = self.get_preserved_extensions(data)
+
+        if (preserved is not None
+                and getattr(encoder, 'preserve_unknown_extensions', False)):
+            return self.encode_preserved_additions(data,
+                                                   encoder,
+                                                   preserved)
 
         try:
             for addition in self.additions:
                 presence_bits <<= 1
                 addition_encoder = encoder.__class__()
+                addition_encoder.preserve_unknown_extensions = (
+                    getattr(encoder, 'preserve_unknown_extensions', False))
                 number_of_precence_bits += 1
 
                 if isinstance(addition, AdditionGroup):
@@ -785,8 +809,107 @@ class MembersType(Type):
 
         for addition_encoder in addition_encoders:
             addition_encoder.align_always()
-            encoder.append_length_determinant(addition_encoder.number_of_bytes())
-            encoder += addition_encoder
+            encode_open_type_fragments(
+                encoder,
+                bytes(addition_encoder.as_bytearray()))
+
+        return True
+
+    def encode_preserved_additions(self, data, encoder, preserved):
+        """Re-emit a presence bit field that includes unknown additions.
+
+        Known fields are re-encoded from `data`. Preserved entries are
+        written back as opaque open types. An entry whose index is
+        locally known is only allowed when it was explicitly kept
+        opaque because the local schema could not verify it.
+
+        """
+
+        if not preserved.is_unchanged(data):
+            raise EncodeError(
+                "Cannot re-send preserved unknown extensions in '{}' "
+                "because its known members have changed.".format(self.name))
+
+        number_of_additions = max(len(self.additions),
+                                  preserved.presence_length,
+                                  preserved.max_index + 1)
+
+        if number_of_additions > 127:
+            raise EncodeError(
+                "Cannot preserve more than 127 extension additions "
+                "in '{}'.".format(self.name))
+
+        presence_bits = 0
+        addition_encoders = []
+
+        try:
+            for i, addition in enumerate(self.additions):
+                addition_encoder = encoder.__class__()
+                addition_encoder.preserve_unknown_extensions = (
+                    getattr(encoder, 'preserve_unknown_extensions', False))
+
+                if isinstance(addition, AdditionGroup):
+                    addition.encode_addition_group(data, addition_encoder)
+                else:
+                    self.encode_member(addition,
+                                       data,
+                                       addition_encoder,
+                                       encode_default=True)
+
+                if addition_encoder.number_of_bits > 0 or addition.name in data:
+                    addition_encoders.append((i, addition_encoder))
+        except EncodeError:
+            pass
+
+        unknown = []
+
+        for extension in preserved:
+            if (extension.index < len(self.additions)
+                    and extension.kind != 'conflicting-known-addition'):
+                raise EncodeError(
+                    "Preserved extension index {} is a known addition "
+                    "in '{}' and must be encoded from decoded data.".format(
+                        extension.index,
+                        self.name))
+
+            if extension.data is None:
+                raise EncodeError(
+                    "Preserved extension index {} in '{}' has no raw "
+                    "data.".format(extension.index,
+                                   self.name))
+
+            unknown.append(extension)
+
+        order = sorted([(index, encoder_, None)
+                        for index, encoder_ in addition_encoders]
+                       + [(extension.index, None, extension)
+                          for extension in unknown],
+                       key=lambda item: item[0])
+
+        if len(order) == 0:
+            return False
+
+        number_of_presence_bits = number_of_additions
+
+        for index, _, _ in order:
+            presence_bits |= (1 << (number_of_presence_bits - index - 1))
+
+        encoder.append_normally_small_length(number_of_additions)
+        encoder.append_non_negative_binary_integer(presence_bits,
+                                                   number_of_presence_bits)
+        encoder.align()
+
+        for index, addition_encoder, extension in order:
+            if extension is not None:
+                encode_open_type_fragments(
+                    encoder,
+                    extension.data,
+                    extension.fragments)
+            else:
+                addition_encoder.align_always()
+                encode_open_type_fragments(
+                    encoder,
+                    bytes(addition_encoder.as_bytearray()))
 
         return True
 
@@ -823,7 +946,20 @@ class MembersType(Type):
         if self.additions is not None:
             if decoder.read_bit():
                 decoded = self.decode_root(decoder)
-                decoded.update(self.decode_additions(decoder))
+                additions = self.decode_additions(decoder)
+
+                if isinstance(additions, tuple):
+                    additions, preserved = additions
+                else:
+                    preserved = None
+
+                decoded.update(additions)
+
+                if preserved is not None:
+                    preserved.local_fingerprint = (
+                        unknown_extensions.fingerprint(decoded))
+                    decoded[unknown_extensions.UNKNOWN_EXTENSIONS_KEY] = (
+                        preserved)
             else:
                 decoded = self.decode_root(decoder)
         else:
@@ -853,6 +989,9 @@ class MembersType(Type):
         return values
 
     def decode_additions(self, decoder):
+        if getattr(decoder, 'preserve_unknown_extensions', False):
+            return self.decode_additions_preserving_unknown(decoder)
+
         # Presence bit field.
         length = decoder.read_normally_small_length()
         presence_bits = decoder.read_non_negative_binary_integer(length)
@@ -860,30 +999,138 @@ class MembersType(Type):
         decoded = {}
 
         for i in range(length):
-            if presence_bits & (1 << (length - i - 1)):
-                # Open type decoding.
-                open_type_length = decoder.read_length_determinant()
-                offset = decoder.number_of_bits
+            if not (presence_bits & (1 << (length - i - 1))):
+                continue
+
+            open_type_length = decoder.read_length_determinant()
+
+            if open_type_length >= 16384:
+                # Fragmented open type.  Decode the isolated payload
+                # rather than reading across fragment headers.
+                first = decoder.read_bytes(open_type_length)
+                rest = [first]
+
+                while True:
+                    chunk_length = decoder.read_length_determinant()
+                    rest.append(decoder.read_bytes(chunk_length))
+
+                    if chunk_length < 16384:
+                        break
 
                 if i < len(self.additions):
                     addition = self.additions[i]
+                    addition_decoder = decoder.__class__(b''.join(rest))
 
                     try:
                         if isinstance(addition, AdditionGroup):
-                            decoded.update(addition.decode(decoder))
+                            decoded.update(addition.decode(addition_decoder))
                         else:
-                            decoded[addition.name] = addition.decode(decoder)
+                            decoded[addition.name] = addition.decode(
+                                addition_decoder)
                     except ErrorWithLocation as e:
                         # Add member location
                         e.add_location(addition)
                         raise e
-                else:
-                    decoder.skip_bits(8 * open_type_length)
 
-                alignment_bits = (offset - decoder.number_of_bits) % 8
+                continue
 
-                if alignment_bits != 0:
-                    decoder.skip_bits(8 - alignment_bits)
+            offset = decoder.number_of_bits
+
+            if i < len(self.additions):
+                addition = self.additions[i]
+
+                try:
+                    if isinstance(addition, AdditionGroup):
+                        decoded.update(addition.decode(decoder))
+                    else:
+                        decoded[addition.name] = addition.decode(decoder)
+                except ErrorWithLocation as e:
+                    # Add member location
+                    e.add_location(addition)
+                    raise e
+            else:
+                decoder.skip_bits(8 * open_type_length)
+
+            alignment_bits = (offset - decoder.number_of_bits) % 8
+
+            if alignment_bits != 0:
+                decoder.skip_bits(8 - alignment_bits)
+
+        return decoded
+
+    def decode_additions_preserving_unknown(self, decoder):
+        # Presence bit field.
+        length = decoder.read_normally_small_length()
+        presence_bits = decoder.read_non_negative_binary_integer(length)
+        decoder.align()
+        decoded = {}
+        preserved = []
+
+        for i in range(length):
+            if not (presence_bits & (1 << (length - i - 1))):
+                continue
+
+            (data,
+             fragments,
+             content_bit_offset,
+             length_bit_offset) = read_open_type_fragments(decoder)
+
+            if i < len(self.additions):
+                addition = self.additions[i]
+                addition_decoder = decoder.__class__(data)
+                addition_decoder.preserve_unknown_extensions = True
+
+                try:
+                    if isinstance(addition, AdditionGroup):
+                        values = addition.decode(addition_decoder)
+                    else:
+                        values = {addition.name: addition.decode(
+                            addition_decoder)}
+                except (ErrorWithLocation, DecodeError):
+                    # An old schema may assign a known index to a field
+                    # introduced later.  Never present such content as
+                    # verified known data; keep it opaque instead.
+                    preserved.append(
+                        unknown_extensions.PreservedUnknownExtension(
+                            index=i,
+                            data=data,
+                            kind='conflicting-known-addition',
+                            bit_offset=length_bit_offset,
+                            content_bit_offset=content_bit_offset,
+                            length_bit_offset=length_bit_offset,
+                            fragments=fragments))
+                    continue
+
+                if addition_decoder.number_of_bits_left != 0:
+                    preserved.append(
+                        unknown_extensions.PreservedUnknownExtension(
+                            index=i,
+                            data=data,
+                            kind='conflicting-known-addition',
+                            bit_offset=length_bit_offset,
+                            content_bit_offset=content_bit_offset,
+                            length_bit_offset=length_bit_offset,
+                            fragments=fragments))
+                    continue
+
+                decoded.update(values)
+            else:
+                preserved.append(
+                    unknown_extensions.PreservedUnknownExtension(
+                        index=i,
+                        data=data,
+                        bit_offset=length_bit_offset,
+                        content_bit_offset=content_bit_offset,
+                        length_bit_offset=length_bit_offset,
+                        fragments=fragments))
+
+        if preserved:
+            metadata = unknown_extensions.PreservedUnknownExtensions(
+                preserved,
+                presence_length=length,
+                container_name=self.name)
+
+            return decoded, metadata
 
         return decoded
 
@@ -1600,6 +1847,19 @@ class Choice(Type):
                                                 number_of_bits)
 
     def encode_additions(self, data, encoder):
+        if (encoder.preserve_unknown_extensions
+                and isinstance(data[1], unknown_extensions.UnknownChoiceExtension)
+                and data[0] is None):
+            extension = data[1]
+            encoder.append_normally_small_non_negative_whole_number(
+                extension.index)
+            encoder.align()
+            encode_open_type_fragments(encoder,
+                                       extension.data,
+                                       extension.fragments)
+
+            return
+
         try:
             index = self.additions_name_to_index[data[0]]
         except KeyError:
@@ -1609,6 +1869,8 @@ class Choice(Type):
                     data[0]))
 
         addition_encoder = encoder.__class__()
+        addition_encoder.preserve_unknown_extensions = (
+            getattr(encoder, 'preserve_unknown_extensions', False))
         addition = self.additions_index_to_member[index]
         try:
             addition.encode(data[1], addition_encoder)
@@ -1622,8 +1884,8 @@ class Choice(Type):
         addition_encoder.align_always()
         encoder.append_normally_small_non_negative_whole_number(index)
         encoder.align()
-        encoder.append_length_determinant(addition_encoder.number_of_bytes())
-        encoder += addition_encoder
+        encode_open_type_fragments(encoder,
+                                   bytes(addition_encoder.as_bytearray()))
 
     def decode(self, decoder):
         if self.additions_index_to_member is not None:
@@ -1679,25 +1941,38 @@ class Choice(Type):
 
         # Open type decoding.
         decoder.align()
-        length = 8 * decoder.read_length_determinant()
-        offset = decoder.number_of_bits
+        (data,
+         fragments,
+         content_bit_offset,
+         length_bit_offset) = read_open_type_fragments(decoder)
 
         if addition is None:
-            name = None
-            decoded = None
-        else:
-            name = addition.name
-            try:
-                decoded = addition.decode(decoder)
-            except ErrorWithLocation as e:
-                # Add member location
-                e.add_location(addition)
-                raise e
-            length -= (offset - decoder.number_of_bits)
+            if getattr(decoder, 'preserve_unknown_extensions', False):
+                return (None,
+                        unknown_extensions.UnknownChoiceExtension(
+                            index=index,
+                            data=data,
+                            bit_offset=length_bit_offset,
+                            content_bit_offset=content_bit_offset,
+                            length_bit_offset=length_bit_offset,
+                            fragments=fragments))
 
-        decoder.skip_bits(length)
+            return (None, None)
 
-        return (name, decoded)
+        addition_decoder = decoder.__class__(data)
+        addition_decoder.preserve_unknown_extensions = getattr(
+            decoder,
+            'preserve_unknown_extensions',
+            False)
+
+        try:
+            decoded = addition.decode(addition_decoder)
+        except ErrorWithLocation as e:
+            # Add member location
+            e.add_location(addition)
+            raise e
+
+        return (addition.name, decoded)
 
     def __repr__(self):
         return 'Choice({}, [{}])'.format(
@@ -1982,25 +2257,46 @@ class AdditionGroup(Sequence):
 
 class CompiledType(compiler.CompiledType):
 
-    def encode(self, data):
+    def encode(self, data, preserve_unknown_extensions=False):
         encoder = Encoder()
+        encoder.preserve_unknown_extensions = preserve_unknown_extensions
+
+        if (preserve_unknown_extensions
+                and unknown_extensions.has_unknown_extensions(data)
+                and not unknown_extensions.unknown_extensions_can_resend(data)):
+            raise EncodeError(
+                'Cannot preserve unknown extensions because known fields '
+                'have changed since decoding.')
+
         try:
-            self._type.encode(data, encoder)
+            encoded = self._type.encode(data, encoder)
         except ErrorWithLocation as e:
             # Add member location
             e.add_location(self._type)
             raise e
+
+        if encoded is not None:
+            return encoded
 
         return encoder.as_bytearray()
 
-    def decode(self, data):
+    def decode(self, data, preserve_unknown_extensions=False):
         decoder = Decoder(bytearray(data))
+        decoder.preserve_unknown_extensions = preserve_unknown_extensions
+
         try:
-            return self._type.decode(decoder)
+            decoded = self._type.decode(decoder)
         except ErrorWithLocation as e:
             # Add member location
             e.add_location(self._type)
             raise e
+
+        if preserve_unknown_extensions:
+            decoded = unknown_extensions.wrap_decoded_message(
+                decoded,
+                self.name)
+
+        return decoded
 
 
 class Compiler(compiler.Compiler):
@@ -2248,3 +2544,83 @@ def compile_dict(specification, numeric_enums=False):
 
 def decode_full_length(_data):
     raise DecodeError('Decode length is not supported for this codec.')
+
+
+def encode_open_type_fragments(encoder, data, fragments=None):
+    """Append one open type with PER length determinant fragmentation.
+
+    `fragments` records the length determinants read while decoding.
+    When they describe `data` exactly, the original framing is
+    replayed.  Otherwise canonical PER fragmentation is used.
+
+    """
+
+    if fragments is not None:
+        offset = 0
+        written = []
+        last_index = len(fragments) - 1
+
+        for index, (length, payload_length) in enumerate(fragments):
+            if payload_length != length:
+                break
+
+            if index != last_index:
+                if length < 16384:
+                    break
+            elif length >= 16384:
+                break
+
+            if offset + payload_length > len(data):
+                break
+
+            written.append((length, payload_length))
+            offset += payload_length
+
+        if len(written) > 0 and offset == len(data):
+            offset = 0
+
+            for length, payload_length in written:
+                encoder.append_length_determinant(length)
+                encoder.append_bytes(data[offset:offset + payload_length])
+                offset += payload_length
+
+            return written
+
+    written = []
+
+    for chunk_offset, length in encoder.append_length_determinant_chunks(
+            len(data)):
+        encoder.append_bytes(data[chunk_offset:chunk_offset + length])
+        written.append((length, min(length, len(data) - chunk_offset)))
+
+    return written
+
+
+def read_open_type_fragments(decoder):
+    """Read a fragmented open type.
+
+    Returns ``(data, fragments, content_bit_offset, length_bit_offset)``.
+    `fragments` records the original length determinants.  They are
+    consumed, but not part of the returned opaque data.
+
+    """
+
+    data = bytearray()
+    fragments = []
+    length_bit_offset = decoder.number_of_read_bits()
+    content_bit_offset = None
+
+    while True:
+        length = decoder.read_length_determinant()
+
+        if content_bit_offset is None:
+            content_bit_offset = decoder.number_of_read_bits()
+
+        payload = decoder.read_bytes(length)
+        data += payload
+        fragments.append((length, len(payload)))
+
+        if length < 16384:
+            break
+
+    return bytes(data), fragments, content_bit_offset, length_bit_offset

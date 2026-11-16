@@ -9,6 +9,7 @@ from copy import copy
 from . import EncodeError, ErrorWithLocation
 from . import compiler
 from . import format_or
+from . import unknown_extensions
 
 
 STRING_TYPES = [
@@ -153,6 +154,33 @@ class Dict(Type):
                     e.add_location(member)
                     raise e
 
+        for key, value in data.items():
+            if key == unknown_extensions.UNKNOWN_EXTENSIONS_KEY:
+                PreservedUnknownExtensions(key).encode(value)
+
+
+class PreservedUnknownExtensions(Type):
+
+    TYPE = unknown_extensions.PreservedUnknownExtensions
+
+    def encode(self, data):
+        super(PreservedUnknownExtensions, self).encode(data)
+
+        for entry in data:
+            if not isinstance(entry,
+                              unknown_extensions.PreservedUnknownExtension):
+                raise EncodeError(
+                    'Expected data of type PreservedUnknownExtension, '
+                    'but got {}.'.format(entry))
+
+
+class UnknownChoiceExtension(Type):
+
+    TYPE = unknown_extensions.UnknownChoiceExtension
+
+    def encode(self, data):
+        super(UnknownChoiceExtension, self).encode(data)
+
 
 class List(Type):
 
@@ -221,6 +249,14 @@ class Choice(Type):
             if (not isinstance(data, tuple)
                 or len(data) != 2
                 or not isinstance(data[0], str)):
+                if (isinstance(data, tuple)
+                        and len(data) == 2
+                        and data[0] is None
+                        and isinstance(
+                            data[1],
+                            unknown_extensions.UnknownChoiceExtension)):
+                    return
+
                 raise EncodeError(
                     'Expected data of type tuple(str, object), but got {}.'.format(
                         data))
@@ -232,13 +268,20 @@ class Choice(Type):
                     'Expected data of type tuple(str, object), but got {}.'.format(
                         data))
 
-        try:
-            member = self.name_to_member[data[0]]
-        except KeyError:
+        member = self.name_to_member.get(data[0], None)
+
+        if (member is None
+                and data[0] is None
+                and isinstance(data[1],
+                               unknown_extensions.UnknownChoiceExtension)):
+            return
+
+        if member is None:
             raise EncodeError(
                 "Expected choice {}, but got '{}'.".format(
                     self.format_names(),
                     data[0]))
+
         try:
             member.encode(data[1])
         except ErrorWithLocation as e:

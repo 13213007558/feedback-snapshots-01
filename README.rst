@@ -105,6 +105,47 @@ The same ASN.1 specification, but using the PER codec.
 
 See the `examples`_ folder for additional examples.
 
+Forwarding unknown PER/UPER extensions
+--------------------------------------
+
+A relay compiled with an old schema normally skips extension additions
+it does not know. That loses new-version fields when the decoded value
+is encoded again. Pass ``preserve_unknown_extensions=True`` to
+:func:`~asn1tools.compiler.Specification.decode` and
+:func:`~asn1tools.compiler.Specification.encode` to keep those
+additions as opaque metadata.
+
+.. code-block:: python
+
+    >>> decoded = old.decode('Message',
+    ...                      encoded,
+    ...                      preserve_unknown_extensions=True)
+    >>> decoded['id']                      # known field
+    1
+    >>> decoded.unknown_extensions[0].index
+    0
+    >>> decoded.unknown_extensions[0].data  # raw open type content
+    b'\x02\x01\x2a'
+    >>> decoded.can_resend_unknown_extensions()
+    True
+    >>> forwarded = old.encode('Message',
+    ...                        decoded,
+    ...                        preserve_unknown_extensions=True)
+
+Preserved entries expose ``index``, the raw open type ``data``
+(without its length determinant), ``fragments``, and the bit offsets
+needed to reproduce the original framing. Unknown additions are never
+merged into the dictionary as if they were known fields. A known
+extension index whose payload does not decode exactly under the old
+schema is also kept opaque and is marked ``conflicting-known-addition``.
+An unknown ``CHOICE`` alternative is returned as ``(None, marker)``.
+
+Changing any known field invalidates the preserved context:
+``can_resend_unknown_extensions()`` returns ``False`` and encoding
+raises :class:`~asn1tools.errors.EncodeError`. Without
+``preserve_unknown_extensions`` the codec keeps its historical
+behaviour and silently skips unknown additions.
+
 Command line tool
 -----------------
 

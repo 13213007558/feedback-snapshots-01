@@ -8,6 +8,7 @@ from copy import copy
 from . import ConstraintsError, ErrorWithLocation
 from . import compiler
 from . import format_or
+from . import unknown_extensions
 from .permitted_alphabet import NUMERIC_STRING
 from .permitted_alphabet import PRINTABLE_STRING
 from .permitted_alphabet import IA5_STRING
@@ -221,6 +222,18 @@ class Dict(Type):
                     e.add_location(member)
                     raise e
 
+        metadata = data.get(unknown_extensions.UNKNOWN_EXTENSIONS_KEY, None)
+
+        if metadata is not None:
+            if not isinstance(
+                    metadata,
+                    unknown_extensions.PreservedUnknownExtensions):
+                raise ConstraintsError(
+                    "Expected '{}' to be PreservedUnknownExtensions, "
+                    'but got {}.'.format(
+                        unknown_extensions.UNKNOWN_EXTENSIONS_KEY,
+                        metadata))
+
 
 class List(Type):
 
@@ -259,6 +272,13 @@ class Choice(Type):
 
         if value in self.name_to_member:
             member = self.name_to_member[value]
+        elif value is None and data[1] is not None and not isinstance(
+                data[1],
+                unknown_extensions.PreservedUnknownExtension):
+            raise ConstraintsError(
+                'Expected None or a preserved unknown extension.')
+        elif value is None:
+            return
         elif self.has_extension_marker:
             return
         else:

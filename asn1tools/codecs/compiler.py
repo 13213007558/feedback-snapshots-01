@@ -176,14 +176,10 @@ class CompiledOpenTypes(CompiledType):
         return self._type.type
 
     def encode(self, data, **kwargs):
-        # print()
-        # print('data:', data)
-        # print(self._compiled_open_types)
-
         return self._type.encode(data, **kwargs)
 
-    def decode(self, data):
-        return self._type.decode(data)
+    def decode(self, data, **kwargs):
+        return self._type.decode(data, **kwargs)
 
 
 class Compiler(object):

@@ -3,7 +3,9 @@
 """
 
 from . import DecodeError, ErrorWithLocation
+from . import EncodeError
 from . import per
+from . import unknown_extensions
 from . import restricted_utc_time_to_datetime
 from . import restricted_utc_time_from_datetime
 from . import restricted_generalized_time_to_datetime
@@ -479,25 +481,46 @@ class OpenType(Type):
 
 class CompiledType(per.CompiledType):
 
-    def encode(self, data):
+    def encode(self, data, preserve_unknown_extensions=False):
         encoder = Encoder()
+        encoder.preserve_unknown_extensions = preserve_unknown_extensions
+
+        if (preserve_unknown_extensions
+                and unknown_extensions.has_unknown_extensions(data)
+                and not unknown_extensions.unknown_extensions_can_resend(data)):
+            raise EncodeError(
+                'Cannot preserve unknown extensions because known fields '
+                'have changed since decoding.')
+
         try:
-            self._type.encode(data, encoder)
+            encoded = self._type.encode(data, encoder)
         except ErrorWithLocation as e:
             # Add member location
             e.add_location(self._type)
             raise e
+
+        if encoded is not None:
+            return encoded
 
         return encoder.as_bytearray()
 
-    def decode(self, data):
+    def decode(self, data, preserve_unknown_extensions=False):
         decoder = Decoder(bytearray(data))
+        decoder.preserve_unknown_extensions = preserve_unknown_extensions
+
         try:
-            return self._type.decode(decoder)
+            decoded = self._type.decode(decoder)
         except ErrorWithLocation as e:
             # Add member location
             e.add_location(self._type)
             raise e
+
+        if preserve_unknown_extensions:
+            decoded = unknown_extensions.wrap_decoded_message(
+                decoded,
+                self.name)
+
+        return decoded
 
 
 class Compiler(per.Compiler):

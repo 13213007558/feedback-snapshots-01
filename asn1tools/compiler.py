@@ -141,7 +141,11 @@ class Specification(object):
 
         return bytes(type_.encode(data, **kwargs))
 
-    def decode(self, name, data, check_constraints=False):
+    def decode(self,
+               name,
+               data,
+               check_constraints=False,
+               preserve_unknown_extensions=False):
         """Decode given bytes object `data` as given type `name` and return
         the decoded data as a dictionary.
 
@@ -152,6 +156,14 @@ class Specification(object):
         the constraints check and minimize the runtime overhead, but
         instead allow decoding of values not fulfilling the
         constraints.
+
+        If `preserve_unknown_extensions` is ``True``, PER/UPER
+        extension additions and CHOICE alternatives not defined by
+        the compiled schema are kept as opaque metadata.  They are
+        attached as ``_unknown_extensions`` on the containing
+        dictionary, or as a marker tuple for an unknown CHOICE
+        alternative.  The default ``False`` keeps the historical
+        behaviour where unknown additions are skipped.
 
         >>> foo.decode('Question', b'0\\x0e\\x02\\x01\\x01\\x16\\x09Is 1+1=3?')
         {'id': 1, 'question': 'Is 1+1=3?'}
@@ -164,7 +176,12 @@ class Specification(object):
             raise DecodeError(
                 "Type '{}' not found in types dictionary.".format(name))
 
-        decoded = type_.decode(data)
+        if preserve_unknown_extensions:
+            decoded = type_.decode(
+                data,
+                preserve_unknown_extensions=True)
+        else:
+            decoded = type_.decode(data)
 
         if check_constraints:
             type_.check_constraints(decoded)
