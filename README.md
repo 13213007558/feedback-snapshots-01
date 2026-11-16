@@ -729,6 +729,22 @@ validation fails. You may disable such exceptions using the `settings.security[:
   settings.security[:soft] = true  # Do not raise error on failed signature/certificate validations
 ```
 
+#### Canonicalization and Namespace Interoperability
+
+`ds:SignedInfo` and each `ds:Reference` are canonicalized independently. The
+algorithm on `SignedInfo/CanonicalizationMethod` does not change how the
+Reference is canonicalized, and an `InclusiveNamespaces` element only applies
+to the element that declares it. A Reference with no canonicalization
+transform defaults to inclusive C14N 1.0, and comments are included only for
+`#WithComments` algorithm URIs.
+
+Avoid pretty-printing or otherwise re-serializing a signed Response or
+Metadata before verifying it; canonicalization covers the received bytes, so
+reformatting can change the digest or signature. The compatibility matrix,
+including byte-level expectations and accept/reject rulings for
+semantically equivalent documents, is documented in
+[`test/c14n_matrix/README.md`](test/c14n_matrix/README.md).
+
 #### Advanced SP Certificate Usage & Key Rollover
 
 Ruby SAML provides the `settings.sp_cert_multi` parameter to enable the following

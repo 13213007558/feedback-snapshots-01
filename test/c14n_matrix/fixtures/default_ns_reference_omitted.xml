@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:oasis:names:tc:SAML:2.0:protocol" ID="resp1" Version="2.0" IssueInstant="2020-01-01T00:00:00Z" Destination="https://sp.example.com/acs">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion xmlns:foo="urn:foo" ID="assert1" Version="2.0" IssueInstant="2020-01-01T00:00:00Z">
+    <saml:Issuer>https://idp.example.com</saml:Issuer>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">user@example.com</saml:NameID>
+      <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+        <saml:SubjectConfirmationData NotOnOrAfter="2035-01-01T00:00:00Z" Recipient="https://sp.example.com/acs"/>
+      </saml:SubjectConfirmation>
+    </saml:Subject>
+    <saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="2035-01-01T00:00:00Z">
+      <saml:AudienceRestriction><saml:Audience>https://sp.example.com/saml</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AuthnStatement AuthnInstant="2020-01-01T00:00:00Z" SessionIndex="session1">
+      <saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext>
+    </saml:AuthnStatement>
+    <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+      <ds:SignedInfo>
+        <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+        <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+        <ds:Reference URI="#assert1">
+          <ds:Transforms>
+            <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+            <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          </ds:Transforms>
+          <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+          <ds:DigestValue>z3jDrkPalvS+CWbyBxOOPGajgS0Te1XryEbLdF9N+sU=</ds:DigestValue>
+        </ds:Reference>
+      </ds:SignedInfo>
+      <ds:SignatureValue>dE7Z1esPVLSOqrucGzVvqsK7gWeJResy3NHQemH+Hvx6+dz0HWz2JkEXI1QOUgMD
+AEzKmGQiwk7ha3VnE4GMQ9bfsEAtZ9XJmPYg7pYNS3AEUqt3uQLWrrI4PZuYQvhR
+RfL4rpNHgNCZdMD3nXIZNKx2LcBEk2Iqy+iDH5MsJPg=</ds:SignatureValue>
+      <ds:KeyInfo><ds:KeyName>matrix</ds:KeyName></ds:KeyInfo>
+    </ds:Signature>
+  </saml:Assertion>
+</samlp:Response>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" ID="meta1" entityID="https://sp.example.com/saml">
+  <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+    <ds:SignedInfo>
+      <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+      <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+      <ds:Reference URI="#meta1">
+        <ds:Transforms>
+          <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+          <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+        </ds:Transforms>
+        <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+        <ds:DigestValue>cZQOdCTYNiO9yrCgw5Ja1JPpQi3pSW23QqqTXgCoIWc=</ds:DigestValue>
+      </ds:Reference>
+    </ds:SignedInfo>
+    <ds:SignatureValue>wIgoGfj0cDqtw9vOUjOUY75e/btBoc5KpKfealArK0UueZK0qM8z1WC5S0vwWEcY
+dQzW7GfHLaI5J5czHp9yP9rn1fAS85rdYhXi2L5ee7Iv3K6wqnhpPCbfaO68tY5K
+DlUubqAjtdJaeo506YiIHB3W9awPWMmUuDk16pt0Wdo=</ds:SignatureValue>
+    <ds:KeyInfo><ds:KeyName>matrix</ds:KeyName></ds:KeyInfo>
+  </ds:Signature>
+  <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://sp.example.com/acs" index="0" isDefault="true"/>
+  </md:SPSSODescriptor>
+</md:EntityDescriptor>

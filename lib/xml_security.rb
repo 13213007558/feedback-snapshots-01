@@ -38,9 +38,30 @@ module XMLSecurity
     REXML::Document::entity_expansion_limit = 0
 
     C14N            = "http://www.w3.org/2001/10/xml-exc-c14n#"
+    C14N_WITH_COMMENTS = "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
+    C14N_1_0        = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+    C14N_1_0_WITH_COMMENTS = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"
+    C14N_1_1        = "http://www.w3.org/2006/12/xml-c14n11"
+    C14N_1_1_WITH_COMMENTS = "http://www.w3.org/2006/12/xml-c14n11#WithComments"
     DSIG            = "http://www.w3.org/2000/09/xmldsig#"
+    ENVELOPED_SIG   = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
     NOKOGIRI_OPTIONS = Nokogiri::XML::ParseOptions::STRICT |
                        Nokogiri::XML::ParseOptions::NONET
+
+    # Canonicalization algorithms that may be selected independently by
+    # SignedInfo/CanonicalizationMethod and by each Reference transform.
+    # The value records the libxml2 mode and whether comments are part of
+    # the canonical form. +InclusiveNamespaces+ is only defined for
+    # exclusive c14n and is therefore resolved from the same element that
+    # declared the algorithm.
+    C14N_ALGORITHMS = {
+      C14N_1_0 => { :mode => Nokogiri::XML::XML_C14N_1_0, :with_comments => false },
+      C14N_1_0_WITH_COMMENTS => { :mode => Nokogiri::XML::XML_C14N_1_0, :with_comments => true },
+      C14N_1_1 => { :mode => Nokogiri::XML::XML_C14N_1_1, :with_comments => false },
+      C14N_1_1_WITH_COMMENTS => { :mode => Nokogiri::XML::XML_C14N_1_1, :with_comments => true },
+      C14N => { :mode => Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0, :with_comments => false },
+      C14N_WITH_COMMENTS => { :mode => Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0, :with_comments => true }
+    }.freeze
 
     # Safety load the SAML Message XML
     # @param document [REXML::Document] The message to be loaded
@@ -73,21 +94,21 @@ module XMLSecurity
     end
 
     def canon_algorithm(element)
+      canonicalization_spec(element)[:mode]
+    end
+
+    # Resolve the canonicalization algorithm declared by an element.
+    # Returns a descriptor with the libxml2 mode and the comment policy so
+    # callers never have to infer either from a different signature layer.
+    # Unknown algorithms retain the historical exclusive-c14n fallback.
+    def canonicalization_spec(element)
       algorithm = element
       if algorithm.is_a?(REXML::Element)
-        algorithm = element.attribute('Algorithm').value
+        attribute = element.attribute('Algorithm')
+        algorithm = attribute && attribute.value
       end
 
-      case algorithm
-        when "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
-             "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"
-          Nokogiri::XML::XML_C14N_1_0
-        when "http://www.w3.org/2006/12/xml-c14n11",
-             "http://www.w3.org/2006/12/xml-c14n11#WithComments"
-          Nokogiri::XML::XML_C14N_1_1
-        else
-          Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
-      end
+      C14N_ALGORITHMS[algorithm] || C14N_ALGORITHMS[C14N]
     end
 
     def algorithm(element)
@@ -118,7 +139,6 @@ module XMLSecurity
     SHA256          = 'http://www.w3.org/2001/04/xmlenc#sha256'
     SHA384          = "http://www.w3.org/2001/04/xmldsig-more#sha384"
     SHA512          = 'http://www.w3.org/2001/04/xmlenc#sha512'
-    ENVELOPED_SIG   = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
     INC_PREFIX_LIST = "#default samlp saml ds xs xsi md"
 
     attr_writer :uuid
@@ -170,7 +190,7 @@ module XMLSecurity
       noko_sig_element = XMLSecurity::BaseDocument.safe_load_xml(signature_element.to_s, check_malformed_doc)
 
       noko_signed_info_element = noko_sig_element.at_xpath('//ds:Signature/ds:SignedInfo', 'ds' => DSIG)
-      canon_string = noko_signed_info_element.canonicalize(canon_algorithm(C14N))
+      canon_string = noko_signed_info_element.canonicalize(canon_algorithm(C14N), nil, false)
 
       signature = compute_signature(private_key, algorithm(signature_method).new, canon_string)
       signature_element.add_element("ds:SignatureValue").text = signature
@@ -213,8 +233,10 @@ module XMLSecurity
     include OneLogin::RubySaml::ErrorHandling
 
     attr_writer :signed_element_id
+    attr_reader :reference_canonicalization, :signed_info_canonicalization
 
     def initialize(response, errors = [])
+      @raw_document = response.to_s
       super(response)
       @errors = errors
       reset_elements
@@ -227,6 +249,9 @@ module XMLSecurity
       @signature_algorithm = nil
       @ref = nil
       @processed = false
+      @working_copy = nil
+      @signed_info_canonicalization = nil
+      @reference_canonicalization = nil
     end
 
     def processed
@@ -317,7 +342,7 @@ module XMLSecurity
       @processed = true
 
       begin
-        nokogiri_document = XMLSecurity::BaseDocument.safe_load_xml(self, check_malformed_doc)
+        nokogiri_document = XMLSecurity::BaseDocument.safe_load_xml(@raw_document, check_malformed_doc)
       rescue StandardError => error
         @errors << error.message
         return false if soft
@@ -356,44 +381,49 @@ module XMLSecurity
       base64_signature_text = OneLogin::RubySaml::Utils.element_text(base64_signature)
       @signature = base64_signature_text.nil? ? nil : Base64.decode64(base64_signature_text)
 
-      # canonicalization method
-      canon_algorithm = canon_algorithm REXML::XPath.first(
-        sig_element,
-        './ds:SignedInfo/ds:CanonicalizationMethod',
-        'ds' => DSIG
-      )
-
       noko_sig_element = nokogiri_document.at_xpath('//ds:Signature', 'ds' => DSIG)
       noko_signed_info_element = noko_sig_element.at_xpath('./ds:SignedInfo', 'ds' => DSIG)
 
-      @cached_signed_info = noko_signed_info_element.canonicalize(canon_algorithm)
+      # SignedInfo has its own canonicalization method and, when exclusive
+      # c14n is used, its own InclusiveNamespaces child. These are never
+      # inherited from a Reference transform.
+      @signed_info_canonicalization = canonicalization_for(
+        sig_element,
+        './ds:SignedInfo/ds:CanonicalizationMethod'
+      )
+      @cached_signed_info = noko_signed_info_element.canonicalize(
+        @signed_info_canonicalization[:mode],
+        @signed_info_canonicalization[:inclusive_namespaces],
+        @signed_info_canonicalization[:with_comments]
+      )
 
-      ### Now get the @referenced_xml to use?
-      rexml_signed_info = REXML::Document.new(@cached_signed_info.to_s).root
-
-      noko_sig_element.remove
-
-      # get inclusive namespaces
-      inclusive_namespaces = extract_inclusive_namespaces
-
-      # check digests
-      @ref = REXML::XPath.first(rexml_signed_info, "./ds:Reference", {"ds"=>DSIG})
+      # The Reference and its transforms are read from the original REXML
+      # tree, not from the canonicalized SignedInfo, because canonicalization
+      # may add or move namespace declarations used by the transform nodes.
+      @ref = REXML::XPath.first(sig_element, "./ds:SignedInfo/ds:Reference", {"ds"=>DSIG})
       return if @ref.nil?
 
-      reference_nodes = nokogiri_document.xpath("//*[@ID=$id]", nil, { 'id' => extract_signed_element_id })
+      # Resolve the target before removing the signature: the digest covers
+      # the document as received with the enveloped signature node absent.
+      enclosing_id = sig_element.parent && sig_element.parent.attributes["ID"]
+      referenced_id = reference_id(@ref) || enclosing_id
+      reference_nodes = nokogiri_document.xpath("//*[@ID=$id]", nil, { 'id' => referenced_id })
 
       hashed_element = reference_nodes[0]
       return if hashed_element.nil?
 
-      canon_algorithm = canon_algorithm REXML::XPath.first(
-        rexml_signed_info,
-        './ds:CanonicalizationMethod',
-        { "ds" => DSIG }
+      # Remove the signature that is enveloped by the referenced element,
+      # matching the enveloped-signature transform. This must happen after
+      # SignedInfo is canonicalized and before the Reference canonicalization.
+      remove_enveloped_signature(nokogiri_document, sig_element, hashed_element)
+
+      @reference_canonicalization = reference_canonicalization_for(@ref)
+
+      @referenced_xml = hashed_element.canonicalize(
+        @reference_canonicalization[:mode],
+        @reference_canonicalization[:inclusive_namespaces],
+        @reference_canonicalization[:with_comments]
       )
-
-      canon_algorithm = process_transforms(@ref, canon_algorithm)
-
-      @referenced_xml = hashed_element.canonicalize(canon_algorithm, inclusive_namespaces)
     end
 
     def validate_signature(base64_cert, soft = true)
@@ -440,7 +470,24 @@ module XMLSecurity
 
     private
 
-    def process_transforms(ref, canon_algorithm)
+    # Resolve the canonicalization declared by +xpath+ under +parent+.
+    # InclusiveNamespaces is read from the algorithm element itself, so a
+    # prefix list on SignedInfo never becomes a Reference parameter (or the
+    # other way around).
+    def canonicalization_for(parent, xpath)
+      element = REXML::XPath.first(parent, xpath, { "ds" => DSIG })
+      spec = canonicalization_spec(element).dup
+      spec[:inclusive_namespaces] = inclusive_namespaces_for(element, spec)
+      spec
+    end
+
+    # Resolve the transforms of a Reference in document order. The last
+    # canonicalization transform wins; when a Reference declares none, XMLDSig
+    # defaults to inclusive c14n 1.0 rather than inheriting SignedInfo's
+    # canonicalization method.
+    def reference_canonicalization_for(ref)
+      spec = canonicalization_spec(C14N_1_0).dup
+
       transforms = REXML::XPath.match(
         ref,
         "./ds:Transforms/ds:Transform",
@@ -448,23 +495,79 @@ module XMLSecurity
       )
 
       transforms.each do |transform_element|
-        if transform_element.attributes && transform_element.attributes["Algorithm"]
-          algorithm = transform_element.attributes["Algorithm"]
-          case algorithm
-            when "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
-                 "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"
-              canon_algorithm = Nokogiri::XML::XML_C14N_1_0
-            when "http://www.w3.org/2006/12/xml-c14n11",
-                 "http://www.w3.org/2006/12/xml-c14n11#WithComments"
-              canon_algorithm = Nokogiri::XML::XML_C14N_1_1
-            when "http://www.w3.org/2001/10/xml-exc-c14n#",
-                 "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
-              canon_algorithm = Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
-          end
-        end
+        algorithm = transform_element.attributes["Algorithm"]
+        next unless C14N_ALGORITHMS.key?(algorithm)
+
+        spec = C14N_ALGORITHMS[algorithm].dup
+        spec[:inclusive_namespaces] = inclusive_namespaces_for(transform_element, spec)
       end
 
-      canon_algorithm
+      spec
+    end
+
+    # InclusiveNamespaces only applies to exclusive c14n. For other
+    # algorithms libxml2 rejects the argument, so the value is discarded.
+    def inclusive_namespaces_for(element, spec)
+      return nil unless spec[:mode] == Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
+      return nil if element.nil?
+
+      inclusive = REXML::XPath.first(element, "./ec:InclusiveNamespaces", { "ec" => C14N })
+      return nil if inclusive.nil?
+
+      prefix_list = inclusive.attributes.get_attribute("PrefixList")
+      return nil if prefix_list.nil?
+
+      prefix_list.value.split(/\s+/).reject(&:empty?)
+    end
+
+    # The URI of the first Reference, used to select the signed element.
+    # An empty URI means the whole document; historically ruby-saml resolves
+    # it to the ID of the element that contains the signature.
+    def reference_id(reference_element)
+      uri = reference_element.attribute("URI")
+      return nil if uri.nil?
+
+      value = uri.value
+      return nil if value.nil? || value.empty?
+
+      value.start_with?("#") ? value[1..-1] : nil
+    end
+
+    # Apply the enveloped-signature transform by deleting the Signature node
+    # that is part of this signature from the referenced subtree. A signature
+    # outside that subtree is not in the node-set and must remain untouched.
+    def remove_enveloped_signature(nokogiri_document, rexml_signature, hashed_element)
+      transforms = REXML::XPath.match(
+        @ref,
+        "./ds:Transforms/ds:Transform",
+        { "ds" => DSIG }
+      )
+      return unless transforms.any? { |t| t.attributes["Algorithm"] == ENVELOPED_SIG }
+
+      # Locate the same Signature node in the Nokogiri tree by its position
+      # among all signature elements, which both parsers preserve.
+      rexml_signatures = REXML::XPath.match(
+        @working_copy,
+        "//ds:Signature",
+        { "ds" => DSIG }
+      )
+      signature_index = rexml_signatures.index { |node| node.equal?(rexml_signature) }
+      return if signature_index.nil?
+
+      nokogiri_signature = nokogiri_document.xpath("//ds:Signature", 'ds' => DSIG)[signature_index]
+      return if nokogiri_signature.nil?
+      return unless descendant_or_self?(nokogiri_signature, hashed_element)
+
+      nokogiri_signature.remove
+    end
+
+    def descendant_or_self?(node, ancestor)
+      current = node
+      while current.respond_to?(:parent)
+        return true if current == ancestor
+        current = current.parent
+      end
+      false
     end
 
     def digests_match?(hash, digest_value)
@@ -480,10 +583,14 @@ module XMLSecurity
 
       return nil if reference_element.nil?
 
-      sei = reference_element.attribute("URI").value[1..-1]
-      sei.nil? ? reference_element.parent.parent.parent.attribute("ID").value : sei
+      reference_id(reference_element) ||
+        reference_element.parent.parent.parent.attribute("ID").value
     end
 
+    # Legacy public hook: returns the prefix list of the first
+    # InclusiveNamespaces in the document. Signature verification uses the
+    # per-layer resolution in #canonicalization_for instead, because this
+    # document-wide lookup cannot distinguish SignedInfo from Reference.
     def extract_inclusive_namespaces
       element = REXML::XPath.first(
         self,
