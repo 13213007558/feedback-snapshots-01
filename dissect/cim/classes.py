@@ -350,6 +350,12 @@ class InstanceKey(dict):
     def __setattr__(self, key: str, value: Any):
         self[key] = value
 
+    def __hash__(self) -> int:
+        # Identity-based hashing so key objects can be used as dict keys. Equality is
+        # unchanged (content based, inherited from dict); every parsed instance owns a
+        # distinct key object even when two instances have identical content.
+        return id(self)
+
     def __str__(self) -> str:
         if len(self) == 0:
             return "default"

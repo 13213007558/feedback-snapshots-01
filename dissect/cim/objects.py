@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -17,6 +18,14 @@ class Objects:
         self.store = Store(cim, fh, mapping)
 
     def get(self, key: Key) -> BytesIO:
+        return BytesIO(self.read_bytes(key))
+
+    def read_bytes(self, key: Key) -> bytes:
+        """Return the raw object bytes for a data reference.
+
+        The returned bytes are read-only facts. Identical references resolve to the
+        same cached bytes, while :meth:`get` wraps them in a fresh stream per call.
+        """
         if not key.is_data_reference:
             raise ValueError(f"Key is not a data reference: {key}")
 
@@ -27,7 +36,7 @@ class Objects:
         cur_len = len(buf)
 
         if cur_len == data_len:
-            return BytesIO(buf)
+            return buf
 
         read_list = [buf]
         cur_page = key.data_page + 1
@@ -45,7 +54,17 @@ class Objects:
 
             cur_page += 1
 
-        return BytesIO(b"".join(read_list))
+        return b"".join(read_list)
+
+    def get_many(self, keys: list[Key]) -> list[BytesIO]:
+        """Fetch the objects for multiple data references in input order.
+
+        Each call returns an independent ``BytesIO`` per input position. Identical
+        references still share their underlying read-only bytes and cached data
+        pages, while distinct references stay distinct and a failure for one
+        reference never collapses the results of the others.
+        """
+        return [self.get(key) for key in keys]
 
 
 class Store:
@@ -53,6 +72,12 @@ class Store:
         self.cim = cim
         self.fh = fh
         self.map = mapping
+
+        # Data pages are read-only and frequently shared across objects on the same or
+        # neighbouring logical pages, so cache both the parsed TOC page and the raw
+        # physical bytes to avoid repeated seeks, reads and TOC parsing.
+        self.page = lru_cache(256)(self.page)
+        self.physical_page = lru_cache(512)(self.physical_page)
 
     def page(self, logical_num: int) -> DataPage:
         page_number = self.map.get_entry(logical_num).page_number

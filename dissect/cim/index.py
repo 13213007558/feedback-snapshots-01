@@ -30,6 +30,26 @@ class Index:
     def lookup(self, key: Key) -> list[Key]:
         return self._lookup(str(key), self.store.root_page)
 
+    def lookup_many(self, keys: list[Key]) -> list[list[Key]]:
+        """Resolve multiple index keys, returning results in input order.
+
+        Duplicate keys share a single index traversal so repeated references do not
+        rescan the same B-tree pages. Each input position still gets its own result
+        list; the results are never merged across distinct keys.
+        """
+        unique: dict[str, Key] = {}
+        order: list[str] = []
+        for key in keys:
+            key_str = str(key)
+            if key_str not in unique:
+                unique[key_str] = key
+                order.append(key_str)
+
+        resolved = {key_str: self.lookup(unique[key_str]) for key_str in order}
+        # Each input slot gets its own list so callers can mutate one result without
+        # touching the others, even when duplicate keys share the underlying lookup.
+        return [list(resolved[str(key)]) for key in keys]
+
     def _lookup(self, key: str, page: IndexPage) -> list[Key]:
         matches = []
 
@@ -80,6 +100,10 @@ class Store:
             root_page_num = self.page(0).page.root_page
 
         self.root_page = self.page(root_page_num)
+
+        # Parsed index pages are read-only snapshots, so a bounded cache lets repeated
+        # lookups reuse pages instead of re-reading and re-parsing them from disk.
+        self.page = lru_cache(256)(self.page)
 
     def page(self, logical_num: int) -> IndexPage:
         page_num = self.map.get_entry(logical_num).page_number
@@ -186,6 +210,11 @@ class Key:
 
     def references(self) -> list[Key]:
         return self.cim.index.lookup(self)
+
+    @staticmethod
+    def references_many(keys: list[Key]) -> list[list[Key]]:
+        """Batch counterpart of :meth:`references`, preserving input order."""
+        return keys[0].cim.index.lookup_many(keys) if keys else []
 
     def object(self) -> BytesIO:
         ref = self.reference()

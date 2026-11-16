@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
     from dissect.cstruct import BaseType
 
+    from dissect.cim.batch import BatchResult
     from dissect.cim.c_cim import (
         CimType,
     )
@@ -42,6 +43,28 @@ if TYPE_CHECKING:
         InstanceKey,
         Qualifier,
     )
+
+
+def keys_match(instance_key: InstanceKey, requested: Any) -> bool:
+    """Compare an instance key against a requested key value.
+
+    ``InstanceKey`` is a dict subclass, so comparing it directly against a textual
+    key never matched. Normalize both sides so a string key (``Name='Beep'``), an
+    ``InstanceKey`` and a plain dict compare by their key/value content. Object path
+    parsing turns backslashes into forward slashes and numeric keys into strings, so
+    values are canonicalized before comparison.
+    """
+
+    def normalize(mapping: dict[Any, Any]) -> dict[str, str]:
+        return {str(key): str(value).replace("\\", "/") for key, value in mapping.items()}
+
+    if isinstance(requested, str):
+        return str(instance_key) == requested
+
+    if isinstance(requested, dict):
+        return normalize(instance_key) == normalize(requested)
+
+    return str(instance_key) == str(requested)
 
 
 class CIM:
@@ -80,6 +103,12 @@ class CIM:
             self.index = Index(self, index, Mapping(self, self._current_map))
         except EOFError:
             raise InvalidDatabaseError("Invalid CIM database, possibly corrupt")
+
+        # Read-only parse facts that are reused by both single and batch queries.
+        # They are scoped to this CIM (and therefore this mapping view); a CIM opened
+        # on different mapping files gets fully isolated caches.
+        self._class_definition_cache: dict[str, ClassDefinition] = {}
+        self._derivation_cache: dict[tuple[str, str], list[ClassDefinition]] = {}
 
         self.root = self.namespace(ROOT_NAMESPACE_NAME)
         self.system = self.namespace(SYSTEM_NAMESPACE_NAME)
@@ -132,10 +161,65 @@ class CIM:
     def get_class_definition(self, q: Key) -> ClassDefinition:
         if not q.reference():
             q = self.key().NS(SYSTEM_NAMESPACE_NAME).CD(q["CD"])
-        return ClassDefinition(self, q.object())
+
+        cache_key = str(q)
+        class_definition = self._class_definition_cache.get(cache_key)
+        if class_definition is None:
+            class_definition = ClassDefinition(self, q.object())
+            self._class_definition_cache[cache_key] = class_definition
+        return class_definition
+
+    def derivation_definitions(self, namespace: str, class_name: str) -> list[ClassDefinition]:
+        """Root-to-leaf class definitions for a class, resolved once per (ns, class).
+
+        Sharing this layout means repeated references to the same class parse its
+        inheritance chain and merge its properties a single time. A corrupt or
+        missing definition raises here, so only results that actually depend on that
+        class are affected.
+        """
+        cache_key = (namespace.lower(), class_name.lower())
+        cached = self._derivation_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        ns = self.namespace(namespace)
+        definitions: list[ClassDefinition] = []
+        current_name = class_name
+        seen: set[str] = set()
+        while True:
+            class_definition = ns.class_(current_name).class_definition
+            definitions.append(class_definition)
+
+            super_class_name = class_definition.super_class_name
+            if super_class_name == "":
+                break
+            if super_class_name.lower() in seen:
+                raise Error(f"Cyclic class derivation for {class_name} in {namespace}")
+
+            seen.add(current_name.lower())
+            current_name = super_class_name
+
+        definitions.reverse()
+        self._derivation_cache[cache_key] = definitions
+        return definitions
 
     def get_class_instance(self, class_: Class, q: Key) -> ClassInstance:
         return self._parse_instance(class_, q.object())
+
+    def query_many(self, paths: list[str], ns: Namespace | None = None) -> list[BatchResult]:
+        """Resolve many object paths in one batched pass, preserving input order.
+
+        Each path is evaluated independently: duplicate references share read-only
+        parse facts (index pages, object bytes, class layouts) but never merge into a
+        single answer. A failure for one path is captured on its own
+        :class:`BatchResult` and does not interrupt the remaining paths.
+        """
+        from dissect.cim.batch import BatchResolver
+
+        if ns is not None and not isinstance(ns, Namespace):
+            raise TypeError("namespace should be an instance of Namespace")
+
+        return BatchResolver(self, ns).resolve(list(paths))
 
 
 class Namespace:
@@ -239,19 +323,8 @@ class Class:
     @property
     def derivation(self) -> list[Class]:
         """List from root to leaf of class layouts."""
-        derivation = []
-
-        class_ = self
-        while True:
-            derivation.append(class_)
-            super_class_name = class_.class_definition.super_class_name
-            if super_class_name == "":
-                break
-
-            class_ = self.namespace.class_(super_class_name)
-
-        derivation.reverse()
-        return derivation
+        definitions = self.cim.derivation_definitions(self.namespace.name, self.name)
+        return [Class(self.cim, self.namespace, definition) for definition in definitions]
 
     @cached_property
     def properties(self) -> dict[str, Property]:
@@ -279,7 +352,7 @@ class Class:
 
     def instance(self, key: str) -> Instance:
         for instance in self.instances:
-            if instance.key == key:
+            if keys_match(instance.key, key):
                 return instance
 
         raise IndexError
