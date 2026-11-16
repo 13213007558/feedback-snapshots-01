@@ -33,12 +33,16 @@ def _parseRecordHeader(blob):
 
     blob.seek(0)
 
-    (buf,) = unpack("<H", blob.read(2))
+    header = blob.read(8)
+    if len(header) < 8:
+        raise exceptions.ParseError("Record header is truncated")
+
+    (buf,) = unpack("<H", header[0:2])
     recVer = getBitSlice(buf, 0, 4)
     recInstance = getBitSlice(buf, 4, 12)
 
-    (recType,) = unpack("<H", blob.read(2))
-    (recLen,) = unpack("<I", blob.read(4))
+    (recType,) = unpack("<H", header[2:4])
+    (recLen,) = unpack("<I", header[4:8])
 
     rh = RecordHeader(
         recVer=recVer,
@@ -102,15 +106,19 @@ def _parseCurrentUserAtom(blob):
     # logger.debug(rh)
 
     # ...Sub-fields are further specified in the following table.
-    assert rh.recVer == 0x0
-    assert rh.recInstance == 0x000
-    assert rh.recType == 0x0FF6
+    if rh.recVer != 0x0 or rh.recInstance != 0x000 or rh.recType != 0x0FF6:
+        raise exceptions.ParseError(
+            "Unexpected record header for CurrentUserAtom: {}".format(rh)
+        )
 
     (size,) = unpack("<I", blob.read(4))
     # logger.debug(hex(size))
 
     # size (4 bytes): ...It MUST be 0x00000014.
-    assert size == 0x00000014
+    if size != 0x00000014:
+        raise exceptions.ParseError(
+            "Unexpected CurrentUserAtom size: {:#x}".format(size)
+        )
 
     # headerToken (4 bytes): An unsigned integer that specifies
     # a token used to identify whether the file is encrypted.
@@ -226,12 +234,15 @@ def _parseUserEditAtom(blob):
     # logger.debug(rh)
 
     # ...Sub-fields are further specified in the following table.
-    assert rh.recVer == 0x0
-    assert rh.recInstance == 0x000
-    assert rh.recType == 0x0FF5
-    assert (
-        rh.recLen == 0x0000001C or rh.recLen == 0x00000020
-    )  # 0x0000001c + len(encryptSessionPersistIdRef)
+    if rh.recVer != 0x0 or rh.recInstance != 0x000 or rh.recType != 0x0FF5:
+        raise exceptions.ParseError(
+            "Unexpected record header for UserEditAtom: {}".format(rh)
+        )
+    if rh.recLen not in (0x0000001C, 0x00000020):
+        # 0x0000001c + len(encryptSessionPersistIdRef)
+        raise exceptions.ParseError(
+            "Unexpected UserEditAtom record length: {:#x}".format(rh.recLen)
+        )
 
     (lastSlideIdRef,) = unpack("<I", blob.read(4))
     (version,) = unpack("<H", blob.read(2))
@@ -252,8 +263,10 @@ def _parseUserEditAtom(blob):
     # encryptSessionPersistIdRef (4 bytes): An optional PersistIdRef
     # that specifies the value to look up in the persist object directory
     # to find the offset of the CryptSession10Container record (section 2.3.7).
-    buf = blob.read(4)
-    if len(buf) == 4:
+    if rh.recLen == 0x00000020:
+        buf = blob.read(4)
+        if len(buf) < 4:
+            raise exceptions.ParseError("UserEditAtom is truncated")
         (encryptSessionPersistIdRef,) = unpack("<I", buf)
     else:
         encryptSessionPersistIdRef = None
@@ -328,6 +341,8 @@ def _parsePersistDirectoryEntry(blob):
     # cf. PersistOffsetEntry: https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/a056484a-2132-4e1e-aa54-6e387f9695cf
     size_rgPersistOffset = 4 * cPersist
     _rgPersistOffset = blob.read(size_rgPersistOffset)
+    if len(_rgPersistOffset) < size_rgPersistOffset:
+        raise exceptions.ParseError("PersistDirectoryEntry is truncated")
     _rgPersistOffset = io.BytesIO(_rgPersistOffset)
     rgPersistOffset = []
     pos = 0
@@ -383,11 +398,14 @@ def _parsePersistDirectoryAtom(blob):
     # logger.debug(rh)
 
     # ...Sub-fields are further specified in the following table.
-    assert rh.recVer == 0x0
-    assert rh.recInstance == 0x000
-    assert rh.recType == 0x1772
+    if rh.recVer != 0x0 or rh.recInstance != 0x000 or rh.recType != 0x1772:
+        raise exceptions.ParseError(
+            "Unexpected record header for PersistDirectoryAtom: {}".format(rh)
+        )
 
     _rgPersistDirEntry = blob.read(rh.recLen)
+    if len(_rgPersistDirEntry) < rh.recLen:
+        raise exceptions.ParseError("PersistDirectoryAtom is truncated")
     _rgPersistDirEntry = io.BytesIO(_rgPersistDirEntry)
     rgPersistDirEntry = []
     pos = 0
@@ -436,10 +454,10 @@ def _parseCryptSession10Container(blob):
     # logger.debug(rh)
 
     # ...Sub-fields are further specified in the following table.
-    assert rh.recVer == 0xF
-    # The specified value fails
-    # assert rh.recInstance == 0x000
-    assert rh.recType == 0x2F14
+    if rh.recVer != 0xF or rh.recType != 0x2F14:
+        raise exceptions.ParseError(
+            "Unexpected record header for CryptSession10Container: {}".format(rh)
+        )
 
     data = blob.read(rh.recLen)
 
@@ -447,6 +465,33 @@ def _parseCryptSession10Container(blob):
         rh=rh,
         data=data,
     )
+
+
+def _stream_size(stream):
+    pos = stream.tell()
+    stream.seek(0, 2)
+    size = stream.tell()
+    stream.seek(pos)
+    return size
+
+
+def _check_record_bounds(stream, offset, stream_size, record_name):
+    if offset < 0 or offset + 8 > stream_size:
+        raise exceptions.ParseError(
+            "{} offset {:#x} is out of bounds (stream size {:#x})".format(
+                record_name, offset, stream_size
+            )
+        )
+    stream.seek(offset)
+    rh = _parseRecordHeader(io.BytesIO(stream.read(8)))
+    if offset + 8 + rh.recLen > stream_size:
+        raise exceptions.ParseError(
+            "{} at offset {:#x} extends past the end of the stream "
+            "(recLen {:#x}, stream size {:#x})".format(
+                record_name, offset, rh.recLen, stream_size
+            )
+        )
+    return rh
 
 
 def construct_persistobjectdirectory(data):
@@ -457,33 +502,49 @@ def construct_persistobjectdirectory(data):
     currentuser = _parseCurrentUser(data.currentuser)
     # logger.debug(currentuser)
 
-    # 2. Seek, in the PowerPoint Document Stream, to the offset specified by the offsetToCurrentEdit field of
-    # the CurrentUserAtom record identified in step 1.
-    data.powerpointdocument.seek(currentuser.currentuseratom.offsetToCurrentEdit)
+    stream = data.powerpointdocument
+    stream_size = _stream_size(stream)
 
     persistdirectoryatom_stack = []
+    visited_edit_offsets = set()
 
-    # The stream MUST contain exactly one UserEditAtom record.
-    # https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/b0963334-4408-4621-879a-ef9c54551fd8
-    for i in range(1):
+    # 2. Seek, in the PowerPoint Document Stream, to the offset specified by the offsetToCurrentEdit field of
+    # the CurrentUserAtom record identified in step 1.
+    offset = currentuser.currentuseratom.offsetToCurrentEdit
+
+    # 7. Repeat steps 3 through 6 until offsetLastEdit is 0x00000000.
+    while True:
+        _check_record_bounds(stream, offset, stream_size, "UserEditAtom")
+        if offset in visited_edit_offsets:
+            raise exceptions.ParseError(
+                "UserEditAtom chain contains a loop: edit record at offset "
+                "{:#x} was already visited".format(offset)
+            )
+        visited_edit_offsets.add(offset)
+
         # 3. Read the UserEditAtom record at the current offset. ...
-        usereditatom = _parseUserEditAtom(data.powerpointdocument)
+        stream.seek(offset)
+        usereditatom = _parseUserEditAtom(stream)
         # logger.debug(usereditatom)
 
         # 4. Seek to the offset specified by the offsetPersistDirectory field of the UserEditAtom record identified in step 3.
-        data.powerpointdocument.seek(usereditatom.offsetPersistDirectory)
+        _check_record_bounds(
+            stream,
+            usereditatom.offsetPersistDirectory,
+            stream_size,
+            "PersistDirectoryAtom",
+        )
+        stream.seek(usereditatom.offsetPersistDirectory)
 
         # 5. Read the PersistDirectoryAtom record at the current offset. ...
-        persistdirectoryatom = _parsePersistDirectoryAtom(data.powerpointdocument)
+        persistdirectoryatom = _parsePersistDirectoryAtom(stream)
         # logger.debug(persistdirectoryatom)
         persistdirectoryatom_stack.append(persistdirectoryatom)
 
         # 6. Seek to the offset specified by the offsetLastEdit field in the UserEditAtom record identified in step 3.
-        # 7. Repeat steps 3 through 6 until offsetLastEdit is 0x00000000.
         if usereditatom.offsetLastEdit == 0x00000000:
             break
-        else:
-            data.powerpointdocument.seek(usereditatom.offsetLastEdit)
+        offset = usereditatom.offsetLastEdit
 
     # 8. Construct the complete persist object directory for this file as follows:
     persistobjectdirectory = {}
@@ -566,8 +627,25 @@ class Ppt97File(base.BaseOfficeFile):
         logger.debug("[*] usereditatom: {}".format(usereditatom))
 
         # cf. Part 2 in https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/1fc22d56-28f9-4818-bd45-67c2bf721ccf
+        encryptSessionPersistIdRef = usereditatom.encryptSessionPersistIdRef
+        if encryptSessionPersistIdRef is None:
+            raise exceptions.ParseError(
+                "UserEditAtom at offset {:#x} has no encryptSessionPersistIdRef; "
+                "the file may not be encrypted".format(
+                    currentuser.currentuseratom.offsetToCurrentEdit
+                )
+            )
+        if encryptSessionPersistIdRef not in persistobjectdirectory:
+            raise exceptions.ParseError(
+                "encryptSessionPersistIdRef {:#x} referenced by the UserEditAtom "
+                "at offset {:#x} is not present in the persist object "
+                "directory".format(
+                    encryptSessionPersistIdRef,
+                    currentuser.currentuseratom.offsetToCurrentEdit,
+                )
+            )
         cryptsession10container_offset = persistobjectdirectory[
-            usereditatom.encryptSessionPersistIdRef
+            encryptSessionPersistIdRef
         ]
         logger.debug(
             "[*] cryptsession10container_offset: {}".format(
@@ -575,6 +653,12 @@ class Ppt97File(base.BaseOfficeFile):
             )
         )
 
+        _check_record_bounds(
+            self.data.powerpointdocument,
+            cryptsession10container_offset,
+            _stream_size(self.data.powerpointdocument),
+            "CryptSession10Container",
+        )
         self.data.powerpointdocument.seek(cryptsession10container_offset)
         cryptsession10container = _parseCryptSession10Container(
             self.data.powerpointdocument
@@ -587,7 +671,10 @@ class Ppt97File(base.BaseOfficeFile):
         vMajor, vMinor = unpack("<HH", encryptionVersionInfo)
         logger.debug("[*] encryption version: {} {}".format(vMajor, vMinor))
 
-        assert vMajor in [0x0002, 0x0003, 0x0004] and vMinor == 0x0002  # RC4 CryptoAPI
+        if not (vMajor in [0x0002, 0x0003, 0x0004] and vMinor == 0x0002):
+            raise exceptions.ParseError(
+                "Unsupported encryption version: {} {}".format(vMajor, vMinor)
+            )  # RC4 CryptoAPI
 
         info = _parse_header_RC4CryptoAPI(encryptionInfo)
         if DocumentRC4CryptoAPI.verifypw(
