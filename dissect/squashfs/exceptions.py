@@ -23,3 +23,7 @@ class NotAFileError(Error):
 
 class NotASymlinkError(Error):
     pass
+
+
+class XattrError(Error, ValueError):
+    """Raised when an extended attribute table entry cannot be decoded safely."""

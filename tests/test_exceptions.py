@@ -11,6 +11,7 @@ from dissect.squashfs import exceptions
         (exceptions.FileNotFoundError, FileNotFoundError),
         (exceptions.IsADirectoryError, IsADirectoryError),
         (exceptions.NotADirectoryError, NotADirectoryError),
+        (exceptions.XattrError, ValueError),
     ],
 )
 def test_filesystem_error_subclass(exc: exceptions.Error, std: Exception) -> None:

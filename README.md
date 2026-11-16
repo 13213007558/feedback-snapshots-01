@@ -56,3 +56,34 @@ Dissect is released as open source by Fox-IT (<https://www.fox-it.com>) part of 
 Developed by the Dissect Team (<dissect@fox-it.com>) and made available at <https://github.com/fox-it/dissect>.
 
 License terms: AGPL3 (<https://www.gnu.org/licenses/agpl-3.0.html>). For more information, see the LICENSE file.
+
+## Extended attributes and file capabilities
+
+`INode` exposes SquashFS extended attributes, including values stored in the shared
+out-of-line value area. Each attribute retains its full name and provenance:
+
+```python
+squashfs = SquashFS(fh)
+inode = squashfs.get("/bin/busybox")
+
+for attribute in inode.xattrs:
+    print(attribute.name, attribute.value, attribute.source)
+```
+
+For static firmware auditing, `INode.file_capabilities(namespace_rootid=...)` decodes
+the `security.capability` attribute. The report keeps the raw stored value, the
+applicability and origin of every capability set, recognised capability names, and
+unrecognised bit positions. It distinguishes the stored declaration from the
+conclusion for the caller-supplied user namespace:
+
+```python
+report = inode.file_capabilities(namespace_rootid=0)
+print(report.declaration.permitted.names)
+print(report.namespace.effective, report.namespace.reason)
+```
+
+Revision 3 values are matched against the supplied namespace rootid. Revision 2
+values are only valid in the initial user namespace. Unknown revisions, truncated
+values and conflicting attributes never produce a definite "effective" conclusion.
+`SquashFS.iter_file_capabilities(namespace_rootid=...)` walks the filesystem without
+reading or executing any file contents.

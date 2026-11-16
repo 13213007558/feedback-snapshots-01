@@ -15,16 +15,28 @@ from dissect.util.stream import RunlistStream
 
 from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
+from dissect.squashfs.capability import analyze_file_capabilities
 from dissect.squashfs.exceptions import (
     FileNotFoundError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
 )
+from dissect.squashfs.xattr import (
+    XATTR_NAME_MAX,
+    XATTR_REF_BLOCK_SHIFT,
+    XATTR_REF_OFFSET_MASK,
+    XATTR_SIZE_MAX,
+    XattrError,
+    decode_xattr_entry,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
+
+    from dissect.squashfs.capability import FileCapabilityReport
+    from dissect.squashfs.xattr import Xattr
 
 
 class SquashFS:
@@ -55,6 +67,7 @@ class SquashFS:
         self._lookup_id = lru_cache(1024)(self._lookup_id)
         self._lookup_inode = lru_cache(1024)(self._lookup_inode)
         self._lookup_fragment = lru_cache(1024)(self._lookup_fragment)
+        self._lookup_xattr_id = lru_cache(1024)(self._lookup_xattr_id)
 
         self._compression_options = None
         if (self.sb.flags >> c_squashfs.SQUASHFS_COMP_OPT) & 1:
@@ -67,6 +80,7 @@ class SquashFS:
         self.fragment_table = self._read_table(
             self.sb.fragment_table_start, self.sb.fragments, len(c_squashfs.squashfs_fragment_entry)
         )
+        self._init_xattr_table()
 
         self.root = self.inode(self.sb.root_inode >> 16, self.sb.root_inode & 0xFFFF, name="/")
 
@@ -122,6 +136,215 @@ class SquashFS:
 
         self.fh.seek(offset)
         return c_squashfs.uint64[num_blocks](self.fh)
+
+    def _init_xattr_table(self) -> None:
+        """Read the xattr ID table index, if the filesystem has one."""
+        self.xattr_table = None
+        self.xattr_table_start = 0
+        self.xattr_ids = 0
+        self.xattr_id_table = []
+
+        if self.sb.xattr_id_table_start == c_squashfs.SQUASHFS_INVALID_BLK:
+            return
+
+        table_header_size = len(c_squashfs.squashfs_xattr_table)
+
+        if self.sb.xattr_id_table_start < 0 or self.sb.xattr_id_table_start + table_header_size > self.size:
+            raise XattrError(f"xattr ID table offset out of bounds: {self.sb.xattr_id_table_start}")
+
+        self.fh.seek(self.sb.xattr_id_table_start)
+        table = c_squashfs.squashfs_xattr_table(self.fh)
+
+        if not table.xattr_ids:
+            return
+
+        if table.xattr_table_start < 0 or table.xattr_table_start >= self.size:
+            raise XattrError(f"xattr table offset out of bounds: {table.xattr_table_start}")
+
+        num_bytes = table.xattr_ids * len(c_squashfs.squashfs_xattr_id)
+        num_blocks = (num_bytes + c_squashfs.SQUASHFS_METADATA_SIZE - 1) // c_squashfs.SQUASHFS_METADATA_SIZE
+
+        index_start = self.sb.xattr_id_table_start + len(c_squashfs.squashfs_xattr_table)
+        if index_start + num_blocks * 8 > self.size:
+            raise XattrError("xattr ID table index exceeds filesystem size")
+
+        self.fh.seek(index_start)
+        self.xattr_table = table
+        self.xattr_table_start = table.xattr_table_start
+        self.xattr_ids = table.xattr_ids
+        self.xattr_id_table = list(c_squashfs.uint64[num_blocks](self.fh))
+
+        for block in self.xattr_id_table:
+            if block < 0 or block >= self.size:
+                raise XattrError(f"xattr ID table block out of bounds: {block:#x}")
+
+    def _xattr_ref(self, block: int, offset: int) -> int:
+        """Encode an absolute metadata position as a SquashFS xattr reference."""
+        return ((block - self.xattr_table_start) << XATTR_REF_BLOCK_SHIFT) | offset
+
+    def _xattr_block(self, ref: int) -> tuple[int, int]:
+        """Resolve an xattr reference to an absolute metadata block and offset."""
+        block = self.xattr_table_start + (ref >> XATTR_REF_BLOCK_SHIFT)
+        offset = ref & XATTR_REF_OFFSET_MASK
+
+        if block < 0 or block >= self.size:
+            raise XattrError(f"xattr reference out of bounds: {ref:#x}")
+
+        return block, offset
+
+    def _lookup_xattr_id(self, index: int) -> tuple[int, int, int]:
+        """Look up an xattr ID.
+
+        Args:
+            index: Index into the xattr ID table.
+
+        Returns:
+            A tuple of ``(xattr_ref, count, size)``.
+
+        Raises:
+            IndexError: If ``index`` is out of bounds.
+            XattrError: If the xattr ID table entry cannot be read.
+        """
+        if index < 0 or index >= self.xattr_ids:
+            raise IndexError(f"xattr ID out of bounds (0, {self.xattr_ids}): {index}")
+
+        entry_offset = index * len(c_squashfs.squashfs_xattr_id)
+        block, offset = divmod(entry_offset, c_squashfs.SQUASHFS_METADATA_SIZE)
+
+        if block >= len(self.xattr_id_table):
+            raise XattrError(f"xattr ID table entry out of bounds: {index}")
+
+        _, _, data = self._read_metadata_exact(
+            self.xattr_id_table[block],
+            offset,
+            len(c_squashfs.squashfs_xattr_id),
+        )
+        return struct.unpack("<QII", data)
+
+    def xattr(self, xattr_id: int) -> list[Xattr]:
+        """Alias for :meth:`xattrs`."""
+        return self.xattrs(xattr_id)
+
+    def xattrs(self, xattr_id: int) -> list[Xattr]:
+        """Read all extended attributes for an xattr ID.
+
+        The xattr ID identifies a list of attribute records in the shared xattr metadata
+        table. Values can either be stored inline or in the shared out-of-line value area.
+        In both cases the complete value is resolved and retained together with its origin.
+
+        Args:
+            xattr_id: The xattr ID from an inode header.
+
+        Returns:
+            The decoded attributes, in on-disk order.
+
+        Raises:
+            XattrError: If the xattr record or its value is malformed or out of bounds.
+        """
+        xattr_ref, count, size = self._lookup_xattr_id(xattr_id)
+
+        if count == 0:
+            return []
+
+        if size == 0 or count > size:
+            raise XattrError(f"invalid xattr record count {count} for size {size}")
+
+        block, offset = self._xattr_block(xattr_ref)
+        result = []
+
+        for _ in range(count):
+            entry_ref = self._xattr_ref(block, offset)
+            block, offset, data = self._read_metadata_exact(
+                block,
+                offset,
+                len(c_squashfs.squashfs_xattr_entry),
+            )
+            entry = c_squashfs.squashfs_xattr_entry(data)
+
+            if entry.size > XATTR_NAME_MAX:
+                raise XattrError(f"xattr name too long: {entry.size}")
+
+            block, offset, name = self._read_metadata_exact(block, offset, entry.size)
+
+            value_header_ref = self._xattr_ref(block, offset)
+            block, offset, data = self._read_metadata_exact(
+                block,
+                offset,
+                len(c_squashfs.squashfs_xattr_val),
+            )
+            value_header = c_squashfs.squashfs_xattr_val(data)
+
+            if entry.type & c_squashfs.SQUASHFS_XATTR_VALUE_OOL:
+                block, offset, data = self._read_metadata_exact(block, offset, 8)
+                ool_ref = struct.unpack("<Q", data)[0]
+
+                ool_block, ool_offset = self._xattr_block(ool_ref)
+                ool_block, ool_offset, data = self._read_metadata_exact(
+                    ool_block,
+                    ool_offset,
+                    len(c_squashfs.squashfs_xattr_val),
+                )
+                shared_header = c_squashfs.squashfs_xattr_val(data)
+                value_size = shared_header.vsize
+                value_ref = self._xattr_ref(ool_block, ool_offset)
+
+                if value_size > XATTR_SIZE_MAX:
+                    raise XattrError(f"xattr value too large: {value_size}")
+
+                _, _, value = self._read_metadata_exact(ool_block, ool_offset, value_size)
+            else:
+                value_size = value_header.vsize
+                ool_ref = None
+                value_ref = value_header_ref
+
+                if value_size > XATTR_SIZE_MAX:
+                    raise XattrError(f"xattr value too large: {value_size}")
+
+                block, offset, value = self._read_metadata_exact(block, offset, value_size)
+
+            result.append(
+                decode_xattr_entry(
+                    entry.type,
+                    name,
+                    value,
+                    xattr_id=xattr_id,
+                    entry_ref=entry_ref,
+                    value_ref=value_ref,
+                    ool_ref=ool_ref,
+                )
+            )
+
+        return result
+
+    def _read_metadata_exact(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
+        """Read metadata and return the position directly after the requested bytes."""
+        if length == 0:
+            return block, offset, b""
+
+        result = []
+        remaining = length
+        while remaining:
+            next_block, data = self._read_block(block)
+
+            if offset > len(data):
+                raise XattrError(f"metadata offset {offset} outside block {block:#x} of size {len(data)}")
+
+            available = len(data) - offset
+            if available <= remaining:
+                result.append(data[offset:])
+                remaining -= available
+                block = next_block
+                offset = 0
+            else:
+                result.append(data[offset : offset + remaining])
+                offset += remaining
+                remaining = 0
+
+        data = b"".join(result)
+        if len(data) != length:
+            raise XattrError(f"truncated metadata read at block {block:#x} offset {offset}: {length} bytes expected")
+
+        return block, offset, data
 
     def _read_metadata(self, block: int, offset: int, length: int) -> tuple[int, int, bytes]:
         result = []
@@ -193,6 +416,49 @@ class SquashFS:
     def iter_inodes(self) -> Iterator[INode]:
         for inum in range(1, self.sb.inodes + 1):
             yield self._lookup_inode(inum)
+
+    def iter_file_capabilities(
+        self,
+        namespace_rootid: int | None = None,
+        *,
+        rootid: int | None = None,
+    ) -> Iterator[tuple[INode, FileCapabilityReport]]:
+        """Iterate over all files that have a ``security.capability`` attribute.
+
+        The tree is walked from the root. Each entry is visited once, and no file
+        contents are read or executed.
+
+        Args:
+            namespace_rootid: Root UID of the target user namespace, as seen from the
+                initial user namespace.
+            rootid: Alias for ``namespace_rootid``.
+
+        Yields:
+            Pairs of ``(inode, report)``.
+        """
+        if rootid is not None:
+            if namespace_rootid is not None and namespace_rootid != rootid:
+                raise ValueError("conflicting namespace_rootid and rootid arguments")
+            namespace_rootid = rootid
+
+        seen: set[tuple[int, int]] = set()
+        stack = [self.root]
+
+        while stack:
+            node = stack.pop()
+            position = (node.block, node.offset)
+
+            if position in seen:
+                continue
+            seen.add(position)
+
+            if node.is_dir():
+                stack.extend(reversed(list(node.iterdir())))
+                continue
+
+            report = node.file_capabilities(namespace_rootid=namespace_rootid)
+            if report is not None:
+                yield node, report
 
 
 class INode:
@@ -316,6 +582,92 @@ class INode:
         if self.is_symlink():
             return self.header.symlink_size
         return None
+
+    @property
+    def xattr_id(self) -> int | None:
+        """The xattr ID for this inode, or ``None`` if it has no extended attributes."""
+        if self.header.inode_type == c_squashfs.SQUASHFS_LSYMLINK_TYPE:
+            # The long symlink inode has no xattr field in its header struct: it follows
+            # the symlink target in the metadata stream.
+            block, offset, _ = self.fs._read_metadata(
+                self.data_block,
+                self.data_offset,
+                self.header.symlink_size,
+            )
+            _, _, data = self.fs._read_metadata(block, offset, 4)
+            xattr = struct.unpack("<I", data)[0]
+        else:
+            xattr = getattr(self.header, "xattr", c_squashfs.SQUASHFS_INVALID_XATTR)
+
+        if xattr == c_squashfs.SQUASHFS_INVALID_XATTR:
+            return None
+        return xattr
+
+    @cached_property
+    def xattrs(self) -> list[Xattr]:
+        """All extended attributes of this inode."""
+        if self.xattr_id is None:
+            return []
+        return self.fs.xattrs(self.xattr_id)
+
+    def getxattr(self, name: str) -> Xattr | None:
+        """Return a single extended attribute by its full name, if present."""
+        return self.get_xattr(name)
+
+    def get_xattr(self, name: str) -> Xattr | None:
+        """Return a single extended attribute by its full name, if present."""
+        for xattr in self.xattrs:
+            if xattr.name == name:
+                return xattr
+        return None
+
+    def file_capabilities(
+        self,
+        namespace_rootid: int | None = None,
+        *,
+        rootid: int | None = None,
+    ) -> FileCapabilityReport | None:
+        """Read and analyse the ``security.capability`` attribute of this inode.
+
+        Args:
+            namespace_rootid: Root UID of the user namespace in which the stored
+                declaration should be evaluated, as seen from the initial user namespace.
+                This is supplied by the caller; the identity of the analysis host is never
+                used. If omitted, the declaration is reported but no effectiveness
+                conclusion is made.
+            rootid: Alias for ``namespace_rootid``.
+
+        Returns:
+            A capability report, or ``None`` if the inode has no ``security.capability``.
+        """
+        return analyze_file_capabilities(self.xattrs, namespace_rootid=namespace_rootid, rootid=rootid)
+
+    def capabilities(
+        self,
+        namespace_rootid: int | None = None,
+        *,
+        rootid: int | None = None,
+    ) -> FileCapabilityReport | None:
+        """Alias for :meth:`file_capabilities`."""
+        return self.file_capabilities(namespace_rootid=namespace_rootid, rootid=rootid)
+
+    def security_capability(
+        self,
+        namespace_rootid: int | None = None,
+        *,
+        rootid: int | None = None,
+    ) -> FileCapabilityReport | None:
+        """Alias for :meth:`file_capabilities`."""
+        return self.file_capabilities(namespace_rootid=namespace_rootid, rootid=rootid)
+
+    def caps(
+        self,
+        namespace_rootid: int | None = None,
+        *,
+        rootid: int | None = None,
+    ) -> FileCapabilityReport | None:
+        """Alias for :meth:`file_capabilities`."""
+        return self.file_capabilities(namespace_rootid=namespace_rootid, rootid=rootid)
 
     def is_dir(self) -> bool:
         return self.type == stat.S_IFDIR
