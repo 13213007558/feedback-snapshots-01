@@ -42,7 +42,7 @@ class Mapping:
         return reverse_map
 
     def get_entry(self, logical_num: int) -> MappingEntry:
-        if logical_num > self.mapping.mapping_entry_count:
+        if logical_num < 0 or logical_num >= self.mapping.mapping_entry_count:
             raise IndexError(logical_num)
 
         try:
