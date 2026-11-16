@@ -97,6 +97,13 @@ class CAPABILITY(IntFlag):
 
 TYPE_INIT = 0x80
 
+# Continuation packets carry a 7-bit sequence number, so a message can span at
+# most 128 of them.
+MAX_SEQ = 0x7F
+
+# Maximum size of a CTAPHID message, as defined by the CTAPHID protocol.
+MAX_MSG_SIZE = 7609
+
 
 class CtapHidDevice(CtapDevice):
     """
@@ -109,6 +116,7 @@ class CtapHidDevice(CtapDevice):
         self.descriptor = descriptor
         self._packet_size = descriptor.report_size_out
         self._connection = connection
+        self._out_of_sync = False
 
         nonce = os.urandom(8)
         self._channel_id = 0xFFFFFFFF
@@ -169,6 +177,8 @@ class CtapHidDevice(CtapDevice):
         on_keepalive: Callable[[STATUS], None] | None = None,
     ) -> bytes:
         event = event or Event()
+        if self._out_of_sync:
+            raise ConnectionFailure("HID channel out of sync, re-open the device")
 
         while True:
             try:
@@ -181,6 +191,33 @@ class CtapHidDevice(CtapDevice):
                 raise
 
     def _do_call(self, cmd, data, event, on_keepalive):
+        try:
+            return self._transact(cmd, data, event, on_keepalive)
+        except CtapError:
+            # A complete ERROR packet ends the request, so the channel remains
+            # usable for the next command.
+            raise
+        except KeyboardInterrupt:
+            logger.debug("Keyboard interrupt, cancelling...")
+            try:
+                self._send_cancel()
+            finally:
+                self._out_of_sync = True
+            raise
+        except Exception:
+            # Any other failure (including a transport error) means the stream
+            # boundary is unknown. Do not let a later command read leftovers.
+            self._out_of_sync = True
+            raise
+
+    def _transact(self, cmd, data, event, on_keepalive):
+        max_len = min(
+            MAX_MSG_SIZE,
+            (self._packet_size - 7) + (MAX_SEQ + 1) * (self._packet_size - 5),
+        )
+        if len(data) > max_len:
+            raise CtapError(CtapError.ERR.REQUEST_TOO_LARGE)
+
         remaining = data
         seq = 0
 
@@ -195,62 +232,84 @@ class CtapHidDevice(CtapDevice):
             header = struct.pack(">IB", self._channel_id, 0x7F & seq)
             seq += 1
 
-        try:
-            # Read response
-            seq = 0
-            r_len = 0
-            response = b""
-            last_ka = None
-            while True:
-                if event.is_set():
-                    # Cancel
-                    logger.debug("Sending cancel...")
-                    self._send_cancel()
+        # Read response
+        seq = 0
+        r_len: int | None = None
+        response = b""
+        last_ka = None
+        while True:
+            if r_len is not None and len(response) >= r_len:
+                break
 
-                recv = self._connection.read_packet()
-                logger.log(LOG_LEVEL_TRAFFIC, "RECV: %s", recv.hex())
+            if event.is_set():
+                # Cancellation ends this channel. A response may already be in
+                # flight, and without a request identifier it could otherwise be
+                # accepted as the response to the next command.
+                logger.debug("Sending cancel...")
+                self._out_of_sync = True
+                self._send_cancel()
+                raise CtapError(CtapError.ERR.KEEPALIVE_CANCEL)
 
-                r_channel = struct.unpack_from(">I", recv)[0]
-                recv = recv[4:]
-                if r_channel != self._channel_id:
-                    raise ConnectionFailure("Wrong channel")
+            recv = self._connection.read_packet()
+            logger.log(LOG_LEVEL_TRAFFIC, "RECV: %s", recv.hex())
 
-                if not response:  # Initialization packet
-                    r_cmd, r_len = struct.unpack_from(">BH", recv)
-                    recv = recv[3:]
-                    if r_cmd == TYPE_INIT | cmd:
-                        pass  # first data packet
-                    elif r_cmd == TYPE_INIT | CTAPHID.KEEPALIVE:
-                        try:
-                            ka_status = STATUS(struct.unpack_from(">B", recv)[0])
-                            logger.debug(f"Got keepalive status: {ka_status:02x}")
-                        except ValueError:
-                            raise ConnectionFailure("Invalid keepalive status")
-                        if on_keepalive and ka_status != last_ka:
-                            last_ka = ka_status
-                            on_keepalive(ka_status)
-                        continue
-                    elif r_cmd == TYPE_INIT | CTAPHID.ERROR:
-                        raise CtapError(struct.unpack_from(">B", recv)[0])
-                    else:
-                        raise CtapError(CtapError.ERR.INVALID_COMMAND)
-                else:  # Continuation packet
-                    r_seq = struct.unpack_from(">B", recv)[0]
-                    recv = recv[1:]
-                    if r_seq != seq & 0x7F:
-                        raise ConnectionFailure("Wrong sequence number")
-                    seq += 1
+            if len(recv) < 5:
+                raise ConnectionFailure("Truncated HID packet")
 
-                response += recv
-                if len(response) >= r_len:
-                    break
+            r_channel = struct.unpack_from(">I", recv)[0]
+            recv = recv[4:]
+            if r_channel != self._channel_id:
+                raise ConnectionFailure("Wrong channel")
 
-            return response[:r_len]
-        except KeyboardInterrupt:
-            logger.debug("Keyboard interrupt, cancelling...")
-            self._send_cancel()
+            if recv[0] & TYPE_INIT:  # Initialization packet
+                if len(recv) < 3:
+                    raise ConnectionFailure("Truncated HID packet")
+                r_cmd, packet_len = struct.unpack_from(">BH", recv)
+                payload = recv[3:]
+                if r_cmd == TYPE_INIT | CTAPHID.KEEPALIVE:
+                    # A keepalive may arrive between any two fragments.
+                    if len(payload) < 1:
+                        raise ConnectionFailure("Truncated keepalive packet")
+                    try:
+                        ka_status = STATUS(payload[0])
+                    except ValueError:
+                        raise ConnectionFailure("Invalid keepalive status")
+                    logger.debug(f"Got keepalive status: {ka_status:02x}")
+                    if on_keepalive and ka_status != last_ka:
+                        last_ka = ka_status
+                        on_keepalive(ka_status)
+                    continue
+                if r_len is not None:
+                    raise ConnectionFailure("Unexpected initialization packet")
+                if r_cmd == TYPE_INIT | cmd:
+                    r_len = packet_len
+                    if r_len > max_len:
+                        raise ConnectionFailure("Response length exceeds HID limit")
+                    body = payload[:r_len]
+                elif r_cmd == TYPE_INIT | CTAPHID.ERROR:
+                    if len(payload) < 1:
+                        raise ConnectionFailure("Truncated error packet")
+                    raise CtapError(payload[0])
+                else:
+                    raise ConnectionFailure("Unexpected initialization packet")
+            else:  # Continuation packet
+                if r_len is None:
+                    raise ConnectionFailure("Unexpected continuation packet")
+                r_seq = recv[0]
+                recv = recv[1:]
+                # The 7-bit sequence number must match exactly. In particular,
+                # a wrapped value (0 after sequence 127) is not accepted.
+                if seq > MAX_SEQ:
+                    raise ConnectionFailure("Too many continuation packets")
+                if r_seq != seq:
+                    raise ConnectionFailure("Wrong sequence number")
+                seq += 1
+                body = recv
 
-            raise
+            response += body
+
+        assert r_len is not None  # noqa: S101
+        return response[:r_len]
 
     def wink(self) -> None:
         """Causes the authenticator to blink."""
