@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Switch to `bytearray` in `apply_png_predictor` to avoid out of memory error (and speed it up) ([#1247](https://github.com/pdfminer/pdfminer.six/pull/1247))
 - Check the type of `N` when creating an `ICCBased` color space ([#1252](http3://github.com/pdfminer/pdfminer.six/pull/1253))
 - Endless recursion issue with circular or corrupted `Prev` chains in cross-refeerence tables ([#1253](https://github.com/pdfminer/pdfminer.six/pull/1253))
+- Reject malformed `O`/`U`/`OE`/`UE` entries and unsupported password input for R5/R6 documents with `PDFEncryptionUnsupported` instead of silently opening or reporting a wrong password
+- `SASLprep` no longer raises `IndexError` when mapping removes every character
 
 ## [20260107]
 

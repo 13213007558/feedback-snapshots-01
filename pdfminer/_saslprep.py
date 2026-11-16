@@ -77,6 +77,11 @@ def saslprep(data: str, prohibit_unassigned_code_points: bool = True) -> str:
     # RFC4013 section 2.2 normalization
     data = unicodedata.ucd_3_2_0.normalize("NFKC", data)
 
+    # Mapping may remove every character (for example a lone SOFT HYPHEN),
+    # in which case there is nothing to check or return.
+    if not data:
+        return data
+
     in_table_d1 = stringprep.in_table_d1
     if in_table_d1(data[0]):
         if not in_table_d1(data[-1]):

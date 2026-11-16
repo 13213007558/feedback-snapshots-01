@@ -22,6 +22,7 @@ from pdfminer.pdfexceptions import (
     PDFKeyError,
     PDFObjectNotFound,
     PDFTypeError,
+    PDFValueError,
 )
 from pdfminer.pdfparser import PDFParser, PDFStreamParser, PDFSyntaxError
 from pdfminer.pdftypes import (
@@ -78,6 +79,10 @@ class PDFEncryptionError(PDFException):
 
 class PDFPasswordIncorrect(PDFEncryptionError):
     pass
+
+
+class PDFEncryptionUnsupported(PDFEncryptionError, PDFValueError):
+    """The encryption input cannot be processed by the available handler."""
 
 
 class PDFEncryptionWarning(UserWarning):
@@ -353,7 +358,7 @@ class PDFStandardSecurityHandler:
         self.init_params()
         if self.r not in self.supported_revisions:
             error_msg = f"Unsupported revision: param={self.param!r}"
-            raise PDFEncryptionError(error_msg)
+            raise PDFEncryptionUnsupported(error_msg)
         self.init_key()
 
     def init_params(self) -> None:
@@ -484,18 +489,18 @@ class PDFStandardSecurityHandlerV4(PDFStandardSecurityHandler):
         self.encrypt_metadata = bool(self.param.get("EncryptMetadata", True))
         if self.stmf != self.strf:
             error_msg = f"Unsupported crypt filter: param={self.param!r}"
-            raise PDFEncryptionError(error_msg)
+            raise PDFEncryptionUnsupported(error_msg)
         self.cfm = {}
         for k, v in self.cf.items():
             f = self.get_cfm(literal_name(v["CFM"]))
             if f is None:
                 error_msg = f"Unknown crypt filter method: param={self.param!r}"
-                raise PDFEncryptionError(error_msg)
+                raise PDFEncryptionUnsupported(error_msg)
             self.cfm[k] = f
         self.cfm["Identity"] = self.decrypt_identity
         if self.strf not in self.cfm:
             error_msg = f"Undefined crypt filter: param={self.param!r}"
-            raise PDFEncryptionError(error_msg)
+            raise PDFEncryptionUnsupported(error_msg)
 
     def get_cfm(self, name: str) -> Callable[[int, int, bytes], bytes] | None:
         if name == "V2":
@@ -551,8 +556,26 @@ class PDFStandardSecurityHandlerV5(PDFStandardSecurityHandlerV4):
     def init_params(self) -> None:
         super().init_params()
         self.length = 256
-        self.oe = str_value(self.param["OE"])
-        self.ue = str_value(self.param["UE"])
+        try:
+            oe = str_value(self.param["OE"])
+            ue = str_value(self.param["UE"])
+        except KeyError as err:
+            error_msg = f"Missing encryption key entry: param={self.param!r}"
+            raise PDFEncryptionUnsupported(error_msg) from err
+        if len(self.o) != 48 or len(self.u) != 48:
+            error_msg = (
+                "Malformed O/U entry for revisions 5 and 6: "
+                f"expected 48 bytes, got O={len(self.o)}, U={len(self.u)}"
+            )
+            raise PDFEncryptionUnsupported(error_msg)
+        if len(oe) != 32 or len(ue) != 32:
+            error_msg = (
+                "Malformed OE/UE entry for revisions 5 and 6: "
+                f"expected 32 bytes, got OE={len(oe)}, UE={len(ue)}"
+            )
+            raise PDFEncryptionUnsupported(error_msg)
+        self.oe = oe
+        self.ue = ue
         self.o_hash = self.o[:32]
         self.o_validation_salt = self.o[32:40]
         self.o_key_salt = self.o[40:]
@@ -589,14 +612,21 @@ class PDFStandardSecurityHandlerV5(PDFStandardSecurityHandlerV4):
         return None
 
     def _normalize_password(self, password: str) -> bytes:
-        if self.r == 6:
-            # saslprep expects non-empty strings, apparently
-            if not password:
-                return b""
-            from pdfminer._saslprep import saslprep
+        try:
+            if self.r == 6:
+                # saslprep expects non-empty strings, apparently
+                if not password:
+                    return b""
+                from pdfminer._saslprep import saslprep
 
-            password = saslprep(password)
-        return password.encode("utf-8")[:127]
+                password = saslprep(password)
+            return password.encode("utf-8")[:127]
+        except (PDFValueError, UnicodeError) as err:
+            # Prohibited characters, bidirectional violations and strings that
+            # cannot be represented as UTF-8 are unsupported input, not a
+            # failed password attempt.
+            error_msg = f"Password cannot be processed for revision {self.r}: {err}"
+            raise PDFEncryptionUnsupported(error_msg) from err
 
     def _password_hash(
         self,
@@ -754,11 +784,11 @@ class PDFDocument:
         assert self.encryption is not None
         (docid, param) = self.encryption
         if literal_name(param.get("Filter")) != "Standard":
-            raise PDFEncryptionError(f"Unknown filter: param={param!r}")
+            raise PDFEncryptionUnsupported(f"Unknown filter: param={param!r}")
         v = int_value(param.get("V", 0))
         factory = self.security_handler_registry.get(v)
         if factory is None:
-            raise PDFEncryptionError(f"Unknown algorithm: param={param!r}")
+            raise PDFEncryptionUnsupported(f"Unknown algorithm: param={param!r}")
         handler = factory(docid, param, password)
         self.decipher = handler.decrypt
         self.is_printable = handler.is_printable()
