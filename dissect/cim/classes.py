@@ -205,6 +205,16 @@ class ClassInstanceProperty:
         return self._prop.default_value
 
     @property
+    def definition_class(self) -> Class:
+        """The class in the derivation that defined this property."""
+        return self._prop.definition_class
+
+    @property
+    def definition_source(self) -> str:
+        """The namespace the property definition was read from."""
+        return self._prop.definition_source
+
+    @property
     def is_initialized(self) -> bool:
         return self.state.is_initialized
 
@@ -222,9 +232,10 @@ class ClassInstanceProperty:
 
 
 class ClassDefinition:
-    def __init__(self, cim: CIM, fh: BinaryIO):
+    def __init__(self, cim: CIM, fh: BinaryIO, namespace: str | None = None):
         self.cim = cim
         self.fh = fh
+        self.namespace = namespace
         self.header = c_cim.class_definition_header(fh)
 
         self.qualifier_references = QualifierReference.read_list(fh)
