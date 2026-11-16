@@ -102,7 +102,7 @@ class CMapConverter:
                     try:
                         code = codecs.decode(code, "hex_codec")
                     except Exception:
-                        code = chr(int(code, 16))
+                        code = bytes((int(code, 16),))
                     if vertical:
                         vcodes.append(code)
                         add(unimap_v, enc, code)

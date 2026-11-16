@@ -23,7 +23,6 @@ from typing import (
     BinaryIO,
     ClassVar,
     TextIO,
-    Union,
     cast,
 )
 
@@ -38,6 +37,10 @@ log = logging.getLogger(__name__)
 
 class CMapError(PDFException):
     pass
+
+
+class CMapDataError(CMapError):
+    """Raised when a JSON CMap resource has an invalid structure."""
 
 
 class CMapBase:
@@ -221,29 +224,171 @@ class CMapDB:
     _cmap_cache: ClassVar[dict[str, PyCMap]] = {}
     _umap_cache: ClassVar[dict[str, list[PyUnicodeMap]]] = {}
 
+    # PDF character codes are sequences of bytes and CIDs are unsigned
+    # 16-bit values. The deepest shipped code tree is four levels (UTF-32).
+    MAX_CODE_TREE_DEPTH = 4
+    MAX_BYTE_VALUE = 0xFF
+    MAX_CID_VALUE = 0xFFFF
+
     class CMapNotFound(CMapError):
         pass
 
     @staticmethod
-    def _convert_code2cid_keys(
-        d: Union[dict[str, object], int],
-    ) -> Union[dict[int, object], int]:
-        """Recursively convert string keys to integers in CODE2CID dictionaries."""
-        if not isinstance(d, dict):
-            return d
+    def _normalize_int_key(key: object, name: str) -> int:
+        """Normalize a JSON object key to its canonical integer spelling.
+
+        The shipped JSON encodes numeric keys as canonical decimal strings
+        (``"32"``, or ``"0"`` for a byte of zero). Legacy files additionally
+        used single non-digit characters whose ordinal is the value
+        (``" "``). Other spellings that denote the same integer
+        (``"01"``, ``"0x20"``) are rejected, as are two keys normalizing
+        to the same integer, which would silently overwrite each other
+        and merge distinct codes.
+        """
+        if isinstance(key, bool) or not isinstance(key, str):
+            raise CMapDataError(f"{name} keys must be strings, got {type(key)}")
+        if key and key.isascii() and key.isdigit():
+            if key != "0" and key[0] == "0":
+                raise CMapDataError(
+                    f"{name} key {key!r} has a non-canonical integer spelling",
+                )
+            return int(key)
+        if len(key) == 1:
+            return ord(key)
+        raise CMapDataError(
+            f"{name} key {key!r} is neither a single character nor a "
+            "canonical decimal integer",
+        )
+
+    @classmethod
+    def _parse_code2cid(
+        cls,
+        node: object,
+        name: str,
+        depth: int = 1,
+    ) -> dict[int, object]:
+        """Validate and normalize a CODE2CID code tree.
+
+        Every level is keyed by a byte (0-255) with a canonical integer
+        spelling. Leaf values are integer CIDs; nested values must be
+        non-empty dictionaries, never bytes, lists or booleans.
+        """
+        if depth > cls.MAX_CODE_TREE_DEPTH:
+            raise CMapDataError(
+                f"CMap {name!r}: CODE2CID tree is deeper than "
+                f"{cls.MAX_CODE_TREE_DEPTH} levels",
+            )
+        if not isinstance(node, dict):
+            raise CMapDataError(
+                f"CMap {name!r}: CODE2CID node at level {depth} must be an object",
+            )
+        if not node:
+            raise CMapDataError(
+                f"CMap {name!r}: empty CODE2CID node at level {depth}",
+            )
         result: dict[int, object] = {}
-        for k, v in d.items():
-            # Convert string keys to integers
-            try:
-                new_key = int(k)
-            except (ValueError, TypeError):
-                new_key = k  # type: ignore[assignment]
-            # Recursively convert nested dictionaries
-            if isinstance(v, dict):
-                result[new_key] = CMapDB._convert_code2cid_keys(v)
+        for key, value in node.items():
+            byte = cls._normalize_int_key(key, "CODE2CID")
+            if not 0 <= byte <= cls.MAX_BYTE_VALUE:
+                raise CMapDataError(
+                    f"CMap {name!r}: byte key {key!r} is outside 0-255",
+                )
+            if byte in result:
+                raise CMapDataError(
+                    f"CMap {name!r}: duplicate byte key {key!r} after "
+                    "integer normalization",
+                )
+            if isinstance(value, dict):
+                result[byte] = cls._parse_code2cid(value, name, depth + 1)
+            elif isinstance(value, bool) or not isinstance(value, int):
+                raise CMapDataError(
+                    f"CMap {name!r}: leaf for byte {byte} must be an "
+                    f"integer CID, got {type(value)}",
+                )
+            elif not 0 <= value <= cls.MAX_CID_VALUE:
+                raise CMapDataError(
+                    f"CMap {name!r}: CID {value} for byte {byte} is outside 0-65535",
+                )
             else:
-                result[new_key] = v
+                result[byte] = value
         return result
+
+    @classmethod
+    def _parse_cid2unichr(
+        cls,
+        mapping: object,
+        name: str,
+        field: str,
+    ) -> dict[int, str]:
+        """Validate and normalize a CID2UNICHR_H/V mapping."""
+        if not isinstance(mapping, dict):
+            raise CMapDataError(f"CMap {name!r}: {field} must be an object")
+        result: dict[int, str] = {}
+        for key, value in mapping.items():
+            cid = cls._normalize_int_key(key, field)
+            if not 0 <= cid <= cls.MAX_CID_VALUE:
+                raise CMapDataError(
+                    f"CMap {name!r}: {field} key {key!r} is outside 0-65535",
+                )
+            if cid in result:
+                raise CMapDataError(
+                    f"CMap {name!r}: duplicate CID key {key!r} after "
+                    "integer normalization",
+                )
+            if not isinstance(value, str) or not value:
+                raise CMapDataError(
+                    f"CMap {name!r}: {field} value for CID {cid} must be "
+                    f"a non-empty string, got {value!r}",
+                )
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise CMapDataError(
+                    f"CMap {name!r}: {field} value for CID {cid} contains "
+                    "an unencodable surrogate code point",
+                ) from exc
+            result[cid] = value
+        return result
+
+    @classmethod
+    def _validate_data(cls, data: object, name: str) -> dict[str, Any]:
+        """Validate the decoded JSON payload and return normalized data."""
+        if not isinstance(data, dict):
+            raise CMapDataError(
+                f"CMap {name!r}: top-level JSON value must be an object",
+            )
+        known_fields = {
+            "IS_VERTICAL",
+            "CODE2CID",
+            "CID2UNICHR_H",
+            "CID2UNICHR_V",
+        }
+        unknown = set(data) - known_fields
+        if unknown:
+            raise CMapDataError(
+                f"CMap {name!r}: unexpected fields {sorted(unknown)}",
+            )
+        is_vertical = data.get("IS_VERTICAL", False)
+        if not isinstance(is_vertical, bool):
+            raise CMapDataError(
+                f"CMap {name!r}: IS_VERTICAL must be a boolean, "
+                f"got {type(is_vertical)}",
+            )
+        normalized: dict[str, Any] = {"IS_VERTICAL": is_vertical}
+        has_content = False
+        if "CODE2CID" in data:
+            normalized["CODE2CID"] = cls._parse_code2cid(data["CODE2CID"], name)
+            has_content = True
+        for field in ("CID2UNICHR_H", "CID2UNICHR_V"):
+            if field in data:
+                normalized[field] = cls._parse_cid2unichr(data[field], name, field)
+                has_content = True
+        if not has_content:
+            raise CMapDataError(
+                f"CMap {name!r}: contains neither CODE2CID nor "
+                "CID2UNICHR_H/V mappings",
+            )
+        return normalized
 
     @classmethod
     def _load_data(cls, name: str) -> type[Any]:
@@ -267,19 +412,7 @@ class CMapDB:
             ) and os.path.exists(resolved_json_path):
                 log.debug("loading JSON: %r", json_path)
                 with gzip.open(resolved_json_path, "rt", encoding="utf-8") as gzfile:
-                    data: dict[str, Any] = json.load(gzfile)
-                    # Convert string keys to integers for CID mappings
-                    if "CID2UNICHR_H" in data:
-                        data["CID2UNICHR_H"] = {
-                            int(k): v for k, v in data["CID2UNICHR_H"].items()
-                        }
-                    if "CID2UNICHR_V" in data:
-                        data["CID2UNICHR_V"] = {
-                            int(k): v for k, v in data["CID2UNICHR_V"].items()
-                        }
-                    # CODE2CID may also have numeric keys that need conversion
-                    if data.get("CODE2CID"):
-                        data["CODE2CID"] = cls._convert_code2cid_keys(data["CODE2CID"])
+                    data = cls._validate_data(json.load(gzfile), name)
                     return type(str(name), (), data)
 
         raise CMapDB.CMapNotFound(name)
