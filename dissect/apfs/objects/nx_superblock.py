@@ -46,9 +46,14 @@ class NxSuperblock(Object):
                 f"(expected {c_apfs.NX_MAGIC!r}, got {self.object.nx_magic.to_bytes(4, 'big')!r})"
             )
 
-    def compare(self, other: NxSuperblock) -> None:
-        """Compare this superblock to another superblock."""
-        if self.header.o_xid < other.header.o_xid:
+    def compare(self, other: NxSuperblock, *, xid: bool = True) -> None:
+        """Compare this superblock to another superblock.
+
+        Args:
+            other: Superblock to compare against.
+            xid: Whether to require that this superblock is not older than ``other``.
+        """
+        if xid and self.header.o_xid < other.header.o_xid:
             raise Error("Lower xid than other superblock")
 
         for attr in (

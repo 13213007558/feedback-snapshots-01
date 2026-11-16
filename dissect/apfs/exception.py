@@ -5,6 +5,10 @@ class Error(Exception):
     pass
 
 
+class CheckpointError(Error):
+    """Raised when no consistent APFS checkpoint can be selected."""
+
+
 class FileNotFoundError(Error, FileNotFoundError):
     pass
 

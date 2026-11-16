@@ -5,6 +5,7 @@ import os
 from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.checkpoint import select_checkpoint
 from dissect.apfs.objects import NxSuperblock
 
 if TYPE_CHECKING:
@@ -28,30 +29,34 @@ class APFS:
         self.fh = fh
         self.fh.seek(0)
 
-        self.sb = NxSuperblock.from_block(self, 0, self.fh.read(c_apfs.NX_DEFAULT_BLOCK_SIZE))
-        self.sb.check()
+        self.anchor = NxSuperblock.from_block(self, 0, self.fh.read(c_apfs.NX_DEFAULT_BLOCK_SIZE))
+        self.anchor.check()
 
-        self.sbs = sorted(
-            [obj for obj in self.sb.checkpoint_objects if isinstance(obj, NxSuperblock)],
+        # Bootstrap block size and block count from the anchor so the checkpoint
+        # descriptor area can be read before a checkpoint has been selected.
+        self.sb = self.anchor
+        self.checkpoint = select_checkpoint(self, self.anchor)
+        self.sb = self.checkpoint.superblock
+
+        for message in self.checkpoint.log_messages():
+            log.debug(message)
+
+        if self.checkpoint.fallback:
+            log.warning("Falling back to older APFS checkpoint:\n%s", self.checkpoint.report())
+
+    @property
+    def sbs(self) -> list[NxSuperblock]:
+        """All superblocks found while selecting a checkpoint, newest first."""
+        return sorted(
+            [candidate.superblock for candidate in self.checkpoint.candidates if candidate.superblock is not None],
             key=lambda obj: obj.xid,
             reverse=True,
         )
 
-        # TODO: Do more accurate checkpoint traversal
-        for sb in self.sbs:
-            try:
-                sb.check()
-                sb.compare(self.sb)
-            except Exception as e:
-                log.debug("Skipping superblock xid=%d: %s", sb.xid, e)
-                continue
-
-            if not sb.omap.is_valid():
-                log.debug("Skipping superblock xid=%d: invalid OMAP", sb.xid)
-                continue
-
-            self.sb = sb
-            break
+    @property
+    def checkpoint_report(self) -> str:
+        """A human-readable report of the checkpoint selection."""
+        return self.checkpoint.report()
 
     @property
     def block_size(self) -> int:

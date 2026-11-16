@@ -380,6 +380,9 @@ def test_corrupt_checkpoints(caplog: pytest.LogCaptureFixture) -> None:
 
     assert caplog.messages[0] == "Skipping superblock xid=304: invalid OMAP"
     assert caplog.messages[1] == "Skipping superblock xid=303: Invalid nx_superblock checksum"
+    assert "Selected checkpoint xid=302" in caplog.messages[-1]
+    assert "Active window" in container.checkpoint_report
+    assert "selected linked prior checkpoint" not in container.checkpoint_report
 
 
 def test_large_extents() -> None:
