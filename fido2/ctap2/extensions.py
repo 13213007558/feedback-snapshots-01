@@ -233,8 +233,16 @@ def _hmac_prepare_salts(allow_list, selected, prf, hmac):
 
 
 def _hmac_format_outputs(enabled, decrypted, prf):
-    output1 = decrypted[: HmacSecretExtension.SALT_LEN] if decrypted else None
-    output2 = decrypted[HmacSecretExtension.SALT_LEN :] if decrypted else None
+    if decrypted:
+        if len(decrypted) not in (
+            HmacSecretExtension.SALT_LEN,
+            2 * HmacSecretExtension.SALT_LEN,
+        ):
+            raise ValueError("Invalid hmac-secret output length")
+        output1: bytes | None = decrypted[: HmacSecretExtension.SALT_LEN]
+        output2: bytes | None = decrypted[HmacSecretExtension.SALT_LEN :] or None
+    else:
+        output1 = output2 = None
 
     if prf:
         result = AuthenticatorExtensionsPRFOutputs(
