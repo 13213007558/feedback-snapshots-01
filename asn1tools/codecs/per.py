@@ -378,14 +378,45 @@ class Encoder(object):
 
 class Decoder(object):
 
-    def __init__(self, encoded):
-        self.number_of_bits = (8 * len(encoded))
-        self.total_number_of_bits = self.number_of_bits
+    def __init__(self, encoded, bit_offset=0, limit_bits=None):
+        """Create a decoder over ``encoded``.
+
+        :param bytes encoded: Byte buffer holding one or more PER messages.
+        :param int bit_offset: Bit position of the first bit the caller
+            authorizes this decoder to read (0 = MSB of the first byte).
+        :param int limit_bits: Number of bits the caller authorizes this
+            decoder to consume, starting at ``bit_offset``. When ``None`` the
+            authorization covers every remaining bit in the buffer. The
+            decoder never reads past this window, so a truncated message
+            cannot be completed by borrowing bits that belong to a following
+            message.
+
+        """
+
+        buffer_number_of_bits = 8 * len(encoded)
+
+        if bit_offset < 0 or bit_offset > buffer_number_of_bits:
+            raise DecodeError(
+                'Invalid bit offset {} (buffer has {} bits).'.format(
+                    bit_offset, buffer_number_of_bits))
+
+        if limit_bits is None:
+            limit_bits = buffer_number_of_bits - bit_offset
+
+        if limit_bits < 0 or bit_offset + limit_bits > buffer_number_of_bits:
+            raise DecodeError(
+                'Authorized bit window [{}:{}] exceeds the {}-bit buffer.'
+                .format(bit_offset, bit_offset + limit_bits,
+                        buffer_number_of_bits))
+
+        self.bit_offset = bit_offset
+        self.total_number_of_bits = limit_bits
+        self.number_of_bits = limit_bits
 
         if len(encoded) > 0:
             value = int(binascii.hexlify(encoded), 16)
-            value |= (0x80 << self.number_of_bits)
-            self.value = bin(value)[10:]
+            value |= (0x80 << buffer_number_of_bits)
+            self.value = bin(value)[10:][bit_offset:bit_offset + limit_bits]
         else:
             self.value = ''
 
@@ -398,6 +429,13 @@ class Decoder(object):
 
     def number_of_read_bits(self):
         return self.total_number_of_bits - self.number_of_bits
+
+    def position(self):
+        """Absolute bit position of the next unread bit in the byte buffer.
+
+        """
+
+        return self.bit_offset + self.number_of_read_bits()
 
     def skip_bits(self, number_of_bits):
         if number_of_bits > self.number_of_bits:

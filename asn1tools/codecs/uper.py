@@ -499,6 +499,181 @@ class CompiledType(per.CompiledType):
             e.add_location(self._type)
             raise e
 
+    def decode_window(self, data, bit_offset=0, limit_bits=None, final=True):
+        """Decode exactly one message from an authorized bit window.
+
+        The decoder is restricted to the window
+        ``[bit_offset, bit_offset + limit_bits)`` and can never read bits
+        outside it, so a truncated message fails instead of borrowing bits
+        from a following message.
+
+        :param bytes data: Byte buffer containing one or more UPER messages.
+        :param int bit_offset: Absolute bit position of the first authorized
+            bit (0 = MSB of the first byte).
+        :param int limit_bits: Number of bits the caller authorizes for this
+            message. ``None`` authorizes every bit from ``bit_offset`` to the
+            end of the buffer.
+        :param bool final: When ``True`` (the default) this is the last
+            message of the transport PDU. The bits between the end of the
+            message and the next octet boundary must be zero transport
+            padding; any authorized bit beyond that octet (i.e. a whole extra
+            octet), or a non-zero padding bit, raises :class:`DecodeError`.
+            When ``False`` every unconsumed authorized bit belongs to the
+            next message and is left untouched.
+        :returns: A :class:`DecodedMessage` whose ``consumed_bits`` counts the
+            message bits (excluding padding) and whose ``next_bit_offset`` is
+            the absolute position at which the next message starts, or the end
+            of the validated transport padding for a final message.
+
+        """
+
+        decoder = Decoder(bytearray(data), bit_offset, limit_bits)
+
+        try:
+            value = self._type.decode(decoder)
+            consumed_bits = decoder.number_of_read_bits()
+            message_end = decoder.position()
+
+            if final:
+                padding_bits = self._validate_final_tail(
+                    bytearray(data), message_end, bit_offset + limit_bits)
+                next_bit_offset = message_end + padding_bits
+            else:
+                padding_bits = None
+                next_bit_offset = message_end
+        except ErrorWithLocation as e:
+            e.add_location(self._type)
+            raise e
+
+        return DecodedMessage(value,
+                              bit_offset,
+                              consumed_bits,
+                              next_bit_offset,
+                              padding_bits)
+
+    @staticmethod
+    def _validate_final_tail(data, message_end, authorized_end):
+        """Validate the tail of the last message in a transport PDU.
+
+        UPER never aligns inside a message, so the only legal bits after the
+        last message are the zero padding bits that fill its final partial
+        octet. Bits past that octet are spurious data and must be reported,
+        not rounded away together with the byte length.
+
+        """
+
+        padding_bits = (-message_end) % 8
+        padded_end = message_end + padding_bits
+
+        if authorized_end > padded_end:
+            raise DecodeError(
+                '{} unexpected bit(s) remain after the complete message and '
+                'its transport padding; trailing data must not be rounded '
+                'away.'.format(authorized_end - padded_end),
+                offset=padded_end)
+
+        buffer_bits = ''.join('{:08b}'.format(byte) for byte in data)
+        tail = buffer_bits[message_end:padded_end]
+
+        if '1' in tail:
+            raise DecodeError(
+                'Non-zero bit found in the {} transport padding bit(s) '
+                'after the message.'.format(padding_bits),
+                offset=message_end)
+
+        return padding_bits
+
+    def decode_stream(self,
+                      data,
+                      number_of_messages,
+                      bit_offset=0,
+                      limit_bits=None):
+        """Decode ``number_of_messages`` complete UPER messages in one buffer.
+
+        The caller states how many messages the PDU carries; a stream of
+        unframed UPER messages cannot otherwise be split without a framing
+        length, since every remaining bit pattern is potentially another
+        message. Messages are decoded one after another, each in a window
+        ending at the PDU end. Intermediate messages use ``final=False`` and
+        leave the following message's bits untouched, while the last message
+        validates its tail as zero transport padding in the final partial
+        octet. A non-zero trailing bit or a whole extra octet then raises
+        :class:`DecodeError`.
+
+        :returns: A list of :class:`DecodedMessage`, one per message, in
+            order.
+
+        """
+
+        if limit_bits is None:
+            limit_bits = 8 * len(data) - bit_offset
+
+        if number_of_messages < 1:
+            raise DecodeError(
+                'decode_stream expects at least one message, got {}.'.format(
+                    number_of_messages))
+
+        window_end = bit_offset + limit_bits
+        current_offset = bit_offset
+        results = []
+
+        for index in range(number_of_messages):
+            remaining = window_end - current_offset
+            is_final = index == number_of_messages - 1
+            result = self.decode_window(data,
+                                        current_offset,
+                                        remaining,
+                                        final=is_final)
+
+            if result.next_bit_offset <= current_offset:
+                raise DecodeError(
+                    'Decoder made no progress at bit offset {}; aborting to '
+                    'avoid an endless stream loop.'.format(current_offset))
+
+            results.append(result)
+            current_offset = result.next_bit_offset
+
+        return results
+
+
+class DecodedMessage(object):
+    """Result of decoding one message inside a shared byte buffer.
+
+    ``value`` is the decoded Python object. ``bit_offset`` is the absolute
+    start position, ``consumed_bits`` the number of message bits used,
+    ``next_bit_offset`` the absolute position of the next message (or the end
+    of the padding), and ``padding_bits`` the number of zero transport
+    padding bits (``None`` when the message was not the final one).
+
+    """
+
+    def __init__(self,
+                 value,
+                 bit_offset,
+                 consumed_bits,
+                 next_bit_offset,
+                 padding_bits):
+        self.value = value
+        self.bit_offset = bit_offset
+        self.consumed_bits = consumed_bits
+        self.next_bit_offset = next_bit_offset
+        self.padding_bits = padding_bits
+
+    def __iter__(self):
+        yield self.value
+        yield self.consumed_bits
+        yield self.next_bit_offset
+
+    def __repr__(self):
+        return (
+            'DecodedMessage(value={!r}, bit_offset={}, consumed_bits={}, '
+            'next_bit_offset={}, padding_bits={})'.format(
+                self.value,
+                self.bit_offset,
+                self.consumed_bits,
+                self.next_bit_offset,
+                self.padding_bits))
+
 
 class Compiler(per.Compiler):
 

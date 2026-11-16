@@ -103,6 +103,35 @@ The same ASN.1 specification, but using the PER codec.
    >>> foo.decode('Question', encoded)
    {'id': 1, 'question': 'Is 1+1=3?'}
 
+Decoding multiple UPER messages from one byte buffer
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+UPER messages are not octet aligned, so two messages can share the final
+byte of a transport PDU. A security gateway must not round the byte length
+up and silently drop the remaining bits, nor let a truncated message borrow
+bits from the next one. The compiled UPER type therefore offers
+``decode_window()``, which decodes exactly one message inside a caller
+authorized bit window and reports the precise consumption position.
+
+``decode_window(data, bit_offset, limit_bits, final)`` returns a
+``DecodedMessage`` with:
+
+- ``value``: the decoded Python object;
+- ``bit_offset``: absolute start position of the message, in bits;
+- ``consumed_bits``: message bits consumed, excluding transport padding;
+- ``next_bit_offset``: absolute position at which the next message starts;
+- ``padding_bits``: zero transport padding bits in the final partial octet
+  (only set when ``final=True``).
+
+The decoder can never read outside ``[bit_offset, bit_offset + limit_bits)``:
+a truncated message raises ``OutOfDataError`` instead of borrowing the next
+message's bits. With ``final=True`` the bits between the end of the message
+and the next octet boundary must be zero transport padding; a non-zero
+padding bit, or any whole extra octet, raises ``DecodeError`` instead of
+being rounded away. Use ``decode_stream(data, number_of_messages)`` to
+decode a fixed number of same-type messages packed into one buffer. See
+``examples/uper_bit_window_gateway.py`` for a runnable demonstration.
+
 See the `examples`_ folder for additional examples.
 
 Command line tool
