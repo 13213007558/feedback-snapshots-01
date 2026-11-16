@@ -56,6 +56,26 @@ Instead of the [Global Configuration](../README.md#configuration) you place in `
   )
 ```
 
+## Encoding Boundaries
+
+`encoding` controls the binary-to-text encoding used for values exchanged with the user agent, but not every field follows it. It is useful to know which fields are fixed by the WebAuthn protocol and which are application storage choices, especially when changing `encoding` in an existing deployment.
+
+**Protocol-fixed (always unpadded base64url)**
+
+- `PublicKeyCredential#id` (the browser-facing credential ID). It is compared against `rawId` with `WebAuthn.standard_encoder`, so `:base64` storage does not change its meaning.
+- `challenge` inside `clientDataJSON` (decoded with `WebAuthn.standard_encoder` by `ClientData#challenge`).
+- `allowCredentials[].id` and `excludeCredentials[].id` in the options sent to the browser. These are browser protocol values even when the stored `Credential#id` came from a differently encoded database.
+
+**Follows the configured encoder**
+
+- `rawId`, `clientDataJSON`, `attestationObject`, `authenticatorData`, `signature` and the `userHandle` input to `WebAuthn::FakeClient`.
+- `Credential#public_key` and `Credential#user_handle` (the values you persist), and the challenge received by `Credential#verify` / `RelyingParty#verify_*`.
+- `WebAuthn::FakeClient` `allow_credentials`: note the FakeClient takes browser protocol IDs here; `options_for_get(allow:)` already returns the persisted `Credential#id`.
+
+With `encoding: false` (NullEncoder) all of the storage values stay raw binary and no decode/encode happens. That means `JSON` serialization will reject them (`JSON::GeneratorError`); use a binary column or another binary-safe serializer.
+
+When switching an existing deployment from `:base64` to `:base64url`, rewrite stored `public_key` values (and any other stored encoded fields) once. Do not change `Credential#id` while doing so: it is already protocol base64url and is the value persisted and passed back as `allow:` IDs. A `:base64url` decoder also accepts the standard alphabet and padding, so reads of old `:base64` records keep working during a gradual migration, but writing the new encoding consistently avoids mixing spellings.
+
 ## Instance Based API
 
 The explanation for each ceremony can be found in depth in [Credential Registration](../README.md#credential-registration) and [Credential Authentication](../README.md#credential-authentication) but if you choose this instance based approach to define your WebAuthn configurations and assuming `relying_party` is the result of an instance you get through `WebAuthn::RelyingParty.new(...)` the code in those explanations needs to be updated to:

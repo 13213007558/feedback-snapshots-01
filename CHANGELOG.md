@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Fixed
+
+- `WebAuthn::FakeClient#get` now decodes `allow_credentials` as browser protocol base64url instead of the configured storage encoding, so filtered authentication works with `encoding: :base64`. Previously the list was decoded with the RP encoder, which raised `ArgumentError` for normal base64url credential IDs.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed
