@@ -6,6 +6,7 @@ require "cbor"
 
 require "byebug"
 require "webauthn/fake_client"
+require "support/cbor_encoding_helpers"
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

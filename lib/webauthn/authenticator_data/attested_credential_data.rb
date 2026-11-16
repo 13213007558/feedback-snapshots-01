@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "bindata"
+require "cbor"
 require "cose/key"
 require "webauthn/error"
 
@@ -31,7 +32,7 @@ module WebAuthn
 
       def self.deserialize(data)
         read(data)
-      rescue EOFError
+      rescue EOFError, IOError
         raise AttestedCredentialDataFormatError
       end
 
@@ -71,12 +72,28 @@ module WebAuthn
       end
 
       def public_key
-        trailing_bytes[0..public_key_length - 1]
+        @public_key ||= trailing_bytes.snapshot.byteslice(0, public_key_length)
       end
 
+      # Returns the number of bytes the first CBOR object in +data+ occupies.
+      #
+      # The length must come from the raw input, not from re-encoding the decoded
+      # object: legal CBOR may use non-shortest integer encodings or a different
+      # map ordering, and re-encoding would produce a shorter, canonical byte
+      # string. Using that canonical length would truncate the public key and
+      # make the remaining key bytes look like extension data.
       def public_key_length
-        @public_key_length ||=
-          CBOR.encode(CBOR::Unpacker.new(StringIO.new(trailing_bytes)).each.first).length
+        @public_key_length ||= begin
+          data = trailing_bytes.snapshot
+
+          unpacker = CBOR::Unpacker.new
+          unpacker.feed(data)
+          unpacker.read
+
+          data.bytesize - unpacker.buffer.size
+        rescue CBOR::UnpackError, CBOR::TypeError, EOFError
+          raise AttestedCredentialDataFormatError
+        end
       end
     end
   end

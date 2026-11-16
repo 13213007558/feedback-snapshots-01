@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "bindata"
+require "cbor"
 require "webauthn/authenticator_data/attested_credential_data"
 require "webauthn/error"
 
@@ -32,7 +33,7 @@ module WebAuthn
 
     def self.deserialize(data)
       read(data)
-    rescue EOFError
+    rescue EOFError, IOError
       raise AuthenticatorDataFormatError
     end
 
@@ -44,6 +45,8 @@ module WebAuthn
       (!attested_credential_data_included? || attested_credential_data.valid?) &&
         (!extension_data_included? || extension_data) &&
         valid_length?
+    rescue AuthenticatorDataFormatError, AttestedCredentialDataFormatError
+      false
     end
 
     def user_flagged?
@@ -88,7 +91,7 @@ module WebAuthn
     end
 
     def extension_data
-      @extension_data ||= CBOR.decode(raw_extension_data)
+      @extension_data ||= decode_extension_data
     end
 
     def aaguid
@@ -101,6 +104,24 @@ module WebAuthn
 
     private
 
+    def decode_extension_data
+      data = raw_extension_data
+
+      unless data && !data.empty?
+        raise AuthenticatorDataFormatError
+      end
+
+      decoded = CBOR.decode(data)
+
+      unless decoded.is_a?(Hash)
+        raise AuthenticatorDataFormatError
+      end
+
+      decoded
+    rescue CBOR::UnpackError, CBOR::TypeError, EOFError
+      raise AuthenticatorDataFormatError
+    end
+
     def valid_length?
       data_length == base_length + attested_credential_data_length + extension_data_length
     end
@@ -108,7 +129,8 @@ module WebAuthn
     def raw_extension_data
       if extension_data_included?
         if attested_credential_data_included?
-          trailing_bytes[attested_credential_data.length..-1]
+          start = attested_credential_data.length
+          trailing_bytes[start..-1] if start && start <= trailing_bytes.length
         else
           trailing_bytes.snapshot
         end
@@ -125,7 +147,7 @@ module WebAuthn
 
     def extension_data_length
       if extension_data_included?
-        raw_extension_data.length
+        raw_extension_data.to_s.length
       else
         0
       end
