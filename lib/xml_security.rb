@@ -226,6 +226,7 @@ module XMLSecurity
       @signature = nil
       @signature_algorithm = nil
       @ref = nil
+      @ambiguous_reference_id = nil
       @processed = false
     end
 
@@ -382,6 +383,16 @@ module XMLSecurity
 
       reference_nodes = nokogiri_document.xpath("//*[@ID=$id]", nil, { 'id' => extract_signed_element_id })
 
+      # REXML resolves the signed element from the Reference URI while Nokogiri
+      # locates it by ID here. Remember when the signed element id resolves to
+      # more than one node (duplicated ID / namespace-rebinding wrapping). The
+      # first node is still canonicalized below and the regular digest
+      # verification decides the outcome; validate_signature uses this flag to
+      # report the underlying ambiguity when the digest fails.
+      if reference_nodes.length > 1
+        @ambiguous_reference_id = extract_signed_element_id
+      end
+
       hashed_element = reference_nodes[0]
       return if hashed_element.nil?
 
@@ -401,8 +412,8 @@ module XMLSecurity
         cache_referenced_xml(soft)
       end
 
-      return append_error("No Signature Algorithm Method found", soft) if @signature_algorithm.nil?  
-      return append_error("No Signature node found", soft) if @signature.nil?  
+      return append_error("No Signature Algorithm Method found", soft) if @signature_algorithm.nil?
+      return append_error("No Signature node found", soft) if @signature.nil?
       return append_error("No canonized SignedInfo ", soft) if @cached_signed_info.nil?
       return append_error("No Reference node found", soft) if @ref.nil?
       return append_error("No referenced XML", soft) if @referenced_xml.nil?
@@ -425,8 +436,15 @@ module XMLSecurity
       encoded_digest_value_text = OneLogin::RubySaml::Utils.element_text(encoded_digest_value)
       digest_value = encoded_digest_value_text.nil? ? nil : Base64.decode64(encoded_digest_value_text)
 
-      # Compare the computed "hash" with the "signed" hash
+      # Compare the computed "hash" with the "signed" hash.
+      # When the signed element id resolves to several nodes (duplicated ID /
+      # namespace-rebinding wrapping), Nokogiri canonicalizes the first one. If
+      # that is not the node the signature actually covers, the digest fails here
+      # and we surface the underlying ambiguity instead of a generic mismatch.
       unless hash && hash == digest_value
+        if @ambiguous_reference_id
+          return append_error("Ambiguous Reference: ID '#{@ambiguous_reference_id}' resolves to more than one element", soft)
+        end
         return append_error("Digest mismatch", soft)
       end
 
