@@ -1,0 +1,26 @@
+                   label  plaintext    package  container    region   mini   FAT  DIFAT   segs  struct    leak   bytes    hmac  passwd                         defects
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+empty                             0          8       5632  mini        yes     1      0      0    FAIL      ok      ok    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+one-byte                          1         24       5632  mini        yes     1      0      1    FAIL      ok    FAIL    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+mini-63B-boundary                63         72       5632  mini        yes     1      0      1    FAIL      ok    FAIL    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+mini-64B-boundary                64         72       5632  mini        yes     1      0      1    FAIL      ok    FAIL    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+mini-65B-boundary                65         88       5632  mini        yes     1      0      1    FAIL      ok    FAIL    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+mini-128B-boundary              128        136       5632  mini        yes     1      0      1    FAIL      ok    FAIL    FAIL      ok       CHAIN_LENGTH,OVERLAP_MINI
+mini-mid                       1500       1512       6656  mini        yes     1      0      0    FAIL      ok    FAIL    FAIL      ok  CHAIN_LENGTH,OVERLAP_MINI,STREAM_LENGTH
+mini-near-cutoff               3000       3016       8192  mini        yes     1      0      0    FAIL      ok    FAIL    FAIL      ok  CHAIN_LENGTH,OVERLAP_MINI,STREAM_LENGTH
+pkg-4088-cutoff                4080       4088       9216  mini        yes     1      0      0    FAIL      ok    FAIL    FAIL      ok  CHAIN_LENGTH,OVERLAP_MINI,STREAM_LENGTH
+pkg-4104-above-cutoff          4087       4104       9728  regular      no     1      0      1      ok      ok      ok      ok      ok                               -
+one-sector-regular             5000       5016      10240  regular      no     1      0      2      ok      ok      ok      ok      ok                               -
+regular-64k                   64000      64008      70144  regular      no     2      0     16      ok      ok      ok      ok      ok                               -
+regular-256k                 256000     256008     263680  regular      no     5      0     63      ok      ok      ok      ok      ok                               -
+regular-1m                  1000000    1000008    1013248  regular      no    16      0    245      ok      ok      ok      ok      ok                               -
+fat-108-sector              7016448    7016456    7076864  regular      no   108      0   1713      ok      ok      ok      ok      ok                               -
+fat-109-sector              7081984    7081992    7142912  regular      no   109      0   1729      ok      ok      ok      ok      ok                               -
+difat-prev-segment          7077888    7077896    7138816  regular      no   109      0   1728      ok      ok      ok      ok      ok                               -
+difat-onset-segment         7081984    7081992    7142912  difat        no   109      0   1729      ok      ok      ok      ok      ok                               -
+difat-onset-minus-one       7083504    7083512    7143936  regular      no   109      0   1730      ok      ok      ok      ok      ok                               -
+difat-onset-plus-one        7083505    7083528    7145472  difat        no   110      1   1730      ok      ok      ok      ok      ok                               -
+difat-next-segment          7086080    7086088    7148032  difat        no   110      1   1730      ok      ok      ok      ok      ok                               -
+difat-deep-7p3m             7300000    7300008    7363072  difat        no   113      1   1783      ok      ok      ok      ok      ok                               -
+
+summary: 13/22 rows fully verified (independent OLE structure + leak scan + byte-exact decrypt + HMAC)
