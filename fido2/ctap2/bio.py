@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import logging
 import struct
-from enum import IntEnum, unique
-from threading import Event
+from enum import Enum, IntEnum, unique
+from threading import Event, Lock
 from typing import Any, Callable, Mapping
 
 from .. import cbor
@@ -102,18 +102,48 @@ class CaptureError(Exception):
 class FPEnrollmentContext:
     """Helper object to perform fingerprint enrollment.
 
+    The context follows a strict lifecycle, exposed through the `state`
+    attribute:
+
+    - `IDLE`: No enrollment has been started yet. The first call to `capture`
+      begins a new enrollment.
+    - `ENROLLING`: An enrollment is in progress and more samples are needed.
+    - `COMPLETED`: The enrollment finished and `template_id` refers to the
+      committed template. The context cannot be reused.
+    - `CANCELLED`: The enrollment was cancelled. The context cannot be reused.
+
+    A `COMPLETED` or `CANCELLED` context is never silently recycled: to start
+    a new enrollment, explicitly create a new context by calling
+    `FPBioEnrollment.enroll()` again.
+
     :param bio: An instance of FPBioEnrollment.
     :param timeout: Optional timeout for fingerprint captures (ms).
+    :ivar state: The current STATE of the enrollment.
     :ivar remaining: The number of (estimated) remaining samples needed.
     :ivar template_id: The ID of the new template (only available after the initial
         sample has been captured).
     """
+
+    @unique
+    class STATE(Enum):
+        IDLE = "IDLE"
+        ENROLLING = "ENROLLING"
+        COMPLETED = "COMPLETED"
+        CANCELLED = "CANCELLED"
 
     def __init__(self, bio: "FPBioEnrollment", timeout: int | None = None):
         self._bio = bio
         self.timeout = timeout
         self.template_id: bytes | None = None
         self.remaining: int | None = None
+        self._state = FPEnrollmentContext.STATE.IDLE
+        self._in_flight = False
+        self._lock = Lock()
+
+    @property
+    def state(self) -> "FPEnrollmentContext.STATE":
+        """The current state of the enrollment."""
+        return self._state
 
     def capture(
         self,
@@ -126,27 +156,80 @@ class FPEnrollmentContext:
         timeout not specified) waiting for the user to scan their fingerprint to
         collect one sample.
 
+        A sample status other than FP_GOOD is quality feedback, not a device
+        error: a CaptureError is raised, the enrollment stays in the ENROLLING
+        state, and the caller may retry by calling `capture` again. Errors
+        returned by the authenticator itself are propagated as CtapError,
+        likewise without changing the state of the context.
+
         :return: None, if more samples are needed, or the template ID if enrollment is
             completed.
+        :raises CaptureError: If the sample was not usable (see above).
+        :raises ValueError: If the enrollment is already completed or cancelled.
         """
-        if self.template_id is None:
-            self.template_id, status, self.remaining = self._bio.enroll_begin(
-                self.timeout, event, on_keepalive
-            )
-        else:
-            status, self.remaining = self._bio.enroll_capture_next(
-                self.template_id, self.timeout, event, on_keepalive
-            )
+        with self._lock:
+            state = self._state
+            if state in (
+                FPEnrollmentContext.STATE.COMPLETED,
+                FPEnrollmentContext.STATE.CANCELLED,
+            ):
+                raise ValueError(f"Cannot capture sample: enrollment is {state.name}")
+            template_id = self.template_id
+            self._in_flight = True
+        try:
+            if state is FPEnrollmentContext.STATE.IDLE:
+                template_id, status, remaining = self._bio.enroll_begin(
+                    self.timeout, event, on_keepalive
+                )
+            else:
+                if template_id is None:
+                    raise ValueError("No template ID for ongoing enrollment")
+                status, remaining = self._bio.enroll_capture_next(
+                    template_id, self.timeout, event, on_keepalive
+                )
+        finally:
+            with self._lock:
+                self._in_flight = False
         if status != FPBioEnrollment.FEEDBACK.FP_GOOD:
             raise CaptureError(status)
-        if self.remaining == 0:
-            return self.template_id
-        return None
+        with self._lock:
+            if remaining == 0:
+                # The enrollment completed on the authenticator, even if a
+                # cancel raced with this capture: the template now exists and
+                # is surfaced to the caller rather than silently discarded.
+                self.template_id = template_id
+                self.remaining = remaining
+                self._state = FPEnrollmentContext.STATE.COMPLETED
+                return template_id
+            if self._state is FPEnrollmentContext.STATE.CANCELLED:
+                raise ValueError("Enrollment was cancelled")
+            self.template_id = template_id
+            self.remaining = remaining
+            self._state = FPEnrollmentContext.STATE.ENROLLING
+            return None
 
     def cancel(self) -> None:
-        """Cancels ongoing enrollment."""
-        self._bio.enroll_cancel()
-        self.template_id = None
+        """Cancels any ongoing enrollment.
+
+        Does nothing if the enrollment is already completed or cancelled; in
+        particular, a completed template is never affected by this cleanup.
+        If the cancel command itself fails, the CtapError is propagated and
+        the context is left in its current state, since the state of the
+        enrollment on the authenticator is then unknown.
+
+        After cancellation the context cannot be reused: call
+        `FPBioEnrollment.enroll()` to explicitly start a new enrollment.
+        """
+        with self._lock:
+            if self._state in (
+                FPEnrollmentContext.STATE.COMPLETED,
+                FPEnrollmentContext.STATE.CANCELLED,
+            ):
+                return
+            if self._state is FPEnrollmentContext.STATE.ENROLLING or self._in_flight:
+                self._bio.enroll_cancel()
+            self._state = FPEnrollmentContext.STATE.CANCELLED
+            self.template_id = None
 
 
 class FPBioEnrollment(BioEnrollment):

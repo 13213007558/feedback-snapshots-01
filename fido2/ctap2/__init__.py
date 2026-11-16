@@ -34,6 +34,6 @@ from .base import (  # noqa
 
 from .pin import ClientPin, PinProtocolV1, PinProtocolV2  # noqa
 from .credman import CredentialManagement  # noqa
-from .bio import FPBioEnrollment, CaptureError  # noqa
+from .bio import FPBioEnrollment, FPEnrollmentContext, CaptureError  # noqa
 from .blob import LargeBlobs  # noqa
 from .config import Config  # noqa

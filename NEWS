@@ -1,4 +1,9 @@
 * Version 2.2.2 (unreleased)
+ ** Bio enrollment: Give FPEnrollmentContext an explicit state lifecycle
+    (IDLE/ENROLLING/COMPLETED/CANCELLED). A completed or cancelled context can
+    no longer be reused for further captures, cancellation no longer resets the
+    context to a fresh state, and a sample completing after a cancel is
+    surfaced instead of silently discarded.
  ** Attestation: Use cryptography's certificate issuer verification when available,
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
