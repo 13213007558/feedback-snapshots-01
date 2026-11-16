@@ -1,0 +1,2 @@
+import subprocess, sys
+raise SystemExit(subprocess.call([sys.executable, *['-m', 'pytest', '-o', 'addopts=', '-q', 'test/framer/test_framer.py', 'test/pdu/test_decoders.py', 'test/pdu/test_register_write_messages.py', '-k', 'rtu_partial_request_waits_for_more_data or decode_bad_frame or invalid_write_multiple_registers_request or test_decode_complicated or test_register_write_exception', '--asyncio-mode=auto']]))
