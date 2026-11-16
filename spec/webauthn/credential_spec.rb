@@ -85,6 +85,10 @@ RSpec.describe "Credential" do
 
     let(:created_credential) { client.create }
 
+    let(:allow_credentials) do
+      [client.send(:encoder).encode(WebAuthn.standard_encoder.decode(created_credential["id"]))]
+    end
+
     let(:public_key) { credential_from_create.public_key }
     let(:sign_count) { credential_from_create.sign_count }
 
@@ -99,7 +103,8 @@ RSpec.describe "Credential" do
       let(:encoding) { :base64url }
 
       it "works" do
-        credential = WebAuthn::Credential.from_get(client.get(challenge: challenge))
+        raw_credential = client.get(challenge: challenge, allow_credentials: allow_credentials)
+        credential = WebAuthn::Credential.from_get(raw_credential)
 
         expect(credential.verify(challenge, public_key: public_key, sign_count: sign_count)).to be_truthy
 
@@ -113,7 +118,8 @@ RSpec.describe "Credential" do
       let(:encoding) { :base64 }
 
       it "works" do
-        credential = WebAuthn::Credential.from_get(client.get(challenge: challenge))
+        raw_credential = client.get(challenge: challenge, allow_credentials: allow_credentials)
+        credential = WebAuthn::Credential.from_get(raw_credential)
 
         expect(credential.verify(challenge, public_key: public_key, sign_count: sign_count)).to be_truthy
 
@@ -127,7 +133,8 @@ RSpec.describe "Credential" do
       let(:encoding) { false }
 
       it "works" do
-        credential = WebAuthn::Credential.from_get(client.get(challenge: challenge))
+        raw_credential = client.get(challenge: challenge, allow_credentials: allow_credentials)
+        credential = WebAuthn::Credential.from_get(raw_credential)
 
         expect(credential.verify(challenge, public_key: public_key, sign_count: sign_count)).to be_truthy
 

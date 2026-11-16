@@ -35,7 +35,12 @@ module WebAuthn
       backup_state: false,
       attested_credential_data: true,
       credential_algorithm: nil,
-      extensions: nil
+      extensions: nil,
+      user_handle: nil,
+      resident_key: nil,
+      require_resident_key: nil,
+      authenticator_selection: nil,
+      exclude_credentials: nil
     )
       rp_id ||= URI.parse(origin).host
 
@@ -51,7 +56,10 @@ module WebAuthn
         backup_state: backup_state,
         attested_credential_data: attested_credential_data,
         algorithm: credential_algorithm,
-        extensions: extensions
+        extensions: extensions,
+        resident: resident_credential?(resident_key, require_resident_key, authenticator_selection),
+        user_handle: user_handle,
+        exclude_credentials: normalize_credential_ids(exclude_credentials)
       )
 
       id =
@@ -106,7 +114,8 @@ module WebAuthn
         backup_state: backup_state,
         sign_count: sign_count,
         extensions: extensions,
-        allow_credentials: allow_credentials
+        allow_credentials: allow_credentials,
+        user_handle: user_handle
       )
 
       {
@@ -119,7 +128,7 @@ module WebAuthn
           "clientDataJSON" => encoder.encode(client_data_json),
           "authenticatorData" => encoder.encode(assertion[:authenticator_data]),
           "signature" => encoder.encode(assertion[:signature]),
-          "userHandle" => user_handle ? encoder.encode(user_handle) : nil
+          "userHandle" => assertion[:user_handle] ? encoder.encode(assertion[:user_handle]) : nil
         }
       }
     end
@@ -127,6 +136,40 @@ module WebAuthn
     private
 
     attr_reader :authenticator
+
+    # Mirrors the WebAuthn L2/L3 effective resident key requirement:
+    # https://www.w3.org/TR/webauthn-3/#dictdef-authenticatorselectioncriteria
+    # `residentKey` takes precedence and the legacy `requireResidentKey` boolean is
+    # retained for backwards compatibility, defaulting to "discouraged" when neither is set.
+    def resident_credential?(resident_key, require_resident_key, authenticator_selection)
+      selection = authenticator_selection || {}
+
+      effective_resident_key =
+        resident_key ||
+        selection[:resident_key] ||
+        selection["residentKey"] ||
+        legacy_require_resident_key(selection, require_resident_key)
+
+      effective_resident_key == "required"
+    end
+
+    def legacy_require_resident_key(selection, require_resident_key)
+      legacy_flag =
+        require_resident_key ||
+        selection[:require_resident_key] ||
+        selection["requireResidentKey"]
+
+      legacy_flag ? "required" : nil
+    end
+
+    def normalize_credential_ids(credentials)
+      return nil if credentials.nil?
+
+      credentials.map do |credential|
+        id = credential.is_a?(Hash) ? (credential[:id] || credential["id"]) : credential
+        encoder.decode(id)
+      end
+    end
 
     def data_json_for(method, challenge)
       data = {

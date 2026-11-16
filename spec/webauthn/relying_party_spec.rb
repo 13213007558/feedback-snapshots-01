@@ -72,7 +72,14 @@ RSpec.describe "RelyingParty" do
 
   describe '#verify_authentication' do
     let(:options) { admin_rp.options_for_authentication(allow: user.credentials.map(&:webauthn_id)) }
-    let(:raw_credential) { admin_fake_client.get(challenge: options.challenge, rp_id: admin_rp.id, sign_count: 1) }
+    let(:raw_credential) do
+      admin_fake_client.get(
+        challenge: options.challenge,
+        rp_id: admin_rp.id,
+        sign_count: 1,
+        allow_credentials: user.credentials.map(&:webauthn_id)
+      )
+    end
 
     let(:admin_credential) { create_credential(client: admin_fake_client, relying_party: admin_rp) }
     let(:admin_credential_public_key) { admin_credential[1] }
@@ -250,7 +257,8 @@ RSpec.describe "RelyingParty" do
         raw_credential = admin_fake_client.get(
           challenge: options.challenge,
           rp_id: admin_rp.id,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         verified_webauthn_credential, stored_credential =
@@ -271,7 +279,8 @@ RSpec.describe "RelyingParty" do
         raw_credential = consumer_fake_client.get(
           challenge: options.challenge,
           rp_id: consumer_rp.id,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         verified_webauthn_credential, stored_credential =
@@ -294,7 +303,8 @@ RSpec.describe "RelyingParty" do
         raw_credential = admin_fake_client.get(
           challenge: options.challenge,
           rp_id: admin_rp.id,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         expect do
@@ -380,7 +390,8 @@ RSpec.describe "RelyingParty" do
         raw_credential = admin_fake_client.get(
           challenge: options.challenge,
           rp_id: admin_rp.id,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         verified_webauthn_credential, stored_credential =
@@ -403,7 +414,8 @@ RSpec.describe "RelyingParty" do
 
         raw_credential = global_configuration_client.get(
           challenge: options.challenge,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         verified_webauthn_credential, stored_credential =
@@ -469,7 +481,8 @@ RSpec.describe "RelyingParty" do
 
         raw_credential = global_configuration_client.get(
           challenge: options.challenge,
-          sign_count: 1
+          sign_count: 1,
+          allow_credentials: user.credentials.map(&:webauthn_id)
         )
 
         webauthn_credential = WebAuthn::Credential.from_get(raw_credential)

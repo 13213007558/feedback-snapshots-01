@@ -2,6 +2,14 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- `WebAuthn::FakeAuthenticator` and `WebAuthn::FakeClient` can now model resident (discoverable) credentials and multiple accounts under the same relying party. `FakeClient#create` accepts `resident_key`, the legacy `require_resident_key`, `authenticator_selection`, `user_handle` and `exclude_credentials`, while `FakeClient#get` requires an explicit `user_handle` for username-less ceremonies and returns the stored user handle in the assertion.
+
+### Changed
+
+- `WebAuthn::FakeClient#get` no longer silently picks the first stored credential when `allow_credentials` is omitted. It raises `WebAuthn::FakeAuthenticator::UserSelectionRequiredError`, `NoDiscoverableCredentialsError` or `NoMatchingCredentialsError` depending on the available resident credentials, and still constrains assertions to `allow_credentials` when it is provided. `exclude_credentials` collisions raise `WebAuthn::FakeAuthenticator::ExcludedCredentialError` during registration.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

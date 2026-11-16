@@ -11,11 +11,12 @@ RSpec.describe WebAuthn::AuthenticatorAssertionResponse do
 
   let!(:credential) { create_credential(client: client) }
   let(:credential_public_key) { credential[1] }
+  let(:allow_credentials) { [WebAuthn.standard_encoder.decode(credential.first)] }
 
   let(:origin) { fake_origin }
   let(:actual_origin) { origin }
   let(:original_challenge) { fake_challenge }
-  let(:assertion) { client.get(challenge: original_challenge) }
+  let(:assertion) { client.get(challenge: original_challenge, allow_credentials: allow_credentials) }
   let(:authenticator_data) { assertion["response"]["authenticatorData"] }
 
   let(:assertion_response) do
@@ -138,7 +139,14 @@ RSpec.describe WebAuthn::AuthenticatorAssertionResponse do
 
   describe "user present validation" do
     context "when user presence flag is off" do
-      let(:assertion) { client.get(challenge: original_challenge, user_present: false, user_verified: false) }
+      let(:assertion) do
+        client.get(
+          challenge: original_challenge,
+          user_present: false,
+          user_verified: false,
+          allow_credentials: allow_credentials
+        )
+      end
 
       context "when silent_authentication is not set" do
         context 'when user presence is not set' do
@@ -216,7 +224,14 @@ RSpec.describe WebAuthn::AuthenticatorAssertionResponse do
 
   describe "user verified validation" do
     context "if user flags are off" do
-      let(:assertion) { client.get(challenge: original_challenge, user_present: true, user_verified: false) }
+      let(:assertion) do
+        client.get(
+          challenge: original_challenge,
+          user_present: true,
+          user_verified: false,
+          allow_credentials: allow_credentials
+        )
+      end
       let(:user_verification) { true }
 
       it_behaves_like "an invalid assertion response that raises", WebAuthn::UserVerifiedVerificationError
@@ -225,7 +240,12 @@ RSpec.describe WebAuthn::AuthenticatorAssertionResponse do
 
   describe "backup flags validation" do
     let(:assertion) do
-      client.get(challenge: original_challenge, backup_eligibility: backup_eligibility, backup_state: backup_state)
+      client.get(
+        challenge: original_challenge,
+        backup_eligibility: backup_eligibility,
+        backup_state: backup_state,
+        allow_credentials: allow_credentials
+      )
     end
 
     context "when the credential is backup eligible and backed up" do
@@ -291,35 +311,45 @@ RSpec.describe WebAuthn::AuthenticatorAssertionResponse do
 
   describe "sign_count validation" do
     context "if authenticator does not support counter" do
-      let(:assertion) { client.get(challenge: original_challenge, sign_count: 0) }
+      let(:assertion) do
+        client.get(challenge: original_challenge, sign_count: 0, allow_credentials: allow_credentials)
+      end
 
       it_behaves_like "a valid assertion response"
     end
 
     context "when the authenticator supports counter" do
       context "and it's greater than the stored counter" do
-        let(:assertion) { client.get(challenge: original_challenge, sign_count: 6) }
+        let(:assertion) do
+        client.get(challenge: original_challenge, sign_count: 6, allow_credentials: allow_credentials)
+      end
         let(:sign_count) { 5 }
 
         it_behaves_like "a valid assertion response"
       end
 
       context "and it's equal to the stored counter" do
-        let(:assertion) { client.get(challenge: original_challenge, sign_count: 5) }
+        let(:assertion) do
+        client.get(challenge: original_challenge, sign_count: 5, allow_credentials: allow_credentials)
+      end
         let(:sign_count) { 5 }
 
         it_behaves_like "an invalid assertion response that raises", WebAuthn::SignCountVerificationError
       end
 
       context "and it's less than the stored counter" do
-        let(:assertion) { client.get(challenge: original_challenge, sign_count: 4) }
+        let(:assertion) do
+        client.get(challenge: original_challenge, sign_count: 4, allow_credentials: allow_credentials)
+      end
         let(:sign_count) { 5 }
 
         it_behaves_like "an invalid assertion response that raises", WebAuthn::SignCountVerificationError
       end
 
       context "when the RP opts out of verifying the signature counter" do
-        let(:assertion) { client.get(challenge: original_challenge, sign_count: false) }
+        let(:assertion) do
+        client.get(challenge: original_challenge, sign_count: false, allow_credentials: allow_credentials)
+      end
         let(:sign_count) { 5 }
 
         it_behaves_like "an invalid assertion response that raises", WebAuthn::SignCountVerificationError

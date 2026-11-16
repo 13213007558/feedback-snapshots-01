@@ -25,7 +25,11 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
     let(:credential_sign_count) { credential[2] }
 
     let(:assertion_response) do
-      response = client.get(challenge: raw_challenge, sign_count: 1)["response"]
+      response = client.get(
+        challenge: raw_challenge,
+        sign_count: 1,
+        allow_credentials: [WebAuthn.standard_encoder.decode(credential_raw_id)]
+      )["response"]
 
       WebAuthn::AuthenticatorAssertionResponse.new(
         authenticator_data: response["authenticatorData"],
@@ -198,7 +202,11 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
     context "when authentication extension input" do
       context "is not received" do
         let(:assertion_response) do
-          response = client.get(challenge: raw_challenge, extensions: nil)["response"]
+          response = client.get(
+            challenge: raw_challenge,
+            extensions: nil,
+            allow_credentials: [WebAuthn.standard_encoder.decode(credential_raw_id)]
+          )["response"]
 
           WebAuthn::AuthenticatorAssertionResponse.new(
             authenticator_data: response["authenticatorData"],
@@ -224,7 +232,8 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
         let(:assertion_response) do
           response = client.get(
             challenge: raw_challenge,
-            extensions: { "txAuthSimple" => "Could you please verify yourself?" }
+            extensions: { "txAuthSimple" => "Could you please verify yourself?" },
+            allow_credentials: [WebAuthn.standard_encoder.decode(credential_raw_id)]
           )["response"]
 
           WebAuthn::AuthenticatorAssertionResponse.new(
