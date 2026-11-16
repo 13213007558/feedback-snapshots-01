@@ -5,8 +5,10 @@ BACnet IPv4 Virtual Link Layer Service
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import math
 from asyncio.exceptions import TimeoutError
-from typing import Callable, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 from ..debugging import ModuleLogger, DebugContents, bacpypes_debugging
 from ..comm import Client, Server, ServiceAccessPoint, ApplicationServiceElement
@@ -38,6 +40,22 @@ REGISTRATION_TIMEOUT = 2.0
 READ_BDT_TIMEOUT = 3.0
 READ_FDT_TIMEOUT = 3.0
 WRITE_BDT_TIMEOUT = 3.0
+
+# BBMD foreign device table policy
+#
+# A foreign device registration is granted for its time-to-live (TTL); after
+# that deadline the entry is expired and must no longer be a broadcast
+# forwarding target.  The grace period only governs how long the expired entry
+# is *retained* so a renewal can observe and replace it, never how long it is
+# eligible for forwarding.
+FDT_GRACE_PERIOD = 5
+FDT_MAX_ENTRIES = 128
+FDT_AUDIT_MAX_ENTRIES = 256
+
+# result codes used by the IPv4 BBMD registration policy
+FDT_RESULT_OK = 0x0000
+FDT_RESULT_REGISTRATION_NAK = 0x0030
+FDT_RESULT_DELETE_NAK = 0x0050
 
 
 #
@@ -843,8 +861,51 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
 #
 
 
+@dataclasses.dataclass
+class FDTAuditRecord:
+    """
+    One decision made by the BBMD foreign device registration policy.
+
+    ``timestamp`` and ``deadline`` are event loop times.  ``source`` is the
+    address the frame actually arrived from; ``address`` is the address the
+    request named (or the address being expired).  ``reason`` is a stable
+    machine-readable token, suitable for logs and tests.
+    """
+
+    timestamp: float
+    action: str
+    source: Optional[str]
+    address: Optional[str]
+    accepted: bool
+    reason: str
+    ttl: Optional[int]
+    deadline: Optional[float]
+    remaining: Optional[int]
+    entries: int
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return the record as a JSON-serializable dictionary."""
+        return dataclasses.asdict(self)
+
+
 @bacpypes_debugging
 class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
+    """
+    BACnet/IPv4 Broadcast Broadcast Management Device.
+
+    Foreign device admission is based on the transport source of the request,
+    never on an address carried in the request body.  A registration is a
+    lease: it is eligible for broadcast forwarding from the moment it is
+    accepted until its TTL deadline.  An expired entry is retained for
+    ``fdt_grace_period`` seconds so the same source can renew it, but it is
+    not a forwarding target during that grace period.  Deleting an entry is
+    also source-bound: a request may only remove the entry of the address it
+    actually came from.  New sources are refused when the table is full; live
+    entries are never evicted to make room.  Every accept/reject decision is
+    appended to ``fdt_audit`` with a reason and, when applicable, the lease
+    deadline.
+    """
+
     _debug: Callable[..., None]
     _warning: Callable[..., None]
     _debug_contents = ("bbmdAddress", "bbmdBDT+", "bbmdFDT+")
@@ -852,10 +913,22 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
     bbmdAddress: IPv4Address
     bbmdBDT: List[IPv4Address]
     bbmdFDT: List[FDTEntry]
+    fdt_audit: List[FDTAuditRecord]
+    fdtCapacity: int
+    fdtGracePeriod: int
+    acceptFDRegistrations: bool
 
     _fdt_clock_handle: asyncio.Handle
 
-    def __init__(self, addr: IPv4Address, **kwargs):
+    def __init__(
+        self,
+        addr: IPv4Address,
+        *,
+        fdt_capacity: int = FDT_MAX_ENTRIES,
+        fdt_grace_period: int = FDT_GRACE_PERIOD,
+        accept_fd_registrations: bool = True,
+        **kwargs,
+    ):
         if _debug:
             BIPBBMD._debug("__init__ %r", addr)
         BVLLServiceAccessPoint.__init__(self, **kwargs)
@@ -863,9 +936,230 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
         self.bbmdAddress = addr
         self.bbmdBDT = []
         self.bbmdFDT = []
+        self.fdt_audit = []
+        self.fdtCapacity = max(1, int(fdt_capacity))
+        self.fdtGracePeriod = max(0, int(fdt_grace_period))
+        self.acceptFDRegistrations = bool(accept_fd_registrations)
+
+        # lease clock: the event loop clock.  A tick that arrives without the
+        # loop clock having advanced (a manually driven clock in deterministic
+        # tests) still counts as one second, so expiry never depends on
+        # wall-clock time passing between ticks.
+        loop = asyncio.get_event_loop()
+        self._fdt_now = loop.time()
+        self._fdt_tick_time = self._fdt_now - 1
 
         # schedule the clock to run
-        self._fdt_clock_handle = asyncio.get_event_loop().call_soon(self.fdt_clock)
+        self._fdt_clock_handle = loop.call_soon(self.fdt_clock)
+
+    def _fdt_time(self) -> float:
+        """Return the clock used for lease deadlines."""
+        self._fdt_now = max(asyncio.get_event_loop().time(), self._fdt_now)
+        return self._fdt_now
+
+    def advance_fdt_clock(self, seconds: int = 1) -> None:
+        """
+        Advance the lease clock by ``seconds`` and expire leases.
+
+        The periodic ``fdt_clock`` task is driven by the event loop; this entry
+        point makes the same transition explicit for deterministic tests and
+        for hosts that want to drive lease bookkeeping themselves.
+        """
+        if seconds < 0:
+            raise ValueError("advance must not be negative")
+        self._fdt_now += seconds
+        self._fdt_tick_time = asyncio.get_event_loop().time()
+        self._fdt_sweep(self._fdt_now)
+
+    @staticmethod
+    def _valid_fdt_source(addr: Any) -> bool:
+        """Return true if the transport source can identify a foreign device."""
+        if not isinstance(addr, IPv4Address):
+            return False
+        if addr.addrPort == 0:
+            return False
+        ip = addr.ip
+        if ip.is_unspecified or ip.is_multicast:
+            return False
+        if ip.packed == b"\xff\xff\xff\xff":
+            return False
+        return True
+
+    def _audit_fdt(
+        self,
+        action: str,
+        source: Optional[Address],
+        address: Optional[Address],
+        accepted: bool,
+        reason: str,
+        *,
+        ttl: Optional[int] = None,
+        deadline: Optional[float] = None,
+        remaining: Optional[int] = None,
+    ) -> FDTAuditRecord:
+        record = FDTAuditRecord(
+            timestamp=self._fdt_time(),
+            action=action,
+            source=str(source) if source is not None else None,
+            address=str(address) if address is not None else None,
+            accepted=accepted,
+            reason=reason,
+            ttl=ttl,
+            deadline=deadline,
+            remaining=remaining,
+            entries=len(self.bbmdFDT),
+        )
+        self.fdt_audit.append(record)
+        overflow = len(self.fdt_audit) - FDT_AUDIT_MAX_ENTRIES
+        if overflow > 0:
+            del self.fdt_audit[:overflow]
+        if not accepted:
+            self._warning(
+                "foreign device %s rejected: %s (source %r, address %r)",
+                action,
+                reason,
+                record.source,
+                record.address,
+            )
+        return record
+
+    def fdt_audit_records(self) -> List[Dict[str, Any]]:
+        """Return the registration audit trail as dictionaries."""
+        return [record.as_dict() for record in self.fdt_audit]
+
+    def fdt_status(self) -> List[Dict[str, Any]]:
+        """
+        Return the foreign device table with lease state for each entry.
+
+        ``deadline`` is when the entry stops being a broadcast forwarding
+        target; ``grace_remaining`` is how long the expired entry will still be
+        retained so its owner can renew it; ``forwarding`` is the effective
+        eligibility used when selecting broadcast targets.
+        """
+        now = self._fdt_time()
+        status = []
+        for fdte in self.bbmdFDT:
+            deadline = fdte.fdDeadline if fdte.fdDeadline is not None else now
+            removal_deadline = (
+                fdte.fdRemovalDeadline
+                if fdte.fdRemovalDeadline is not None
+                else deadline
+            )
+            status.append(
+                {
+                    "address": str(fdte.fdAddress),
+                    "ttl": fdte.fdTTL,
+                    "remaining": max(0, math.ceil(deadline - now)),
+                    "deadline": fdte.fdDeadline,
+                    "grace_remaining": max(0, math.ceil(removal_deadline - now)),
+                    "forwarding": self._fdt_entry_is_live(fdte, now),
+                    "expired": fdte.fdExpired,
+                    "renewals": fdte.fdRenewals,
+                }
+            )
+        return status
+
+    def _find_fdt_entry(self, addr: Address) -> Optional[FDTEntry]:
+        for fdte in self.bbmdFDT:
+            if addr == fdte.fdAddress:
+                return fdte
+        return None
+
+    def _fdt_entry_is_live(self, fdte: FDTEntry, now: Optional[float] = None) -> bool:
+        if fdte.fdExpired or fdte.fdDeadline is None:
+            return False
+        if now is None:
+            now = self._fdt_time()
+        return now < fdte.fdDeadline
+
+    def _fdt_forward_targets(self) -> List[FDTEntry]:
+        """Return only entries whose lease has not expired."""
+        now = self._fdt_time()
+        return [fdte for fdte in self.bbmdFDT if self._fdt_entry_is_live(fdte, now)]
+
+    def _expire_fdt_entry(self, fdte: FDTEntry, now: float) -> None:
+        fdte.fdExpired = True
+        if fdte.fdRemovalDeadline is not None:
+            fdte.fdRemain = max(0, math.ceil(fdte.fdRemovalDeadline - now))
+        else:
+            fdte.fdRemain = 0
+        self._audit_fdt(
+            "expire",
+            fdte.fdAddress,
+            fdte.fdAddress,
+            False,
+            "ttl-expired",
+            ttl=fdte.fdTTL,
+            deadline=fdte.fdDeadline,
+            remaining=0,
+        )
+
+    def _purge_fdt(self, now: float) -> None:
+        for i in range(len(self.bbmdFDT) - 1, -1, -1):
+            fdte = self.bbmdFDT[i]
+
+            # make sure an expiring entry is recorded even if the periodic
+            # clock has not ticked since its deadline passed
+            if not fdte.fdExpired and not self._fdt_entry_is_live(fdte, now):
+                self._expire_fdt_entry(fdte, now)
+
+            if fdte.fdRemovalDeadline is not None and now >= fdte.fdRemovalDeadline:
+                if _debug:
+                    BIPBBMD._debug("foreign device removed: %r", fdte.fdAddress)
+                del self.bbmdFDT[i]
+                self._audit_fdt(
+                    "purge",
+                    fdte.fdAddress,
+                    fdte.fdAddress,
+                    True,
+                    "grace-period-elapsed",
+                    ttl=fdte.fdTTL,
+                    deadline=fdte.fdDeadline,
+                    remaining=0,
+                )
+
+    def _reclaim_expired_fdt_entry(self, now: float) -> Optional[FDTEntry]:
+        """
+        Remove the longest-expired entry to make room for a new source.
+
+        Only entries whose lease has already lapsed are eligible; a live lease
+        is never evicted for a newcomer.  If several have lapsed the one that
+        expired first is reclaimed first.
+        """
+        expired = [
+            fdte for fdte in self.bbmdFDT if not self._fdt_entry_is_live(fdte, now)
+        ]
+        if not expired:
+            return None
+
+        victim = min(
+            expired,
+            key=lambda fdte: (
+                fdte.fdDeadline if fdte.fdDeadline is not None else float("-inf")
+            ),
+        )
+        self.bbmdFDT.remove(victim)
+        self._audit_fdt(
+            "reclaim",
+            victim.fdAddress,
+            victim.fdAddress,
+            True,
+            "expired-entry-reclaimed",
+            ttl=victim.fdTTL,
+            deadline=victim.fdDeadline,
+            remaining=0,
+        )
+        return victim
+
+    def _refresh_fdt_remaining(self, now: Optional[float] = None) -> None:
+        """Update the wire-visible remaining time from each retention deadline."""
+        if now is None:
+            now = self._fdt_time()
+        for fdte in self.bbmdFDT:
+            if fdte.fdRemovalDeadline is None:
+                fdte.fdRemain = 0
+            else:
+                fdte.fdRemain = max(0, math.ceil(fdte.fdRemovalDeadline - now))
 
     async def indication(self, pdu: PDU) -> None:
         if _debug:
@@ -913,7 +1207,7 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                     await self.request(lpdu)
 
             # send it to the registered foreign devices
-            for fdte in self.bbmdFDT:
+            for fdte in self._fdt_forward_targets():
                 lpdu.pduDestination = fdte.fdAddress
                 if _debug:
                     BIPBBMD._debug(
@@ -1007,7 +1301,7 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                 BIPBBMD._warning("invalid destination address: %r", lpdu.pduDestination)
 
             # send it to the registered foreign devices
-            for fdte in self.bbmdFDT:
+            for fdte in self._fdt_forward_targets():
                 xpdu.pduDestination = fdte.fdAddress
                 if _debug:
                     BIPBBMD._debug(
@@ -1016,13 +1310,15 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                 await self.request(xpdu)
 
         elif isinstance(lpdu, RegisterForeignDevice):
-            assert isinstance(lpdu.pduSource, IPv4Address)
-
-            # process the request
+            # foreign device admission is decided by the transport source of
+            # the frame, not by any address carried in the request payload;
+            # a zero TTL is the protocol's unregister request
             if lpdu.bvlciTimeToLive == 0:
-                stat = self.delete_foreign_device_table_entry(lpdu.pduSource)
+                stat = self.process_delete_foreign_device(
+                    lpdu.pduSource, lpdu.pduSource
+                )
             else:
-                stat = self.register_foreign_device(
+                stat = self.process_register_foreign_device(
                     lpdu.pduSource, lpdu.bvlciTimeToLive
                 )
 
@@ -1037,7 +1333,9 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             await self.request(xpdu)
 
         elif isinstance(lpdu, ReadForeignDeviceTable):
-            # build a response
+            # report the table as it stands, expired-but-retained entries
+            # included, so an operator can see leases that are not forwarding
+            self._refresh_fdt_remaining()
             xpdu = ReadForeignDeviceTableAck(
                 self.bbmdFDT, destination=lpdu.pduSource, user_data=lpdu.pduUserData
             )
@@ -1052,8 +1350,9 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, DeleteForeignDeviceTableEntry):
-            # process the request
-            stat = self.delete_foreign_device_table_entry(lpdu.bvlciAddress)
+            # deletion is source-bound: the entry removed is the one owned by
+            # the address the request actually came from
+            stat = self.process_delete_foreign_device(lpdu.pduSource, lpdu.bvlciAddress)
 
             # build a response
             xpdu = Result(
@@ -1066,6 +1365,30 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             await self.request(xpdu)
 
         elif isinstance(lpdu, DistributeBroadcastToNetwork):
+            # only a foreign device with a live lease may inject broadcasts
+            now = self._fdt_time()
+            self._purge_fdt(now)
+            fdte = self._find_fdt_entry(lpdu.pduSource)
+            if fdte is None or not self._fdt_entry_is_live(fdte, now):
+                self._audit_fdt(
+                    "distribute",
+                    lpdu.pduSource,
+                    lpdu.pduSource,
+                    False,
+                    "entry-not-found" if fdte is None else "ttl-expired",
+                    ttl=fdte.fdTTL if fdte is not None else None,
+                    deadline=fdte.fdDeadline if fdte is not None else None,
+                    remaining=fdte.fdRemain if fdte is not None else None,
+                )
+                await self.request(
+                    Result(
+                        code=0x0060,
+                        destination=lpdu.pduSource,
+                        user_data=lpdu.pduUserData,
+                    )
+                )
+                return
+
             # send it upstream if there is a network layer
             if self.serverPeer:
                 # build a PDU with a local broadcast address
@@ -1099,8 +1422,8 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                     await self.request(xpdu)
 
             # send it to the other registered foreign devices
-            for fdte in self.bbmdFDT:
-                if fdte.fdAddress != pdu.pduSource:
+            for fdte in self._fdt_forward_targets():
+                if fdte.fdAddress != lpdu.pduSource:
                     xpdu.pduDestination = fdte.fdAddress
                     if _debug:
                         BIPBBMD._debug(
@@ -1151,7 +1474,7 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                     await self.request(xpdu)
 
             # send it to the registered foreign devices
-            for fdte in self.bbmdFDT:
+            for fdte in self._fdt_forward_targets():
                 xpdu.pduDestination = fdte.fdAddress
                 if _debug:
                     BIPBBMD._debug(
@@ -1163,51 +1486,200 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             BIPBBMD._warning("invalid pdu type: %s", type(lpdu))
 
     def register_foreign_device(self, addr: IPv4Address, ttl: int) -> int:
-        """Add a foreign device to the FDT."""
+        """
+        Administrative registration, identified by ``addr``.
+
+        This is the local API used when provisioning a BBMD programmatically;
+        requests arriving on the wire go through ``process_register_foreign_device``
+        and are identified by their transport source instead.
+        """
+        return self.process_register_foreign_device(addr, ttl, administrative=True)
+
+    def process_register_foreign_device(
+        self,
+        source: Optional[Address],
+        ttl: int,
+        *,
+        administrative: bool = False,
+    ) -> int:
+        """
+        Apply the admission policy to a registration from ``source``.
+
+        Returns 0x0000 when the source now holds a live lease and a result code
+        otherwise.  Every decision, accepted or rejected, is recorded in the
+        audit trail with a reason and the lease deadline when one exists.
+
+        Wire requests (``administrative=False``) are subject to the full
+        policy.  The administrative API bypasses the network-facing gates
+        (disabled registrations, source shape) but still validates the TTL.
+        """
         if _debug:
-            BIPBBMD._debug("register_foreign_device %r %r", addr, ttl)
+            BIPBBMD._debug("process_register_foreign_device %r %r", source, ttl)
 
-        for fdte in self.bbmdFDT:
-            if addr == fdte.fdAddress:
-                break
-        else:
+        now = self._fdt_time()
+        self._purge_fdt(now)
+
+        if not administrative:
+            if not self.acceptFDRegistrations:
+                self._audit_fdt(
+                    "register",
+                    source,
+                    source,
+                    False,
+                    "registrations-disabled",
+                    ttl=ttl,
+                )
+                return FDT_RESULT_REGISTRATION_NAK
+
+            if not self._valid_fdt_source(source):
+                self._audit_fdt(
+                    "register", source, source, False, "invalid-source", ttl=ttl
+                )
+                return FDT_RESULT_REGISTRATION_NAK
+
+        if not isinstance(ttl, int) or ttl <= 0:
+            self._audit_fdt("register", source, source, False, "invalid-ttl", ttl=ttl)
+            return FDT_RESULT_REGISTRATION_NAK
+
+        fdte = self._find_fdt_entry(source)
+        if fdte is None:
+            # a new source may not displace a live lease; an expired row that
+            # is only being retained for a possible renewal may be reclaimed
+            if len(self.bbmdFDT) >= self.fdtCapacity:
+                if self._reclaim_expired_fdt_entry(now) is None:
+                    self._audit_fdt(
+                        "register",
+                        source,
+                        source,
+                        False,
+                        "table-full",
+                        ttl=ttl,
+                    )
+                    return FDT_RESULT_REGISTRATION_NAK
+
             fdte = FDTEntry()
-            fdte.fdAddress = addr
+            fdte.fdAddress = source
+            fdte.fdRegisteredAt = now
             self.bbmdFDT.append(fdte)
+            action = "register"
+            reason = "new-registration"
+        else:
+            action = "renew"
+            reason = "renewal"
 
+        # a renewal replaces the lease but keeps the identity (the source
+        # address); the new deadline starts now, not from the old deadline
         fdte.fdTTL = ttl
-        fdte.fdRemain = ttl + 5
+        fdte.fdDeadline = now + ttl
+        fdte.fdRemovalDeadline = fdte.fdDeadline + self.fdtGracePeriod
+        # the wire-visible "remaining time" counts down through the grace
+        # period, as in Annex J, while forwarding stops at the TTL deadline
+        fdte.fdRemain = ttl + self.fdtGracePeriod
+        fdte.fdExpired = False
+        fdte.fdRenewals = (fdte.fdRenewals or 0) + (
+            0 if reason == "new-registration" else 1
+        )
+
+        self._audit_fdt(
+            action,
+            source,
+            source,
+            True,
+            reason,
+            ttl=ttl,
+            deadline=fdte.fdDeadline,
+            remaining=ttl,
+        )
 
         # return success
-        return 0
+        return FDT_RESULT_OK
 
     def delete_foreign_device_table_entry(self, addr: IPv4Address) -> int:
+        """
+        Administrative deletion, identified by ``addr``.
+
+        Wire requests use ``process_delete_foreign_device`` so a request can
+        only remove its own entry.
+        """
         if _debug:
             BIPBBMD._debug("delete_foreign_device_table_entry %r", addr)
 
-        # find it and delete it
-        stat = 0
-        for i in range(len(self.bbmdFDT) - 1, -1, -1):
-            if addr == self.bbmdFDT[i].fdAddress:
-                del self.bbmdFDT[i]
-                break
-        else:
-            stat = 0x0050  ### entry not found
+        return self.process_delete_foreign_device(addr, addr, administrative=True)
 
-        # return status
-        return stat
+    def process_delete_foreign_device(
+        self,
+        source: Optional[Address],
+        requested: Optional[Address],
+        *,
+        administrative: bool = False,
+    ) -> int:
+        """
+        Apply the deletion policy to a request from ``source`` naming
+        ``requested``.  A wire request may only remove its own entry; a named
+        address that does not match the transport source is rejected and the
+        table is left untouched.
+        """
+        if _debug:
+            BIPBBMD._debug(
+                "process_delete_foreign_device source=%r requested=%r",
+                source,
+                requested,
+            )
+
+        now = self._fdt_time()
+        self._purge_fdt(now)
+
+        if not administrative and not self._valid_fdt_source(source):
+            self._audit_fdt("delete", source, requested, False, "invalid-source")
+            return FDT_RESULT_DELETE_NAK
+
+        if not administrative and requested is not None and source != requested:
+            self._audit_fdt("delete", source, requested, False, "source-mismatch")
+            return FDT_RESULT_DELETE_NAK
+
+        fdte = self._find_fdt_entry(source)
+        if fdte is None:
+            self._audit_fdt("delete", source, requested, False, "entry-not-found")
+            return FDT_RESULT_DELETE_NAK
+
+        self.bbmdFDT.remove(fdte)
+        self._audit_fdt(
+            "delete",
+            source,
+            fdte.fdAddress,
+            True,
+            "deleted",
+            ttl=fdte.fdTTL,
+            deadline=fdte.fdDeadline,
+            remaining=0,
+        )
+
+        # return success
+        return FDT_RESULT_OK
+
+    def _fdt_sweep(self, now: float) -> None:
+        """Expire and purge FDT entries as of ``now``."""
+        # look for foreign device registrations that have expired
+        self._refresh_fdt_remaining(now)
+        for fdte in self.bbmdFDT:
+            if not fdte.fdExpired and not self._fdt_entry_is_live(fdte, now):
+                self._expire_fdt_entry(fdte, now)
+
+        # remove entries whose grace period has elapsed
+        self._purge_fdt(now)
 
     def fdt_clock(self) -> None:
-        # look for foreign device registrations that have expired
-        for i in range(len(self.bbmdFDT) - 1, -1, -1):
-            fdte = self.bbmdFDT[i]
-            fdte.fdRemain -= 1
+        loop_now = asyncio.get_event_loop().time()
+        if loop_now > self._fdt_tick_time:
+            # the real (or virtual) clock moved on; never move backwards, even
+            # if the lease clock was advanced explicitly ahead of the loop
+            self._fdt_now = max(loop_now, self._fdt_now)
+        else:
+            # a manual tick with no clock movement counts as one second
+            self._fdt_now += 1
+        self._fdt_tick_time = loop_now
 
-            # delete it if it expired
-            if fdte.fdRemain <= 0:
-                if _debug:
-                    BIPBBMD._debug("foreign device expired: %r", fdte.fdAddress)
-                del self.bbmdFDT[i]
+        self._fdt_sweep(self._fdt_now)
 
         # again, again!
         self._fdt_clock_handle = asyncio.get_event_loop().call_later(1, self.fdt_clock)

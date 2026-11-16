@@ -631,7 +631,14 @@ class Application(
                     )
 
                 elif obj.bacnetIPMode == IPMode.bbmd:
-                    link_layer = BBMDLinkLayer_ipv4(link_address)
+                    link_layer = BBMDLinkLayer_ipv4(
+                        link_address,
+                        accept_fd_registrations=(
+                            True
+                            if obj.bbmdAcceptFDRegistrations is None
+                            else bool(obj.bbmdAcceptFDRegistrations)
+                        ),
+                    )
                     if _debug:
                         Application._debug("     - link_layer: %r", link_layer)
 

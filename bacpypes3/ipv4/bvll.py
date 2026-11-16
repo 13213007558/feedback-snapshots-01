@@ -337,16 +337,36 @@ def key_value_contents(use_dict=None, as_class=dict, key_values=()):
 
 
 class FDTEntry(DebugContents):
-    _debug_contents = ("fdAddress", "fdTTL", "fdRemain")
+    _debug_contents = (
+        "fdAddress",
+        "fdTTL",
+        "fdRemain",
+        "fdDeadline",
+        "fdRemovalDeadline",
+        "fdExpired",
+        "fdRenewals",
+    )
 
     fdAddress: IPv4Address
     fdTTL: int
     fdRemain: int
 
+    # registration bookkeeping, not part of the BVLL encoding
+    fdRegisteredAt: Optional[float]
+    fdDeadline: Optional[float]
+    fdRemovalDeadline: Optional[float]
+    fdExpired: bool
+    fdRenewals: int
+
     def __init__(self):
         self.fdAddress = None
         self.fdTTL = None
         self.fdRemain = None
+        self.fdRegisteredAt = None
+        self.fdDeadline = None
+        self.fdRemovalDeadline = None
+        self.fdExpired = False
+        self.fdRenewals = 0
 
     def __eq__(self, other):
         """Return true iff entries are identical."""

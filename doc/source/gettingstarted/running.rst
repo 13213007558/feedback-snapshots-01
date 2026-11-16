@@ -77,6 +77,22 @@ Table (BDT)::
 
     $ python3 -m bacpypes3 --address 192.168.0.10/24 --bbmd 192.168.0.10 192.168.1.11
 
+Foreign device registration is a lease keyed on the UDP source address of the
+request, not on anything the request payload claims.  A lease is a broadcast
+forwarding target only until its time-to-live expires; it is then retained for
+a short grace period so the same device can renew, but it no longer receives
+forwarded broadcasts.  Deleting an entry is likewise source-bound: a request
+can only remove the registration belonging to the address it came from.  The
+table is bounded (128 entries by default) and a new source is refused while all
+entries are live; expired entries may be reclaimed.  The BBMD records each
+accept/reject decision, with the reason and lease deadline, in its audit trail.
+
+These behaviors are available programmatically through
+``BIPBBMD.fdt_status()`` (per-entry deadline, grace remaining, and whether the
+entry is currently a forwarding target) and ``BIPBBMD.fdt_audit_records()``
+(JSON-serializable decision records).  Admission can be disabled entirely with
+the network port's ``bbmdAcceptFDRegistrations`` property.
+
 Device Configuration
 --------------------
 
