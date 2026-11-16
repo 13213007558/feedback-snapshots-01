@@ -20,22 +20,31 @@ class Objects:
         if not key.is_data_reference:
             raise ValueError(f"Key is not a data reference: {key}")
 
-        page = self.store.page(key.data_page)
+        return self.get_record(key.data_page, key.data_id, key.data_length)
 
-        buf = page.data(key)
-        data_len = key.data_length
+    def get_record(self, data_page: int, record_id: int, data_length: int) -> BytesIO:
+        """Read a record by its physical location, without requiring an index reference.
+
+        Args:
+            data_page: Logical data page number the record starts on.
+            record_id: The record identifier from the data page TOC.
+            data_length: The expected length of the record. Records that span pages are stitched together.
+        """
+        page = self.store.page(data_page)
+
+        buf = page.data_by_id(record_id, data_length)
         cur_len = len(buf)
 
-        if cur_len == data_len:
+        if cur_len == data_length:
             return BytesIO(buf)
 
         read_list = [buf]
-        cur_page = key.data_page + 1
-        while cur_len < data_len:
+        cur_page = data_page + 1
+        while cur_len < data_length:
             next_buf = self.store.logical_page(cur_page)
-            if cur_len + len(next_buf) > data_len:
+            if cur_len + len(next_buf) > data_length:
                 # Last page containing partial data
-                chunk_size = data_len - cur_len
+                chunk_size = data_length - cur_len
                 read_list.append(next_buf[:chunk_size])
                 cur_len += chunk_size
             else:
@@ -77,8 +86,11 @@ class DataPage:
         self.toc = TOC(fh)
 
     def data(self, key: Key) -> bytes:
-        target_id = key.data_id
-        target_size = key.data_length
+        return self.data_by_id(key.data_id, key.data_length)
+
+    def data_by_id(self, record_id: int, data_length: int) -> bytes:
+        target_id = record_id
+        target_size = data_length
 
         for i in range(self.toc.count):
             entry = self.toc[i]

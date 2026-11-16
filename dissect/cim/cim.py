@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         InstanceKey,
         Qualifier,
     )
+    from dissect.cim.recovery import ScanResult
 
 
 class CIM:
@@ -136,6 +137,19 @@ class CIM:
 
     def get_class_instance(self, class_: Class, q: Key) -> ClassInstance:
         return self._parse_instance(class_, q.object())
+
+    def scan_unreferenced(self) -> ScanResult:
+        """Scan data page TOCs for records that are not referenced by the current index.
+
+        This is an independent, read-only recovery entry point. It does not change normal namespace enumeration
+        and never interprets or executes record contents.
+
+        Returns:
+            A :class:`~dissect.cim.recovery.ScanResult` with ``reachable``, ``unreferenced`` and ``fragment`` records.
+        """
+        from dissect.cim.recovery import RecoveryScanner
+
+        return RecoveryScanner(self).scan()
 
 
 class Namespace:
