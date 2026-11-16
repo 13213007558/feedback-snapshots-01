@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -9,6 +10,17 @@ import pytest
 
 from dissect.apfs.apfs import APFS, log
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.exception import Error
+from tests._encrypted_snapshot import (
+    CURRENT_CONTENT,
+    CURRENT_FILE,
+    FOREIGN_NAME,
+    FUTURE_KEY_NAME,
+    MULTIKEY_NAME,
+    SNAPSHOT_CONTENT,
+    SNAPSHOT_NAME,
+    build_image,
+)
 from tests.conftest import absolute_path
 
 if TYPE_CHECKING:
@@ -368,6 +380,100 @@ def test_snapshots() -> None:
         for i, snapshot in enumerate(volume.snapshots):
             assert snapshot.name == f"Snapshot {i}"
             assert snapshot.open().get("file").open().read() == f"Snapshot {i}\n".encode()
+
+
+@pytest.fixture()
+def encrypted_snapshot() -> APFS:
+    """An unlocked encrypted volume with historical snapshots."""
+    container = APFS(io.BytesIO(build_image(absolute_path("_data/encrypted.bin.gz").as_posix())))
+    container.volumes[0].unlock("password")
+    return container
+
+
+def test_encrypted_snapshot_content(encrypted_snapshot: APFS) -> None:
+    """The current volume and its snapshot read their own encrypted content."""
+    volume = encrypted_snapshot.volumes[0]
+    snapshot = next(s for s in volume.snapshots if s.name == SNAPSHOT_NAME)
+    snapshot_volume = snapshot.open()
+
+    assert volume.get(CURRENT_FILE).open().read() == CURRENT_CONTENT
+    assert snapshot_volume.get(CURRENT_FILE).open().read() == SNAPSHOT_CONTENT
+    assert snapshot_volume.get(CURRENT_FILE).open().read() != volume.get(CURRENT_FILE).open().read()
+
+    # Re-reading in either direction must not disturb the other view
+    assert volume.get(CURRENT_FILE).open().read() == CURRENT_CONTENT
+    assert snapshot_volume.get(CURRENT_FILE).open().read() == SNAPSHOT_CONTENT
+
+
+def test_encrypted_snapshot_context_separation(encrypted_snapshot: APFS) -> None:
+    """Only the key context and volume-wide object map are reused by a snapshot."""
+    volume = encrypted_snapshot.volumes[0]
+    snapshot = next(s for s in volume.snapshots if s.name == SNAPSHOT_NAME)
+    snapshot_volume = snapshot.open()
+
+    # Reused: the cipher, the volume identity and the volume-wide object map
+    assert snapshot_volume._cipher is volume._cipher
+    assert snapshot_volume.uuid == volume.uuid
+    assert snapshot_volume.omap is volume.omap
+
+    # Rebuilt: everything tied to the volume's current transaction
+    assert snapshot_volume is not volume
+    assert snapshot_volume.xid == snapshot.xid != volume.xid
+    assert snapshot_volume.root_tree is not volume.root_tree
+    assert snapshot_volume.root_tree.address != volume.root_tree.address
+    assert snapshot_volume.root_tree.xid <= snapshot.xid
+
+    # The historical root tree record and the live one are distinct OMAP versions
+    assert volume.omap.lookup(volume.object.apfs_root_tree_oid, snapshot.xid) != volume.omap.lookup(
+        volume.object.apfs_root_tree_oid, volume.xid
+    )
+
+    # Reading the snapshot must not move the current volume's tree or cursors
+    assert volume.xid == encrypted_snapshot.sb.xid
+    assert volume.root_tree.xid <= volume.xid
+
+
+def test_encrypted_snapshot_requires_unlock(encrypted_snapshot: APFS) -> None:
+    """An encrypted snapshot can not be opened without an unlocked volume."""
+    volume = encrypted_snapshot.volumes[0]
+    snapshot = next(s for s in volume.snapshots if s.name == SNAPSHOT_NAME)
+
+    volume._cipher = None
+
+    with pytest.raises(Error, match="unlock volume first"):
+        snapshot.open()
+
+
+@pytest.mark.parametrize(
+    ("name", "match"),
+    [
+        pytest.param(FOREIGN_NAME, "does not match unlocked volume", id="foreign-volume"),
+        pytest.param(FUTURE_KEY_NAME, "unsupported key generation", id="future-key-generation"),
+        pytest.param(MULTIKEY_NAME, "multi-key encryption", id="multi-key"),
+    ],
+)
+def test_encrypted_snapshot_rejected_context(encrypted_snapshot: APFS, name: str, match: str) -> None:
+    """A key context may only be used for its own volume identity and encryption mode."""
+    volume = encrypted_snapshot.volumes[0]
+    snapshot = next(s for s in volume.snapshots if s.name == name)
+
+    with pytest.raises(Error, match=match):
+        snapshot.open()
+
+
+def test_encrypted_snapshot_wrong_volume_key(encrypted_snapshot: APFS) -> None:
+    """A key context from another volume can not read an encrypted snapshot."""
+    volume = encrypted_snapshot.volumes[0]
+    snapshot = next(s for s in volume.snapshots if s.name == SNAPSHOT_NAME)
+
+    with gzip.open(absolute_path("_data/jhfs_encrypted.bin.gz"), "rb") as fh:
+        other = APFS(fh).volumes[0]
+        other.unlock("password")
+
+    volume._cipher = other._cipher
+
+    with pytest.raises(Error, match="Could not resolve snapshot root tree|unsupported key generation"):
+        snapshot.open()
 
 
 def test_corrupt_checkpoints(caplog: pytest.LogCaptureFixture) -> None:

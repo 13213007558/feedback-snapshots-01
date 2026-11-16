@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
 
+    from dissect.fve.crypto import Cipher
+
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
 
@@ -46,6 +48,8 @@ class FS(Object):
             )
 
         self._cipher = None
+        # The transaction used to resolve objects. ``None`` means the object's own xid.
+        self._xid: int | None = None
 
         self.inode = lru_cache(4096)(self.inode)
         self._cursor_state = lru_cache(128)(self._cursor_state)
@@ -103,7 +107,7 @@ class FS(Object):
 
         return BTree.from_address(
             self.container,
-            self.omap.lookup(self.object.apfs_root_tree_oid, self.xid),
+            self.omap.lookup(self.object.apfs_root_tree_oid, self._xid if self._xid is not None else self.xid),
             cipher=self._cipher,
         )
 
@@ -147,6 +151,17 @@ class FS(Object):
     def is_onekey(self) -> bool:
         """Whether the filesystem uses the volume encryption key for all."""
         return c_apfs.APFS_FS.ONEKEY in self.flags
+
+    @cached_property
+    def key_generation(self) -> tuple[int, int, int]:
+        """The metadata crypto generation as a ``(major, minor, key_revision)`` tuple.
+
+        A key context is only valid for the volume and key generation it was unlocked
+        with. Snapshots from a different generation need their own key material, which
+        is not available to this implementation.
+        """
+        crypto = self.object.apfs_meta_crypto
+        return crypto.major_version, crypto.minor_version, crypto.key_revision
 
     @cached_property
     def formatted_by(self) -> tuple[str, datetime, int]:
@@ -244,7 +259,12 @@ class FS(Object):
 
     def cursor(self) -> Cursor:
         """Create a new cursor for the volume's root B-tree."""
-        return Cursor(self.root_tree, self.omap, self.object.apfs_root_tree_oid if self.is_sealed else 0, self.xid)
+        return Cursor(
+            self.root_tree,
+            self.omap,
+            self.object.apfs_root_tree_oid if self.is_sealed else 0,
+            self._xid if self._xid is not None else self.xid,
+        )
 
     def _cursor_state(self, oid: int) -> tuple[BTreeNode, int, list[tuple[BTreeNode, int]]]:
         """Precompute the cursor state for a given object ID.
@@ -389,13 +409,178 @@ class Snapshot:
         return self.value.name.decode().rstrip("\x00")
 
     def open(self) -> FS:
-        """Open the snapshot as a filesystem."""
-        fs = FS.from_address(
-            self.fs.container,
-            self.value.sblock_oid,
+        """Open the snapshot as a filesystem.
+
+        An unlocked parent volume lends its key context to the snapshot, because the
+        snapshot superblock shares the volume identity and key generation of its parent.
+        Everything that is tied to a transaction - the root tree, cursors and all object
+        lookups - is created anew from the snapshot's own superblock and xid.
+
+        Raises:
+            Error: If the volume is encrypted but was not unlocked, if the snapshot
+                belongs to a different volume identity, or if the snapshot requires a
+                key generation that is not supported.
+        """
+        return open_snapshot(self.fs, self.xid, self.value.sblock_oid)
+
+
+class UnlockContext:
+    """The key context of an unlocked volume, as inherited by a snapshot.
+
+    Only the cipher and the identity/mode it is valid for are reusable. The object map
+    is a volume-wide lookup structure and can be reused, but the root tree, cursors and
+    transaction ID always come from the snapshot itself.
+
+    Args:
+        cipher: The cipher created from the volume encryption key.
+        volume_uuid: The volume UUID the key belongs to.
+        key_generation: The metadata crypto generation the key belongs to.
+        onekey: Whether the volume uses the volume encryption key for all objects.
+    """
+
+    __slots__ = ("cipher", "volume_uuid", "key_generation", "onekey")
+
+    def __init__(self, cipher: Cipher, volume_uuid: UUID, key_generation: tuple[int, int, int], onekey: bool):
+        self.cipher = cipher
+        self.volume_uuid = volume_uuid
+        self.key_generation = key_generation
+        self.onekey = onekey
+
+    def validate(self, snapshot: FS) -> None:
+        """Validate that this key context can be used for the given snapshot superblock.
+
+        Args:
+            snapshot: The filesystem object created from the snapshot superblock.
+
+        Raises:
+            Error: If the snapshot has a different volume identity or encryption mode,
+                or requires a key generation this context does not provide.
+        """
+        if snapshot.uuid != self.volume_uuid:
+            raise Error(f"Snapshot volume UUID {snapshot.uuid} does not match unlocked volume {self.volume_uuid}")
+
+        if not snapshot.is_encrypted:
+            raise Error("Snapshot is not encrypted, but the unlocked volume is")
+
+        if not snapshot.is_onekey:
+            raise Error("Snapshot uses multi-key encryption, which is not supported yet")
+
+        if not self.onekey:
+            raise Error("Multi-key encryption is not supported yet")
+
+        if snapshot.key_generation != self.key_generation:
+            raise Error(
+                "Snapshot requires an unsupported key generation "
+                f"(volume {self.key_generation}, snapshot {snapshot.key_generation})"
+            )
+
+
+def open_snapshot(volume: FS, xid: int, sblock_oid: int) -> FS:
+    """Open a snapshot superblock as a filesystem, validating the volume key context first.
+
+    The snapshot superblock shares the volume identity and key generation of its parent,
+    so the parent's cipher can be reused. Everything tied to a transaction - the object
+    map lookup, root tree and all subsequent object lookups - is resolved from the
+    snapshot's own superblock and transaction ID.
+
+    Args:
+        volume: The parent volume the snapshot belongs to.
+        xid: The transaction ID of the snapshot.
+        sblock_oid: The physical block address of the snapshot superblock.
+
+    Raises:
+        Error: If the volume is locked, if the snapshot belongs to another volume or
+            unsupported encryption mode, or if its objects can not be resolved at the
+            snapshot transaction. The error is raised before any filesystem content is
+            handed out.
+    """
+    if not sblock_oid:
+        raise Error("Invalid snapshot superblock address 0")
+
+    if volume.is_encrypted and volume._cipher is None:
+        raise Error("Volume is encrypted, unlock volume first")
+
+    block = volume.container._read_block(sblock_oid)
+
+    try:
+        fs = FS.from_block(volume.container, sblock_oid, block, cipher=volume._cipher)
+    except Exception as e:
+        raise Error(f"Could not read snapshot superblock at block {sblock_oid} with the volume key context: {e}") from e
+
+    if not fs.is_valid():
+        raise Error(f"Invalid snapshot superblock checksum at block {sblock_oid}")
+
+    if fs.oid != sblock_oid:
+        raise Error(f"Snapshot superblock oid {fs.oid} does not match its physical block address {sblock_oid}")
+
+    if not fs.is_physical:
+        raise Error(f"Snapshot superblock at block {sblock_oid} is not stored as a physical object")
+
+    if fs.xid != xid:
+        raise Error(f"Snapshot superblock xid {fs.xid} does not match snapshot transaction xid {xid}")
+
+    if fs.is_encrypted:
+        if volume._cipher is None:
+            raise Error("Snapshot is encrypted, unlock volume first")
+
+        UnlockContext(
+            cipher=volume._cipher,
+            volume_uuid=volume.uuid,
+            key_generation=volume.key_generation,
+            onekey=volume.is_onekey,
+        ).validate(fs)
+    elif fs.uuid != volume.uuid:
+        raise Error(f"Snapshot volume UUID {fs.uuid} does not match volume {volume.uuid}")
+
+    if fs.is_encrypted:
+        fs._cipher = volume._cipher
+
+    # Resolve historical objects at the snapshot's own transaction, regardless of the
+    # superblock object header, so the current tree's addresses are never substituted.
+    fs._xid = xid
+
+    if fs.object.apfs_omap_oid == 0:
+        # Snapshot superblocks do not carry their own object map; the volume-wide map
+        # contains the historical mappings for every snapshot transaction.
+        fs.omap = volume.omap
+    elif fs.object.apfs_omap_oid != volume.object.apfs_omap_oid:
+        raise Error(
+            f"Snapshot object map {fs.object.apfs_omap_oid} differs from volume object map "
+            f"{volume.object.apfs_omap_oid}, which is not supported"
         )
-        fs.omap = self.fs.omap
-        return fs
+    else:
+        fs.omap = volume.omap
+
+    # The snapshot superblock is a physical object from the snapshot transaction. Verify
+    # that its root tree resolves in the snapshot's own transaction before handing out a
+    # filesystem; this prevents partially readable directories on a bad context.
+    if fs.object.apfs_root_tree_oid:
+        try:
+            root_tree = fs.root_tree
+        except Exception as e:
+            raise Error(f"Could not resolve snapshot root tree at xid {xid}: {e}") from e
+
+        if root_tree.type != c_apfs.OBJECT_TYPE.BTREE:
+            raise Error(f"Could not resolve snapshot root tree at xid {xid}: unexpected object type {root_tree.type}")
+
+        if root_tree.root.subtype not in (
+            c_apfs.OBJECT_TYPE.FSTREE,
+            c_apfs.OBJECT_TYPE_INVALID,
+        ):
+            raise Error(
+                f"Could not resolve snapshot root tree at xid {xid}: unexpected subtype {root_tree.root.subtype}"
+            )
+
+        if not root_tree.root.is_valid():
+            raise Error(
+                f"Could not resolve snapshot root tree at xid {xid}: "
+                "checksum validation failed, the key context does not decrypt this snapshot"
+            )
+
+        if root_tree.xid > xid:
+            raise Error(f"Could not resolve snapshot root tree at xid {xid}: tree xid {root_tree.xid} is newer")
+
+    return fs
 
 
 class INode:
