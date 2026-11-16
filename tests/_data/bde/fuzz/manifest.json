@@ -1,0 +1,38 @@
+{
+  "authenticated_bad_inner.bin": {
+    "layer": "decrypted",
+    "note": "valid AES-CCM shell over a KEY datum whose declared size exceeds the decrypted plaintext",
+    "reason": "truncated_struct",
+    "size": 130
+  },
+  "deep_nesting.bin": {
+    "layer": "nested",
+    "note": "41 nested VMK datums; parsing stops at depth 32 with reason too_deep",
+    "reason": "too_deep",
+    "size": 1532
+  },
+  "out_of_bounds.bin": {
+    "layer": "dataset",
+    "note": "minimal dataset: 48-byte header plus one datum claiming 0x40 bytes in a 16-byte parent",
+    "offset": 0,
+    "reason": "out_of_bounds",
+    "size": 64
+  },
+  "swallowed_fvek.bin": {
+    "layer": "nested",
+    "note": "FVEK is inside the VMK range but has a non-PROPERTY role and is never selected",
+    "size": 288
+  },
+  "unknown_datum.bin": {
+    "layer": "dataset",
+    "note": "unknown role/type content must be preserved byte for byte",
+    "size": 220
+  },
+  "zero_size.bin": {
+    "layer": "dataset",
+    "note": "minimal dataset: 48-byte header plus one 8-byte datum header with Size=0",
+    "offset": 0,
+    "reason": "zero_size",
+    "size": 56
+  }
+}

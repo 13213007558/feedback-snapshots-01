@@ -21,11 +21,87 @@ from dissect.fve.bde.c_bde import (
     c_bde,
 )
 from dissect.fve.bde.c_tpm import c_tpm
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidDatumError, InvalidHeaderError
 
 if TYPE_CHECKING:
     import datetime
     from collections.abc import Iterator
+
+
+MAX_DATASET_SIZE = 0x100000
+MAX_DATUM_DEPTH = 32
+MAX_INFORMATION_SIZE = 0x100000
+
+
+def _read_datum_header(buf: memoryview, offset: int, *, depth: int = 0) -> c_bde.FVE_DATUM:
+    """Read and validate a datum header from a bounded buffer."""
+    if len(buf) - offset < Datum.MINIMAL_SIZE:
+        raise InvalidDatumError(
+            "Truncated datum header",
+            offset=offset,
+            reason="truncated_header",
+            depth=depth,
+        )
+
+    header = c_bde.FVE_DATUM(bytes(buf[offset : offset + Datum.MINIMAL_SIZE]))
+    size = header.Size
+
+    if size == 0:
+        raise InvalidDatumError("Zero-sized datum", offset=offset, reason="zero_size", depth=depth)
+
+    if size < Datum.MINIMAL_SIZE:
+        raise InvalidDatumError(
+            f"Datum size {size:#x} is smaller than the datum header",
+            offset=offset,
+            reason="undersized",
+            depth=depth,
+        )
+
+    return header
+
+
+def _parse_datums(buf: memoryview, *, depth: int = 0) -> list[Datum]:
+    """Parse a bounded sequence of datums.
+
+    The buffer must contain exactly the bytes available to the datum sequence, so a datum can never
+    read beyond its parent. Every datum consumes at least ``Datum.MINIMAL_SIZE`` bytes, which
+    guarantees forward progress.
+    """
+    if depth > MAX_DATUM_DEPTH:
+        raise InvalidDatumError(
+            f"Datum nesting exceeds {MAX_DATUM_DEPTH} levels",
+            offset=0,
+            reason="too_deep",
+            depth=depth,
+        )
+
+    result = []
+    offset = 0
+    length = len(buf)
+
+    while offset < length:
+        header = _read_datum_header(buf, offset, depth=depth)
+        size = header.Size
+
+        if size > length - offset:
+            raise InvalidDatumError(
+                f"Datum size {size:#x} exceeds the {length - offset:#x} bytes available in its parent",
+                offset=offset,
+                reason="out_of_bounds",
+                depth=depth,
+            )
+
+        result.append(
+            Datum._from_parts(
+                header,
+                bytes(buf[offset : offset + size]),
+                offset=offset,
+                depth=depth,
+            )
+        )
+        offset += size
+
+    return result
 
 
 class Information:
@@ -46,17 +122,37 @@ class Information:
         self.offset = offset
         fh.seek(offset)
 
-        self.header = c_bde.FVE_INFORMATION(fh)
+        try:
+            self.header = c_bde.FVE_INFORMATION(fh)
+        except EOFError as e:
+            raise InvalidHeaderError("Truncated BDE information header") from e
+
         if self.header.Signature != BITLOCKER_SIGNATURE:
             raise InvalidHeaderError("Invalid BDE information signature")
 
-        # Datums are lazily parsed so we can safely parse the dataset header
-        self.dataset = Dataset(fh)
+        if not (len(c_bde.FVE_INFORMATION) + len(c_bde.FVE_DATASET) <= self.size <= MAX_INFORMATION_SIZE):
+            raise InvalidHeaderError("Invalid BDE information size")
 
         fh.seek(offset)
         self._buf = fh.read(self.size)
+        if len(self._buf) != self.size:
+            raise InvalidHeaderError("Truncated BDE information")
 
-        self.validation = Validation(fh)
+        # The dataset is bounded by the information buffer, so a corrupt dataset Size can never
+        # read past the information it is embedded in.
+        self.dataset = Dataset(BytesIO(self._buf[len(c_bde.FVE_INFORMATION) :]))
+
+        if len(c_bde.FVE_INFORMATION) + self.dataset.header.Size > len(self._buf):
+            raise InvalidHeaderError("BDE dataset exceeds the information buffer")
+
+        # The validation structure and its integrity check datum live directly behind the information
+        # buffer.
+        fh.seek(offset + self.size)
+        try:
+            self.validation = Validation(fh)
+        except EOFError as e:
+            raise InvalidHeaderError("Truncated BDE information validation") from e
+
         self._valid_checksum = crc32(self._buf) == self.validation.crc32
 
     def __repr__(self) -> str:
@@ -150,13 +246,38 @@ class Dataset:
     """
 
     def __init__(self, fh: BinaryIO):
-        offset = fh.tell()
-        self.header = c_bde.FVE_DATASET(fh)
-        self.identifier = UUID(bytes_le=self.header.Identification)
-        self.creation_time = ts.wintimestamp(self.header.CreationTime)
+        raw_size = fh.read(4)
+        if len(raw_size) != 4:
+            raise InvalidHeaderError("Truncated BDE dataset header")
 
-        fh.seek(offset)
-        self._buf = fh.read(self.header.Size)
+        size = int.from_bytes(raw_size, "little")
+        if size < len(c_bde.FVE_DATASET) or size > MAX_DATASET_SIZE:
+            raise InvalidHeaderError("Invalid BDE dataset size")
+
+        self._buf = raw_size + fh.read(size - 4)
+        if len(self._buf) != size:
+            raise InvalidHeaderError("Truncated BDE dataset")
+
+        try:
+            self.header = c_bde.FVE_DATASET(self._buf)
+        except EOFError as e:
+            raise InvalidHeaderError("Truncated BDE dataset header") from e
+
+        self.identifier = UUID(bytes_le=self.header.Identification)
+        try:
+            self.creation_time = ts.wintimestamp(self.header.CreationTime)
+        except ValueError:
+            # Out-of-range timestamps are attacker controllable metadata, not a reason to reject
+            # the entire dataset. Keep the raw value available through the header.
+            self.creation_time = None
+
+        if (
+            self.header.StartOffset < len(c_bde.FVE_DATASET)
+            or self.header.EndOffset < self.header.StartOffset
+            or self.header.EndOffset > self.header.Size
+            or self.header.Size > len(self._buf)
+        ):
+            raise InvalidHeaderError("Invalid BDE dataset bounds")
 
     def __iter__(self) -> Iterator[Datum]:
         yield from self.data
@@ -164,17 +285,9 @@ class Dataset:
     @cached_property
     def data(self) -> list[Datum]:
         """Return the list of Datum in this Dataset."""
-        result = []
-
-        buf = BytesIO(memoryview(self._buf)[self.header.StartOffset :])
-        remaining = self.header.EndOffset - self.header.StartOffset
-        while remaining >= Datum.MINIMAL_SIZE:
-            datum = Datum.from_fh(buf)
-            result.append(datum)
-
-            remaining -= datum.size
-
-        return result
+        return _parse_datums(
+            memoryview(self._buf)[self.header.StartOffset : self.header.EndOffset],
+        )
 
     @property
     def fvek_type(self) -> FVE_KEY_TYPE:
@@ -279,16 +392,62 @@ class Datum:
 
     __struct__ = None
     __complex__ = False
+    __nested__ = False
 
     MINIMAL_SIZE = len(c_bde.FVE_DATUM)
 
     def __init__(self, fh: BinaryIO):
-        self.header = c_bde.FVE_DATUM(fh)
-        self._data = fh.read(self.data_size)
+        self.offset = fh.tell()
+        try:
+            self.header = c_bde.FVE_DATUM(fh)
+        except EOFError as e:
+            raise InvalidDatumError("Truncated datum header", offset=self.offset, reason="truncated_header") from e
 
-        buf = BytesIO(self._data)
-        self._datum = self.__struct__(buf) if self.__struct__ else None
-        self.data_segment = buf.read() if not self.__complex__ else None
+        if self.header.Size < self.MINIMAL_SIZE:
+            raise InvalidDatumError(
+                f"Datum size {self.header.Size:#x} is smaller than the datum header",
+                offset=self.offset,
+                reason="zero_size" if self.header.Size == 0 else "undersized",
+            )
+
+        data = fh.read(self.data_size)
+        if len(data) != self.data_size:
+            raise InvalidDatumError("Truncated datum", offset=self.offset, reason="truncated")
+
+        self._init(data, offset=self.offset, depth=0)
+
+    @classmethod
+    def _from_parts(cls, header: c_bde.FVE_DATUM, data: bytes, *, offset: int, depth: int) -> Datum:
+        """Create a datum from an already validated header and its exact data bytes."""
+        datum = cls.__new__(DATUM_TYPE_MAP.get(FVE_DATUM_TYPE(header.Type), Datum))
+        datum.header = header
+        datum._init(data[cls.MINIMAL_SIZE :], offset=offset, depth=depth)
+        return datum
+
+    def _init(self, data: bytes, *, offset: int | None, depth: int) -> None:
+        self.offset = offset
+        self._depth = depth
+        self._data = data
+        self.raw = self.header.dumps() + data
+
+        buf = BytesIO(data)
+        if self.__struct__:
+            try:
+                self._datum = self.__struct__(buf)
+            except EOFError as e:
+                raise InvalidDatumError(
+                    f"Datum data of {len(data):#x} bytes is too small for its structure",
+                    offset=offset,
+                    reason="truncated_struct",
+                    depth=depth,
+                ) from e
+            struct_size = buf.tell()
+        else:
+            self._datum = None
+            struct_size = 0
+
+        self._payload = data[struct_size:]
+        self.data_segment = None if self.__complex__ else self._payload
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} role={self.role.name} type={self.type.name}>"
@@ -311,37 +470,67 @@ class Datum:
 
     @cached_property
     def properties(self) -> list[Datum]:
-        """Return a list of property datum if this datum is complex."""
-        result = []
+        """Return a list of property datum if this datum is complex.
 
-        if self.__complex__:
-            remaining = self.data_size - len(self.__struct__)
-            buf = BytesIO(memoryview(self._data)[len(self.__struct__) :])
-            while remaining >= self.MINIMAL_SIZE:
-                nested = Datum.from_fh(buf)
-                result.append(nested)
+        Only datum types that are known to contain nested datums are interpreted as containers. Other
+        complex datum types (such as USE_KEY) carry opaque payloads, which are preserved in
+        ``data_segment`` instead of being misinterpreted as nested datums.
+        """
+        if not (self.__complex__ and self.__nested__):
+            return []
 
-                remaining -= nested.size
-
-        return result
+        return _parse_datums(
+            memoryview(self._payload),
+            depth=self._depth + 1,
+        )
 
     @classmethod
     def from_fh(cls, fh: BinaryIO) -> Datum:
         """Read a datum from a file handle."""
         offset = fh.tell()
-        header = c_bde.FVE_DATUM(fh)
-        fh.seek(offset)
+        raw = fh.read(cls.MINIMAL_SIZE)
+        if len(raw) != cls.MINIMAL_SIZE:
+            raise InvalidDatumError("Truncated datum header", offset=offset, reason="truncated_header")
 
+        header = c_bde.FVE_DATUM(raw)
+        if header.Size < cls.MINIMAL_SIZE:
+            raise InvalidDatumError(
+                f"Datum size {header.Size:#x} is smaller than the datum header",
+                offset=offset,
+                reason="zero_size" if header.Size == 0 else "undersized",
+            )
+
+        fh.seek(offset)
         return DATUM_TYPE_MAP.get(FVE_DATUM_TYPE(header.Type), Datum)(fh)
 
     @classmethod
     def from_bytes(cls, buf: bytes) -> Datum:
-        """Read a datum from raw bytes."""
-        return cls.from_fh(BytesIO(buf))
+        """Read exactly one datum from raw bytes.
+
+        The payload must contain exactly one complete datum. Trailing bytes indicate a framing error,
+        which is important for datums that were just authenticated and decrypted.
+        """
+        datums = _parse_datums(memoryview(buf))
+        if not datums:
+            raise InvalidDatumError("Empty datum payload", offset=0, reason="empty")
+        if len(datums) != 1:
+            raise InvalidDatumError(
+                f"Expected exactly one datum, found {len(datums)}",
+                offset=datums[0].size,
+                reason="trailing_data",
+            )
+        return datums[0]
 
     def find_property(self, type_: FVE_DATUM_TYPE | None) -> Iterator[Datum]:
-        """Find one or more datum with a specified type within the properties."""
+        """Find one or more datum with a specified type within the properties.
+
+        Only datums with the PROPERTY role are considered properties. This prevents an adjacent valid
+        VMK or FVEK that was swallowed by an oversized parent from being selected as this datum's
+        key material.
+        """
         for datum in self.properties:
+            if datum.role != FVE_DATUM_ROLE.PROPERTY:
+                continue
             if datum.type == type_ or type_ is None:
                 yield datum
 
@@ -395,7 +584,9 @@ class KeyDatum(Datum):
 
     @property
     def data(self) -> bytes:
-        return self._data[len(KeyDatum.__struct__) :]
+        if not self._payload:
+            raise InvalidDatumError("Key datum has no key data", offset=self.offset, reason="empty_key")
+        return self._payload
 
 
 class UnicodeDatum(Datum):
@@ -404,12 +595,16 @@ class UnicodeDatum(Datum):
 
     @property
     def text(self) -> str:
-        return self._data.decode("utf-16-le").rstrip("\x00")
+        # Drop a dangling lead byte instead of letting an attacker-controlled odd length raise
+        # UnicodeDecodeError from deep inside metadata parsing.
+        data = self._data[: len(self._data) - (len(self._data) % 2)]
+        return data.decode("utf-16-le", errors="replace").rstrip("\x00")
 
 
 class StretchKeyDatum(Datum):
     __struct__ = c_bde.FVE_DATUM_STRETCH_KEY
     __complex__ = True
+    __nested__ = True
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} role={self.role.name} key_type={self.key_type} key_flags={self.key_flags}>"
@@ -473,13 +668,47 @@ class AesCcmEncryptedDatum(Datum):
 
     @property
     def data(self) -> bytes:
-        return self._data[len(self.__struct__) :]
+        return self._payload
 
     def unbox(self, key: KeyDatum | bytes) -> Datum:
         key = key.data if isinstance(key, KeyDatum) else key
-        cipher = AES.new(key, AES.MODE_CCM, nonce=self.nonce)
-        decrypted_data = cipher.decrypt_and_verify(self.data, self.mac)
-        return Datum.from_bytes(decrypted_data)
+
+        try:
+            cipher = AES.new(key, AES.MODE_CCM, nonce=self.nonce)
+            decrypted_data = cipher.decrypt_and_verify(self.data, self.mac)
+        except ValueError as e:
+            raise ValueError(f"Invalid AES-CCM encrypted datum: {e}") from e
+
+        try:
+            datum = Datum.from_bytes(decrypted_data)
+        except InvalidDatumError as e:
+            raise InvalidDatumError(
+                f"Invalid decrypted datum: {e}",
+                offset=e.offset,
+                reason=e.reason,
+            ) from e
+
+        # Everything that BitLocker encrypts with AES-CCM in the metadata is a KEY datum: the VMK,
+        # the FVEK and the information integrity digest. Accepting anything else here would let a
+        # datum of a different shape be used as key material.
+        if not isinstance(datum, KeyDatum):
+            raise InvalidDatumError(
+                f"Decrypted datum is {datum.__class__.__name__}, expected KeyDatum",
+                offset=0,
+                reason="unexpected_type",
+            )
+
+        if datum.role != FVE_DATUM_ROLE.PROPERTY:
+            raise InvalidDatumError(
+                f"Decrypted datum has role {datum.role}, expected PROPERTY",
+                offset=0,
+                reason="unexpected_role",
+            )
+
+        if not datum._payload:
+            raise InvalidDatumError("Decrypted key datum has no key data", offset=0, reason="empty_key")
+
+        return datum
 
 
 class TpmEncryptedBlobDatum(Datum):
@@ -524,7 +753,7 @@ class TpmEncryptedBlobDatum(Datum):
 
     @property
     def data(self) -> bytes:
-        return self._data[len(self.__struct__) :]
+        return self._payload
 
 
 class ValidationEntry:
@@ -567,6 +796,7 @@ class ValidationInfoDatum(Datum):
 class VmkInfoDatum(Datum):
     __struct__ = c_bde.FVE_DATUM_VMK_INFO
     __complex__ = True
+    __nested__ = True
 
     def __repr__(self) -> str:
         return (
@@ -592,6 +822,8 @@ class VmkInfoDatum(Datum):
 
     def decrypt(self, key: KeyDatum | bytes) -> KeyDatum:
         encrypted_key = self.aes_ccm_encrypted_key()
+        if encrypted_key is None:
+            raise ValueError("VMK has no AES-CCM encrypted key property")
         return encrypted_key.unbox(key)
 
     def label(self) -> str | None:
@@ -675,6 +907,7 @@ class VmkInfoDatum(Datum):
 class ExternalInfoDatum(Datum):
     __struct__ = c_bde.FVE_DATUM_EXTERNAL_INFO
     __complex__ = True
+    __nested__ = True
 
     def __repr__(self) -> str:
         return (
@@ -802,7 +1035,7 @@ class VirtualizationInfoDatum(Datum):
         | c_bde.FVE_EXTENDED_INFORMATION_V5
         | None
     ):
-        if not self.data_segment:
+        if not self.data_segment or len(self.data_segment) < 2:
             return None
 
         struct_versions = {
@@ -817,7 +1050,16 @@ class VirtualizationInfoDatum(Datum):
         if version not in struct_versions:
             raise NotImplementedError(f"Unknown FVE_EXTENDED_INFORMATION version: {version}")
 
-        return struct_versions[version](self.data_segment)
+        struct = struct_versions[version]
+        if len(self.data_segment) < struct.size:
+            raise InvalidDatumError(
+                f"Extended information version {version} needs {struct.size:#x} bytes, "
+                f"only {len(self.data_segment):#x} available",
+                offset=self.offset,
+                reason="truncated_struct",
+            )
+
+        return struct(self.data_segment)
 
 
 class ConcatHashKeyDatum(Datum):
@@ -874,7 +1116,7 @@ class AesCbc256HmacSha512EncryptedDatum(Datum):
 
     @property
     def data(self) -> bytes:
-        return self._data[len(self.__struct__) :]
+        return self._payload
 
 
 DATUM_TYPE_MAP = {

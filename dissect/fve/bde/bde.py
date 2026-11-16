@@ -32,7 +32,7 @@ from dissect.fve.bde.eow import EowInformation
 from dissect.fve.bde.information import Dataset, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
 from dissect.fve.crypto import create_cipher
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidDatumError, InvalidHeaderError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -158,7 +158,10 @@ class BDE:
         if not (fvek := self.information.dataset.find_fvek()):
             raise ValueError("No FVEK found")
 
-        fvek = fvek.unbox(key)
+        try:
+            fvek = fvek.unbox(key)
+        except InvalidDatumError as e:
+            raise ValueError("No usable FVEK found") from e
         if not isinstance(fvek, KeyDatum):
             raise TypeError("Invalid unboxed FVEK")
 
@@ -179,7 +182,15 @@ class BDE:
         if not (vmk := self.information.dataset.find_clear_vmk()):
             raise ValueError("No clear VMK found")
 
-        return self.unlock(vmk.decrypt(vmk.clear_key()))
+        if not (clear_key := vmk.clear_key()):
+            raise ValueError("No clear VMK key found")
+
+        try:
+            decrypted_key = vmk.decrypt(clear_key)
+        except InvalidDatumError as e:
+            raise ValueError("Unable to unlock with clear key") from e
+
+        return self.unlock(decrypted_key)
 
     def unlock_with_recovery_password(self, recovery_password: str, identifier: UUID | str | None = None) -> BDE:
         """Unlock this volume with the recovery password."""
@@ -335,10 +346,14 @@ class BootSector:
 
     def __init__(self, fh: BinaryIO):
         buf = fh.read(512)
+        if len(buf) != 512:
+            raise ValueError("Truncated BDE boot sector")
 
         self.boot_sector = c_bde.BOOT_SECTOR(buf)
         self.sector_size = self.boot_sector.Bpb.BytesPerSector
         self.cluster_size = self.sector_size * self.boot_sector.Bpb.SectorsPerCluster
+        if not self.sector_size or not self.cluster_size:
+            raise ValueError("Invalid BDE sector or cluster size")
 
         self.guid = None
         self.information_offsets = []
@@ -348,11 +363,15 @@ class BootSector:
         eow_guid_offset = buf.find(EOW_INFORMATION_OFFSET_GUID.bytes_le)
 
         if eow_guid_offset != -1:
+            if len(buf) - eow_guid_offset < len(c_bde.FVE_EOW_GUID_RECOGNITION):
+                raise ValueError("Truncated BDE EOW GUID recognition structure")
             info = c_bde.FVE_EOW_GUID_RECOGNITION(buf[eow_guid_offset:])
             self.guid = EOW_INFORMATION_OFFSET_GUID
             self.information_offsets = info.InformationOffset
             self.eow_offsets = info.EowOffset
         elif info_guid_offset != -1:
+            if len(buf) - info_guid_offset < len(c_bde.FVE_GUID_RECOGNITION):
+                raise ValueError("Truncated BDE GUID recognition structure")
             info = c_bde.FVE_GUID_RECOGNITION(buf[info_guid_offset:])
             self.guid = INFORMATION_OFFSET_GUID
             self.information_offsets = info.InformationOffset
