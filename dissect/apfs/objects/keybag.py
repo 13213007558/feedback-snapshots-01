@@ -31,6 +31,11 @@ except ImportError:
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+# Flag set on both the KEK and VEK of volumes converted from CoreStorage/HFS+.
+# It selects the 128-bit wrapped key path (24 byte wrapped material) instead of
+# the regular 256-bit path (40 byte wrapped material).
+CONVERTED_VOLUME_KEY_FLAG = 2
+
 
 class Keybag(Object):
     """APFS Keybag."""
@@ -57,7 +62,17 @@ class Keybag(Object):
             )
             offset += (len(c_apfs.keybag_entry) + entry.ke_keylen + 0x0F) & ~0x0F  # Align to 16 bytes
 
-            self.entries[(entry.ke_uuid, entry.ke_tag)] = entry
+            identity = (entry.ke_uuid, entry.ke_tag)
+            existing = self.entries.get(identity)
+            if existing is not None and existing.ke_keydata != entry.ke_keydata:
+                # Conflicting records share the same (uuid, tag) identity but carry different key material.
+                # Silently letting the later record overwrite the earlier one would make the selected key
+                # depend on insertion order, so reject the keybag instead.
+                raise Error(
+                    f"Conflicting keybag records for uuid {UUID(bytes_le=entry.ke_uuid)} "
+                    f"and tag {c_apfs.KB_TAG(entry.ke_tag).name}"
+                )
+            self.entries[identity] = entry
 
     @cached_property
     def type(self) -> c_apfs.OBJECT_TYPE:
@@ -191,8 +206,8 @@ class KEK(Sequence):
 
         wrapped = blob["wrapped"].native[:40]
 
-        if self.flags & 2:
-            # Unknown flag, but used in CoreStorage converted volumes
+        if self.flags & CONVERTED_VOLUME_KEY_FLAG:
+            # Converted CoreStorage volumes use a 128-bit wrapping key and 24 byte wrapped material
             key = key[:16]
             wrapped = wrapped[:24]
 
@@ -241,17 +256,17 @@ class VEK(Sequence):
         )
 
     def unwrap(self, key: bytes) -> bytes:
-        """Unwrap the KEK using the given key."""
+        """Unwrap the VEK using the given KEK."""
         wrapped = self["blob"]["wrapped"].native
 
-        if self.flags & 2:
-            # Unknown flag, but used in CoreStorage converted volumes
+        if self.flags & CONVERTED_VOLUME_KEY_FLAG:
+            # Converted CoreStorage volumes use a 128-bit wrapping key and 24 byte wrapped material
             key = key[:16]
             wrapped = wrapped[:24]
 
         unwrapped = aes_unwrap(key, wrapped)
 
-        if self.flags & 2:
+        if self.flags & CONVERTED_VOLUME_KEY_FLAG:
             unwrapped += hashlib.sha256(unwrapped + self["blob"]["uuid"].native).digest()[:16]
 
         return unwrapped

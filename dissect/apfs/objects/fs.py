@@ -17,6 +17,7 @@ from dissect.apfs.cursor import Cursor
 from dissect.apfs.exception import Error, FileNotFoundError, NotADirectoryError, NotASymlinkError
 from dissect.apfs.objects.base import Object
 from dissect.apfs.objects.btree import BTree
+from dissect.apfs.objects.keybag import CONVERTED_VOLUME_KEY_FLAG, KEK, VEK
 from dissect.apfs.objects.omap import ObjectMap
 from dissect.apfs.stream import DecmpfsStream, FileStream
 from dissect.apfs.util import cmp_fs, cmp_fs_dir, cmp_fs_dir_hash, parse_fs_object_key
@@ -221,26 +222,119 @@ class FS(Object):
         return self.keybag.password_hint(self.object.apfs_vol_uuid)
 
     def unlock(self, password: str, uuid: UUID | str | None = None) -> None:
-        if (vek := self.container.keybag.vek(self.object.apfs_vol_uuid)) is None:
-            raise Error("No VEK found for this volume")
+        """Unlock the encrypted volume with the given password.
 
-        for kek in self.keybag.keks():
-            if uuid is not None and str(kek.uuid) != str(uuid):
-                continue
+        The keybag is treated as untrusted input. A successful password-based key unwrap alone is not
+        sufficient: every record is bound to the volume through its outer keybag UUID/tag and its inner
+        blob UUID, protected by an HMAC, and its wrapped key is authenticated by the AES key unwrap.
+        A contradiction in any of these checks aborts the unlock before a cipher is installed.
 
-            if not kek.verify():
+        Args:
+            password: The password to unlock the volume with.
+            uuid: Optional inner UUID of a specific user KEK to try.
+        """
+        # Always start from a clean state so a failed (re)unlock never leaves a previously working
+        # cipher in place and no derived key material outlives this call.
+        self._cipher = None
+
+        volume_uuid = self.object.apfs_vol_uuid
+        vek = self._load_vek(volume_uuid)
+        is_converted = bool(vek.flags & CONVERTED_VOLUME_KEY_FLAG)
+
+        requested_uuid = str(uuid) if uuid is not None else None
+        derived_cipher = None
+
+        # Multiple legitimate user KEKs may be present; each is fully validated before it is tried.
+        for kek, entry in self._load_keks():
+            self._validate_kek(kek, entry, vek, volume_uuid, is_converted)
+
+            if requested_uuid is not None and str(kek.uuid) != requested_uuid:
                 continue
 
             try:
-                vek = vek.unwrap(kek.unwrap(password))
+                # The AES key unwrap authenticates the wrapped material through its integrity check,
+                # so a wrong password or tampered wrapped key fails here rather than producing a key.
+                unwrapped_kek = kek.unwrap(password)
+                unwrapped_vek = vek.unwrap(unwrapped_kek)
             except Exception:
+                # This user record could not be used with this password; try the next one.
                 continue
-            else:
-                self._cipher = create_cipher("aes-xts-128", vek)
-                break
 
-        if self._cipher is None:
+            # Only install the cipher once every stage has succeeded for the same record chain.
+            derived_cipher = create_cipher("aes-xts-128", unwrapped_vek)
+            break
+
+        if derived_cipher is None:
             raise Error("Failed to unlock volume with the given password")
+
+        self._cipher = derived_cipher
+
+    def _load_vek(self, volume_uuid: bytes) -> VEK:
+        """Load and fully validate the volume encryption key record for this volume."""
+        container_keybag = self.container.keybag
+
+        entry = container_keybag.entries.get((volume_uuid, c_apfs.KB_TAG.VOLUME_KEY.value))
+        if entry is None:
+            raise Error("No VEK found for this volume")
+
+        # Stage 1: outer identity binding. The record must be explicitly addressed to this volume.
+        if entry.ke_uuid != volume_uuid:
+            raise Error("VEK keybag record is not bound to this volume UUID")
+
+        vek = VEK.load(entry.ke_keydata)
+
+        # Stage 2: integrity. A modified blob invalidates the HMAC and must never be used.
+        if not vek.verify():
+            raise Error("VEK record failed HMAC verification")
+
+        # Stage 3: inner identity binding. On a regular volume the blob UUID names the volume itself.
+        # A converted volume instead carries a dedicated crypto UUID that the KEK chain must match.
+        if not (vek.flags & CONVERTED_VOLUME_KEY_FLAG) and vek.uuid.bytes_le != volume_uuid:
+            raise Error("VEK inner UUID does not match the volume UUID")
+
+        return vek
+
+    def _load_keks(self) -> Iterator[tuple[KEK, c_apfs.keybag_entry]]:
+        """Yield the raw KEK records in the volume keybag as ``(KEK, keybag_entry)`` pairs."""
+        volume_keybag = self.keybag
+        if volume_keybag is None:
+            return
+
+        for entry in volume_keybag.entries.values():
+            if entry.ke_tag != c_apfs.KB_TAG.VOLUME_UNLOCK_RECORDS.value:
+                continue
+            yield KEK.load(entry.ke_keydata), entry
+
+    def _validate_kek(
+        self,
+        kek: KEK,
+        entry: c_apfs.keybag_entry,
+        vek: VEK,
+        volume_uuid: bytes,
+        is_converted: bool,
+    ) -> None:
+        """Validate one KEK record's identity binding, HMAC and flag consistency."""
+        inner_uuid = kek["blob"]["uuid"].native
+
+        # Stage 1: outer identity binding. A regular volume keys each entry by the user's own UUID,
+        # which must equal the blob's inner UUID. A converted volume keys every entry by the volume
+        # UUID while the blob carries a separate crypto UUID, so bind it to the volume instead.
+        expected_outer_uuid = volume_uuid if is_converted else inner_uuid
+        if entry.ke_uuid != expected_outer_uuid:
+            raise Error("KEK keybag record identity does not match its inner blob UUID")
+
+        # Stage 2: integrity. A modified blob invalidates the HMAC and must never be used.
+        if not kek.verify():
+            raise Error("KEK record failed HMAC verification")
+
+        # Stage 3: the wrapped key path (flag) must be consistent across the KEK -> VEK chain.
+        if bool(kek.flags & CONVERTED_VOLUME_KEY_FLAG) != is_converted:
+            raise Error("KEK and VEK converted-volume flag mismatch")
+
+        # Stage 4: inner identity binding. On a converted volume the KEK and VEK share a crypto UUID;
+        # on a regular volume each user KEK carries its own user UUID and only needs to be self-consistent.
+        if is_converted and kek.uuid != vek.uuid:
+            raise Error("KEK inner UUID does not match the VEK inner UUID")
 
     def cursor(self) -> Cursor:
         """Create a new cursor for the volume's root B-tree."""
