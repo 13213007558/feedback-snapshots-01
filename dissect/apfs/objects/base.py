@@ -82,7 +82,8 @@ class Object:
                 and header.o_type & c_apfs.OBJECT_TYPE_MASK != cls.__type__
             ):
                 # If the type is invalid, decrypt the block
-                block = cipher.decrypt(block, address * container.sectors_per_block)
+                # The cipher uses a device-relative sector, so strip any Fusion tier-2 bit
+                block = cipher.decrypt(block, container.device_block_address(address) * container.sectors_per_block)
 
         if cls is not Object:
             # If a subclass is called directly, use that class

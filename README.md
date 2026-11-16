@@ -19,6 +19,37 @@ pip install dissect.apfs
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Fusion Drive support
+
+A Fusion Drive can be opened by supplying both collected device images explicitly:
+
+```python
+from dissect.apfs import APFS
+
+with open("tier1.img", "rb") as fh, open("tier2.img", "rb") as tier2_fh:
+    container = APFS(fh, tier2_fh)
+```
+
+Physical block addresses that carry the format's tier-2 device selection bit
+(`FUSION_TIER2_DEVICE_BYTE_ADDR`) are routed to `tier2_fh`. The bit is defined as a byte
+address and converted using the container block size, and the same routing is used for
+metadata objects and file extents.
+
+The following are currently **not** interpreted, so a Fusion drive cannot be considered
+fully supported:
+
+- The Fusion middle tree (`nx_fusion_mt_oid`) is not used to remap addresses that lack the
+  tier-2 selection bit.
+- The Fusion write-back cache (`nx_fusion_wbc`, `NX_FUSION_WBC` and `NX_FUSION_WBC_LIST`) is
+  not applied, so blocks whose current contents are still in the tier-1 cache are not
+  reconstructed.
+- Other Fusion metadata, such as the write-back cache range and tenant records, is not used
+  for address resolution.
+
+A missing tier-2 device, a read crossing the device selection boundary and a read beyond a
+device's capacity fail explicitly; they are never silently served from the other device.
+Opening a single image without `tier2_fh` continues to work as before.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
