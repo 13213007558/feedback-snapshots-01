@@ -1,0 +1,293 @@
+/*
+ * Differential decode harness for the SecMsg schema
+ * (tests/differential/secmsg.asn). "@NS@" is replaced with the generated
+ * codec namespace (secmsg_oer or secmsg_uper) by
+ * tests/differential/differential.py before compilation.
+ *
+ * Reads one hex-encoded message from argv[1], decodes it with the
+ * generated decoder and prints exactly one JSON line on stdout:
+ *
+ *   {"status":"ok","consumed":<bytes>,"fields":{...}}
+ *   {"status":"reject","error":<code>}
+ *
+ * The decoder is always called with the exact input length and the real
+ * output struct. A truncated or out-of-range input is reported as reject;
+ * fields are never fabricated from a partially decoded struct. The struct
+ * is poisoned with 0xaa before decoding so uninitialized data cannot
+ * masquerade as successfully decoded default values. Any non-zero exit
+ * code, or missing/invalid JSON output, is treated as a harness crash by
+ * the runner and is never counted as agreement.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "@NS@.h"
+
+static int hex_nibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return (ch - '0');
+    }
+
+    if (ch >= 'a' && ch <= 'f') {
+        return (ch - 'a' + 10);
+    }
+
+    if (ch >= 'A' && ch <= 'F') {
+        return (ch - 'A' + 10);
+    }
+
+    return (-1);
+}
+
+static void print_hex(const uint8_t *data_p, size_t length)
+{
+    size_t i;
+
+    putchar('"');
+
+    for (i = 0; i < length; i++) {
+        printf("%02x", data_p[i]);
+    }
+
+    putchar('"');
+}
+
+static void print_bool(bool value)
+{
+    printf("%s", value ? "true" : "false");
+}
+
+static void print_content(const struct @NS@_sec_msg_content_t *content_p)
+{
+    switch (content_p->choice) {
+    case @NS@_sec_msg_content_choice_text_e:
+        printf("{\"choice\":\"text\",\"value\":");
+        print_hex(content_p->value.text.buf, content_p->value.text.length);
+        printf("}");
+        break;
+
+    case @NS@_sec_msg_content_choice_raw_e:
+        printf("{\"choice\":\"raw\",\"value\":");
+        print_hex(content_p->value.raw.buf, sizeof(content_p->value.raw.buf));
+        printf("}");
+        break;
+
+    case @NS@_sec_msg_content_choice_empty_e:
+        printf("{\"choice\":\"empty\",\"value\":");
+        print_bool(content_p->value.empty);
+        printf("}");
+        break;
+
+    default:
+        /* An out-of-range discriminant after a successful decode is a
+         * decoder bug; make it visible instead of printing a field. */
+        printf("{\"choice\":\"<invalid:%d>\"}", (int)content_p->choice);
+        break;
+    }
+}
+
+static void print_signed_body(const struct @NS@_sec_msg_signed_body_t *body_p)
+{
+    printf("{\"signerDigest\":");
+    print_hex(body_p->signerDigest.buf, sizeof(body_p->signerDigest.buf));
+    printf(",\"signature\":");
+    print_hex(body_p->signature.buf, sizeof(body_p->signature.buf));
+    printf(",\"content\":");
+    print_content(&body_p->content);
+    printf("}");
+}
+
+static void print_plain_body(const struct @NS@_sec_msg_plain_body_t *body_p)
+{
+    uint8_t i;
+
+    printf("{\"recipients\":[");
+
+    for (i = 0; i < body_p->recipients.length; i++) {
+        if (i > 0) {
+            printf(",");
+        }
+
+        printf("%u", (unsigned int)body_p->recipients.elements[i]);
+    }
+
+    printf("],\"urgent\":");
+    print_bool(body_p->urgent);
+    printf("}");
+}
+
+static void print_control_body(const struct @NS@_sec_msg_control_body_t *body_p)
+{
+    uint8_t i;
+
+    printf("{\"command\":%u,\"params\":[", (unsigned int)body_p->command);
+
+    for (i = 0; i < body_p->params.length; i++) {
+        if (i > 0) {
+            printf(",");
+        }
+
+        printf("{\"key\":%u,\"value\":%d}",
+               (unsigned int)body_p->params.elements[i].key,
+               (int)body_p->params.elements[i].value);
+    }
+
+    printf("]}");
+}
+
+static void print_body(const struct @NS@_sec_msg_body_t *body_p)
+{
+    switch (body_p->choice) {
+    case @NS@_sec_msg_body_choice_signedData_e:
+        printf("{\"choice\":\"signedData\",\"value\":");
+        print_signed_body(&body_p->value.signedData);
+        printf("}");
+        break;
+
+    case @NS@_sec_msg_body_choice_plain_e:
+        printf("{\"choice\":\"plain\",\"value\":");
+        print_plain_body(&body_p->value.plain);
+        printf("}");
+        break;
+
+    case @NS@_sec_msg_body_choice_control_e:
+        printf("{\"choice\":\"control\",\"value\":");
+        print_control_body(&body_p->value.control);
+        printf("}");
+        break;
+
+    default:
+        printf("{\"choice\":\"<invalid:%d>\"}", (int)body_p->choice);
+        break;
+    }
+}
+
+static void print_sec_msg(const struct @NS@_sec_msg_sec_msg_t *msg_p)
+{
+    printf("{\"version\":%u,\"msgId\":%lu,\"body\":",
+           (unsigned int)msg_p->version,
+           (unsigned long)msg_p->msgId);
+    print_body(&msg_p->body);
+
+    if (msg_p->is_trustAnchor_present) {
+        printf(",\"trustAnchor\":");
+        print_hex(msg_p->trustAnchor.buf, sizeof(msg_p->trustAnchor.buf));
+    }
+
+    if (msg_p->is_priority_present) {
+        printf(",\"priority\":%u", (unsigned int)msg_p->priority);
+    }
+
+    printf("}");
+}
+
+static void decode_and_print(const uint8_t *input_p, size_t length)
+{
+    ssize_t res;
+    struct @NS@_sec_msg_sec_msg_t decoded;
+
+    /* Poison the output struct: a decoder that forgets to write a field
+     * must not appear to produce a clean default value. */
+    memset(&decoded, 0xaa, sizeof(decoded));
+
+    /* Pass the exact input length; never round it up or pad. */
+    res = @NS@_sec_msg_sec_msg_decode(&decoded, input_p, length);
+
+    if (res < 0) {
+        printf("{\"status\":\"reject\",\"error\":%ld}\n", (long)res);
+
+        return;
+    }
+
+    printf("{\"status\":\"ok\",\"consumed\":%ld,\"fields\":", (long)res);
+    print_sec_msg(&decoded);
+    printf("}\n");
+}
+
+static int decode_hex_line(const char *hex_p)
+{
+    size_t hex_length;
+    size_t length;
+    size_t i;
+    int high;
+    int low;
+    uint8_t *input_p;
+
+    hex_length = strlen(hex_p);
+
+    if ((hex_length % 2) != 0) {
+        fprintf(stderr, "error: odd number of hex digits\n");
+
+        return (2);
+    }
+
+    length = hex_length / 2;
+    input_p = malloc(length == 0 ? 1 : length);
+
+    if (input_p == NULL) {
+        fprintf(stderr, "error: out of memory\n");
+
+        return (2);
+    }
+
+    for (i = 0; i < length; i++) {
+        high = hex_nibble(hex_p[2 * i]);
+        low = hex_nibble(hex_p[2 * i + 1]);
+
+        if (high < 0 || low < 0) {
+            fprintf(stderr, "error: invalid hex digit\n");
+            free(input_p);
+
+            return (2);
+        }
+
+        input_p[i] = (uint8_t)((high << 4) | low);
+    }
+
+    decode_and_print(input_p, length);
+    free(input_p);
+
+    return (0);
+}
+
+int main(int argc, char *argv[])
+{
+    static char line[65536];
+    size_t length;
+
+    if (argc == 2) {
+        /* Single-shot mode: decode the hex string in argv[1]. */
+        return (decode_hex_line(argv[1]));
+    }
+
+    if (argc != 1) {
+        fprintf(stderr, "usage: %s [<hex-encoded-message>]\n", argv[0]);
+
+        return (2);
+    }
+
+    /* Batch mode: decode one hex-encoded message per stdin line and
+     * print one JSON verdict per line, flushing after each so output
+     * produced before a crash is not lost. Empty lines decode as
+     * empty inputs. */
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        length = strlen(line);
+
+        if (length > 0 && line[length - 1] == '\n') {
+            line[length - 1] = '\0';
+        }
+
+        if (decode_hex_line(line) != 0) {
+            return (2);
+        }
+
+        fflush(stdout);
+    }
+
+    return (0);
+}
