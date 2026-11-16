@@ -903,9 +903,12 @@ module OneLogin
 
         old_errors = @errors.clone
 
+        opts = {}
+        opts[:allowed_signature_methods] = settings.security[:allowed_signature_methods]
+        opts[:allowed_digest_methods] = settings.security[:allowed_digest_methods]
+
         idp_certs = settings.get_idp_cert_multi
         if idp_certs.nil? || idp_certs[:signing].empty?
-          opts = {}
           opts[:fingerprint_alg] = settings.idp_cert_fingerprint_algorithm
           idp_cert = settings.get_idp_cert
           fingerprint = settings.get_fingerprint
@@ -925,7 +928,7 @@ module OneLogin
           valid = false
           expired = false
           idp_certs[:signing].each do |idp_cert|
-            valid = doc.validate_document_with_cert(idp_cert, true)
+            valid = doc.validate_document_with_cert(idp_cert, true, opts)
             if valid
               if settings.security[:check_idp_cert_expiration]
                 if OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)

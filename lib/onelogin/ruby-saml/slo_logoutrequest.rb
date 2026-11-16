@@ -286,6 +286,11 @@ module OneLogin
           options[:get_params]['SigAlg'] = CGI.unescape(options[:raw_get_params]['SigAlg'])
         end
 
+        if !options[:get_params]['SigAlg'].nil? && !options[:raw_get_params]['SigAlg'].nil? &&
+           options[:get_params]['SigAlg'] != CGI.unescape(options[:raw_get_params]['SigAlg'])
+          return append_error("Conflicting SigAlg declarations on Logout Request")
+        end
+
         idp_cert = settings.get_idp_cert
         idp_certs = settings.get_idp_cert_multi
 
@@ -306,7 +311,8 @@ module OneLogin
             :cert         => idp_cert,
             :sig_alg      => options[:get_params]['SigAlg'],
             :signature    => options[:get_params]['Signature'],
-            :query_string => query_string
+            :query_string => query_string,
+            :allowed_signature_methods => settings.security[:allowed_signature_methods]
           )
           if valid && settings.security[:check_idp_cert_expiration]
             if OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)

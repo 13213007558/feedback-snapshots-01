@@ -241,10 +241,16 @@ module OneLogin
       # @option params [String] sig_alg The SigAlg parameter
       # @option params [String] signature The Signature parameter (base64 encoded)
       # @option params [String] query_string The full GET Query String to be compared
+      # @option params [Array<String>] allowed_signature_methods Signature algorithms accepted from the IdP.
+      #   When provided, a SigAlg outside this list is rejected before any cryptographic operation;
+      #   the algorithm self-declared by the message can never extend this list.
       # @return [Boolean] True if the Signature is valid, False otherwise
       #
       def self.verify_signature(params)
-        cert, sig_alg, signature, query_string = [:cert, :sig_alg, :signature, :query_string].map { |k| params[k]}
+        cert, sig_alg, signature, query_string, allowed_signature_methods = [:cert, :sig_alg, :signature, :query_string, :allowed_signature_methods].map { |k| params[k]}
+        if allowed_signature_methods && !allowed_signature_methods.include?(sig_alg)
+          return false
+        end
         signature_algorithm = XMLSecurity::BaseDocument.new.algorithm(sig_alg)
         return cert.public_key.verify(signature_algorithm.new, Base64.decode64(signature), query_string)
       end

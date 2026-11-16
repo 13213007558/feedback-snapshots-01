@@ -1,5 +1,8 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Add a migratable message algorithm policy: new `security[:allowed_signature_methods]` and `security[:allowed_digest_methods]` settings control which SignatureMethod/DigestMethod (XML signatures) and SigAlg (HTTP-Redirect binding) values are accepted inbound, independently from the outbound `security[:signature_method]`/`security[:digest_method]` selection and from `idp_cert_fingerprint_algorithm`. Incoming messages can no longer widen the accepted algorithms by self-declaring them, unknown algorithm URIs are rejected instead of falling back to SHA-1, and conflicting algorithm declarations within a message are rejected. Defaults keep accepting SHA-1 for legacy IdP compatibility.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner

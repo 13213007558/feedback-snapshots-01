@@ -225,6 +225,9 @@ module XMLSecurity
       @cached_signed_info = nil
       @signature = nil
       @signature_algorithm = nil
+      @signature_method_uri = nil
+      @digest_method_uris = []
+      @algorithm_declarations_conflict = false
       @ref = nil
       @processed = false
     end
@@ -282,10 +285,10 @@ module XMLSecurity
           end
         end
       end
-      validate_signature(base64_cert, soft)
+      validate_signature(base64_cert, soft, options)
     end
 
-    def validate_document_with_cert(idp_cert, soft = true)
+    def validate_document_with_cert(idp_cert, soft = true, options = {})
       # get cert from response
       cert_element = REXML::XPath.first(
         self,
@@ -309,7 +312,7 @@ module XMLSecurity
       end
 
       encoded_idp_cert = Base64.encode64(idp_cert.to_pem)
-      validate_signature(encoded_idp_cert, true)
+      validate_signature(encoded_idp_cert, true, options)
     end
 
     def cache_referenced_xml(soft, check_malformed_doc = true)
@@ -337,12 +340,24 @@ module XMLSecurity
       return if sig_element.nil?
 
       # signature method
-      sig_alg_value = REXML::XPath.first(
+      sig_alg_elements = REXML::XPath.match(
         sig_element,
         "./ds:SignedInfo/ds:SignatureMethod",
         {"ds"=>DSIG}
       )
-      @signature_algorithm = algorithm(sig_alg_value)
+      sig_alg_values = sig_alg_elements.map do |element|
+        attribute = element.attribute("Algorithm")
+        attribute && attribute.value
+      end.compact.uniq
+
+      if sig_alg_values.size > 1
+        # Multiple conflicting SignatureMethod declarations: reject the document
+        @algorithm_declarations_conflict = true
+        return
+      end
+
+      @signature_method_uri = sig_alg_values.first
+      @signature_algorithm = algorithm(sig_alg_elements.first)
 
       # get signature
       base64_signature = REXML::XPath.first(
@@ -377,7 +392,23 @@ module XMLSecurity
       inclusive_namespaces = extract_inclusive_namespaces
 
       # check digests
-      @ref = REXML::XPath.first(rexml_signed_info, "./ds:Reference", {"ds"=>DSIG})
+      reference_elements = REXML::XPath.match(rexml_signed_info, "./ds:Reference", {"ds"=>DSIG})
+      digest_alg_values = []
+      reference_elements.each do |reference_element|
+        REXML::XPath.match(reference_element, "./ds:DigestMethod", {"ds"=>DSIG}).each do |digest_element|
+          attribute = digest_element.attribute("Algorithm")
+          digest_alg_values << attribute.value if attribute
+        end
+      end
+      @digest_method_uris = digest_alg_values.uniq
+
+      if @digest_method_uris.size > 1
+        # Multiple conflicting DigestMethod declarations: reject the document
+        @algorithm_declarations_conflict = true
+        return
+      end
+
+      @ref = reference_elements.first
       return if @ref.nil?
 
       reference_nodes = nokogiri_document.xpath("//*[@ID=$id]", nil, { 'id' => extract_signed_element_id })
@@ -396,16 +427,35 @@ module XMLSecurity
       @referenced_xml = hashed_element.canonicalize(canon_algorithm, inclusive_namespaces)
     end
 
-    def validate_signature(base64_cert, soft = true)
+    def validate_signature(base64_cert, soft = true, options = {})
       if !@processed
         cache_referenced_xml(soft)
       end
 
-      return append_error("No Signature Algorithm Method found", soft) if @signature_algorithm.nil?  
-      return append_error("No Signature node found", soft) if @signature.nil?  
+      if @algorithm_declarations_conflict
+        return append_error("Conflicting SignatureMethod or DigestMethod declarations", soft)
+      end
+
+      return append_error("No Signature Algorithm Method found", soft) if @signature_algorithm.nil?
+      return append_error("No Signature node found", soft) if @signature.nil?
       return append_error("No canonized SignedInfo ", soft) if @cached_signed_info.nil?
       return append_error("No Reference node found", soft) if @ref.nil?
       return append_error("No referenced XML", soft) if @referenced_xml.nil?
+
+      # The allowed algorithms come only from the local configuration; an
+      # algorithm declared by the message itself can never extend that list.
+      allowed_signature_methods = options[:allowed_signature_methods]
+      if allowed_signature_methods && !allowed_signature_methods.include?(@signature_method_uri)
+        return append_error("Signature Method '#{@signature_method_uri}' is not allowed", soft)
+      end
+
+      allowed_digest_methods = options[:allowed_digest_methods]
+      if allowed_digest_methods
+        disallowed_digest = @digest_method_uris.find { |uri| !allowed_digest_methods.include?(uri) }
+        if disallowed_digest
+          return append_error("Digest Method '#{disallowed_digest}' is not allowed", soft)
+        end
+      end
 
       # get certificate object
       cert_text = Base64.decode64(base64_cert)

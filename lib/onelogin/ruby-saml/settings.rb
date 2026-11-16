@@ -296,6 +296,25 @@ module OneLogin
           :embed_sign                 => false, # Deprecated
           :digest_method              => XMLSecurity::Document::SHA1,
           :signature_method           => XMLSecurity::Document::RSA_SHA1,
+          # Inbound message algorithm policy. Only signatures and digests
+          # whose algorithms appear in these lists are accepted; an algorithm
+          # declared by an incoming message can never extend them.
+          # The defaults keep accepting SHA-1 for backwards compatibility
+          # with legacy IdPs. To migrate away from SHA-1, remove the SHA-1
+          # URIs (and keep :signature_method / :digest_method aligned for
+          # outbound messages).
+          :allowed_signature_methods   => [
+            XMLSecurity::Document::RSA_SHA1,
+            XMLSecurity::Document::RSA_SHA256,
+            XMLSecurity::Document::RSA_SHA384,
+            XMLSecurity::Document::RSA_SHA512
+          ].freeze,
+          :allowed_digest_methods      => [
+            XMLSecurity::Document::SHA1,
+            XMLSecurity::Document::SHA256,
+            XMLSecurity::Document::SHA384,
+            XMLSecurity::Document::SHA512
+          ].freeze,
           :check_idp_cert_expiration  => false,
           :check_sp_cert_expiration   => false,
           :strict_audience_validation => false,

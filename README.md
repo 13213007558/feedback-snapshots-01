@@ -649,6 +649,78 @@ You may also globally set the SP signature and digest method, to be used in SP s
   settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA1
 ```
 
+#### Message Algorithm Policy (migrating away from SHA-1)
+
+Three different "algorithms" are easy to confuse; ruby-saml keeps them separate:
+
+1. **Message signature/digest algorithms** — the `SignatureMethod`/`DigestMethod`
+   of XML signatures and the `SigAlg` parameter of the HTTP-Redirect binding.
+   These are governed by the message algorithm policy described here.
+2. **The IdP certificate fingerprint algorithm** — `settings.idp_cert_fingerprint_algorithm`
+   only selects the hash used to compare the IdP certificate against
+   `settings.idp_cert_fingerprint`. Changing it does **not** weaken or tighten
+   which message signatures are accepted.
+3. **The certificate's own signature** — the algorithm the CA used to sign the
+   IdP/SP certificate itself. It is a property of the certificate and is not
+   controlled by, nor does it influence, the message algorithm policy.
+
+Inbound, the toolkit only accepts message algorithms that appear in the
+configured allowlists; an algorithm self-declared by an incoming message can
+never extend them, unknown algorithm URIs are rejected instead of being treated
+as SHA-1, and a message carrying conflicting `SignatureMethod`/`DigestMethod`
+(or Redirect `SigAlg`) declarations is rejected:
+
+```ruby
+  # Defaults (legacy compatible): SHA-1/256/384/512 are all accepted inbound.
+  settings.security[:allowed_signature_methods] = [
+    XMLSecurity::Document::RSA_SHA1,
+    XMLSecurity::Document::RSA_SHA256,
+    XMLSecurity::Document::RSA_SHA384,
+    XMLSecurity::Document::RSA_SHA512
+  ]
+  settings.security[:allowed_digest_methods] = [
+    XMLSecurity::Document::SHA1,
+    XMLSecurity::Document::SHA256,
+    XMLSecurity::Document::SHA384,
+    XMLSecurity::Document::SHA512
+  ]
+```
+
+Outbound, `settings.security[:signature_method]` and
+`settings.security[:digest_method]` select the algorithms used when the SP
+signs, covering both embedded XML signatures and the Redirect binding `SigAlg`.
+
+A typical SHA-1 phase-out looks like this:
+
+```ruby
+  # Phase 1 - temporary compatibility with a legacy IdP:
+  # send SHA-256, but still accept the IdP's SHA-1 messages.
+  settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA256
+  settings.security[:digest_method]    = XMLSecurity::Document::SHA256
+  settings.security[:allowed_signature_methods] = [
+    XMLSecurity::Document::RSA_SHA1,   # legacy IdP responses still accepted
+    XMLSecurity::Document::RSA_SHA256
+  ]
+  settings.security[:allowed_digest_methods] = [
+    XMLSecurity::Document::SHA1,       # legacy IdP digests still accepted
+    XMLSecurity::Document::SHA256
+  ]
+
+  # Phase 2 - strict, once the IdP signs with SHA-256:
+  # SHA-1 responses/logout messages from the IdP are now rejected.
+  settings.security[:allowed_signature_methods] = [XMLSecurity::Document::RSA_SHA256]
+  settings.security[:allowed_digest_methods]    = [XMLSecurity::Document::SHA256]
+```
+
+Under the phase 1 compatibility scope, the legacy messages that remain
+acceptable are exactly those whose `SignatureMethod`/`DigestMethod`/`SigAlg`
+are listed: SHA-1-signed responses and assertions, SHA-1 digest references,
+and SHA-1 `SigAlg` logout messages. Anything else unknown or undeclared is
+still rejected. Rotating `settings.idp_cert_fingerprint_algorithm` (for example
+to `XMLSecurity::Document::SHA256`) at any point only changes how the IdP
+certificate fingerprint is computed; it does not add or remove any message
+algorithm from the policy.
+
 #### Signing SP Metadata
 
 You may add a `<ds:Signature>` digital signature element to your SP Metadata XML using the following setting:
