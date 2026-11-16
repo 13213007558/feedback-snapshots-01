@@ -101,16 +101,19 @@ module OneLogin
         end
 
         elem_plaintext = OneLogin::RubySaml::Utils.decrypt_multi(encrypted_id_node, settings.get_sp_decryption_keys)
-        # If we get some problematic noise in the plaintext after decrypting.
-        # This quick regexp parse will grab only the Element and discard the noise.
-        elem_plaintext = elem_plaintext.match(/(.*<\/(\w+:)?NameID>)/m)[0]
 
-        # To avoid namespace errors if saml namespace is not defined
-        # create a parent node first with the namespace defined
-        node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">'
-        elem_plaintext = node_header + elem_plaintext + '</node>'
-        doc = REXML::Document.new(elem_plaintext)
-        doc.root[0]
+        # Parse the whole plaintext as a single XML element instead of
+        # truncating at the NameID closing tag so malformed padding or content
+        # cannot be masked.
+        begin
+          OneLogin::RubySaml::Utils.parse_decrypted_element(
+            elem_plaintext,
+            'NameID',
+            'saml' => 'urn:oasis:names:tc:SAML:2.0:assertion'
+          )
+        rescue OneLogin::RubySaml::Utils::DecryptionError => e
+          raise ValidationError.new(e.message)
+        end
       end
 
       # @return [String|nil] Gets the ID attribute from the Logout Request. if exists.

@@ -1068,7 +1068,7 @@ module OneLogin
       # @return [REXML::Document] The decrypted EncryptedAssertion element
       #
       def decrypt_assertion(encrypted_assertion_node)
-        decrypt_element(encrypted_assertion_node, /(.*<\/(\w+:)?Assertion>)/m)
+        decrypt_element(encrypted_assertion_node, 'Assertion')
       end
 
       # Decrypts an EncryptedID element
@@ -1076,7 +1076,7 @@ module OneLogin
       # @return [REXML::Document] The decrypted EncrypedtID element
       #
       def decrypt_nameid(encrypted_id_node)
-        decrypt_element(encrypted_id_node, /(.*<\/(\w+:)?NameID>)/m)
+        decrypt_element(encrypted_id_node, 'NameID')
       end
 
       # Decrypts an EncryptedAttribute element
@@ -1084,36 +1084,42 @@ module OneLogin
       # @return [REXML::Document] The decrypted EncryptedAttribute element
       #
       def decrypt_attribute(encrypted_attribute_node)
-        decrypt_element(encrypted_attribute_node, /(.*<\/(\w+:)?Attribute>)/m)
+        decrypt_element(encrypted_attribute_node, 'Attribute')
       end
 
       # Decrypt an element
       # @param encrypt_node [REXML::Element] The encrypted element
-      # @param regexp [Regexp] The regular expression to extract the decrypted data
+      # @param expected_element_name [String] The local name the decrypted root element must have
       # @return [REXML::Document] The decrypted element
+      # @raise [ValidationError] If decryption fails or the plaintext is not a single well formed XML element
       #
-      def decrypt_element(encrypt_node, regexp)
+      def decrypt_element(encrypt_node, expected_element_name)
         if settings.nil? || settings.get_sp_decryption_keys.empty?
           raise ValidationError.new('An ' + encrypt_node.name + ' found and no SP private key found on the settings to decrypt it')
         end
 
         if encrypt_node.name == 'EncryptedAttribute'
-          node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+          namespaces = {
+            'saml' => 'urn:oasis:names:tc:SAML:2.0:assertion',
+            'xsi' => 'http://www.w3.org/2001/XMLSchema-instance'
+          }
         else
-          node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">'
+          namespaces = { 'saml' => 'urn:oasis:names:tc:SAML:2.0:assertion' }
         end
 
+        # The cryptographic layer rejects unknown algorithms, bad OAEP
+        # parameters, invalid CBC padding and failed GCM authentication. The
+        # plaintext is then parsed as a single XML element rather than
+        # truncated at an expected closing tag, so padding or content errors
+        # cannot be masked. Error messages stay generic and never embed the
+        # private key or decrypted plaintext.
         elem_plaintext = OneLogin::RubySaml::Utils.decrypt_multi(encrypt_node, settings.get_sp_decryption_keys)
 
-        # If we get some problematic noise in the plaintext after decrypting.
-        # This quick regexp parse will grab only the Element and discard the noise.
-        elem_plaintext = elem_plaintext.match(regexp)[0]
-
-        # To avoid namespace errors if saml namespace is not defined
-        # create a parent node first with the namespace defined
-        elem_plaintext = node_header + elem_plaintext + '</node>'
-        doc = REXML::Document.new(elem_plaintext)
-        doc.root[0]
+        begin
+          OneLogin::RubySaml::Utils.parse_decrypted_element(elem_plaintext, expected_element_name, namespaces)
+        rescue OneLogin::RubySaml::Utils::DecryptionError => e
+          raise ValidationError.new(e.message)
+        end
       end
 
       # Parse the attribute of a given node in Time format

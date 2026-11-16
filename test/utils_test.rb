@@ -368,13 +368,13 @@ class UtilsTest < Minitest::Test
     end
 
     it 'raises an error when there is only one key and it fails to decrypt' do
-      assert_raises OpenSSL::PKey::PKeyError do
+      assert_raises OneLogin::RubySaml::Utils::DecryptionError do
         OneLogin::RubySaml::Utils.decrypt_multi(encrypted, [invalid_key1])
       end
     end
 
     it 'raises an error when all keys fail to decrypt' do
-      assert_raises OpenSSL::PKey::PKeyError do
+      assert_raises OneLogin::RubySaml::Utils::DecryptionError do
         OneLogin::RubySaml::Utils.decrypt_multi(encrypted, [invalid_key1, invalid_key2])
       end
     end
