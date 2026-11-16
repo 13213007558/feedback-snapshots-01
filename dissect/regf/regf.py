@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import struct
+from bisect import bisect_right
+from dataclasses import dataclass
+from enum import IntFlag, auto
 from functools import cached_property, lru_cache
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO, TypeAlias
@@ -26,6 +29,8 @@ from dissect.regf.c_regf import (
 )
 from dissect.regf.exceptions import (
     Error,
+    HiveIntegrityError,
+    HiveStructureError,
     RegistryKeyNotFoundError,
     RegistryValueNotFoundError,
 )
@@ -43,55 +48,342 @@ CellType: TypeAlias = "IndexLeaf | FastLeaf | HashLeaf | IndexRoot | KeyNode | K
 STABLE = 0
 VOLATILE = 1
 
+REGISTRY_FILE_SIGNATURE = 0x66676572  # "regf"
+HBIN_SIGNATURE = 0x6E696268  # "hbin"
+HBIN_ALIGNMENT = 0x1000
+
+
+class HiveState(IntFlag):
+    """Independent integrity conditions that may be present at the same time.
+
+    These flags are not mutually exclusive: a hive can be dirty, mid-transaction
+    and structurally out of bounds at the same time. ``HiveState.OK`` is only
+    present when no other flag is set.
+    """
+
+    OK = 0
+    CHECKSUM_MISMATCH = auto()
+    IN_TRANSACTION = auto()
+    STRUCTURE_OUT_OF_BOUNDS = auto()
+
+
+@dataclass(frozen=True)
+class HiveIntegrity:
+    """Detailed result of the integrity checks performed when opening a hive."""
+
+    filename: str
+    state: HiveState
+    checksum_expected: int
+    checksum_actual: int
+    sequence1: int
+    sequence2: int
+    hbin_ranges: tuple[tuple[int, int], ...]
+    structure_errors: tuple[str, ...]
+
+    @property
+    def checksum_ok(self) -> bool:
+        return self.checksum_expected == self.checksum_actual
+
+    @property
+    def sequences_match(self) -> bool:
+        return self.sequence1 == self.sequence2
+
+    @property
+    def structure_ok(self) -> bool:
+        return not self.structure_errors
+
+    @property
+    def ok(self) -> bool:
+        return self.state == HiveState.OK
+
+    def summary(self) -> str:
+        """Return a stable, log-friendly description of every condition present."""
+        if self.ok:
+            return "integrity OK (checksum matches, sequences match, structure in bounds)"
+
+        reasons = []
+        if self.state & HiveState.CHECKSUM_MISMATCH:
+            reasons.append(
+                f"checksum mismatch (stored 0x{self.checksum_expected:08x}, computed 0x{self.checksum_actual:08x})"
+            )
+        if self.state & HiveState.IN_TRANSACTION:
+            reasons.append(f"transaction in progress (Sequence1 {self.sequence1} != Sequence2 {self.sequence2})")
+        if self.state & HiveState.STRUCTURE_OUT_OF_BOUNDS:
+            reasons.append("structure out of bounds (" + "; ".join(self.structure_errors) + ")")
+
+        return ", ".join(reasons)
+
 
 class RegistryHive:
-    def __init__(self, fh: BinaryIO):
-        self.fh = fh
+    def __init__(self, fh: BinaryIO, strict: bool = False):
+        """Open a registry hive.
 
+        By default the hive is opened leniently: checksum, sequence and structure
+        problems are recorded in :attr:`integrity` (and logged individually) but
+        do not prevent reading. With ``strict=True`` any failed check raises
+        :class:`~dissect.regf.exceptions.HiveIntegrityError` before any cells are
+        parsed.
+        """
+        self.fh = fh
+        self.strict = strict
+
+        self.fh.seek(0, os.SEEK_END)
+        self._file_size = self.fh.tell()
         self.fh.seek(0)
         data = self.fh.read(len(c_regf._HBASE_BLOCK))
+        if len(data) < len(c_regf._HBASE_BLOCK):
+            raise Error(f"Hive header truncated: expected {len(c_regf._HBASE_BLOCK)} bytes, got {len(data)}")
+
         self.header = c_regf._HBASE_BLOCK(data)
         self.version = self.header.Minor
         self.filename = self.header.FileName.rstrip("\x00")
 
-        self.dirty = xor32_crc(data[:508]) == self.header.CheckSum
-        if self.dirty:
-            log.warning(
-                "Checksum failed, the %r hive is dirty, recovery needed, "
-                "may not be able to read keys and values properly",
-                self.filename,
-            )
-        else:
-            log.debug("Hive %r checksum OK", self.filename)
-
-        self.in_transaction = self.header.Sequence1 != self.header.Sequence2
-        if self.in_transaction:
-            log.warning(
-                "The hive %r is undergoing a transaction, may not be able to read keys and values properly",
-                self.filename,
-            )
-        else:
-            log.debug("Hive %r is not undergoing any transactions", self.filename)
-
         self._hbin_offset = len(c_regf._HBASE_BLOCK)
-        self._root = self.cell(self.header.RootCell)
+        self._hbin_ranges, self._hbin_errors = self._scan_hbins()
+        self._hbin_starts = [bin_offset for bin_offset, _ in self._hbin_ranges]
+        self.integrity = self._check_integrity(data)
+        self.state = self.integrity.state
+
+        self._log_integrity()
+
+        if strict and not self.integrity.ok:
+            raise HiveIntegrityError(self.integrity)
+
+        root_error = self._cell_bounds_error(self.header.RootCell)
+        if root_error is not None:
+            self._root = None
+            log.error("Hive %r root cell 0x%x cannot be read: %s", self.filename, self.header.RootCell, root_error)
+        else:
+            self._root = self.cell(self.header.RootCell)
 
         self.cell = lru_cache(4096)(self.cell)
 
+    @property
+    def dirty(self) -> bool:
+        """Whether the header checksum failed (kept for backwards compatibility)."""
+        return bool(self.state & HiveState.CHECKSUM_MISMATCH)
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether Sequence1 and Sequence2 disagree (kept for backwards compatibility)."""
+        return bool(self.state & HiveState.IN_TRANSACTION)
+
+    def _log_integrity(self) -> None:
+        if self.integrity.checksum_ok:
+            log.debug("Hive %r checksum OK", self.filename)
+        else:
+            log.warning(
+                "Hive %r header checksum mismatch: stored 0x%08x, computed 0x%08x, may not be able to read "
+                "keys and values properly",
+                self.filename,
+                self.integrity.checksum_expected,
+                self.integrity.checksum_actual,
+            )
+
+        if self.integrity.sequences_match:
+            log.debug("Hive %r is not undergoing any transactions", self.filename)
+        else:
+            log.warning(
+                "Hive %r has an unfinished transaction: Sequence1 %d != Sequence2 %d, may not be able to read "
+                "keys and values properly",
+                self.filename,
+                self.integrity.sequence1,
+                self.integrity.sequence2,
+            )
+
+        for error in self.integrity.structure_errors:
+            log.warning("Hive %r structure out of bounds: %s", self.filename, error)
+
+        if self.integrity.ok:
+            log.debug("Hive %r integrity OK", self.filename)
+        else:
+            log.info("Hive %r integrity state: %s", self.filename, self.integrity.summary())
+
+    def _scan_hbins(self) -> tuple[list[tuple[int, int]], list[str]]:
+        """Walk the hbin chain bounded by the header Length and the file size.
+
+        Returns the accepted ``(offset, size)`` ranges and a list of structural
+        errors encountered while walking the chain.
+        """
+        ranges = []
+        errors = []
+
+        declared_end = self._hbin_offset + self.header.Length
+        end = min(declared_end, self._file_size)
+        offset = self._hbin_offset
+
+        while offset + len(c_regf._HBIN) <= end:
+            self.fh.seek(offset)
+            header = c_regf._HBIN(self.fh)
+            if header.Signature != HBIN_SIGNATURE:
+                errors.append(f"hbin at 0x{offset:x} has invalid signature 0x{header.Signature:08x}")
+                break
+            if header.Size == 0:
+                errors.append(f"hbin at 0x{offset:x} has size zero")
+                break
+            if header.Size % HBIN_ALIGNMENT:
+                errors.append(f"hbin at 0x{offset:x} has unaligned size 0x{header.Size:x}")
+                break
+            if offset + header.Size > end:
+                errors.append(
+                    f"hbin at 0x{offset:x} extends to 0x{offset + header.Size:x}, "
+                    f"beyond the declared hive end 0x{declared_end:x}"
+                )
+                ranges.append((offset, header.Size))
+                break
+
+            ranges.append((offset, header.Size))
+            offset += header.Size
+
+        return ranges, errors
+
+    def _check_integrity(self, data: bytes) -> HiveIntegrity:
+        checksum_actual = xor32_crc(data[:508])
+        structure_errors = list(self._hbin_errors)
+
+        expected_end = self._hbin_offset + self.header.Length
+        if self.header.Signature != REGISTRY_FILE_SIGNATURE:
+            structure_errors.append(
+                f"header signature is 0x{self.header.Signature:08x}, expected 0x{REGISTRY_FILE_SIGNATURE:08x}"
+            )
+        if self.header.Length == 0:
+            structure_errors.append("header Length is zero")
+        elif self.header.Length % HBIN_ALIGNMENT:
+            structure_errors.append(f"header Length 0x{self.header.Length:x} is not aligned to 0x{HBIN_ALIGNMENT:x}")
+        if expected_end > self._file_size:
+            structure_errors.append(f"header Length ends at 0x{expected_end:x}, beyond file size 0x{self._file_size:x}")
+        if expected_end < self._file_size and self.header.Length and not self.header.Length % HBIN_ALIGNMENT:
+            # Slack beyond the declared hive length is normal (cluster alignment).
+            log.debug(
+                "Hive %r is followed by 0x%x bytes outside the declared hive length",
+                self.filename,
+                self._file_size - expected_end,
+            )
+
+        if not self._hbin_ranges:
+            if not self._hbin_errors:
+                structure_errors.append(f"no hbin found at 0x{self._hbin_offset:x}")
+        else:
+            offset = self._hbin_offset
+            for bin_offset, bin_size in self._hbin_ranges:
+                if bin_offset != offset:
+                    structure_errors.append(f"hbin at 0x{offset:x} missing; next hbin found at 0x{bin_offset:x}")
+                    break
+                offset += bin_size
+
+            last_offset, last_size = self._hbin_ranges[-1]
+            if last_offset + last_size != expected_end and not self._hbin_errors:
+                structure_errors.append(
+                    f"hbin chain ends at 0x{last_offset + last_size:x}, header Length ends at 0x{expected_end:x}"
+                )
+
+        if (root_error := self._cell_bounds_error(self.header.RootCell)) is not None:
+            structure_errors.append(f"root cell 0x{self.header.RootCell:x}: {root_error}")
+
+        state = HiveState.OK
+        if checksum_actual != self.header.CheckSum:
+            state |= HiveState.CHECKSUM_MISMATCH
+        if self.header.Sequence1 != self.header.Sequence2:
+            state |= HiveState.IN_TRANSACTION
+        if structure_errors:
+            state |= HiveState.STRUCTURE_OUT_OF_BOUNDS
+
+        return HiveIntegrity(
+            filename=self.filename,
+            state=state,
+            checksum_expected=self.header.CheckSum,
+            checksum_actual=checksum_actual,
+            sequence1=self.header.Sequence1,
+            sequence2=self.header.Sequence2,
+            hbin_ranges=tuple(self._hbin_ranges),
+            structure_errors=tuple(structure_errors),
+        )
+
+    def _cell_bounds_error(self, offset: int) -> str | None:
+        """Return why ``offset`` does not address a complete cell inside a known hbin."""
+        if offset < 0 or offset >= self.header.Length:
+            return "offset outside the declared hive length"
+
+        absolute = self._hbin_offset + offset
+        idx = bisect_right(self._hbin_starts, absolute) - 1
+        if idx < 0:
+            return "offset before the first hbin"
+
+        bin_offset, bin_size = self._hbin_ranges[idx]
+        bin_end = min(bin_offset + bin_size, self._file_size)
+        if absolute + 4 > bin_end:
+            return f"offset is outside hbin 0x{bin_offset - self._hbin_offset:x}+0x{bin_size:x}"
+        if absolute < bin_offset + len(c_regf._HBIN):
+            return "offset inside the hbin header"
+
+        self.fh.seek(absolute)
+        raw_size = self.fh.read(4)
+        if len(raw_size) < 4:
+            return "cell size unreadable"
+
+        size = struct.unpack("<i", raw_size)[0]
+        size = -size if size < 0 else size
+        if size < 4:
+            return f"invalid cell size {size}"
+        if absolute + size > bin_end:
+            return (
+                f"cell of size 0x{size:x} at 0x{offset:x} crosses the end of hbin "
+                f"0x{bin_offset - self._hbin_offset:x}+0x{bin_size:x}"
+            )
+
+        return None
+
+    def _check_cell_offset(self, offset: int) -> bool:
+        """Validate a cell offset, raising in strict mode and logging otherwise."""
+        error = self._cell_bounds_error(offset)
+        if error is None:
+            return True
+
+        if self.strict:
+            raise HiveStructureError(f"Cell at 0x{offset:x} is out of bounds: {error}")
+
+        log.warning("Hive %r cell at 0x%x is out of bounds: %s", self.filename, offset, error)
+        return False
+
     def root(self) -> KeyNode:
+        if self._root is None:
+            raise HiveStructureError(
+                f"Root cell 0x{self.header.RootCell:x} of hive {self.filename!r} is out of bounds: "
+                + (self._cell_bounds_error(self.header.RootCell) or "unknown")
+            )
         return self._root
 
     def cell(self, offset: int) -> CellType:
-        return self.parse_cell_data(self.cell_data(offset))
+        data = self.cell_data(offset)
+        if not data:
+            raise HiveStructureError(
+                f"Cell at 0x{offset:x} of hive {self.filename!r} could not be read: "
+                + (self._cell_bounds_error(offset) or "empty cell")
+            )
+        return self.parse_cell_data(data)
 
-    def _cell_data(self, offset: int) -> tuple[bool, bytes]:
-        self.fh.seek(self._hbin_offset + offset)
+    def _cell_data(self, offset: int, *, validate: bool = True, limit: int | None = None) -> tuple[bool, bytes]:
+        if validate and not self._check_cell_offset(offset):
+            return False, b""
+
+        absolute = self._hbin_offset + offset
+        self.fh.seek(absolute)
 
         allocated = False
-        if (size := struct.unpack("<i", self.fh.read(4))[0]) < 0:
+        raw_size = self.fh.read(4)
+        if len(raw_size) < 4:
+            return allocated, b""
+
+        size = struct.unpack("<i", raw_size)[0]
+        if size < 0:
             size = -size
             allocated = True
 
+        if size < 4:
+            return allocated, b""
+
+        end = self._file_size if limit is None else min(limit, self._file_size)
+        size = min(size, max(end - absolute, 4))
         return allocated, self.fh.read(size - 4)
 
     def cell_data(self, offset: int) -> bytes:
@@ -121,20 +413,25 @@ class RegistryHive:
         return node
 
     def walk(self) -> Iterator[tuple[int, bool, CellType | bytes]]:
-        next_hbin = self._hbin_offset
-        hive_size = self.header.Length + self._hbin_offset
+        """Iterate over all cells in the hive, following the validated hbin chain.
 
-        while next_hbin < hive_size:
-            self.fh.seek(next_hbin)
-            header = c_regf._HBIN(self.fh)
-            if header.Signature != 0x6E696268:
-                break
+        Iteration stops at the end of the declared hive length or when a hbin
+        cannot be advanced over, so a corrupt size can never loop forever.
+        """
+        for bin_offset, bin_size in self._hbin_ranges:
+            bin_end = min(bin_offset + bin_size, self._file_size)
+            offset = bin_offset + len(c_regf._HBIN)
 
-            next_hbin += header.Size
+            while offset < bin_end:
+                allocated, data = self._cell_data(offset - self._hbin_offset, validate=False, limit=bin_end)
+                if not data:
+                    log.warning(
+                        "Hive %r cell at 0x%x is truncated, stopping walk of this hbin",
+                        self.filename,
+                        offset,
+                    )
+                    break
 
-            offset = self.fh.tell()
-            while offset < next_hbin:
-                allocated, data = self._cell_data(offset - self._hbin_offset)
                 cell = _CELL_CLASSES.get(data[:2], lambda hive, buf: buf)(self, data)
 
                 yield offset, allocated, cell
