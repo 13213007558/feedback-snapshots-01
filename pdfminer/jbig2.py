@@ -62,7 +62,7 @@ def mask_value(mask: int, value: int) -> int:
 
 
 def unpack_int(format: str, buffer: bytes) -> int:
-    assert format in {">B", ">I", ">L"}
+    assert format in {">B", ">H", ">I", ">L"}
     [result] = cast(tuple[int], unpack(format, buffer))
     return result
 
@@ -83,22 +83,32 @@ class JBIG2StreamReader:
 
     def get_segments(self) -> list[JBIG2Segment]:
         segments: list[JBIG2Segment] = []
+        seen_numbers: set[int] = set()
         while not self.is_eof():
             segment: JBIG2Segment = {}
             for field_format, name in SEG_STRUCT:
                 field_len = calcsize(field_format)
                 field = self.stream.read(field_len)
                 if len(field) < field_len:
-                    segment["_error"] = True
-                    break
+                    seg_num = segment.get("number", "unknown")
+                    if not isinstance(seg_num, int):
+                        seg_num = "unknown"
+                    raise PDFValueError(
+                        f"Truncated JBIG2 segment header: expected {field_len}"
+                        f" bytes for field {name!r} of segment {seg_num},"
+                        f" got {len(field)}",
+                    )
                 value = unpack_int(field_format, field)
                 parser = getattr(self, f"parse_{name}", None)
                 if callable(parser):
                     value = parser(segment, value, field)
                 segment[name] = value
 
-            if not segment.get("_error"):
-                segments.append(segment)
+            seg_num = cast(int, segment["number"])
+            if seg_num in seen_numbers:
+                raise PDFValueError(f"Duplicate JBIG2 segment number {seg_num}")
+            seen_numbers.add(seg_num)
+            segments.append(segment)
         return segments
 
     def is_eof(self) -> bool:
@@ -134,13 +144,16 @@ class JBIG2StreamReader:
             for bit_pos in range(5):
                 retain_segments.append(bit_set(bit_pos, flags))
         else:
-            field += self.stream.read(3)
+            field += self.read_exact(3, segment, "referred-to segment count")
             ref_count = unpack_int(">L", field)
             ref_count = masked_value(REF_COUNT_LONG_MASK, ref_count)
             ret_bytes_count = math.ceil((ref_count + 1) / 8)
             for _ret_byte_index in range(ret_bytes_count):
-                ret_byte = unpack_int(">B", self.stream.read(1))
-                for bit_pos in range(7):
+                ret_byte = unpack_int(
+                    ">B",
+                    self.read_exact(1, segment, "retention flags"),
+                )
+                for bit_pos in range(8):
                     retain_segments.append(bit_set(bit_pos, ret_byte))
 
         seg_num = segment["number"]
@@ -148,14 +161,14 @@ class JBIG2StreamReader:
         if seg_num <= 256:
             ref_format = ">B"
         elif seg_num <= 65536:
-            ref_format = ">I"
+            ref_format = ">H"
         else:
             ref_format = ">L"
 
         ref_size = calcsize(ref_format)
 
         for _ref_index in range(ref_count):
-            ref_data = self.stream.read(ref_size)
+            ref_data = self.read_exact(ref_size, segment, "referred-to segment table")
             ref = unpack_int(ref_format, ref_data)
             ref_segments.append(ref)
 
@@ -165,9 +178,26 @@ class JBIG2StreamReader:
             "ref_segments": ref_segments,
         }
 
+    def read_exact(
+        self,
+        size: int,
+        segment: JBIG2Segment,
+        field_name: str,
+    ) -> bytes:
+        data = self.stream.read(size)
+        if len(data) < size:
+            seg_num = segment.get("number", "unknown")
+            if not isinstance(seg_num, int):
+                seg_num = "unknown"
+            raise PDFValueError(
+                f"Truncated JBIG2 segment {seg_num}: expected {size} bytes"
+                f" for {field_name}, got {len(data)}",
+            )
+        return data
+
     def parse_page_assoc(self, segment: JBIG2Segment, page: int, field: bytes) -> int:
         if cast(JBIG2SegmentFlags, segment["flags"])["page_assoc_long"]:
-            field += self.stream.read(3)
+            field += self.read_exact(3, segment, "page association")
             page = unpack_int(">L", field)
         return page
 
@@ -186,7 +216,11 @@ class JBIG2StreamReader:
                     "Working with unknown segment length is not implemented yet",
                 )
             else:
-                segment["raw_data"] = self.stream.read(length)
+                segment["raw_data"] = self.read_exact(
+                    length,
+                    segment,
+                    "segment data",
+                )
 
         return length
 
@@ -208,6 +242,9 @@ class JBIG2StreamWriter:
         segments: Iterable[JBIG2Segment],
         fix_last_page: bool = True,
     ) -> int:
+        segments = list(segments)
+        self.check_segment_dependencies(segments)
+
         data_len = 0
         current_page: int | None = None
         seg_num: int | None = None
@@ -268,6 +305,33 @@ class JBIG2StreamWriter:
 
         return data_len
 
+    def check_segment_dependencies(self, segments: list[JBIG2Segment]) -> None:
+        """Ensure the segment list can be exported as a self-contained file.
+
+        Every referred-to segment must be present and segment numbers must be
+        unique, otherwise independent readers would silently render an
+        incomplete image.
+        """
+        known_numbers: set[int] = set()
+        for segment in segments:
+            seg_num = cast(int, segment["number"])
+            if seg_num in known_numbers:
+                raise PDFValueError(f"Duplicate JBIG2 segment number {seg_num}")
+            known_numbers.add(seg_num)
+
+        for segment in segments:
+            seg_num = cast(int, segment["number"])
+            retention_flags = cast(
+                JBIG2RetentionFlags,
+                segment.get("retention_flags") or {},
+            )
+            ref_segments = cast(list[int], retention_flags.get("ref_segments") or [])
+            for ref in ref_segments:
+                if ref not in known_numbers:
+                    raise PDFValueError(
+                        f"JBIG2 segment {seg_num} refers to missing segment {ref}",
+                    )
+
     def encode_segment(self, segment: JBIG2Segment) -> bytes:
         data = b""
         for field_format, name in SEG_STRUCT:
@@ -318,7 +382,9 @@ class JBIG2StreamWriter:
         else:
             bytes_count = math.ceil((ref_count + 1) / 8)
             flags_format = ">L" + ("B" * bytes_count)
-            flags_dword = mask_value(REF_COUNT_SHORT_MASK, REF_COUNT_LONG) << 24
+            flags_dword = (
+                mask_value(REF_COUNT_SHORT_MASK, REF_COUNT_LONG) << 24
+            ) | ref_count
             flags.append(flags_dword)
 
             for byte_index in range(bytes_count):
@@ -335,7 +401,7 @@ class JBIG2StreamWriter:
         if seg_num <= 256:
             ref_format = "B"
         elif seg_num <= 65536:
-            ref_format = "I"
+            ref_format = "H"
         else:
             ref_format = "L"
 
