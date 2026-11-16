@@ -5,10 +5,14 @@ from dissect.regf.exceptions import (
     RegistryKeyNotFoundError,
     RegistryValueNotFoundError,
 )
+from dissect.regf.expand import ExpansionContext, ExpansionReport, ExpansionStep
 from dissect.regf.regf import RegistryHive
 
 __all__ = [
     "Error",
+    "ExpansionContext",
+    "ExpansionReport",
+    "ExpansionStep",
     "RegistryHive",
     "RegistryKeyNotFoundError",
     "RegistryValueNotFoundError",

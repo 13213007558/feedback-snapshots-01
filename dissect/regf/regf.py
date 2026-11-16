@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
 
+    from dissect.regf.expand import ExpansionContext, ExpansionReport
+
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_REGF", "CRITICAL"))
 
@@ -329,6 +331,15 @@ class KeyValue(Cell):
     @cached_property
     def value(self) -> int | str | list[str] | bytes:
         return parse_value(self.type, self.data)
+
+    def expand(self, context: ExpansionContext) -> ExpansionReport:
+        """Expand this value using an explicit offline expansion context.
+
+        Only ``REG_EXPAND_SZ`` values are expanded; ``REG_SZ`` and all other
+        types are returned verbatim. The raw registry data is never modified
+        and remains available through ``value`` and ``data``.
+        """
+        return context.expand_value(self)
 
 
 class KeyIndex(Cell):
