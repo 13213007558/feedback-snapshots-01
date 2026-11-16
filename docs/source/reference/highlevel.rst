@@ -28,3 +28,12 @@ extract_pages
 
 .. currentmodule:: pdfminer.high_level
 .. autofunction:: extract_pages
+
+
+.. _api_extract_text_evidence:
+
+extract_text_evidence
+=====================
+
+.. currentmodule:: pdfminer.high_level
+.. autofunction:: extract_text_evidence

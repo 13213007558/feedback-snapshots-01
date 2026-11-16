@@ -81,6 +81,14 @@ class PDFTextState:
         self.leading: float = 0
         self.render: int = 0
         self.rise: float = 0
+        # Provenance for the text-showing operator that produced the current
+        # string. It is filled in by PDFPageInterpreter before render_string()
+        # is called and is only consumed by evidence-oriented devices.
+        self.source_stream_objid: int | None = None
+        self.source_stream_generation: int | None = None
+        self.source_stream_index: int | None = None
+        self.source_position: int | None = None
+        self.source_form_path: tuple[tuple[str, int | None], ...] = ()
         self.reset()
         # self.matrix is set
         # self.linematrix is set
@@ -111,6 +119,11 @@ class PDFTextState:
         obj.rise = self.rise
         obj.matrix = self.matrix
         obj.linematrix = self.linematrix
+        obj.source_stream_objid = self.source_stream_objid
+        obj.source_stream_generation = self.source_stream_generation
+        obj.source_stream_index = self.source_stream_index
+        obj.source_position = self.source_position
+        obj.source_form_path = self.source_form_path
         return obj
 
     def reset(self) -> None:
@@ -153,6 +166,12 @@ class PDFGraphicState:
         self.ncolor: Color = 0
         self.ncs: PDFColorSpace = PREDEFINED_COLORSPACE["DeviceGray"]
 
+        # Evidence flags. These do not change how pdfminer.six renders content;
+        # they only record when the visible result cannot be determined from the
+        # text-rendering mode alone.
+        self.clipping: bool = False
+        self.transparency_uncertain: bool = False
+
     def copy(self) -> "PDFGraphicState":
         obj = PDFGraphicState()
         obj.linewidth = self.linewidth
@@ -166,6 +185,8 @@ class PDFGraphicState:
         obj.scs = self.scs
         obj.ncolor = self.ncolor
         obj.ncs = self.ncs
+        obj.clipping = self.clipping
+        obj.transparency_uncertain = self.transparency_uncertain
         return obj
 
     def __repr__(self) -> str:
@@ -325,6 +346,18 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
     def flush(self) -> None:
         self.add_results(*self.popall())
 
+    def current_stream(self) -> PDFStream | None:
+        """Return the content stream the parser is currently reading."""
+        if self.fp is None or self.istream == 0:
+            return None
+        stream = stream_value(self.streams[self.istream - 1])
+        return stream
+
+    def current_stream_index(self) -> int | None:
+        if self.fp is None or self.istream == 0:
+            return None
+        return self.istream - 1
+
     KEYWORD_BI = KWD(b"BI")
     KEYWORD_ID = KWD(b"ID")
     KEYWORD_EI = KWD(b"EI")
@@ -378,6 +411,14 @@ class PDFPageInterpreter:
         self.stream_ids: set[int] = set()
         # Track stream IDs from parent interpreters in the call stack
         self.parent_stream_ids: set[int] = set()
+        # Provenance of the current operator for evidence devices. The operator
+        # position is a byte offset within the identified content stream and
+        # form_path describes the Form XObject nesting.
+        self.stream_objid: int | None = None
+        self.stream_generation: int | None = None
+        self.stream_index: int | None = None
+        self.operator_position: int | None = None
+        self.form_path: tuple[tuple[str, int | None], ...] = ()
 
     def dup(self) -> "PDFPageInterpreter":
         return self.__class__(self.rsrcmgr, self.device)
@@ -393,6 +434,7 @@ class PDFPageInterpreter:
         interp = self.dup()
         interp.parent_stream_ids.update(self.parent_stream_ids)
         interp.parent_stream_ids.update(self.stream_ids)
+        interp.form_path = self.form_path
         return interp
 
     def init_resources(self, resources: dict[object, object]) -> None:
@@ -400,6 +442,7 @@ class PDFPageInterpreter:
         self.resources = resources
         self.fontmap: dict[object, PDFFont] = {}
         self.xobjmap = {}
+        self.extgstate_map: dict[str, object] = {}
         self.csmap: dict[str, PDFColorSpace] = PREDEFINED_COLORSPACE.copy()
         if not resources:
             return
@@ -435,6 +478,9 @@ class PDFPageInterpreter:
             elif k == "XObject":
                 for xobjid, xobjstrm in dict_value(v).items():
                     self.xobjmap[xobjid] = xobjstrm
+            elif k == "ExtGState":
+                for gsid, spec in dict_value(v).items():
+                    self.extgstate_map[literal_name(gsid)] = resolve1(spec)
 
     def init_state(self, ctm: Matrix) -> None:
         """Initialize the text and graphic states for rendering a page."""
@@ -445,6 +491,7 @@ class PDFPageInterpreter:
         self.textstate = PDFTextState()
         self.graphicstate = PDFGraphicState()
         self.curpath: list[PathSegment] = []
+        self._text_clip_pending = False
         # argstack: stack for command arguments.
         self.argstack: list[PDFStackT] = []
 
@@ -537,7 +584,22 @@ class PDFPageInterpreter:
 
     def do_gs(self, name: PDFStackT) -> None:
         """Set parameters from graphics state parameter dictionary"""
-        # TODO
+        # pdfminer.six does not implement clipping paths and blend modes. A
+        # non-unit /ca or /CA, or a non-Normal /BM, means we cannot claim the
+        # glyph is actually visible on the page.
+        spec = dict_value(self.extgstate_map.get(literal_name(name), {}))
+        fill_alpha = safe_float(resolve1(spec.get("ca")))
+        stroke_alpha = safe_float(resolve1(spec.get("CA")))
+        if (fill_alpha is not None and fill_alpha != 1.0) or (
+            stroke_alpha is not None and stroke_alpha != 1.0
+        ):
+            self.graphicstate.transparency_uncertain = True
+        bm = resolve1(spec.get("BM"))
+        if bm is not None and literal_name(bm) != "Normal":
+            self.graphicstate.transparency_uncertain = True
+        smask = resolve1(spec.get("SMask"))
+        if smask is not None and literal_name(smask) != "None":
+            self.graphicstate.transparency_uncertain = True
 
     def do_m(self, x: PDFStackT, y: PDFStackT) -> None:
         """Begin new subpath"""
@@ -712,9 +774,11 @@ class PDFPageInterpreter:
 
     def do_W(self) -> None:
         """Set clipping path using nonzero winding number rule"""
+        self.graphicstate.clipping = True
 
     def do_W_a(self) -> None:
         """Set clipping path using even-odd rule"""
+        self.graphicstate.clipping = True
 
     def do_CS(self, name: PDFStackT) -> None:
         """Set color space for stroking operations
@@ -1024,6 +1088,9 @@ class PDFPageInterpreter:
 
     def do_ET(self) -> None:
         """End a text object"""
+        if self._text_clip_pending:
+            self.graphicstate.clipping = True
+            self._text_clip_pending = False
 
     def do_BX(self) -> None:
         """Begin compatibility section"""
@@ -1174,6 +1241,11 @@ class PDFPageInterpreter:
             )
         else:
             self.textstate.render = render_i
+            # Modes 4-7 add the glyphs to the clipping path. The clip takes
+            # effect at ET, so later content is uncertain (pdfminer.six does
+            # not evaluate clip geometry).
+            if 4 <= render_i <= 7:
+                self._text_clip_pending = True
 
     def do_Ts(self, rise: PDFStackT) -> None:
         """Set the text rise
@@ -1273,12 +1345,21 @@ class PDFPageInterpreter:
             if settings.STRICT:
                 raise PDFInterpreterError("No font specified!")
             return
+        textstate = self.textstate.copy()
+        textstate.source_stream_objid = self.stream_objid
+        textstate.source_stream_generation = self.stream_generation
+        textstate.source_stream_index = self.stream_index
+        textstate.source_position = self.operator_position
+        textstate.source_form_path = self.form_path
         self.device.render_string(
-            self.textstate,
+            textstate,
             cast(PDFTextSeq, seq),
             self.graphicstate.ncs,
             self.graphicstate.copy(),
         )
+        # PDFTextDevice advances the line matrix while rendering. Preserve that
+        # behavior for existing devices.
+        self.textstate.linematrix = textstate.linematrix
 
     def do_Tj(self, s: PDFStackT) -> None:
         """Show text"""
@@ -1335,6 +1416,10 @@ class PDFPageInterpreter:
             # instead of having their own Resources entry.
             xobjres = xobj.get("Resources")
             resources = dict_value(xobjres) if xobjres else self.resources.copy()
+            interpreter.form_path = (
+                *self.form_path,
+                (xobjid, xobj.objid),
+            )
             self.device.begin_figure(xobjid, bbox, matrix)
             interpreter.render_contents(
                 resources,
@@ -1417,9 +1502,14 @@ class PDFPageInterpreter:
             return
         while True:
             try:
-                (_, obj) = parser.nextobject()
+                (pos, obj) = parser.nextobject()
             except PSEOF:
                 break
+            stream = parser.current_stream()
+            self.stream_objid = stream.objid if stream else None
+            self.stream_generation = stream.genno if stream else None
+            self.stream_index = parser.current_stream_index()
+            self.operator_position = pos
             if isinstance(obj, PSKeyword):
                 name = keyword_name(obj)
                 method = "do_{}".format(

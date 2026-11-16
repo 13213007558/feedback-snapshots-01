@@ -35,6 +35,11 @@ class PDFDevice:
     def __init__(self, rsrcmgr: "PDFResourceManager") -> None:
         self.rsrcmgr = rsrcmgr
         self.ctm: Matrix | None = None
+        # Position of the glyph currently being rendered, in the coordinate
+        # system of the text line. It is set by PDFTextDevice for devices that
+        # need to keep the original text coordinates (for example forensic
+        # text evidence).
+        self._text_position: Point | None = None
 
     def __repr__(self) -> str:
         return "<PDFDevice>"
@@ -171,6 +176,7 @@ class PDFTextDevice(PDFDevice):
                 for cid in font.decode(obj):
                     if needcharspace:
                         x += charspace
+                    self._text_position = (x, y)
                     x += self.render_char(
                         utils.translate_matrix(matrix, (x, y)),
                         font,
@@ -217,6 +223,7 @@ class PDFTextDevice(PDFDevice):
                 for cid in font.decode(obj):
                     if needcharspace:
                         y += charspace
+                    self._text_position = (x, y)
                     y += self.render_char(
                         utils.translate_matrix(matrix, (x, y)),
                         font,

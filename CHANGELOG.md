@@ -5,6 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Traceable text evidence output via `pdfminer.high_level.extract_text_evidence` and
+  `pdf2txt.py -t evidence`. Each text-showing operator is reported with its content
+  stream and byte offset, Form XObject path, glyph coordinates, text rendering mode
+  and a conservative visibility assessment (`visible`, `invisible` or `unknown`).
+
 - Restore `cmap` and `cmap_clean` targets to `Makefile ([#1256](https://github.com/pdfminer/pdfminer.six/pull/1256))
 
 ### Fixed

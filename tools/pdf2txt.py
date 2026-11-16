@@ -4,12 +4,14 @@ output it to plain text, html, xml or tags.
 """
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Container, Iterable
 from typing import Any
 
 import pdfminer.high_level
+from pdfminer.high_level import extract_text_evidence
 from pdfminer.layout import LAParams
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.utils import AnyIO
@@ -17,6 +19,17 @@ from pdfminer.utils import AnyIO
 logging.basicConfig()
 
 OUTPUT_TYPES = ((".htm", "html"), (".html", "html"), (".xml", "xml"), (".tag", "tag"))
+OUTPUT_TYPE_CHOICES = ("text", "html", "xml", "hocr", "tag", "evidence")
+
+
+def evidence_kwargs(values: dict[str, Any]) -> dict[str, Any]:
+    """Select the arguments supported by extract_text_evidence."""
+    return {
+        "password": values["password"],
+        "page_numbers": values["page_numbers"],
+        "maxpages": values["maxpages"],
+        "caching": not values["disable_caching"],
+    }
 
 
 def float_or_disabled(x: str) -> float | None:
@@ -48,6 +61,21 @@ def extract_text(
 ) -> None:
     if not files:
         raise PDFValueError("Must provide files to work upon!")
+
+    if output_type == "evidence":
+        pages = []
+        evidence_args = evidence_kwargs(locals())
+        for fname in files:
+            with open(fname, "rb") as fp:
+                pages.extend(extract_text_evidence(fp, **evidence_args))
+        payload = {"pages": [page.to_dict() for page in pages]}
+        text = json.dumps(payload, indent=2, ensure_ascii=False)
+        if outfile == "-":
+            sys.stdout.write(text + "\n")
+        else:
+            with open(outfile, "w", encoding=codec) as outfp:
+                outfp.write(text + "\n")
+        return
 
     if output_type == "text" and outfile != "-":
         for override, alttype in OUTPUT_TYPES:
@@ -235,7 +263,9 @@ def create_parser() -> argparse.ArgumentParser:
         "-t",
         type=str,
         default="text",
-        help="Type of output to generate {text,html,xml,tag}.",
+        help="Type of output to generate {text,html,xml,tag,evidence}. "
+        "'evidence' writes traceable text runs with rendering modes, source "
+        "streams and visibility as JSON.",
     )
     output_params.add_argument(
         "--codec",

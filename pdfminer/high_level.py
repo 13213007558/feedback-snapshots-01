@@ -19,6 +19,7 @@ from pdfminer.pdfdevice import PDFDevice, TagExtractor
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
 from pdfminer.pdfpage import PDFPage
+from pdfminer.text_evidence import PageTextEvidence, TextEvidenceDevice
 from pdfminer.utils import AnyIO, FileOrName, open_filename
 
 
@@ -225,3 +226,41 @@ def extract_pages(
             interpreter.process_page(page)
             layout = device.get_result()
             yield layout
+
+
+def extract_text_evidence(
+    pdf_file: FileOrName,
+    password: str = "",
+    page_numbers: Container[int] | None = None,
+    maxpages: int = 0,
+    caching: bool = True,
+) -> list[PageTextEvidence]:
+    """Extract traceable text evidence, including text rendering modes.
+
+    Unlike :func:`extract_text`, this function does not merge characters into
+    layout text. It returns one record per text-showing operator, with the
+    page, content stream, byte offset, Form XObject path, glyph coordinates,
+    text rendering mode and a conservative visibility assessment.
+
+    :param pdf_file: Either a file path or a file-like object for the PDF file
+        to be worked on.
+    :param password: For encrypted PDFs, the password to decrypt.
+    :param page_numbers: List of zero-indexed page numbers to extract.
+    :param maxpages: The maximum number of pages to parse.
+    :param caching: If resources should be cached.
+    :return: A list of :class:`PageTextEvidence`, in page order.
+    """
+    with open_filename(pdf_file, "rb") as fp:
+        fp = cast(BinaryIO, fp)  # we opened in binary mode
+        rsrcmgr = PDFResourceManager(caching=caching)
+        device = TextEvidenceDevice(rsrcmgr)
+        interpreter = PDFPageInterpreter(rsrcmgr, device)
+        for page in PDFPage.get_pages(
+            fp,
+            page_numbers,
+            maxpages=maxpages,
+            password=password,
+            caching=caching,
+        ):
+            interpreter.process_page(page)
+        return device.pages
