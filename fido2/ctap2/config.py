@@ -62,6 +62,18 @@ class Config:
     def is_supported(info: Info) -> bool:
         return info.options.get("authnrCfg") is True
 
+    @staticmethod
+    def is_min_pin_length_rpids_supported(info: Info) -> bool:
+        """Checks if the minPinLength RP ID list parameter is supported.
+
+        The capability is signaled through the setMinPINLength option, or by a
+        non-zero maxRIDsForSetMinPINLength value in the Authenticator info.
+        """
+        return (
+            info.options.get("setMinPINLength") is True
+            or info.max_rpids_for_min_pin > 0
+        )
+
     def __init__(
         self,
         ctap: Ctap2,
@@ -129,6 +141,15 @@ class Config:
         if min_pin_length is not None:
             params[Config.PARAM.NEW_MIN_PIN_LENGTH] = min_pin_length
         if rp_ids is not None:
+            if not self.is_min_pin_length_rpids_supported(self.ctap.info):
+                raise ValueError(
+                    "Authenticator does not support the minPinLength RP ID list"
+                )
+            max_rpids = self.ctap.info.max_rpids_for_min_pin
+            if max_rpids and len(rp_ids) > max_rpids:
+                raise ValueError(
+                    f"minPinLength RP ID list exceeds the maximum of {max_rpids}"
+                )
             params[Config.PARAM.MIN_PIN_LENGTH_RPIDS] = rp_ids
         if pin_complexity_policy:
             if self.ctap.info.pin_complexity_policy is None:

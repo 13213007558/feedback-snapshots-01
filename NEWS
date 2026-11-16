@@ -3,6 +3,8 @@
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
     specified in Metadata Statement 3.1.1.
+ ** Config: Reject the minPinLength RP ID list explicitly when the Authenticator
+    does not advertise support for it, instead of sending an unsupported field.
 
 * Version 2.2.1 (released 2026-06-29)
  ** Server example: Migrate build tool from poetry to uv.
