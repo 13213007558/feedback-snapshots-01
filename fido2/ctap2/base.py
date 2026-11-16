@@ -59,6 +59,13 @@ def args(*params) -> dict[int, Any]:
     return {i: v for i, v in enumerate(params, 1) if v is not None}
 
 
+# Maximum number of assertions collected in a single Ctap2.get_assertions call.
+# This guards against authenticators declaring an unreasonably large
+# numberOfCredentials value, which would otherwise cause an unbounded number of
+# getNextAssertion commands to be issued.
+MAX_ASSERTIONS = 64
+
+
 class _CborDataObject(_DataClassMapping[int]):
     @classmethod
     def _get_field_key(cls, field: Field) -> int:
@@ -483,13 +490,38 @@ class Ctap2:
         """Convenience method to get list of assertions.
 
         See get_assertion and get_next_assertion for details.
+
+        The numberOfCredentials value of the first response determines how many
+        assertions are read; when not set, a single assertion is assumed. Each
+        subsequent response is validated to belong to the same RP as the first
+        response, and is used as-is, with its own credential. If the
+        authenticator declares an invalid number of credentials, or fails to
+        provide the declared number of assertions, a ValueError is raised and
+        no partial result is returned.
         """
         first = self.get_assertion(*args, **kwargs)
-        rest = [
-            self.get_next_assertion()
-            for _ in range(1, first.number_of_credentials or 1)
-        ]
-        return [first] + rest
+        count = first.number_of_credentials
+        if count is None:
+            # No declared count means a single response.
+            return [first]
+        if not 1 <= count <= MAX_ASSERTIONS:
+            raise ValueError(f"Invalid numberOfCredentials value: {count}")
+        assertions = [first]
+        for _ in range(1, count):
+            position = len(assertions) + 1
+            try:
+                nxt = self.get_next_assertion()
+            except CtapError as e:
+                raise ValueError(
+                    f"Failed to read assertion {position} of {count}"
+                ) from e
+            if nxt.auth_data.rp_id_hash != first.auth_data.rp_id_hash:
+                raise ValueError(
+                    f"Assertion {position} of {count} does not match the RP ID "
+                    "hash of the first response"
+                )
+            assertions.append(nxt)
+        return assertions
 
     def credential_mgmt(
         self,

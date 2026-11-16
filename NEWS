@@ -1,4 +1,7 @@
 * Version 2.2.2 (unreleased)
+ ** CTAP2: Harden Ctap2.get_assertions: validate the declared
+    numberOfCredentials, verify that subsequent assertions belong to the same
+    RP, and fail instead of returning a partial list on device errors.
  ** Attestation: Use cryptography's certificate issuer verification when available,
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
