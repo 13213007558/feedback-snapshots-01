@@ -1,5 +1,6 @@
 require "xml_security"
 require "onelogin/ruby-saml/attributes"
+require "onelogin/ruby-saml/attribute_records"
 
 require "time"
 require "nokogiri"
@@ -17,6 +18,11 @@ module OneLogin
       PROTOCOL  = "urn:oasis:names:tc:SAML:2.0:protocol"
       DSIG      = "http://www.w3.org/2000/09/xmldsig#"
       XENC      = "http://www.w3.org/2001/04/xmlenc#"
+      XML_SCHEMA_PREFIX_NAMESPACES = {
+        'xs' => 'http://www.w3.org/2001/XMLSchema',
+        'xsd' => 'http://www.w3.org/2001/XMLSchema',
+        'xsi' => AttributeValue::XSI_NAMESPACE
+      }.freeze
       SAML_NAMESPACES = {
         "p" => PROTOCOL,
         "a" => ASSERTION
@@ -189,6 +195,87 @@ module OneLogin
           end
           attributes
         end
+      end
+
+      # Gets a strict, protocol-aware view of the attributes in the signed
+      # assertion. Unlike #attributes it keeps NameFormat, the XML Schema type
+      # of every value, the distinction between a missing value, xsi:nil and an
+      # empty string, and every qualifier of nested NameID values.
+      #
+      # Duplicate Attribute elements stay separate records; their values are
+      # never merged. This API never consults
+      # Attributes.single_value_compatibility.
+      #
+      # @return [AttributeCollection] the Attribute records in XML order.
+      # @raise [ValidationError] if an EncryptedAttribute cannot be decrypted.
+      #
+      def attribute_records
+        @attribute_records ||= begin
+          records = []
+
+          stmt_elements = xpath_from_signed_assertion('/a:AttributeStatement')
+          stmt_elements.each_with_index do |stmt_element, stmt_index|
+            attribute_index = 0
+
+            stmt_element.elements.each do |attr_element|
+              next unless attr_element.name == 'Attribute' || attr_element.name == 'EncryptedAttribute'
+
+              attribute_index += 1
+              element_name = attr_element.name
+              encrypted = element_name == 'EncryptedAttribute'
+              node = encrypted ? decrypt_attribute(attr_element.dup) : attr_element
+
+              source = AttributeSource.new(
+                :response_id => response_id,
+                :assertion_id => assertion_id,
+                :statement_index => stmt_index + 1,
+                :attribute_index => attribute_index,
+                :element_name => element_name,
+                :encrypted => encrypted
+              )
+
+              values = []
+              node.elements.each do |value_element|
+                next unless value_element.name == 'AttributeValue'
+
+                values << build_attribute_value(value_element, source.for_value(values.size + 1))
+              end
+
+              records << AttributeRecord.new(
+                :name => node.attributes['Name'],
+                :name_format => node.attributes['NameFormat'],
+                :friendly_name => node.attributes['FriendlyName'],
+                :values => values,
+                :source => source
+              )
+            end
+          end
+
+          AttributeCollection.new(records)
+        end
+      end
+      alias_method :typed_attributes, :attribute_records
+
+      # Selects exactly one AttributeRecord from #attribute_records.
+      # @param name [String] the Attribute Name
+      # @param options [Hash] :name_format and :occurrence, see
+      #   AttributeCollection#fetch
+      # @return [AttributeRecord]
+      # @raise [MissingAttributeError, AmbiguousAttributeError]
+      #
+      def attribute_record(name, options = {})
+        attribute_records.fetch(name, options)
+      end
+
+      # Selects exactly one AttributeValue from #attribute_records.
+      # @param name [String] the Attribute Name
+      # @param options [Hash] :name_format, :occurrence and :value_index, see
+      #   AttributeCollection#value
+      # @return [AttributeValue]
+      # @raise [MissingAttributeError, AmbiguousAttributeError]
+      #
+      def attribute_value(name, options = {})
+        attribute_records.value(name, options)
       end
 
       # Gets the SessionNotOnOrAfter from the AuthnStatement.
@@ -1114,6 +1201,100 @@ module OneLogin
         elem_plaintext = node_header + elem_plaintext + '</node>'
         doc = REXML::Document.new(elem_plaintext)
         doc.root[0]
+      end
+
+      # Builds an AttributeValue from an AttributeValue element.
+      # @param value_element [REXML::Element] The AttributeValue element
+      # @param source [AttributeSource] The location of the value
+      # @return [AttributeValue]
+      #
+      def build_attribute_value(value_element, source)
+        nil_value = attribute_value_nil?(value_element)
+        type_attribute = attribute_value_type_attribute(value_element)
+        type = type_attribute.nil? ? nil : type_attribute.value
+        name_ids = attribute_value_name_ids(value_element)
+        text = Utils.element_text(value_element)
+        text = nil if nil_value || (text && text.strip.empty? && !name_ids.empty?)
+
+        AttributeValue.new(
+          :text => text,
+          :type => type,
+          :type_namespace => type_attribute.nil? ? nil : resolved_namespace(value_element, type),
+          :type_name => type_attribute.nil? ? nil : local_name(type),
+          :nil => nil_value,
+          :name_ids => name_ids,
+          :source => source
+        )
+      end
+
+      # True when the AttributeValue carries xsi:nil="true" or xsi:nil="1".
+      #
+      def attribute_value_nil?(value_element)
+        value_element.attributes.each_attribute do |attribute|
+          next unless attribute.name == 'nil'
+          next unless attribute.namespace == AttributeValue::XSI_NAMESPACE
+
+          return ['true', '1'].include?(attribute.value)
+        end
+
+        ['true', '1'].include?(value_element.attributes['xsi:nil'])
+      end
+
+      # Returns the xsi:type attribute of an AttributeValue, or nil.
+      #
+      def attribute_value_type_attribute(value_element)
+        value_element.attributes.each_attribute do |attribute|
+          return attribute if attribute.name == 'type' && attribute.namespace == AttributeValue::XSI_NAMESPACE
+        end
+
+        value_element.attributes.get_attribute('xsi:type')
+      end
+
+      # Resolves the namespace URI of a QName such as "xs:string".
+      #
+      def resolved_namespace(element, qname)
+        return nil if qname.nil?
+
+        separator = qname.index(':')
+        return element.namespace('') if separator.nil?
+
+        prefix = qname[0, separator]
+        namespace = element.namespace(prefix)
+        return namespace unless namespace.nil?
+
+        # Values decrypted from an EncryptedAttribute are re-parented into a
+        # wrapper that only declares the saml and xsi namespaces. Fall back to
+        # the well-known XML Schema namespace by prefix in that case.
+        XML_SCHEMA_PREFIX_NAMESPACES[prefix]
+      end
+
+      # Returns the local part of a QName such as "xs:string".
+      #
+      def local_name(qname)
+        return nil if qname.nil?
+
+        separator = qname.index(':')
+        separator.nil? ? qname : qname[(separator + 1)..-1]
+      end
+
+      # Collects every NameID nested in an AttributeValue, keeping each
+      # qualifier separate instead of merging it into the value.
+      #
+      def attribute_value_name_ids(value_element)
+        name_ids = []
+
+        value_element.elements.each do |child|
+          next unless child.name == 'NameID'
+
+          name_ids << NameIdValue.new(
+            :value => Utils.element_text(child),
+            :format => child.attributes['Format'],
+            :name_qualifier => child.attributes['NameQualifier'],
+            :sp_name_qualifier => child.attributes['SPNameQualifier']
+          )
+        end
+
+        name_ids
       end
 
       # Parse the attribute of a given node in Time format

@@ -462,6 +462,98 @@ end
 If you are using `saml:AttributeStatement` to transfer data, such as the username, you can access all the attributes through `response.attributes`. It contains all the `saml:AttributeStatement`s with its 'Name' as an indifferent key and one or more `saml:AttributeValue`s as values. The value returned depends on the value of the
 `single_value_compatibility` (when activated, only the first value is returned)
 
+### Protocol-aware attributes
+
+`response.attributes` is a convenience view. It collapses values and drops protocol details that an SP may need to pick an account identifier safely. Use
+`response.attribute_records` (aliased as `response.typed_attributes`) when you need to distinguish:
+
+- the `Name` and `NameFormat` of every `saml:Attribute`,
+- the XML Schema type of every `saml:AttributeValue` (`xsi:type`, including its namespace and local name),
+- an absent attribute, an absent value, an empty value and an `xsi:nil` value,
+- the `Format`, `NameQualifier` and `SPNameQualifier` of a `NameID` nested in an
+  `AttributeValue`,
+- duplicate `saml:Attribute` elements and which values belong to each of them,
+- the statement and element position of the attribute, and whether it came from a
+  decrypted `saml:EncryptedAttribute`.
+
+```ruby
+records = response.attribute_records
+
+records.names
+# => ["uid", "eduPersonTargetedID", "displayName", "role", ...]
+
+record = records.fetch("eduPersonTargetedID",
+                       :name_format => "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+record.name_format
+# => "urn:oasis:names:tc:SAML:2.0:attrname-format:basic"
+record.friendly_name
+# => "eduPersonTargetedID"
+record.source.path
+# => "/samlp:Response[@ID='...']/saml:Assertion[@ID='...']/saml:AttributeStatement[1]/saml:Attribute[2]"
+record.source.encrypted?
+# => false
+
+record.values.map(&:name_id).map(&:to_h)
+# => [{:value=>"opaque-a", :format=>"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+#      :name_qualifier=>"https://idp-a.example.com", :sp_name_qualifier=>"https://sp.example.com/metadata"},
+#     {:value=>"opaque-b", :format=>"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+#      :name_qualifier=>"https://idp-b.example.com", :sp_name_qualifier=>"https://sp.example.com/metadata"}]
+
+nil_value, empty_value, text_value = records.fetch("displayName").values
+nil_value.nil_value?   # => true; carries xsi:nil
+nil_value.text         # => nil
+empty_value.empty?     # => true; present but has no text
+empty_value.text       # => ""
+text_value.text        # => "Alice Example"
+text_value.type        # => "xs:string"
+text_value.type_namespace
+# => "http://www.w3.org/2001/XMLSchema"
+text_value.type_name
+# => "string"
+```
+
+Selection is strict and never guesses:
+
+- `records.fetch(name, :name_format => ...)` raises
+  `OneLogin::RubySaml::AmbiguousAttributeError` when `name` appears with more than
+  one `NameFormat` and `attribute_records.value` raises it when an attribute has
+  several values and no `:value_index` is given.
+- `OneLogin::RubySaml::MissingAttributeError` is raised when nothing matches.
+- Duplicate `saml:Attribute` elements with the same `Name` and `NameFormat` remain
+  separate records. Use `record.occurrence` / `record.occurrences` or
+  `records.duplicates` to explain them, and pass `:occurrence` (1-based, XML order)
+  to select one. Values are never merged across duplicates.
+
+The full vocabulary is:
+
+- `response.attribute_records` (`typed_attributes`) — `AttributeCollection`, one
+  `AttributeRecord` per `saml:Attribute`, in XML order.
+- `AttributeRecord#name`, `#name_format`, `#friendly_name`, `#values`, `#source`,
+  `#occurrence`, `#occurrences`, `#duplicate?`, `#same_name_other_format?`,
+  `#encrypted?`, `#multi_value?`, `#empty?`.
+- `AttributeValue#text`, `#type`, `#type_namespace`, `#type_name`, `#nil_value?`,
+  `#empty?`, `#name_ids`, `#name_id?`, `#name_id`, `#source`. The object itself is
+  never `nil`; that is why a protocol nilled value is exposed as
+  `#nil_value?`, not `#nil?`.
+- `NameIdValue#value`, `#format`, `#name_qualifier`, `#sp_name_qualifier`.
+- `AttributeSource#response_id`, `#assertion_id`, `#statement_index`,
+  `#attribute_index`, `#value_index`, `#element_name`, `#encrypted?`, `#path`.
+  `attribute_index` counts the `Attribute` and `EncryptedAttribute` children of
+  the statement in XML order, regardless of tag name; `path` addresses the same
+  position. Values read from an `EncryptedAttribute` point into the decrypted
+  payload and their path ends with `(decrypted)`.
+- `AttributeCollection#records`, `#names`, `#where`, `#by_name`, `#name_formats`,
+  `#duplicates`, `#duplicate?`, `#fetch`, `#value`.
+
+All `to_h` methods return the same information as plain hashes, so the records can
+also be logged or serialised without losing the protocol facts.
+
+This API is independent of `Attributes.single_value_compatibility`; toggling that
+global only affects the legacy `response.attributes` view.
+
+An `AttributeValue` that nests a `NameID` exposes `value.name_ids`; `value.name_id`
+raises `AmbiguousAttributeError` when several are nested in one value.
+
 ```ruby
 response = OneLogin::RubySaml::Response.new(params[:SAMLResponse])
 response.settings = saml_settings

@@ -1,5 +1,8 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Add `Response#attribute_records` / `Response#typed_attributes`, a strict attribute view that preserves `Name`, `NameFormat`, `FriendlyName`, `xsi:type`, `xsi:nil` vs. empty vs. missing values, nested `NameID` qualifiers, duplicate `Attribute` occurrence and the source assertion/position of every value (including decrypted `EncryptedAttribute`s). It is independent of `Attributes.single_value_compatibility`; `Response#attributes` is unchanged.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner
