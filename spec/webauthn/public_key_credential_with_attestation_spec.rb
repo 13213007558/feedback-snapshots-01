@@ -55,7 +55,7 @@ RSpec.describe "PublicKeyCredentialWithAttestation" do
         let(:type) { nil }
 
         it "fails" do
-          expect { public_key_credential.verify(challenge) }.to raise_error(RuntimeError)
+          expect { public_key_credential.verify(challenge) }.to raise_error(WebAuthn::VerificationError)
         end
       end
 
@@ -63,7 +63,7 @@ RSpec.describe "PublicKeyCredentialWithAttestation" do
         let(:type) { "password" }
 
         it "fails" do
-          expect { public_key_credential.verify(challenge) }.to raise_error(RuntimeError)
+          expect { public_key_credential.verify(challenge) }.to raise_error(WebAuthn::VerificationError)
         end
       end
     end
@@ -73,7 +73,7 @@ RSpec.describe "PublicKeyCredentialWithAttestation" do
         let(:id) { nil }
 
         it "fails" do
-          expect { public_key_credential.verify(challenge) }.to raise_error(RuntimeError)
+          expect { public_key_credential.verify(challenge) }.to raise_error(WebAuthn::VerificationError)
         end
       end
 
@@ -81,7 +81,7 @@ RSpec.describe "PublicKeyCredentialWithAttestation" do
         let(:id) { WebAuthn::Encoders::Base64UrlEncoder.encode(raw_id + "a") }
 
         it "fails" do
-          expect { public_key_credential.verify(challenge) }.to raise_error(RuntimeError)
+          expect { public_key_credential.verify(challenge) }.to raise_error(WebAuthn::VerificationError)
         end
       end
     end

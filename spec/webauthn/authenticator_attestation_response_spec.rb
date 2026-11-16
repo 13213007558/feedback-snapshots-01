@@ -541,8 +541,10 @@ RSpec.describe WebAuthn::AuthenticatorAttestationResponse do
       )
 
       expect {
-        attestation_response.valid?("", "")
+        attestation_response.verify("", "")
       }.to raise_exception(WebAuthn::ClientDataMissingError)
+
+      expect(attestation_response.valid?("", "")).to be_falsy
     end
   end
 
@@ -1108,7 +1110,7 @@ RSpec.describe WebAuthn::AuthenticatorAttestationResponse do
       end
 
       it "raises error" do
-        expect { attestation_response.verify(original_challenge) }.to raise_error(OpenSSL::PKey::PKeyError)
+        expect { attestation_response.verify(original_challenge) }.to raise_error(WebAuthn::AttestationStatementVerificationError)
       end
     end
 

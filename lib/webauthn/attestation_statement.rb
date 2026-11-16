@@ -11,7 +11,8 @@ require "webauthn/error"
 
 module WebAuthn
   module AttestationStatement
-    class FormatNotSupportedError < Error; end
+    class FormatNotSupportedError < FormatError; end
+    class InvalidCertificateError < FormatError; end
 
     ATTESTATION_FORMAT_NONE = "none"
     ATTESTATION_FORMAT_FIDO_U2F = "fido-u2f"

@@ -9,7 +9,7 @@ require "webauthn/error"
 
 module WebAuthn
   module AttestationStatement
-    class UnsupportedAlgorithm < Error; end
+    class UnsupportedAlgorithm < VerificationError; end
 
     ATTESTATION_TYPE_NONE = "None"
     ATTESTATION_TYPE_BASIC = "Basic"
@@ -72,6 +72,8 @@ module WebAuthn
           raw_certificates&.map do |raw_certificate|
             OpenSSL::X509::Certificate.new(raw_certificate)
           end
+      rescue OpenSSL::X509::CertificateError
+        raise InvalidCertificateError, "Attestation statement certificate could not be parsed"
       end
 
       def algorithm
@@ -123,7 +125,11 @@ module WebAuthn
             aaguid: aaguid,
             attestation_certificate_key_id: attestation_certificate_key_id
           ).each do |cert|
-            store.add_cert(cert)
+            begin
+              store.add_cert(cert)
+            rescue OpenSSL::X509::CertificateError, TypeError
+              raise ConfigurationError, "Attestation root certificate could not be parsed"
+            end
           end
         end
       end
@@ -150,14 +156,14 @@ module WebAuthn
       end
 
       def valid_signature?(authenticator_data, client_data_hash, public_key = attestation_certificate.public_key)
-        raise("Incompatible algorithm and key") unless cose_algorithm.compatible_key?(public_key)
+        return false unless cose_algorithm.compatible_key?(public_key)
 
         cose_algorithm.verify(
           public_key,
           signature,
           verification_data(authenticator_data, client_data_hash)
         )
-      rescue COSE::Error
+      rescue COSE::Error, OpenSSL::PKey::PKeyError
         false
       end
 

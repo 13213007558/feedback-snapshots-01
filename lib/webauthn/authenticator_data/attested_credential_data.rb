@@ -5,7 +5,7 @@ require "cose/key"
 require "webauthn/error"
 
 module WebAuthn
-  class AttestedCredentialDataFormatError < WebAuthn::Error; end
+  class AttestedCredentialDataFormatError < WebAuthn::FormatError; end
 
   class AuthenticatorData < BinData::Record
     class AttestedCredentialData < BinData::Record
@@ -26,12 +26,14 @@ module WebAuthn
         Struct.new(:id, :public_key, :algorithm, keyword_init: true) do
           def public_key_object
             COSE::Key.deserialize(public_key).to_pkey
+          rescue COSE::Error, ArgumentError, OpenSSL::OpenSSLError, RuntimeError
+            raise AttestedCredentialDataFormatError
           end
         end
 
       def self.deserialize(data)
         read(data)
-      rescue EOFError
+      rescue EOFError, IOError
         raise AttestedCredentialDataFormatError
       end
 
@@ -59,7 +61,7 @@ module WebAuthn
       private
 
       def algorithm
-        COSE::Algorithm.find(cose_key.alg).name
+        COSE::Algorithm.find(cose_key.alg)&.name || raise(AttestedCredentialDataFormatError)
       end
 
       def valid_credential_public_key?
@@ -68,6 +70,8 @@ module WebAuthn
 
       def cose_key
         @cose_key ||= COSE::Key.deserialize(public_key)
+      rescue COSE::Error, ArgumentError
+        raise AttestedCredentialDataFormatError
       end
 
       def public_key
@@ -77,6 +81,8 @@ module WebAuthn
       def public_key_length
         @public_key_length ||=
           CBOR.encode(CBOR::Unpacker.new(StringIO.new(trailing_bytes)).each.first).length
+      rescue CBOR::UnpackError, EOFError
+        raise AttestedCredentialDataFormatError
       end
     end
   end

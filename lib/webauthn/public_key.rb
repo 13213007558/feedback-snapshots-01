@@ -9,6 +9,7 @@ require "webauthn/attestation_statement/fido_u2f/public_key"
 module WebAuthn
   class PublicKey
     class UnsupportedAlgorithm < Error; end
+    class DeserializationError < Error; end
 
     def self.deserialize(public_key)
       cose_key =
@@ -34,6 +35,8 @@ module WebAuthn
         end
 
       new(cose_key: cose_key)
+    rescue COSE::Error, ArgumentError
+      raise DeserializationError, "Public key could not be deserialized"
     end
 
     attr_reader :cose_key

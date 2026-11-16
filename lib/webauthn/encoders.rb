@@ -1,6 +1,10 @@
 # frozen_string_literal: true
 
+require "webauthn/error"
+
 module WebAuthn
+  class DecodingError < FormatError; end
+
   def self.standard_encoder
     @standard_encoder ||= Encoders.lookup(Encoder::STANDARD_ENCODING)
   end
@@ -16,7 +20,7 @@ module WebAuthn
         when nil, false
           NullEncoder
         else
-          raise "Unsupported or unknown encoding: #{encoding}"
+          raise ConfigurationError, "Unsupported or unknown encoding: #{encoding}"
         end
       end
     end
@@ -27,7 +31,11 @@ module WebAuthn
       end
 
       def self.decode(data)
+        raise DecodingError, "Input could not be decoded" unless data.is_a?(String)
+
         data.unpack1("m0") # Base64.strict_decode64(data)
+      rescue ArgumentError
+        raise DecodingError, "Input could not be decoded"
       end
     end
 
@@ -40,12 +48,16 @@ module WebAuthn
       end
 
       def self.decode(data)
+        raise DecodingError, "Input could not be decoded" unless data.is_a?(String)
+
         if !data.end_with?("=") && data.length % 4 != 0 #  Base64.urlsafe_decode64(data)
           data = data.ljust((data.length + 3) & ~3, "=")
         end
 
         data = data.tr("-_", "+/")
         data.unpack1("m0")
+      rescue ArgumentError
+        raise DecodingError, "Input could not be decoded"
       end
     end
 

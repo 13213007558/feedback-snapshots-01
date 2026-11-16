@@ -6,7 +6,7 @@ require "webauthn/encoder"
 require "webauthn/error"
 
 module WebAuthn
-  class RootCertificateFinderNotSupportedError < Error; end
+  class RootCertificateFinderNotSupportedError < ConfigurationError; end
 
   class RelyingParty
     DEFAULT_ALGORITHMS = ["ES256", "PS256", "RS256"].compact.freeze

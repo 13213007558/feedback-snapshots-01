@@ -5,7 +5,7 @@ require "webauthn/authenticator_data/attested_credential_data"
 require "webauthn/error"
 
 module WebAuthn
-  class AuthenticatorDataFormatError < WebAuthn::Error; end
+  class AuthenticatorDataFormatError < WebAuthn::FormatError; end
 
   class AuthenticatorData < BinData::Record
     RP_ID_HASH_LENGTH = 32
@@ -32,7 +32,7 @@ module WebAuthn
 
     def self.deserialize(data)
       read(data)
-    rescue EOFError
+    rescue EOFError, IOError
       raise AuthenticatorDataFormatError
     end
 
@@ -89,6 +89,8 @@ module WebAuthn
 
     def extension_data
       @extension_data ||= CBOR.decode(raw_extension_data)
+    rescue CBOR::UnpackError, EOFError
+      raise AuthenticatorDataFormatError
     end
 
     def aaguid

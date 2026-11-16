@@ -2,6 +2,16 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Changed
+
+- Establish a consistent error contract for `RelyingParty#verify_registration` and `RelyingParty#verify_authentication`, documented in [docs/error_contract.md](docs/error_contract.md):
+  - Malformed untrusted input (truncated CBOR, invalid attestation certificates, incomplete credential public key parameters, unknown attestation formats, invalid base64, invalid client data JSON) now raises `WebAuthn::FormatError` subclasses instead of low-level `EOFError`/`IOError`/`CBOR::UnpackError`/`OpenSSL::X509::CertificateError`/`COSE::Error`/`ArgumentError` exceptions. The original exception is preserved as the exception `cause`.
+  - `WebAuthn::FormatError` inherits from `WebAuthn::VerificationError`, so `valid?` returns `false` for all malformed authenticator responses.
+  - Relying Party misconfiguration (missing `allowed_origins`, missing `legacy_u2f_appid`, non-conforming or misbehaving attestation root certificate finders, unsupported `encoding`) now raises `WebAuthn::ConfigurationError`, which is never swallowed by `valid?`. Exceptions raised by trusted finders themselves keep propagating unchanged.
+  - `WebAuthn::AuthenticatorDataFormatError`, `WebAuthn::AttestedCredentialDataFormatError` and `WebAuthn::AttestationStatement::FormatNotSupportedError` now inherit from `WebAuthn::FormatError`; `WebAuthn::RootCertificateFinderNotSupportedError` now inherits from `WebAuthn::ConfigurationError`.
+  - Invalid credential `type`/`id` now raise `WebAuthn::VerificationError` instead of `RuntimeError`.
+  - A corrupted attestation statement signature now fails verification (`valid?` returns `false`, `verify` raises `WebAuthn::AttestationStatementVerificationError`) instead of leaking `OpenSSL::PKey::PKeyError`.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

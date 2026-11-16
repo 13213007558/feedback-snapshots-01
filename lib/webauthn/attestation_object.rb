@@ -5,13 +5,27 @@ require "forwardable"
 require "openssl"
 require "webauthn/attestation_statement"
 require "webauthn/authenticator_data"
+require "webauthn/error"
 
 module WebAuthn
+  class AttestationObjectFormatError < FormatError; end
+
   class AttestationObject
     extend Forwardable
 
     def self.deserialize(attestation_object, relying_party)
-      from_map(CBOR.decode(attestation_object), relying_party)
+      map =
+        begin
+          CBOR.decode(attestation_object)
+        rescue CBOR::UnpackError, EOFError
+          raise AttestationObjectFormatError, "Attestation object could not be deserialized"
+        end
+
+      unless map.is_a?(Hash)
+        raise AttestationObjectFormatError, "Attestation object could not be deserialized"
+      end
+
+      from_map(map, relying_party)
     end
 
     def self.from_map(map, relying_party)

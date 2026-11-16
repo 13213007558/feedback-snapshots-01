@@ -7,8 +7,6 @@ require "webauthn/error"
 module WebAuthn
   TYPES = { create: "webauthn.create", get: "webauthn.get" }.freeze
 
-  class VerificationError < Error; end
-
   class AuthenticatorDataVerificationError < VerificationError; end
   class BackupFlagsVerificationError < VerificationError; end
   class ChallengeVerificationError < VerificationError; end
@@ -26,7 +24,7 @@ module WebAuthn
     end
 
     def verify(expected_challenge, expected_origin = nil, user_presence: nil, user_verification: nil, rp_id: nil)
-      expected_origin ||= relying_party.allowed_origins || raise("Unspecified expected origin")
+      expected_origin ||= relying_party.allowed_origins || raise(ConfigurationError, "Unspecified expected origin")
 
       rp_id ||= relying_party.id
 

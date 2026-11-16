@@ -127,7 +127,7 @@ RSpec.describe "AndroidKey attestation" do
         let(:signature) { "corrupted signature".b }
 
         it "fails" do
-          expect { statement.valid?(authenticator_data, client_data_hash) }.to raise_error(OpenSSL::PKey::PKeyError)
+          expect(statement.valid?(authenticator_data, client_data_hash)).to be_falsy
         end
       end
     end

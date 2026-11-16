@@ -69,7 +69,7 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
               public_key: credential_public_key,
               sign_count: credential_sign_count
             )
-          end.to raise_error(RuntimeError)
+          end.to raise_error(WebAuthn::VerificationError)
         end
       end
 
@@ -83,7 +83,7 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
               public_key: credential_public_key,
               sign_count: credential_sign_count
             )
-          end.to raise_error(RuntimeError)
+          end.to raise_error(WebAuthn::VerificationError)
         end
       end
     end
@@ -99,7 +99,7 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
               public_key: credential_public_key,
               sign_count: credential_sign_count
             )
-          end.to raise_error(RuntimeError)
+          end.to raise_error(WebAuthn::VerificationError)
         end
       end
 
@@ -113,7 +113,7 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
               public_key: credential_public_key,
               sign_count: credential_sign_count
             )
-          end.to raise_error(RuntimeError)
+          end.to raise_error(WebAuthn::VerificationError)
         end
       end
     end

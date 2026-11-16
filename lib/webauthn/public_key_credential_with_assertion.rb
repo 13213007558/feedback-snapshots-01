@@ -43,7 +43,7 @@ module WebAuthn
     end
 
     def appid
-      URI.parse(relying_party.legacy_u2f_appid || raise("Unspecified legacy U2F AppID")).to_s
+      URI.parse(relying_party.legacy_u2f_appid || raise(ConfigurationError, "Unspecified legacy U2F AppID")).to_s
     end
   end
 end

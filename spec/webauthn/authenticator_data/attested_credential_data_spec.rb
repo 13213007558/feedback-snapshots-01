@@ -22,8 +22,8 @@ RSpec.describe WebAuthn::AuthenticatorData::AttestedCredentialData do
       attested_credential_data =
         WebAuthn::AuthenticatorData::AttestedCredentialData.deserialize(raw_data)
 
-      expect { attested_credential_data.valid? }.to raise_error(COSE::UnknownKeyType)
-      expect { attested_credential_data.credential }.to raise_error(COSE::UnknownKeyType)
+      expect { attested_credential_data.valid? }.to raise_error(WebAuthn::AttestedCredentialDataFormatError)
+      expect { attested_credential_data.credential }.to raise_error(WebAuthn::AttestedCredentialDataFormatError)
     end
 
     it "returns false if public key doesn't contain the alg parameter" do

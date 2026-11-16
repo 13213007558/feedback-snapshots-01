@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "webauthn/encoder"
+require "webauthn/error"
 
 module WebAuthn
   class PublicKeyCredential
@@ -45,8 +46,8 @@ module WebAuthn
         raise(InvalidChallengeError, msg)
       end
 
-      valid_type? || raise("invalid type")
-      valid_id? || raise("invalid id")
+      valid_type? || raise(VerificationError, "invalid type")
+      valid_id? || raise(VerificationError, "invalid id")
 
       true
     end
