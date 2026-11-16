@@ -22,7 +22,7 @@ from dissect.cim.classes import (
     ClassInstance,
     PropertyDefaultValues,
 )
-from dissect.cim.exceptions import Error, InvalidDatabaseError
+from dissect.cim.exceptions import Error, InheritanceError, InvalidDatabaseError, ReferenceNotFoundError
 from dissect.cim.index import Index, Key
 from dissect.cim.mappings import Mapping
 from dissect.cim.objects import Objects
@@ -240,15 +240,30 @@ class Class:
     def derivation(self) -> list[Class]:
         """List from root to leaf of class layouts."""
         derivation = []
+        seen = set()
 
         class_ = self
         while True:
+            name = class_.name
+            if name in seen:
+                raise InheritanceError(
+                    f"Cycle detected in class inheritance chain at {name!r}", class_name=name
+                )
+            seen.add(name)
             derivation.append(class_)
+
             super_class_name = class_.class_definition.super_class_name
             if super_class_name == "":
                 break
 
-            class_ = self.namespace.class_(super_class_name)
+            try:
+                class_ = self.namespace.class_(super_class_name)
+            except (ReferenceNotFoundError, IndexError) as e:
+                raise InheritanceError(
+                    f"Class {name!r} references missing super class {super_class_name!r}",
+                    class_name=name,
+                    super_class_name=super_class_name,
+                ) from e
 
         derivation.reverse()
         return derivation
@@ -331,6 +346,18 @@ class Instance:
     @property
     def properties(self) -> dict[str, ClassInstanceProperty]:
         return self.class_instance.properties
+
+    def property(self, name: str) -> ClassInstanceProperty:
+        """Resolve a property's value provenance by name.
+
+        Properties present in the merged class layout return a fully resolved
+        :class:`ClassInstanceProperty` (instance value, inherited default,
+        explicit NULL or uninitialised). A name outside the layout yields a
+        NONEXISTENT result instead of being confused with an adjacent field.
+        """
+        if name in self.class_instance.properties:
+            return self.class_instance.properties[name]
+        return self.class_instance.nonexistent_property(name)
 
 
 class Property:

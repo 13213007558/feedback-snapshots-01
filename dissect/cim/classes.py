@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from functools import cached_property
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -27,6 +28,22 @@ if TYPE_CHECKING:
         CimType,
     )
     from dissect.cim.cim import CIM, Class, Property
+
+
+class PropertyValueOrigin(Enum):
+    """Where an instance property's effective value originates from."""
+
+    # The value is stored in the instance's own data region.
+    INSTANCE = "instance"
+    # The instance has no own value; the class hierarchy supplies a default.
+    DEFAULT = "default"
+    # The instance explicitly initialised the property to NULL (for reference
+    # types this is encoded as an empty string/array on disk).
+    NULL = "null"
+    # The property exists in the layout but the instance never initialised it.
+    UNINITIALIZED = "uninitialized"
+    # The property is not part of the (merged) class layout at all.
+    NONEXISTENT = "nonexistent"
 
 
 class QualifierReference:
@@ -98,13 +115,20 @@ class PropertyStates:
         self.entries = c_cim.uint8[self._property_state_length()](fh)
 
     def __getitem__(self, idx: int) -> ClassDefinitionPropertyState | ClassInstancePropertyState:
-        if idx > self.num_properties:
-            raise IndexError("Invalid property index")
+        if idx < 0 or idx >= self.num_properties:
+            raise IndexError(f"Invalid property index: {idx} (have {self.num_properties} properties)")
 
         byte_of_state = self.entries[idx // 4]
         rotations = idx % 4
         state_flags = (byte_of_state >> (2 * rotations)) & 0x3
         return self.state_cls(state_flags & 0b10 > 0, state_flags & 0b01 == 0)
+
+    def __len__(self) -> int:
+        return self.num_properties
+
+    @property
+    def data_size(self) -> int:
+        return len(self.entries)
 
     def _property_state_length(self) -> int:
         required_bits = 2 * self.num_properties
@@ -118,10 +142,13 @@ class PropertyDefaultValues:
         self.fh = fh
         self.properties = properties
         self.state = PropertyStates(fh, ClassDefinitionPropertyState, len(properties))
-        self.default_values = []
-
-        for prop in self.properties:
-            self.default_values.append(prop.ctype(fh))
+        # Default values are stored on disk in global-index order, one entry per
+        # merged property. Key them by the property's actual global index so a
+        # non-contiguous or reordered layout can never shift a value onto the
+        # wrong property (the remaining entries are not compacted forward).
+        self.default_values = {}
+        for prop in properties:
+            self.default_values[prop.index] = prop.ctype(fh)
 
 
 class ClassDefinitionProperty:
@@ -160,13 +187,15 @@ class ClassInstanceProperty:
         self,
         class_instance: ClassInstance,
         prop: Property,
-        value: CimType | list[CimType],
+        value: CimType | list[CimType] | None,
         state: ClassDefinitionPropertyState | ClassInstancePropertyState,
+        origin: PropertyValueOrigin,
     ):
         self.class_instance = class_instance
         self._prop = prop
         self._value = value
         self.state = state
+        self._origin = origin
 
     @property
     def type(self) -> c_cim.cim_type:
@@ -215,9 +244,21 @@ class ClassInstanceProperty:
         return False
 
     @property
+    def origin(self) -> PropertyValueOrigin:
+        """Provenance of the effective value.
+
+        Distinguishes a value stored on the instance itself from a value that
+        is merely inherited from a class default, an explicit NULL, a property
+        that was never initialised and a property that is not in the layout.
+        """
+        return self._origin
+
+    @property
     def value(self) -> CimType | list[CimType]:
-        if not self.is_initialized:
+        if self._origin == PropertyValueOrigin.UNINITIALIZED:
             raise ValueError("Property is not initialized")
+        if self._origin == PropertyValueOrigin.NONEXISTENT:
+            raise ValueError("Property does not exist on this class")
         return self._value
 
 
@@ -272,6 +313,24 @@ class ClassDefinition:
         return wintimestamp(self.header.timestamp)
 
 
+class _UnknownProperty:
+    """Minimal stand-in for a property name that is not part of the layout."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.index = -1
+        self.offset = -1
+        self.level = -1
+        self.type = None
+        self.qualifiers = {}
+        self.is_inherited = False
+        self.has_default_value = False
+
+    @property
+    def default_value(self):
+        raise ValueError("Property does not exist on this class")
+
+
 class ClassInstance:
     def __init__(self, cim: CIM, class_: Class, fh: BinaryIO):
         self.cim = cim
@@ -287,13 +346,28 @@ class ClassInstance:
         buf = BytesIO(self.header.remaining_data)
         self.property_states = PropertyStates(buf, ClassInstancePropertyState, len(class_.properties))
 
-        self.toc = []
-        for p in sorted(class_.properties.values(), key=lambda p: p.index):
-            self.toc.append(p.ctype(buf))
+        # The on-disk TOC holds one entry per merged property, in global-index
+        # order. Key the entries by the property's actual global index instead
+        # of assuming a compacted, contiguous list: a non-contiguous layout must
+        # not shift the remaining entries forward onto the wrong property.
+        ordered_properties = sorted(class_.properties.values(), key=lambda p: p.index)
+        self.toc = {}
+        for prop in ordered_properties:
+            self.toc[prop.index] = prop.ctype(buf)
 
         self.qualifier_references = QualifierReference.read_list(buf)
         self.dynprops = Dynprops(buf)
         self.data = DataRegion(buf)
+
+        # Anything left after the data region cannot currently be interpreted;
+        # retain the raw bytes rather than silently discarding them.
+        self.residual_data = buf.read()
+
+    def _toc_entry(self, prop: Property) -> CimType | list[CimType]:
+        try:
+            return self.toc[prop.index]
+        except KeyError:
+            raise Error(f"Instance TOC has no entry for property {prop.name!r} (index {prop.index})")
 
     @property
     def class_name(self) -> str:
@@ -313,16 +387,43 @@ class ClassInstance:
         for prop in self.class_.properties.values():
             state = self.property_states[prop.index]
 
-            value = None
-            if state.is_initialized:
-                if state.use_default_value:
-                    value = prop.default_value
-                else:
-                    value = self.data.get_value(self.toc[prop.index], prop.type)
+            if not state.is_initialized:
+                # Declared in the layout but never given a value in this instance.
+                properties[prop.name] = ClassInstanceProperty(
+                    self, prop, None, state, PropertyValueOrigin.UNINITIALIZED
+                )
+                continue
 
-            properties[prop.name] = ClassInstanceProperty(self, prop, value, state)
+            if state.use_default_value:
+                # The instance points at the class hierarchy's default value.
+                properties[prop.name] = ClassInstanceProperty(
+                    self, prop, prop.default_value, state, PropertyValueOrigin.DEFAULT
+                )
+                continue
+
+            # The value is stored in the instance's own data region. A NULL is
+            # represented on disk as an empty reference-type value; tag it via
+            # the origin while keeping the decoded value faithful to the bytes.
+            value = self.data.get_value(self._toc_entry(prop), prop.type)
+            origin = PropertyValueOrigin.NULL if self._is_null(prop, value) else PropertyValueOrigin.INSTANCE
+            properties[prop.name] = ClassInstanceProperty(self, prop, value, state, origin)
 
         return properties
+
+    @staticmethod
+    def _is_null(prop: Property, value: CimType | list[CimType]) -> bool:
+        if prop.type.array_state == ARRAY_STATES.ARRAY:
+            return len(value) == 0
+        t = prop.type.type
+        if t in (CIM_TYPES.STRING, CIM_TYPES.REFERENCE, CIM_TYPES.DATETIME):
+            return value == ""
+        return False
+
+    def nonexistent_property(self, name: str) -> ClassInstanceProperty:
+        """Build a NONEXISTENT result for a name absent from the class layout."""
+        placeholder = _UnknownProperty(name)
+        state = ClassInstancePropertyState(use_default_value=False, is_initialized=False)
+        return ClassInstanceProperty(self, placeholder, None, state, PropertyValueOrigin.NONEXISTENT)
 
     @property
     def key(self) -> InstanceKey:
