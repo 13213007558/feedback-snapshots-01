@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 import zipfile
+from hashlib import sha1
 from struct import unpack
 from xml.dom.minidom import parseString
 
@@ -45,14 +46,33 @@ def _parseinfo_standard(ole):
     header = _parse_encryptionheader(blob)
     block = ole.read()
     blob = io.BytesIO(block)
-    algIdMap = {
-        0x0000660E: "AES-128",
-        0x0000660F: "AES-192",
-        0x00006610: "AES-256",
-    }
-    verifier = _parse_encryptionverifier(
-        blob, "AES" if header["algId"] & 0xFF00 == 0x6600 else "RC4"
-    )  # TODO: Fix
+    # [MS-OFFCRYPTO] 2.3.6: Standard Encryption for OOXML is always AES with
+    # SHA-1. RC4 CryptoAPI is a legacy CFB mechanism handled elsewhere, never
+    # part of an OOXML Standard EncryptionInfo stream.
+    verifier = _parse_encryptionverifier(blob, "AES")
+    if header["sizeExtra"] != 0:
+        raise exceptions.DecryptionError(
+            "Unsupported Standard Encryption header: sizeExtra must be 0 (got {})".format(
+                header["sizeExtra"]
+            )
+        )
+    if verifier["verifierHashSize"] != sha1().digest_size:
+        raise exceptions.DecryptionError(
+            "Unsupported Standard Encryption verifierHashSize {}; expected {} (SHA-1)".format(
+                verifier["verifierHashSize"], sha1().digest_size
+            )
+        )
+    # Fail at parse time if the header does not declare a supported,
+    # self-consistent Standard Encryption suite. Key derivation validates again
+    # as defense in depth.
+    ECMA376Standard.validate_standard_parameters(
+        header["algId"],
+        header["algIdHash"],
+        header["providerType"],
+        header["keySize"],
+        verifier["saltSize"],
+        verifier["salt"],
+    )
     info = {
         "header": header,
         "verifier": verifier,

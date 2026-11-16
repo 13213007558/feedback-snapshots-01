@@ -6,13 +6,76 @@ from struct import pack, unpack
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from msoffcrypto import exceptions
+
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+# [MS-OFFCRYPTO] 2.3.6 EncryptionHeader (Standard Encryption):
+# the only algorithm suite permitted for ECMA-376 Standard Encryption is
+# AES (ECB) in combination with SHA-1. These rules are specific to the
+# Standard Encryption version of the header and must not be confused with
+# the parameter negotiation used by Agile Encryption.
+STANDARD_ALG_IDS = {
+    0x0000660E: 128,  # AES-128
+    0x0000660F: 192,  # AES-192
+    0x00006610: 256,  # AES-256
+}
+STANDARD_ALG_ID_HASH = 0x00008004  # SHA-1
+STANDARD_PROVIDER_TYPE = 0x00000018  # PROV_RSA_AES
+STANDARD_SALT_SIZE = 16  # bytes
+STANDARD_ITER_COUNT = 50000
 
 
 class ECMA376Standard:
     def __init__(self):
         pass
+
+    @staticmethod
+    def validate_standard_parameters(algId, algIdHash, providerType, keySize, saltSize, salt):
+        r"""
+        Validate that an EncryptionHeader/EncryptionVerifier combination is one of
+        the suites allowed by [MS-OFFCRYPTO] Standard Encryption.
+
+        Raises DecryptionError on any unsupported or contradictory declaration so
+        that a file cannot be decrypted under an algorithm different from the one
+        its header advertises.
+        """
+        if algId not in STANDARD_ALG_IDS:
+            raise exceptions.DecryptionError(
+                "Unsupported Standard Encryption algId 0x{:08X}".format(algId)
+            )
+        if algIdHash != STANDARD_ALG_ID_HASH:
+            raise exceptions.DecryptionError(
+                "Unsupported Standard Encryption algIdHash 0x{:08X}; only SHA-1 (0x{:08X}) is supported".format(
+                    algIdHash, STANDARD_ALG_ID_HASH
+                )
+            )
+        if providerType != STANDARD_PROVIDER_TYPE:
+            raise exceptions.DecryptionError(
+                "Unsupported Standard Encryption providerType 0x{:08X}; only PROV_RSA_AES (0x{:08X}) is supported".format(
+                    providerType, STANDARD_PROVIDER_TYPE
+                )
+            )
+        expected_key_size = STANDARD_ALG_IDS[algId]
+        if keySize != expected_key_size:
+            raise exceptions.DecryptionError(
+                "Contradictory Standard Encryption keySize {} for algId 0x{:08X}; expected {}".format(
+                    keySize, algId, expected_key_size
+                )
+            )
+        if saltSize != STANDARD_SALT_SIZE:
+            raise exceptions.DecryptionError(
+                "Unsupported Standard Encryption saltSize {}; expected {} bytes".format(
+                    saltSize, STANDARD_SALT_SIZE
+                )
+            )
+        if len(salt) != STANDARD_SALT_SIZE:
+            raise exceptions.DecryptionError(
+                "Unsupported Standard Encryption salt length {}; expected {} bytes".format(
+                    len(salt), STANDARD_SALT_SIZE
+                )
+            )
 
     @staticmethod
     def decrypt(key, ibuf):
@@ -82,12 +145,18 @@ class ECMA376Standard:
                 salt,
             ]
         )
+        # Reject declarations we cannot honor before deriving anything, so an
+        # unsupported algId/hash/provider/key-length can never silently fall
+        # back to another algorithm and still produce a working key.
+        ECMA376Standard.validate_standard_parameters(
+            algId, algIdHash, providerType, keySize, saltSize, salt
+        )
         xor_bytes = lambda a, b: bytearray(
             [p ^ q for p, q in zip(bytearray(a), bytearray(b))]
         )  # bytearray() for Python 2 compat.
 
         # https://msdn.microsoft.com/en-us/library/dd925430(v=office.12).aspx
-        ITER_COUNT = 50000
+        ITER_COUNT = STANDARD_ITER_COUNT
 
         password = password.encode("UTF-16LE")
         h = sha1(salt + password).digest()
