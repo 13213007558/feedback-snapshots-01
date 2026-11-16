@@ -347,6 +347,13 @@ class PDFStandardSecurityHandler:
         self.docid = docid
         self.param = param
         self.password = password
+        #: Whether the supplied password authenticated as the user or owner
+        #: password. ``None`` means authentication failed.
+        self.password_role: str | None = None
+        #: Result of validating the AES-256 ``/Perms`` entry, when present.
+        #: ``None`` means the document revision does not carry a ``/Perms``
+        #: entry that can be verified independently.
+        self.perms_verified: bool | None = None
         self.init()
 
     def init(self) -> None:
@@ -368,6 +375,28 @@ class PDFStandardSecurityHandler:
         self.key = self.authenticate(self.password)
         if self.key is None:
             raise PDFPasswordIncorrect
+        self.verify_perms()
+
+    def verify_perms(self) -> None:
+        """Validate the encrypted ``/Perms`` entry of revision 5 and 6 documents.
+
+        For these revisions the permission bits in ``/P`` are not
+        authenticated. The encrypted ``/Perms`` entry repeats them under the
+        file key, so a mismatch means that ``/P`` was altered after the
+        document was produced and must not be trusted.
+        """
+        perms = self.param.get("Perms")
+        if not isinstance(perms, bytes) or len(perms) < 12 or self.key is None:
+            self.perms_verified = None
+            return
+        cipher = Cipher(
+            algorithms.AES(self.key),
+            modes.ECB(),
+            backend=default_backend(),
+        )
+        decrypted = cipher.decryptor().update(perms[:16])
+        stored_p = struct.unpack("<L", decrypted[0:4])[0]
+        self.perms_verified = stored_p == self.p
 
     def is_printable(self) -> bool:
         return bool(self.p & 4)
@@ -417,8 +446,12 @@ class PDFStandardSecurityHandler:
     def authenticate(self, password: str) -> bytes | None:
         password_bytes = password.encode("latin1")
         key = self.authenticate_user_password(password_bytes)
-        if key is None:
-            key = self.authenticate_owner_password(password_bytes)
+        if key is not None:
+            self.password_role = "user"
+            return key
+        key = self.authenticate_owner_password(password_bytes)
+        if key is not None:
+            self.password_role = "owner"
         return key
 
     def authenticate_user_password(self, password: bytes) -> bytes | None:
@@ -570,6 +603,7 @@ class PDFStandardSecurityHandlerV5(PDFStandardSecurityHandlerV4):
         password_b = self._normalize_password(password)
         hash = self._password_hash(password_b, self.o_validation_salt, self.u)
         if hash == self.o_hash:
+            self.password_role = "owner"
             hash = self._password_hash(password_b, self.o_key_salt, self.u)
             cipher = Cipher(
                 algorithms.AES(hash),
@@ -579,6 +613,7 @@ class PDFStandardSecurityHandlerV5(PDFStandardSecurityHandlerV4):
             return cipher.decryptor().update(self.oe)  # type: ignore
         hash = self._password_hash(password_b, self.u_validation_salt)
         if hash == self.u_hash:
+            self.password_role = "user"
             hash = self._password_hash(password_b, self.u_key_salt)
             cipher = Cipher(
                 algorithms.AES(hash),
@@ -704,6 +739,15 @@ class PDFDocument:
         self.catalog: dict[str, Any] = {}
         self.encryption: tuple[Any, Any] | None = None
         self.decipher: DecipherCallable | None = None
+        #: Permission bits declared by the document (``/P``), or ``None`` for
+        #: unencrypted documents. This is a document-level declaration, not an
+        #: authorization decision.
+        self.permissions: int | None = None
+        #: "user" or "owner" when an encryption password was accepted.
+        self.password_role: str | None = None
+        #: True/False when the AES-256 ``/Perms`` entry was checked, otherwise
+        #: ``None`` (unencrypted or an encryption revision without ``/Perms``).
+        self.perms_verified: bool | None = None
         self._parser = None
         self._cached_objs: dict[int, tuple[object, int]] = {}
         self._parsed_objs: dict[int, tuple[list[object], int]] = {}
@@ -761,6 +805,9 @@ class PDFDocument:
             raise PDFEncryptionError(f"Unknown algorithm: param={param!r}")
         handler = factory(docid, param, password)
         self.decipher = handler.decrypt
+        self.permissions = handler.p
+        self.password_role = handler.password_role
+        self.perms_verified = handler.perms_verified
         self.is_printable = handler.is_printable()
         self.is_modifiable = handler.is_modifiable()
         self.is_extractable = handler.is_extractable()

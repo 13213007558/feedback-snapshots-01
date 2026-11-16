@@ -1,6 +1,7 @@
+import hashlib
 import itertools
 import logging
-from collections.abc import Container, Iterator
+from collections.abc import Collection, Container, Iterator
 from typing import Any, BinaryIO, ClassVar
 
 from pdfminer import settings
@@ -20,6 +21,142 @@ log = logging.getLogger(__name__)
 # some predefined literals and keywords.
 LITERAL_PAGE = LIT("Page")
 LITERAL_PAGES = LIT("Pages")
+
+
+def _document_digest(fp: BinaryIO) -> str:
+    """Return the SHA-256 of the whole PDF, restoring the stream position."""
+    position = fp.tell()
+    digest = hashlib.sha256()
+    try:
+        fp.seek(0)
+        for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+            digest.update(chunk)
+    finally:
+        fp.seek(position)
+    return digest.hexdigest()
+
+
+class ExtractionPolicy:
+    """Application-level extraction authorization for named documents.
+
+    A grant names the exact documents it applies to, by SHA-256 of the PDF
+    bytes. It is therefore impossible for one grant to authorize a different
+    file, and no module-level or process-wide switch is involved. A grant
+    without ``doc_digests`` is rejected: the caller must say which documents
+    the authorization covers.
+
+    Decryption and authorization are deliberately separate. A correct user or
+    owner password only proves access to the cipher; it never implies that the
+    application is allowed to extract text. ``granted`` is the application's
+    explicit authorization to ignore the document's ``/P`` bits, and the reason
+    is carried into the audit record.
+
+    :param doc_digests: SHA-256 hex digests of the documents this policy may
+        authorize for extraction.
+    :param granted: Whether the application grants extraction for these
+        documents despite their ``/P`` bits.
+    :param grant_reason: Human-readable justification, required when
+        ``granted`` is true.
+    """
+
+    def __init__(
+        self,
+        doc_digests: Collection[str] = (),
+        granted: bool = False,
+        grant_reason: str | None = None,
+    ) -> None:
+        if granted and not doc_digests:
+            error_msg = "An extraction grant must name the document digests it covers"
+            raise PDFValueError(error_msg)
+        if granted and not grant_reason:
+            error_msg = "An extraction grant requires a non-empty reason for audit"
+            raise PDFValueError(error_msg)
+        self.doc_digests = frozenset(doc_digests)
+        self.granted = granted
+        self.grant_reason = grant_reason
+
+    def bind(self, document: PDFDocument, doc_digest: str) -> "ExtractionDecision":
+        return ExtractionDecision(document, self, doc_digest)
+
+
+class ExtractionDecision:
+    """The result of applying one :class:`ExtractionPolicy` to one document."""
+
+    def __init__(
+        self,
+        document: PDFDocument,
+        policy: ExtractionPolicy,
+        doc_digest: str,
+    ) -> None:
+        self.document = document
+        self.policy = policy
+        self.doc_digest = doc_digest
+
+    @property
+    def allowed_by_pdf(self) -> bool:
+        """Whether the document's declared permission bits allow extraction."""
+        return self.document.is_extractable
+
+    @property
+    def granted(self) -> bool:
+        """Whether this specific document is covered by the application grant."""
+        return (
+            self.policy.granted
+            and self.doc_digest in self.policy.doc_digests
+            and self.document.encryption is not None
+        )
+
+    @property
+    def decided_by(self) -> str:
+        """Which layer produced the current decision.
+
+        ``pdf_permission`` means the document declaration was followed,
+        ``application_grant`` means an explicit grant allowed extraction, and
+        ``unencrypted`` means there was no declaration to honor.
+        """
+        if self.document.encryption is None:
+            return "unencrypted"
+        if not self.allowed_by_pdf and self.granted:
+            return "application_grant"
+        return "pdf_permission"
+
+    @property
+    def allowed(self) -> bool:
+        if self.document.encryption is None:
+            return True
+        return self.allowed_by_pdf or self.granted
+
+    def audit_record(self, action: str = "extract_text") -> dict[str, Any]:
+        """Return a JSON-serializable record of this decision."""
+        return {
+            "action": action,
+            "document_sha256": self.doc_digest,
+            "document_encrypted": self.document.encryption is not None,
+            "pdf_permission_extract": self.allowed_by_pdf,
+            "permission_bits": self.document.permissions,
+            "password_role": self.document.password_role,
+            "perms_verified": self.document.perms_verified,
+            "application_grant": self.granted,
+            "grant_reason": self.policy.grant_reason if self.granted else None,
+            "decided_by": self.decided_by,
+            "allowed": self.allowed,
+        }
+
+    def check(self, source: object = None) -> None:
+        """Raise when extraction is not allowed under this decision."""
+        if not self.allowed:
+            error_msg = (
+                f"Text extraction is not allowed: {source!r} "
+                f"(permission_bits={self.document.permissions!r})"
+            )
+            raise PDFTextExtractionNotAllowed(error_msg)
+        if not self.allowed_by_pdf and self.granted:
+            log.warning(
+                "Extracting text from %r despite the document's permission "
+                "bits because an application grant was supplied: %s",
+                source,
+                self.policy.grant_reason,
+            )
 
 
 class PDFPage:
@@ -158,14 +295,17 @@ class PDFPage:
         password: str = "",
         caching: bool = True,
         check_extractable: bool = False,
+        extraction_policy: ExtractionPolicy | None = None,
     ) -> Iterator["PDFPage"]:
         # Create a PDF parser object associated with the file object.
         parser = PDFParser(fp)
         # Create a PDF document object that stores the document structure.
         doc = PDFDocument(parser, password=password, caching=caching)
+        if extraction_policy is not None:
+            extraction_policy.bind(doc, _document_digest(fp)).check(fp)
         # Check if the document allows text extraction.
         # If not, warn the user and proceed.
-        if not doc.is_extractable:
+        elif not doc.is_extractable:
             if check_extractable:
                 error_msg = f"Text extraction is not allowed: {fp!r}"
                 raise PDFTextExtractionNotAllowed(error_msg)

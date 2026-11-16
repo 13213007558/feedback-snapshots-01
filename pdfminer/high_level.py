@@ -18,7 +18,7 @@ from pdfminer.layout import LAParams, LTPage
 from pdfminer.pdfdevice import PDFDevice, TagExtractor
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
-from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfpage import ExtractionPolicy, PDFPage
 from pdfminer.utils import AnyIO, FileOrName, open_filename
 
 
@@ -38,6 +38,8 @@ def extract_text_to_fp(
     strip_control: bool = False,
     debug: bool = False,
     disable_caching: bool = False,
+    check_extractable: bool = False,
+    extraction_policy: ExtractionPolicy | None = None,
     **kwargs: Any,
 ) -> None:
     """Parses text from inf-file and writes to outfp file-like object.
@@ -65,12 +67,38 @@ def extract_text_to_fp(
     :param strip_control: Does what it says on the tin
     :param debug: Output more logging data
     :param disable_caching: Does what it says on the tin
-    :param other:
+    :param check_extractable: Raise
+        :class:`~pdfminer.pdfdocument.PDFTextExtractionNotAllowed` when the
+        document's ``/P`` bits forbid text extraction. By default a warning is
+        logged and extraction proceeds, matching historical behavior.
+    :param extraction_policy: An application-level
+        :class:`~pdfminer.pdfpage.ExtractionPolicy`. Unlike
+        ``check_extractable``, a policy always enforces the document's
+        permission bits unless the caller explicitly granted extraction, and it
+        produces an auditable decision.
     :return: nothing, acting as it does on two streams. Use StringIO to get
         strings.
     """
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
+    if kwargs:
+        # `tools/pdf2txt.py` historically forwards its full argparse namespace.
+        # Absorb only the fields that belong to layout/CLI plumbing, and reject
+        # anything else so that security-relevant typos are not silent.
+        cli_only = {
+            "no_laparams",
+            "line_overlap",
+            "char_margin",
+            "line_margin",
+            "word_margin",
+            "boxes_flow",
+            "detect_vertical",
+            "all_texts",
+        }
+        unknown = sorted(set(kwargs) - cli_only)
+        if unknown:
+            msg = f"Unsupported keyword arguments: {', '.join(unknown)}"
+            raise PDFValueError(msg)
 
     imagewriter = None
     if output_dir:
@@ -137,6 +165,8 @@ def extract_text_to_fp(
         maxpages=maxpages,
         password=password,
         caching=not disable_caching,
+        check_extractable=check_extractable,
+        extraction_policy=extraction_policy,
     ):
         page.rotate = (page.rotate + rotation) % 360
         interpreter.process_page(page)
@@ -152,6 +182,8 @@ def extract_text(
     caching: bool = True,
     codec: str = "utf-8",
     laparams: LAParams | None = None,
+    check_extractable: bool = False,
+    extraction_policy: ExtractionPolicy | None = None,
 ) -> str:
     """Parse and return the text contained in a PDF file.
 
@@ -164,6 +196,12 @@ def extract_text(
     :param codec: Text decoding codec
     :param laparams: An LAParams object from pdfminer.layout. If None, uses
         some default settings that often work well.
+    :param check_extractable: Raise
+        :class:`~pdfminer.pdfdocument.PDFTextExtractionNotAllowed` instead of
+        only warning when the document forbids text extraction.
+    :param extraction_policy: An application-level
+        :class:`~pdfminer.pdfpage.ExtractionPolicy` that enforces the document
+        permission bits unless extraction was explicitly granted.
     :return: a string containing all of the text extracted.
     """
     if laparams is None:
@@ -181,6 +219,8 @@ def extract_text(
             maxpages=maxpages,
             password=password,
             caching=caching,
+            check_extractable=check_extractable,
+            extraction_policy=extraction_policy,
         ):
             interpreter.process_page(page)
 
@@ -194,6 +234,8 @@ def extract_pages(
     maxpages: int = 0,
     caching: bool = True,
     laparams: LAParams | None = None,
+    check_extractable: bool = False,
+    extraction_policy: ExtractionPolicy | None = None,
 ) -> Iterator[LTPage]:
     """Extract and yield LTPage objects
 
@@ -205,6 +247,12 @@ def extract_pages(
     :param caching: If resources should be cached
     :param laparams: An LAParams object from pdfminer.layout. If None, uses
         some default settings that often work well.
+    :param check_extractable: Raise
+        :class:`~pdfminer.pdfdocument.PDFTextExtractionNotAllowed` when the
+        document forbids text extraction.
+    :param extraction_policy: An application-level
+        :class:`~pdfminer.pdfpage.ExtractionPolicy` that enforces the document
+        permission bits unless extraction was explicitly granted.
     :return: LTPage objects
     """
     if laparams is None:
@@ -221,6 +269,8 @@ def extract_pages(
             maxpages=maxpages,
             password=password,
             caching=caching,
+            check_extractable=check_extractable,
+            extraction_policy=extraction_policy,
         ):
             interpreter.process_page(page)
             layout = device.get_result()

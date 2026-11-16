@@ -2,7 +2,11 @@ import itertools
 
 import pytest
 
-from pdfminer.pdfdocument import PDFDocument, PDFNoPageLabels
+from pdfminer.pdfdocument import (
+    PDFDocument,
+    PDFNoPageLabels,
+    PDFStandardSecurityHandlerV5,
+)
 from pdfminer.pdfexceptions import PDFObjectNotFound
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
@@ -27,6 +31,34 @@ class TestPdfDocument:
             parser = PDFParser(fp)
             doc = PDFDocument(parser)
             assert doc.info == [{"Producer": b"European Patent Office"}]
+
+    def test_password_role_user_and_owner(self):
+        path = absolute_sample_path("encryption/aes-256-r6.pdf")
+        for password, role in (("usersecret", "user"), ("ownersecret", "owner")):
+            with open(path, "rb") as fp:
+                doc = PDFDocument(PDFParser(fp), password=password)
+            assert doc.password_role == role
+            assert doc.permissions == 0xFFFFFFFC
+
+    def test_perms_entry_validates_declared_bits(self):
+        path = absolute_sample_path("encryption/aes-256.pdf")
+        with open(path, "rb") as fp:
+            doc = PDFDocument(PDFParser(fp), password="foo")
+        docid, param = doc.encryption
+        assert doc.perms_verified is True
+
+        tampered = dict(param, P=-17)
+        handler = PDFStandardSecurityHandlerV5(docid, tampered, "foo")
+        assert handler.perms_verified is False
+        assert handler.is_extractable() is False
+
+    def test_unencrypted_document_has_no_declaration(self):
+        with open(absolute_sample_path("simple1.pdf"), "rb") as fp:
+            doc = PDFDocument(PDFParser(fp))
+        assert doc.encryption is None
+        assert doc.permissions is None
+        assert doc.password_role is None
+        assert doc.perms_verified is None
 
     def test_page_labels(self):
         path = absolute_sample_path("contrib/pagelabels.pdf")

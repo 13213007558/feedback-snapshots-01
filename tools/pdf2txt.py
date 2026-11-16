@@ -7,7 +7,7 @@ import argparse
 import logging
 import sys
 from collections.abc import Container, Iterable
-from typing import Any
+from typing import Any, BinaryIO
 
 import pdfminer.high_level
 from pdfminer.layout import LAParams
@@ -26,6 +26,10 @@ def float_or_disabled(x: str) -> float | None:
         return float(x)
     except ValueError as err:
         raise argparse.ArgumentTypeError(f"invalid float value: {x}") from err
+
+
+def _extract(fp: BinaryIO, outfp: AnyIO, **options: Any) -> None:
+    pdfminer.high_level.extract_text_to_fp(fp, outfp, **options)
 
 
 def extract_text(
@@ -54,19 +58,36 @@ def extract_text(
             if outfile.endswith(override):
                 output_type = alttype
 
+    options = {
+        "output_type": output_type,
+        "codec": codec,
+        "laparams": laparams,
+        "maxpages": maxpages,
+        "page_numbers": page_numbers,
+        "password": password,
+        "scale": scale,
+        "rotation": rotation,
+        "layoutmode": layoutmode,
+        "output_dir": output_dir,
+        "strip_control": strip_control,
+        "debug": debug,
+        "disable_caching": disable_caching,
+    }
+
     if outfile == "-":
         outfp: AnyIO = sys.stdout
         if sys.stdout.encoding is not None:
             codec = "utf-8"
+            options["codec"] = codec
         for fname in files:
             with open(fname, "rb") as fp:
-                pdfminer.high_level.extract_text_to_fp(fp, **locals())
+                _extract(fp, outfp, **options)
     else:
         # Use context manager for file output, ensuring proper cleanup
         with open(outfile, "wb") as outfp:
             for fname in files:
                 with open(fname, "rb") as fp:
-                    pdfminer.high_level.extract_text_to_fp(fp, **locals())
+                    _extract(fp, outfp, **options)
 
 
 def create_parser() -> argparse.ArgumentParser:
