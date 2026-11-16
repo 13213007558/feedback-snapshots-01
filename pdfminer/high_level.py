@@ -7,12 +7,14 @@ from io import StringIO
 from typing import Any, BinaryIO, cast
 
 from pdfminer.converter import (
+    ForensicLayoutAnalyzer,
     HOCRConverter,
     HTMLConverter,
     PDFPageAggregator,
     TextConverter,
     XMLConverter,
 )
+from pdfminer.forensic import ForensicTrace
 from pdfminer.image import ImageWriter
 from pdfminer.layout import LAParams, LTPage
 from pdfminer.pdfdevice import PDFDevice, TagExtractor
@@ -225,3 +227,47 @@ def extract_pages(
             interpreter.process_page(page)
             layout = device.get_result()
             yield layout
+
+
+def extract_char_mappings(
+    pdf_file: FileOrName,
+    password: str = "",
+    page_numbers: Container[int] | None = None,
+    maxpages: int = 0,
+    caching: bool = True,
+    laparams: LAParams | None = None,
+) -> ForensicTrace:
+    """Extract forensic character-mapping records from a PDF.
+
+    Each returned record links an emitted Unicode character (or replacement
+    placeholder) back to the exact text-showing operand and byte range it was
+    decoded from, together with the CID and the mapping source used.  The
+    trace keeps the original operand bytes separate from the normalized text
+    intended for searching, so substitute characters can never be mistaken
+    for document content.
+
+    :param pdf_file: Either a file path or a file-like object for the PDF.
+    :param password: For encrypted PDFs, the password to decrypt.
+    :param page_numbers: List of zero-indexed page numbers to extract.
+    :param maxpages: The maximum number of pages to parse.
+    :param caching: If resources should be cached.
+    :param laparams: An LAParams object from pdfminer.layout.
+    :return: a :class:`~pdfminer.forensic.ForensicTrace` of all records.
+    """
+    if laparams is None:
+        laparams = LAParams()
+
+    with open_filename(pdf_file, "rb") as fp:
+        fp = cast(BinaryIO, fp)  # we opened in binary mode
+        resource_manager = PDFResourceManager(caching=caching)
+        device = ForensicLayoutAnalyzer(resource_manager, laparams=laparams)
+        interpreter = PDFPageInterpreter(resource_manager, device)
+        for page in PDFPage.get_pages(
+            fp,
+            page_numbers,
+            maxpages=maxpages,
+            password=password,
+            caching=caching,
+        ):
+            interpreter.process_page(page)
+        return device.get_trace()

@@ -64,6 +64,17 @@ class CMapBase:
     def decode(self, code: bytes) -> Iterable[int]:
         raise NotImplementedError
 
+    def decode_spans(self, code: bytes) -> Iterable[tuple[int, int, int | None]]:
+        """Decode ``code`` into ``(byte_offset, byte_length, cid)`` spans.
+
+        Unlike :meth:`decode`, each yielded CID is paired with the exact byte
+        range it was decoded from.  Bytes that no code space matches yield a
+        ``cid`` of ``None`` while still consuming one byte, so that undecodable
+        glyphs remain traceable to their original bytes.
+        """
+        for offset, cid in enumerate(self.decode(code)):
+            yield (offset, 1, cid)
+
 
 class CMap(CMapBase):
     def __init__(self, **kwargs: str | int) -> None:
@@ -101,6 +112,35 @@ class CMap(CMapBase):
             else:
                 d = self.code2cid
 
+    def decode_spans(self, code: bytes) -> Iterator[tuple[int, int, int | None]]:
+        """Decode with the longest matching code space, tracking byte spans."""
+        offset = 0
+        length = len(code)
+        while offset < length:
+            d = self.code2cid
+            cid: int | None = None
+            matched = 0
+            depth = 0
+            while offset + depth < length:
+                byte = code[offset + depth]
+                if byte not in d:
+                    break
+                node = d[byte]
+                depth += 1
+                if isinstance(node, int):
+                    cid = node
+                    matched = depth
+                    break
+                d = cast(dict[int, object], node)
+            if matched:
+                yield (offset, matched, cid)
+                offset += matched
+            else:
+                # No code space matches this byte; consume it but keep it
+                # visible as an undecodable glyph.
+                yield (offset, 1, None)
+                offset += 1
+
     def dump(
         self,
         out: TextIO = sys.stdout,
@@ -126,6 +166,14 @@ class IdentityCMap(CMapBase):
         else:
             return ()
 
+    def decode_spans(self, code: bytes) -> Iterator[tuple[int, int, int | None]]:
+        n = len(code) // 2
+        for index, cid in enumerate(struct.unpack(f">{n}H", code[: n * 2])):
+            yield (index * 2, 2, cid)
+        if len(code) % 2:
+            # A trailing odd byte cannot form a CID; keep it traceable.
+            yield (n * 2, 1, None)
+
 
 class IdentityCMapByte(IdentityCMap):
     def decode(self, code: bytes) -> tuple[int, ...]:
@@ -135,8 +183,15 @@ class IdentityCMapByte(IdentityCMap):
         else:
             return ()
 
+    def decode_spans(self, code: bytes) -> Iterator[tuple[int, int, int | None]]:
+        for offset, cid in enumerate(struct.unpack(f">{len(code)}B", code)):
+            yield (offset, 1, cid)
+
 
 class UnicodeMap(CMapBase):
+    # Provenance of the CID-to-Unicode data, reported in forensic records.
+    map_source: str = "builtin-cmap"
+
     def __init__(self, **kwargs: str | int) -> None:
         CMapBase.__init__(self, **kwargs)
         self.cid2unichr: dict[int, str] = {}
@@ -154,6 +209,8 @@ class UnicodeMap(CMapBase):
 
 
 class IdentityUnicodeMap(UnicodeMap):
+    map_source = "identity"
+
     def get_unichr(self, cid: int) -> str:
         """Interpret character id as unicode codepoint"""
         log.debug("get_unichr: %r, %r", self, cid)
@@ -179,6 +236,8 @@ class FileCMap(CMap):
 
 
 class FileUnicodeMap(UnicodeMap):
+    map_source = "tounicode"
+
     def add_cid2unichr(self, cid: int, code: PSLiteral | bytes | int) -> None:
         assert isinstance(cid, int), str(type(cid))
         if isinstance(code, PSLiteral):

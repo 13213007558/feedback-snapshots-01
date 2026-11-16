@@ -8,6 +8,7 @@ from typing import (
 )
 
 from pdfminer import utils
+from pdfminer.forensic import GlyphMapping
 from pdfminer.pdfcolor import PDFColorSpace
 from pdfminer.pdffont import PDFFont, PDFUnicodeNotDefined
 from pdfminer.pdfpage import PDFPage
@@ -91,17 +92,37 @@ class PDFDevice:
         seq: PDFTextSeq,
         ncs: PDFColorSpace,
         graphicstate: "PDFGraphicState",
+        operator: str = "TJ",
     ) -> None:
         pass
 
 
 class PDFTextDevice(PDFDevice):
+    # Subclasses that collect forensic records enable this so the rendering
+    # loop resolves mapping provenance for every glyph.
+    _forensic_enabled = False
+
+    def note_glyph(
+        self,
+        font: PDFFont,
+        operand: bytes,
+        operand_index: int,
+        byte_offset: int,
+        byte_length: int,
+        cid: int | None,
+        mapping: GlyphMapping,
+        operator: str,
+    ) -> None:
+        """Hook for recording how one glyph was mapped to Unicode."""
+        pass
+
     def render_string(
         self,
         textstate: "PDFTextState",
         seq: PDFTextSeq,
         ncs: PDFColorSpace,
         graphicstate: "PDFGraphicState",
+        operator: str = "TJ",
     ) -> None:
         assert self.ctm is not None
         matrix = utils.mult_matrix(textstate.matrix, self.ctm)
@@ -129,6 +150,7 @@ class PDFTextDevice(PDFDevice):
                 dxscale,
                 ncs,
                 graphicstate,
+                operator,
             )
         else:
             textstate.linematrix = self.render_string_horizontal(
@@ -144,6 +166,7 @@ class PDFTextDevice(PDFDevice):
                 dxscale,
                 ncs,
                 graphicstate,
+                operator,
             )
 
     def render_string_horizontal(
@@ -160,15 +183,34 @@ class PDFTextDevice(PDFDevice):
         dxscale: float,
         ncs: PDFColorSpace,
         graphicstate: "PDFGraphicState",
+        operator: str = "TJ",
     ) -> Point:
         (x, y) = pos
         needcharspace = False
+        operand_index = 0
         for obj in seq:
             if isinstance(obj, (int, float)):
                 x -= obj * dxscale
                 needcharspace = True
             elif isinstance(obj, bytes):
-                for cid in font.decode(obj):
+                current_index = operand_index
+                operand_index += 1
+                for offset, length, cid in font.decode_spans(obj):
+                    if cid is None:
+                        # Undecodable bytes are not drawn; record them only
+                        # when forensic collection is active.
+                        if self._forensic_enabled:
+                            self.note_glyph(
+                                font,
+                                obj,
+                                current_index,
+                                offset,
+                                length,
+                                None,
+                                font.resolve_mapping(None),
+                                operator,
+                            )
+                        continue
                     if needcharspace:
                         x += charspace
                     x += self.render_char(
@@ -184,6 +226,17 @@ class PDFTextDevice(PDFDevice):
                     if cid == 32 and wordspace:
                         x += wordspace
                     needcharspace = True
+                    if self._forensic_enabled:
+                        self.note_glyph(
+                            font,
+                            obj,
+                            current_index,
+                            offset,
+                            length,
+                            cid,
+                            font.resolve_mapping(cid),
+                            operator,
+                        )
             else:
                 logger.warning(
                     "Cannot render horizontal string because "
@@ -206,15 +259,32 @@ class PDFTextDevice(PDFDevice):
         dxscale: float,
         ncs: PDFColorSpace,
         graphicstate: "PDFGraphicState",
+        operator: str = "TJ",
     ) -> Point:
         (x, y) = pos
         needcharspace = False
+        operand_index = 0
         for obj in seq:
             if isinstance(obj, (int, float)):
                 y -= obj * dxscale
                 needcharspace = True
             elif isinstance(obj, bytes):
-                for cid in font.decode(obj):
+                current_index = operand_index
+                operand_index += 1
+                for offset, length, cid in font.decode_spans(obj):
+                    if cid is None:
+                        if self._forensic_enabled:
+                            self.note_glyph(
+                                font,
+                                obj,
+                                current_index,
+                                offset,
+                                length,
+                                None,
+                                font.resolve_mapping(None),
+                                operator,
+                            )
+                        continue
                     if needcharspace:
                         y += charspace
                     y += self.render_char(
@@ -230,6 +300,17 @@ class PDFTextDevice(PDFDevice):
                     if cid == 32 and wordspace:
                         y += wordspace
                     needcharspace = True
+                    if self._forensic_enabled:
+                        self.note_glyph(
+                            font,
+                            obj,
+                            current_index,
+                            offset,
+                            length,
+                            cid,
+                            font.resolve_mapping(cid),
+                            operator,
+                        )
             else:
                 logger.warning(
                     "Cannot render vertical string because %r is not a valid "
@@ -271,6 +352,7 @@ class TagExtractor(PDFDevice):
         seq: PDFTextSeq,
         ncs: PDFColorSpace,
         graphicstate: "PDFGraphicState",
+        operator: str = "TJ",
     ) -> None:
         font = textstate.font
         assert font is not None

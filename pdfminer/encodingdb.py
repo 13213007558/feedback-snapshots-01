@@ -105,6 +105,10 @@ class EncodingDB:
         "PDFDocEncoding": pdf2unicode,
     }
 
+    _unichr2glyphname: ClassVar[dict[str, str]] = {
+        unichr: glyph_name for glyph_name, unichr in glyphname2unicode.items()
+    }
+
     @classmethod
     def get_encoding(
         cls,
@@ -125,3 +129,35 @@ class EncodingDB:
                         log.debug(str(e))
                     cid += 1
         return cid2unicode
+
+    @classmethod
+    def get_encoding_entries(
+        cls,
+        name: str,
+        diff: Iterable[object] | None = None,
+    ) -> dict[int, tuple[str, str]]:
+        """Like :meth:`get_encoding` but keeps the Adobe glyph name.
+
+        Forensic mapping needs the glyph name to recognize named ligatures
+        even when they resolve to a single Unicode code point.
+        """
+        base = cls.encodings.get(name, cls.std2unicode)
+        # Recover glyph names for the base encoding by reversing the glyph
+        # list for code points present in this encoding.
+        cid2entry: dict[int, tuple[str, str]] = {
+            cid: (cls._unichr2glyphname.get(unichr, ""), unichr)
+            for cid, unichr in base.items()
+        }
+        if diff:
+            cid = 0
+            for x in diff:
+                if isinstance(x, int):
+                    cid = x
+                elif isinstance(x, PSLiteral):
+                    glyph_name = cast(str, x.name)
+                    try:
+                        cid2entry[cid] = (glyph_name, name2unicode(glyph_name))
+                    except (KeyError, ValueError) as e:
+                        log.debug(str(e))
+                    cid += 1
+        return cid2entry

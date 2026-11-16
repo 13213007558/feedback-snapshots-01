@@ -12,6 +12,14 @@ from typing import (
 )
 
 from pdfminer import utils
+from pdfminer.forensic import (
+    SOURCE_NONE,
+    STATUS_REPLACEMENT,
+    CharMappingRecord,
+    ForensicTrace,
+    GlyphMapping,
+    cid_placeholder,
+)
 from pdfminer.image import ImageWriter
 from pdfminer.layout import (
     LAParams,
@@ -287,6 +295,70 @@ class PDFPageAggregator(PDFLayoutAnalyzer):
     def get_result(self) -> LTPage:
         assert self.result is not None
         return self.result
+
+
+class ForensicLayoutAnalyzer(PDFLayoutAnalyzer):
+    """Layout analyzer that also records character-mapping provenance.
+
+    For every drawn glyph it keeps the operand bytes, their byte range, the
+    decoded CID, the mapping source that produced the emitted text and the
+    resulting code points.  Missing mappings and synthetic replacement
+    placeholders are recorded as such instead of being presented as document
+    text.  Records are exposed through :attr:`forensic_trace`.
+    """
+
+    _forensic_enabled = True
+
+    def __init__(
+        self,
+        rsrcmgr: PDFResourceManager,
+        pageno: int = 1,
+        laparams: LAParams | None = None,
+    ) -> None:
+        super().__init__(rsrcmgr, pageno=pageno, laparams=laparams)
+        self.forensic_trace = ForensicTrace()
+
+    def note_glyph(
+        self,
+        font: PDFFont,
+        operand: bytes,
+        operand_index: int,
+        byte_offset: int,
+        byte_length: int,
+        cid: int | None,
+        mapping: GlyphMapping,
+        operator: str,
+    ) -> None:
+        if mapping.is_missing:
+            # The layout analyzer substitutes a synthetic placeholder for an
+            # unmapped glyph; record both the absence and the substitute.
+            placeholder = cid_placeholder(cid)
+            mapping = GlyphMapping(
+                cid=cid,
+                text=placeholder,
+                source=SOURCE_NONE,
+                status=STATUS_REPLACEMENT,
+                codepoints=tuple(ord(char) for char in placeholder),
+            )
+        record = CharMappingRecord(
+            page=self.pageno - 1,
+            operand_index=operand_index,
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+            raw_bytes=operand[byte_offset : byte_offset + byte_length],
+            cid=cid,
+            source=mapping.source,
+            status=mapping.status,
+            text=mapping.text,
+            codepoints=mapping.codepoints,
+            font_id=font.forensic_font_id,
+            fontname=font.fontname,
+            operator=operator,
+        )
+        self.forensic_trace.add(record)
+
+    def get_trace(self) -> ForensicTrace:
+        return self.forensic_trace
 
 
 # Some PDFConverter children support only binary I/O

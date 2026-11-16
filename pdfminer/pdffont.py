@@ -23,6 +23,18 @@ from pdfminer.cmapdb import (
 )
 from pdfminer.encodingdb import EncodingDB, name2unicode
 from pdfminer.fontmetrics import FONT_METRICS
+from pdfminer.forensic import (
+    SOURCE_ENCODING,
+    SOURCE_IDENTITY,
+    SOURCE_NONE,
+    SOURCE_TRUETYPE_CMAP,
+    STATUS_LIGATURE,
+    STATUS_MISSING,
+    STATUS_MULTICODEPOINT,
+    STATUS_SINGLE,
+    GlyphMapping,
+    is_ligature_text,
+)
 from pdfminer.pdfexceptions import PDFException, PDFKeyError, PDFValueError
 from pdfminer.pdftypes import (
     PDFStream,
@@ -169,6 +181,57 @@ IDENTITY_ENCODER = {
     "DLIdent-H": "Identity-H",
     "DLIdent-V": "Identity-V",
 }
+
+# Adobe ligature glyph names that encode several characters as one glyph.
+# Underscore-composed glyph names (for example ``f_i``) are handled
+# dynamically via :func:`pdfminer.encodingdb.name2unicode`.
+LIGATURE_GLYPH_NAMES = frozenset(
+    {
+        "fi",
+        "fl",
+        "ff",
+        "ffi",
+        "ffl",
+        "ae",
+        "AE",
+        "oe",
+        "OE",
+        "st",
+        "St",
+    },
+)
+
+# Fallback identifiers assigned to fonts that are not backed by an indirect
+# object, so forensic records stay stable without relying on font names.
+_font_serial = 0
+
+
+def _next_font_serial() -> int:
+    global _font_serial
+    _font_serial += 1
+    return _font_serial
+
+
+def _classify_mapping(text: str, glyph_name: str | None = None) -> str:
+    """Classify the result of resolving one glyph to Unicode."""
+    if glyph_name is not None and (
+        glyph_name in LIGATURE_GLYPH_NAMES
+        or ("_" in glyph_name and len(name2unicode_safe(glyph_name)) > 1)
+    ):
+        return STATUS_LIGATURE
+    if len(text) > 1:
+        return STATUS_MULTICODEPOINT
+    if len(text) == 1 and is_ligature_text(text):
+        # Compatibility ligatures such as U+FB01.
+        return STATUS_LIGATURE
+    return STATUS_SINGLE
+
+
+def name2unicode_safe(glyph_name: str) -> str:
+    try:
+        return name2unicode(glyph_name)
+    except KeyError:
+        return ""
 
 
 def getdict(data: bytes) -> dict[int, list[float | int]]:
@@ -782,6 +845,9 @@ class TrueTypeFont:
             raise TrueTypeFont.CMapNotFound
         # create unicode map
         unicode_map = FileUnicodeMap()
+        # This data comes from the embedded TrueType program's own cmap
+        # table, not from a PDF ToUnicode CMap, so label the provenance.
+        unicode_map.map_source = SOURCE_TRUETYPE_CMAP
         for char, gid in char2gid.items():
             unicode_map.add_cid2unichr(gid, char)
         return unicode_map
@@ -913,6 +979,12 @@ class PDFFont:
         self.bbox = self._parse_bbox(descriptor)
         self.hscale = self.vscale = 0.001
 
+        # Stable identifier used by forensic records.  The resource manager
+        # overrides this with the font's indirect object number when
+        # available; anonymous fonts keep a process-unique serial so records
+        # never depend on the (possibly duplicated or misleading) font name.
+        self.forensic_font_id = f"font-{_next_font_serial()}"
+
         # PDF RM 9.8.1 specifies /Descent should always be a negative number.
         # PScript5.dll seems to produce Descent with a positive number, but
         # text analysis will be wrong if this is taken as correct. So force
@@ -931,6 +1003,20 @@ class PDFFont:
 
     def decode(self, bytes: bytes) -> Iterable[int]:
         return bytearray(bytes)  # map(ord, bytes)
+
+    def decode_spans(
+        self, bytes: bytes
+    ) -> Iterable[tuple[int, int, int | None]]:
+        """Decode operand bytes into ``(offset, length, cid)`` spans.
+
+        Simple fonts consume one byte per glyph, mirroring :meth:`decode`.
+        """
+        for offset, cid in enumerate(self.decode(bytes)):
+            yield (offset, 1, cid)
+
+    def resolve_mapping(self, cid: int | None) -> GlyphMapping:
+        """Resolve a decoded CID to its Unicode text with provenance."""
+        raise NotImplementedError
 
     def get_ascent(self) -> float:
         """Ascent above the baseline, in text space units"""
@@ -1018,9 +1104,12 @@ class PDFSimpleFont(PDFFont):
         if isinstance(encoding, dict):
             name = literal_name(encoding.get("BaseEncoding", default_encoding))
             diff = list_value(encoding.get("Differences", []))
-            self.cid2unicode = EncodingDB.get_encoding(name, diff)
+            self.cid2entries = EncodingDB.get_encoding_entries(name, diff)
         else:
-            self.cid2unicode = EncodingDB.get_encoding(literal_name(encoding))
+            self.cid2entries = EncodingDB.get_encoding_entries(literal_name(encoding))
+        self.cid2unicode = {
+            cid: unichr for cid, (_glyph_name, unichr) in self.cid2entries.items()
+        }
 
         self.unicode_map: UnicodeMap | None = None
         if "ToUnicode" in spec:
@@ -1028,6 +1117,12 @@ class PDFSimpleFont(PDFFont):
             self.unicode_map = FileUnicodeMap()
             CMapParser(self.unicode_map, BytesIO(strm.get_data())).run()
         PDFFont.__init__(self, descriptor, widths)
+
+    def glyph_name(self, cid: int) -> str | None:
+        entry = self.cid2entries.get(cid)
+        if entry is None:
+            return None
+        return entry[0] or None
 
     def to_unichr(self, cid: int) -> str:
         if self.unicode_map:
@@ -1039,6 +1134,44 @@ class PDFSimpleFont(PDFFont):
             return self.cid2unicode[cid]
         except KeyError as err:
             raise PDFUnicodeNotDefined(None, cid) from err
+
+    def resolve_mapping(self, cid: int | None) -> GlyphMapping:
+        if cid is None:
+            return GlyphMapping(
+                cid=None,
+                text="",
+                source=SOURCE_NONE,
+                status=STATUS_MISSING,
+            )
+        if self.unicode_map is not None:
+            try:
+                text = self.unicode_map.get_unichr(cid)
+            except KeyError:
+                pass
+            else:
+                return GlyphMapping(
+                    cid=cid,
+                    text=text,
+                    source=self.unicode_map.map_source,
+                    status=_classify_mapping(text),
+                    codepoints=tuple(ord(char) for char in text),
+                )
+        entry = self.cid2entries.get(cid)
+        if entry is not None:
+            glyph_name, text = entry
+            return GlyphMapping(
+                cid=cid,
+                text=text,
+                source=SOURCE_ENCODING,
+                status=_classify_mapping(text, glyph_name or None),
+                codepoints=tuple(ord(char) for char in text),
+            )
+        return GlyphMapping(
+            cid=cid,
+            text="",
+            source=SOURCE_NONE,
+            status=STATUS_MISSING,
+        )
 
 
 class PDFType1Font(PDFSimpleFont):
@@ -1067,7 +1200,11 @@ class PDFType1Font(PDFSimpleFont):
             length1 = int_value(self.fontfile["Length1"])
             data = self.fontfile.get_data()[:length1]
             parser = Type1FontHeaderParser(BytesIO(data))
-            self.cid2unicode = parser.get_encoding()
+            recovered = parser.get_encoding()
+            self.cid2unicode = recovered
+            self.cid2entries = {
+                cid: ("", unichr) for cid, unichr in recovered.items()
+            }
 
     def __repr__(self) -> str:
         return f"<PDFType1Font: basefont={self.basefont!r}>"
@@ -1233,6 +1370,11 @@ class PDFCIDFont(PDFFont):
     def decode(self, bytes: bytes) -> Iterable[int]:
         return self.cmap.decode(bytes)
 
+    def decode_spans(
+        self, bytes: bytes
+    ) -> Iterable[tuple[int, int, int | None]]:
+        return self.cmap.decode_spans(bytes)
+
     def char_disp(self, cid: int) -> float | tuple[float | None, float]:
         """Returns an integer for horizontal fonts, a tuple for vertical fonts."""
         return self.disps.get(cid, self.default_disp)
@@ -1244,3 +1386,31 @@ class PDFCIDFont(PDFFont):
             return self.unicode_map.get_unichr(cid)
         except KeyError as err:
             raise PDFUnicodeNotDefined(self.cidcoding, cid) from err
+
+    def resolve_mapping(self, cid: int | None) -> GlyphMapping:
+        if cid is None or self.unicode_map is None:
+            return GlyphMapping(
+                cid=cid,
+                text="",
+                source=SOURCE_NONE,
+                status=STATUS_MISSING,
+            )
+        try:
+            text = self.unicode_map.get_unichr(cid)
+        except KeyError:
+            return GlyphMapping(
+                cid=cid,
+                text="",
+                source=SOURCE_NONE,
+                status=STATUS_MISSING,
+            )
+        source = self.unicode_map.map_source
+        if isinstance(self.unicode_map, IdentityUnicodeMap):
+            source = SOURCE_IDENTITY
+        return GlyphMapping(
+            cid=cid,
+            text=text,
+            source=source,
+            status=_classify_mapping(text),
+            codepoints=tuple(ord(char) for char in text),
+        )

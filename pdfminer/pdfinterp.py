@@ -249,6 +249,8 @@ class PDFResourceManager:
                 if settings.STRICT:
                     raise PDFFontError(f"Invalid Font spec: {spec!r}")
                 font = PDFType1Font(self, spec)  # this is so wrong!
+            if isinstance(objid, int):
+                font.forensic_font_id = f"obj-{objid}"
             if objid and self.caching:
                 self._cached_fonts[objid] = font
         return font
@@ -1278,11 +1280,22 @@ class PDFPageInterpreter:
             cast(PDFTextSeq, seq),
             self.graphicstate.ncs,
             self.graphicstate.copy(),
+            operator="TJ",
         )
 
     def do_Tj(self, s: PDFStackT) -> None:
         """Show text"""
-        self.do_TJ([s])
+        if self.textstate.font is None:
+            if settings.STRICT:
+                raise PDFInterpreterError("No font specified!")
+            return
+        self.device.render_string(
+            self.textstate,
+            cast(PDFTextSeq, [s]),
+            self.graphicstate.ncs,
+            self.graphicstate.copy(),
+            operator="Tj",
+        )
 
     def do__q(self, s: PDFStackT) -> None:
         """Move to next line and show text
@@ -1290,7 +1303,17 @@ class PDFPageInterpreter:
         The ' (single quote) operator.
         """
         self.do_T_a()
-        self.do_TJ([s])
+        if self.textstate.font is None:
+            if settings.STRICT:
+                raise PDFInterpreterError("No font specified!")
+            return
+        self.device.render_string(
+            self.textstate,
+            cast(PDFTextSeq, [s]),
+            self.graphicstate.ncs,
+            self.graphicstate.copy(),
+            operator="'",
+        )
 
     def do__w(self, aw: PDFStackT, ac: PDFStackT, s: PDFStackT) -> None:
         """Set word and character spacing, move to next line, and show text
@@ -1299,7 +1322,17 @@ class PDFPageInterpreter:
         """
         self.do_Tw(aw)
         self.do_Tc(ac)
-        self.do_TJ([s])
+        if self.textstate.font is None:
+            if settings.STRICT:
+                raise PDFInterpreterError("No font specified!")
+            return
+        self.device.render_string(
+            self.textstate,
+            cast(PDFTextSeq, [s]),
+            self.graphicstate.ncs,
+            self.graphicstate.copy(),
+            operator='"',
+        )
 
     def do_BI(self) -> None:
         """Begin inline image object"""
