@@ -20,6 +20,24 @@ pip install dissect.regf
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Registry views
+
+`RegistryHive` resolves physical, hive-relative paths only; `Wow6432Node` is an
+ordinary subkey. For an explicit 32-bit/native view with caller-supplied
+redirection rules and context, see `dissect.regf.views` and
+[docs/registry-views.md](docs/registry-views.md).
+
+```python
+from dissect.regf import RegistryHive, resolve_physical, resolve_view
+
+hive.open(r"Software\Classes")                 # physical, unchanged
+resolve_physical(hive, r"Software\Classes")    # same semantics, typed result
+```
+
+A logical lookup never falls back to the other view silently. Give it a
+`RedirectionPolicy` and a `LookupContext`; a missing fact produces
+`NEEDS_CONTEXT` instead of a guessed path.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

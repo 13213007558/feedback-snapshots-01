@@ -1,0 +1,24 @@
+{
+  "name": "example-wow64-software",
+  "source": "illustrative only; verify against your Windows version",
+  "hive_roles": ["SOFTWARE"],
+  "unmatched": "out_of_scope",
+  "rules": [
+    {
+      "name": "software-wow64",
+      "logical_prefix": "Software",
+      "target_prefix": "Software\\Wow6432Node",
+      "views": ["wow32"],
+      "shared_prefixes": ["Classes", "Clients", "Microsoft\\Windows\\CurrentVersion\\Explorer"],
+      "requires": []
+    },
+    {
+      "name": "software-classes-wow64",
+      "logical_prefix": "Software\\Classes",
+      "target_prefix": "Software\\Wow6432Node\\Classes",
+      "views": ["wow32"],
+      "shared_prefixes": ["CLSID", "Interface", "TypeLib"],
+      "requires": []
+    }
+  ]
+}
