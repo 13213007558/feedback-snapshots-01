@@ -1601,6 +1601,11 @@ module Net
     #   TLS starts immediately _after_ that response.  Any response code sent
     #   with the response (e.g. CAPABILITY) is insecure and cannot be trusted.
     #
+    #   TLS will only start after the tagged response with _this_ command's tag
+    #   is handled.  A tagged +OK+ sent for another command is ignored.
+    #   Untagged responses which precede the matching +OK+ in the same read are
+    #   handled before the TLS handshake begins.
+    #
     # Related: Net::IMAP.new, #login, #authenticate
     #
     # ==== Capability
@@ -1610,32 +1615,43 @@ module Net
     # Server capabilities may change after #starttls, #login, and #authenticate.
     # Cached #capabilities will be cleared when this method completes.
     #
+    # ==== Failure
+    # If STARTTLS fails, for any reason, the connection is disconnected rather
+    # than left in a state where unencrypted authentication credentials might
+    # be sent.  A +NO+ or +BAD+ response raises #NoResponseError or
+    # #BadResponseError, as for other commands.
+    #
     def starttls(**options)
       @ssl_ctx_params, @ssl_ctx = build_ssl_ctx(options)
-      handled = false
-      error = nil
-      ok = send_command("STARTTLS") do |resp|
-        if resp.kind_of?(TaggedResponse) && resp.name == "OK"
-          handled = true
-          clear_cached_capabilities
-          clear_responses
-          start_tls_session
+      begin
+        handled = false
+        responded = false
+        error = nil
+        ok = send_command("STARTTLS") do |resp, tag|
+          if resp.kind_of?(TaggedResponse) && resp.tag == tag && !responded
+            responded = true
+            if resp.name == "OK"
+              handled = true
+              clear_cached_capabilities
+              clear_responses
+              start_tls_session
+            end
+          end
+        rescue Exception => error
+          raise # note that the error backtrace is in the receiver_thread
         end
-      rescue Exception => error
-        raise # note that the error backtrace is in the receiver_thread
-      end
-      if error
+        reraise error if error
+        unless handled
+          raise InvalidResponseError,
+                "STARTTLS handler was bypassed, although server responded %p" % [
+                  ok.raw_data.chomp
+                ]
+        end
+        ok
+      rescue Exception
         disconnect
-        reraise error
+        raise
       end
-      unless handled
-        disconnect
-        raise InvalidResponseError,
-              "STARTTLS handler was bypassed, although server responded %p" % [
-                ok.raw_data.chomp
-              ]
-      end
-      ok
     end
 
     # :call-seq:
@@ -3837,12 +3853,15 @@ module Net
         end
         @logout_command_tag = tag if cmd == "LOGOUT"
         finish_sending_command(command)
-        add_response_handler(&block) if block
+        handler = block && proc { |resp|
+          block.arity == 1 ? block.call(resp) : block.call(resp, tag)
+        }
+        add_response_handler(&handler) if handler
         begin
           put_string(CRLF)
           get_tagged_response(tag, cmd)
         ensure
-          remove_response_handler(block) if block
+          remove_response_handler(handler) if handler
         end
       rescue InvalidResponseError
         disconnect

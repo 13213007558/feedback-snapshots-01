@@ -251,6 +251,282 @@ class IMAP_TLS_Test < Net::IMAP::TestCase
       assert_equal(OpenSSL::SSL::VERIFY_PEER, imap.ssl_ctx.verify_mode)
     end
 
+    # An in-memory transport lets us control the exact interleaving of
+    # responses, without waiting on a real network or a real mail service.
+    #
+    # It records the byte offset where TLS was started and every write, so
+    # tests can assert that STARTTLS switched protocols immediately after the
+    # matching tagged response, and only after _that_ response.
+    class MemoryTransport
+      attr_reader :writes, :read_bytes, :tls_starts
+
+      def initialize(greeting)
+        @monitor     = Monitor.new
+        @read_cond   = @monitor.new_cond
+        @write_cond  = @monitor.new_cond
+        @buffer      = +""
+        @closed      = false
+        @writes      = []
+        @read_bytes  = 0
+        @tls_starts  = []
+        feed(greeting)
+      end
+
+      def feed(data)
+        synchronize do
+          @buffer << data
+          @read_cond.broadcast
+        end
+      end
+
+      def wait_until(timeout: 5)
+        timeout *= EnvUtil.timeout_scale || 1 if defined?(EnvUtil.timeout_scale)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+        synchronize do
+          until yield
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            remaining = deadline - now
+            flunk "timed out waiting for transport" if remaining <= 0
+            @write_cond.wait(remaining)
+          end
+        end
+      end
+
+      def gets(separator = "\n", _limit = nil)
+        synchronize do
+          loop do
+            if (index = @buffer.index(separator))
+              line = @buffer.slice!(0, index + separator.bytesize)
+              @read_bytes += line.bytesize
+              return line
+            end
+            return nil if @closed
+            @read_cond.wait
+          end
+        end
+      end
+
+      def print(data)
+        synchronize do
+          raise IOError, "closed stream" if @closed
+          @writes << data
+          @write_cond.broadcast
+        end
+        data.bytesize
+      end
+
+      def to_io; self end
+
+      def shutdown(*)
+        synchronize do
+          @closed = true
+          @read_cond.broadcast
+          @write_cond.broadcast
+        end
+      end
+
+      def close
+        synchronize do
+          @closed = true
+          @read_cond.broadcast
+          @write_cond.broadcast
+        end
+      end
+
+      def closed?; synchronize { @closed } end
+
+      def record_tls_start
+        synchronize do
+          @tls_starts << {read_bytes: @read_bytes, writes: @writes.dup.freeze}
+        end
+      end
+
+      def write_string; synchronize { @writes.join } end
+
+      private
+
+      def synchronize(&) = @monitor.synchronize(&)
+    end
+
+    class MemoryIMAP < Net::IMAP
+      def initialize(transport)
+        @transport = transport
+        super("memory.invalid", port: 143)
+      end
+
+      private
+
+      def tcp_socket(*) = @transport
+
+      def start_tls_session
+        @transport.record_tls_start
+      end
+    end
+
+    def run_starttls_on_memory_transport(transport)
+      imap = MemoryIMAP.new(transport)
+      error = nil
+      client = Thread.new do
+        imap.starttls(verify_mode: OpenSSL::SSL::VERIFY_NONE)
+      rescue Exception => ex
+        error = ex
+      end
+      transport.wait_until do
+        transport.write_string.match?(/RUBY0001 STARTTLS\r\n\z/)
+      end
+      yield transport
+      client.join
+      [imap, error]
+    ensure
+      client&.join
+      imap&.disconnect unless imap&.disconnected?
+    end
+
+    test "STARTTLS ignores another command's tagged OK, then fails on its NO" do
+      transport = MemoryTransport.new("* OK test server\r\n")
+      imap, error = run_starttls_on_memory_transport(transport) do
+        # Another command's OK and the STARTTLS NO arrive before any unrelated
+        # untagged data or a normal upgrade response.
+        transport.feed("RUBY9999 OK not your response\r\n")
+        transport.feed("RUBY0001 NO STARTTLS refused\r\n")
+      end
+
+      assert_kind_of Net::IMAP::NoResponseError, error
+      assert_empty transport.tls_starts,
+                   "TLS must not start for another command's tagged OK"
+      assert imap.disconnected?, "STARTTLS failure must disconnect"
+      failure_read = (
+        "* OK test server\r\n" \
+        "RUBY9999 OK not your response\r\n" \
+        "RUBY0001 NO STARTTLS refused\r\n"
+      ).bytesize
+      assert_equal failure_read, transport.read_bytes,
+                   "TLS/command boundary must be after STARTTLS's NO"
+
+      # Unrelated untagged data and a would-be upgrade response must never be
+      # read or acted on after the failed STARTTLS.
+      transport.feed("* OK unrelated untagged data\r\n")
+      transport.feed("RUBY0001 OK begin TLS\r\n")
+      assert_equal failure_read, transport.read_bytes,
+                   "no bytes may be consumed after STARTTLS failed"
+      assert_empty transport.tls_starts,
+                   "no TLS may start after STARTTLS failed"
+      assert_raise(IOError) { imap.login("user", "password") }
+      assert_equal 1, transport.writes.count { _1.include?("STARTTLS") }
+      refute transport.write_string.match?(/LOGIN|password/i),
+             "no authentication material may be written after failure"
+    end
+
+    test "STARTTLS starts TLS only on the matching tag in one read block" do
+      transport = MemoryTransport.new("* OK test server\r\n")
+      imap, error = run_starttls_on_memory_transport(transport) do
+        # All of these responses arrive in a single transport write.
+        transport.feed(
+          "* OK unrelated untagged data\r\n" \
+          "RUBY9999 OK not your response\r\n" \
+          "RUBY0001 OK begin TLS\r\n"
+        )
+      end
+
+      assert_nil error, "normal STARTTLS upgrade should succeed"
+      assert_equal 1, transport.tls_starts.size,
+                   "TLS must start exactly once"
+      tls_start = transport.tls_starts.first
+      expected_read = (
+        "* OK test server\r\n" \
+        "* OK unrelated untagged data\r\n" \
+        "RUBY9999 OK not your response\r\n" \
+        "RUBY0001 OK begin TLS\r\n"
+      ).bytesize
+      assert_equal expected_read, tls_start[:read_bytes],
+                   "TLS must start after the complete matching OK response"
+      assert_equal 1, tls_start[:writes].count { _1.include?("STARTTLS") }
+      assert_equal 1, transport.writes.count { _1.include?("STARTTLS") }
+    end
+
+    test "STARTTLS normal upgrade with untagged data before matching OK" do
+      transport = MemoryTransport.new("* OK test server\r\n")
+      imap, error = run_starttls_on_memory_transport(transport) do
+        transport.feed("* CAPABILITY IMAP4rev1 STARTTLS\r\n")
+        transport.feed("RUBY0001 OK begin TLS\r\n")
+      end
+
+      assert_nil error
+      assert_equal 1, transport.tls_starts.size
+      expected_read = (
+        "* OK test server\r\n" \
+        "* CAPABILITY IMAP4rev1 STARTTLS\r\n" \
+        "RUBY0001 OK begin TLS\r\n"
+      ).bytesize
+      assert_equal expected_read, transport.tls_starts.first[:read_bytes]
+    end
+
+    test "STARTTLS does not upgrade after its NO in the same read block" do
+      transport = MemoryTransport.new("* OK test server\r\n")
+      imap, error = run_starttls_on_memory_transport(transport) do
+        # The first response owned by this tag is NO.  A forged duplicate OK,
+        # in the same read block, must not turn the failure into an upgrade.
+        transport.feed(
+          "RUBY0001 NO STARTTLS refused\r\n" \
+          "RUBY0001 OK forged duplicate\r\n"
+        )
+      end
+
+      assert_kind_of Net::IMAP::InvalidResponseError, error
+      assert_empty transport.tls_starts,
+                   "TLS must not start after STARTTLS's first response was NO"
+      assert imap.disconnected?
+      transport.feed("RUBY0001 OK begin TLS\r\n")
+      assert_empty transport.tls_starts,
+                   "later duplicates must not start TLS"
+      refute transport.write_string.match?(/LOGIN|password/i)
+    end
+
+    test "STARTTLS upgrade is immediately followed by a real TLS session" do
+      client_sock, server_sock = Socket.pair(:UNIX, :STREAM, 0)
+      server = Thread.new do
+        begin
+          server_sock.print("* OK test server\r\n")
+          assert_equal "RUBY0001 STARTTLS\r\n", server_sock.gets
+          server_sock.print(
+            "* OK unrelated untagged data\r\n" \
+            "RUBY9999 OK not your response\r\n" \
+            "RUBY0001 OK begin TLS\r\n"
+          )
+          ctx = OpenSSL::SSL::SSLContext.new
+          ctx.ca_file = CA_FILE
+          ctx.key = File.open(SERVER_KEY) { OpenSSL::PKey::RSA.new(_1) }
+          cert = File.open(SERVER_CERT) { OpenSSL::X509::Certificate.new(_1) }
+          ctx.cert = cert
+          ssl = OpenSSL::SSL::SSLSocket.new(server_sock, ctx)
+          ssl.sync_close = true
+          ssl.accept
+          assert_equal "RUBY0002 LOGOUT\r\n", ssl.gets
+          ssl.print("* BYE terminating connection\r\n")
+          ssl.print("RUBY0002 OK LOGOUT completed\r\n")
+          ssl.close
+        ensure
+          server_sock.close unless server_sock.closed?
+        end
+      end
+      imap = Class.new(Net::IMAP) do
+        define_method(:tcp_socket) { |*| client_sock }
+      end.new("localhost", port: 143)
+      begin
+        imap.starttls(ca_file: CA_FILE)
+        assert imap.tls_socket?
+        assert imap.tls_connected?
+        assert imap.tls_verified?
+        imap.logout
+      ensure
+        imap.disconnect unless imap.disconnected?
+        client_sock.close unless client_sock.closed?
+      end
+      server.join
+    rescue NotImplementedError, Errno::EAFNOSUPPORT
+      omit "Socket.pair is not supported on this platform"
+    end
+
   end
 
   private
