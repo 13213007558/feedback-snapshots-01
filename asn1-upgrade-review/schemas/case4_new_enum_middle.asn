@@ -1,0 +1,4 @@
+AuthV2EnumMiddle DEFINITIONS ::= BEGIN
+  AuthToken ::= SEQUENCE { level Level }
+  Level ::= ENUMERATED { none(0), guest(1), user(2), admin(3) }
+END

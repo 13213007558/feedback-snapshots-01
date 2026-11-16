@@ -1,0 +1,3 @@
+AuthV1Constraint DEFINITIONS ::= BEGIN
+  AuthToken ::= SEQUENCE { maxPower INTEGER (0..255) }
+END

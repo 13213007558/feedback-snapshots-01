@@ -1,0 +1,815 @@
+[
+  {
+    "id": "C1a-root-insert-mandatory",
+    "title": "Root member insertion (new MANDATORY scope)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "30060201070a0102",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "MissingMandatoryFieldError: AuthToken.scope: OctetString(scope) is missing and has no default value (At offset: 8)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "300a0201070402dead0a0102",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "DecodeTagError: AuthToken.level: Expected Level(level) with tag '0a', but got '04'. (At offset: 5)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "0780",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "OutOfDataError: AuthToken.scope: out of data (At bit offset: 16)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "0702dead80",
+          "decoded": {
+            "deviceId": 7,
+            "level": "none"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'admin' -> 'none'"
+          ],
+          "reencoded_hex": "0700",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "0780",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "OutOfDataError: AuthToken.scope: out of data (At bit offset: 16)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "0702dead80",
+          "decoded": {
+            "deviceId": 7,
+            "level": "none"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'admin' -> 'none'"
+          ],
+          "reencoded_hex": "0700",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C1b-root-insert-optional",
+    "title": "Root member insertion (new OPTIONAL scope) - the dev claim",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "30060201070a0102",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "30060201070a0102",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "300a0201070402dead0a0102",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "DecodeTagError: AuthToken.level: Expected Level(level) with tag '0a', but got '04'. (At offset: 5)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "0780",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "OutOfDataError: AuthToken.level: out of data (At bit offset: 16)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "800702dead80",
+          "decoded": {
+            "deviceId": 128,
+            "level": "none"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "deviceId: 7 -> 128",
+            "level: 'admin' -> 'none'"
+          ],
+          "reencoded_hex": "8000",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin"
+          },
+          "wire_hex": "0780",
+          "decoded": {
+            "deviceId": 15,
+            "level": "none"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "deviceId: 7 -> 15",
+            "level: 'admin' -> 'none'"
+          ],
+          "reencoded_hex": "0780",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "scope": "b'\\xde\\xad'",
+            "level": "admin"
+          },
+          "wire_hex": "83816f56c0",
+          "decoded": {
+            "deviceId": 131,
+            "level": "admin"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "deviceId: 7 -> 131"
+          ],
+          "reencoded_hex": "8380",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C2-extension-append",
+    "title": "Extension addition after extension marker (...)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "wire_hex": "30090201070a01020c0178",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "30090201070a01020c0178",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x",
+            "token": "b'\\xaa\\xbb'"
+          },
+          "wire_hex": "300d0201070a01020c01780402aabb",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "30090201070a01020c0178",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "wire_hex": "80078040020178",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "800780c0020178",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x",
+            "token": "b'\\xaa\\xbb'"
+          },
+          "wire_hex": "800780e00201780302aabb",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "80078040020178",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "wire_hex": "83c020402f00",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "83c060201780",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x",
+            "token": "b'\\xaa\\xbb'"
+          },
+          "wire_hex": "83c070201780302aabb0",
+          "decoded": {
+            "deviceId": 7,
+            "level": "admin",
+            "label": "x"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "83c020402f00",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C3a-constraint-widen",
+    "title": "Constraint widening INTEGER(0..255) -> (0..65535)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 200
+          },
+          "wire_hex": "3004020200c8",
+          "decoded": {
+            "maxPower": 200
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "3004020200c8",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 300
+          },
+          "wire_hex": "30040202012c",
+          "decoded": {
+            "maxPower": 300
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "30040202012c",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 200
+          },
+          "wire_hex": "c8",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "OutOfDataError: AuthToken.maxPower: out of data (At bit offset: 0)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 300
+          },
+          "wire_hex": "012c",
+          "decoded": {
+            "maxPower": 1
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "maxPower: 300 -> 1"
+          ],
+          "reencoded_hex": "01",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 200
+          },
+          "wire_hex": "c8",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "OutOfDataError: AuthToken.maxPower: out of data (At bit offset: 0)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 300
+          },
+          "wire_hex": "012c",
+          "decoded": {
+            "maxPower": 1
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "maxPower: 300 -> 1"
+          ],
+          "reencoded_hex": "01",
+          "sign_bytes_identical": false,
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C3b-constraint-narrow",
+    "title": "Constraint narrowing INTEGER(0..255) -> (0..254)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 255
+          },
+          "wire_hex": "3004020200ff",
+          "decoded": {
+            "maxPower": 255
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "3004020200ff",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 100
+          },
+          "wire_hex": "3003020164",
+          "decoded": {
+            "maxPower": 100
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "3003020164",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 255
+          },
+          "wire_hex": "ff",
+          "decoded": {
+            "maxPower": 255
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "ff",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 100
+          },
+          "wire_hex": "64",
+          "decoded": {
+            "maxPower": 100
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "64",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "maxPower": 255
+          },
+          "wire_hex": "ff",
+          "decoded": {
+            "maxPower": 255
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "ff",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "maxPower": 100
+          },
+          "wire_hex": "64",
+          "decoded": {
+            "maxPower": 100
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "64",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C4a-enum-middle-insert",
+    "title": "ENUMERATED middle insertion (renumbers user/admin)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "30030a0102",
+          "decoded": {
+            "level": "user"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'admin' -> 'user'"
+          ],
+          "reencoded_hex": "30030a0102",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "30030a0103",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "DecodeError: AuthToken.level: Expected enumeration value 0, 1 or 2, but got 3. (At offset: 4)",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "80",
+          "decoded": {
+            "level": "user"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'admin' -> 'user'"
+          ],
+          "reencoded_hex": "80",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "c0",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "DecodeError: AuthToken.level: Expected enumeration index 0, 1 or 2, but got 3.",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "80",
+          "decoded": {
+            "level": "user"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'admin' -> 'user'"
+          ],
+          "reencoded_hex": "80",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "c0",
+          "decoded": null,
+          "decode": "FAIL",
+          "decode_error": "DecodeError: AuthToken.level: Expected enumeration index 0, 1 or 2, but got 3.",
+          "meaning": "N/A",
+          "meaning_diffs": null,
+          "reencoded_hex": null,
+          "sign_bytes_identical": "N/A",
+          "reencode_error": null
+        }
+      }
+    }
+  },
+  {
+    "id": "C4b-enum-extension",
+    "title": "ENUMERATED extension enumerant after (...)",
+    "codecs": {
+      "ber": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "30030a0102",
+          "decoded": {
+            "level": "admin"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "30030a0102",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "guest"
+          },
+          "wire_hex": "30030a0103",
+          "decoded": {
+            "level": null
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'guest' -> None"
+          ],
+          "reencoded_hex": null,
+          "sign_bytes_identical": false,
+          "reencode_error": "EncodeError: AuthToken.level: Expected data of type str, but got None."
+        }
+      },
+      "per": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "40",
+          "decoded": {
+            "level": "admin"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "40",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "guest"
+          },
+          "wire_hex": "80",
+          "decoded": {
+            "level": null
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'guest' -> None"
+          ],
+          "reencoded_hex": null,
+          "sign_bytes_identical": false,
+          "reencode_error": "EncodeError: AuthToken.level: Expected data of type str, but got None."
+        }
+      },
+      "uper": {
+        "old_sender_to_new": {
+          "encoded_value": {
+            "level": "admin"
+          },
+          "wire_hex": "40",
+          "decoded": {
+            "level": "admin"
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "SAME",
+          "meaning_diffs": [],
+          "reencoded_hex": "40",
+          "sign_bytes_identical": true,
+          "reencode_error": null
+        },
+        "new_sender_to_old": {
+          "encoded_value": {
+            "level": "guest"
+          },
+          "wire_hex": "80",
+          "decoded": {
+            "level": null
+          },
+          "decode": "OK",
+          "decode_error": null,
+          "meaning": "DIFFERENT",
+          "meaning_diffs": [
+            "level: 'guest' -> None"
+          ],
+          "reencoded_hex": null,
+          "sign_bytes_identical": false,
+          "reencode_error": "EncodeError: AuthToken.level: Expected data of type str, but got None."
+        }
+      }
+    }
+  }
+]

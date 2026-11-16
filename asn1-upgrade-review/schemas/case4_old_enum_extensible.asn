@@ -1,0 +1,4 @@
+AuthV1EnumExt DEFINITIONS ::= BEGIN
+  AuthToken ::= SEQUENCE { level Level }
+  Level ::= ENUMERATED { none(0), user(1), admin(2), ... }
+END

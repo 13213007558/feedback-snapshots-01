@@ -1,0 +1,7 @@
+AuthV1 DEFINITIONS ::= BEGIN
+  AuthToken ::= SEQUENCE {
+    deviceId INTEGER (0..255),
+    level    Level
+  }
+  Level ::= ENUMERATED { none(0), user(1), admin(2) }
+END

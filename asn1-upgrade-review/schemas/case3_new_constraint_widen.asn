@@ -1,0 +1,3 @@
+AuthV2Widen DEFINITIONS ::= BEGIN
+  AuthToken ::= SEQUENCE { maxPower INTEGER (0..65535) }
+END

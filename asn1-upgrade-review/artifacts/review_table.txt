@@ -1,0 +1,159 @@
+ASN.1 UPGRADE COMPATIBILITY REVIEW (asn1tools 0.169.0)
+====================================================================================================
+
+C1a-root-insert-mandatory  Root member insertion (new MANDATORY scope)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=30060201070a0102 (8 bytes)
+           decode_error: MissingMandatoryFieldError: AuthToken.scope: OctetString(scope) is missing and has no default value (At offset: 8)
+  [BER ] new -> old  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=300a0201070402dead0a0102 (12 bytes)
+           decode_error: DecodeTagError: AuthToken.level: Expected Level(level) with tag '0a', but got '04'. (At offset: 5)
+  [PER ] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=0780 (2 bytes)
+           decode_error: OutOfDataError: AuthToken.scope: out of data (At bit offset: 16)
+  [PER ] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=0702dead80 (5 bytes)
+           MEANING DRIFT: level: 'admin' -> 'none'
+           reenc=0700
+  [UPER] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=0780 (2 bytes)
+           decode_error: OutOfDataError: AuthToken.scope: out of data (At bit offset: 16)
+  [UPER] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=0702dead80 (5 bytes)
+           MEANING DRIFT: level: 'admin' -> 'none'
+           reenc=0700
+
+C1b-root-insert-optional  Root member insertion (new OPTIONAL scope) - the dev claim
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=30060201070a0102 (8 bytes)
+           reenc=30060201070a0102
+  [BER ] new -> old  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=300a0201070402dead0a0102 (12 bytes)
+           decode_error: DecodeTagError: AuthToken.level: Expected Level(level) with tag '0a', but got '04'. (At offset: 5)
+  [PER ] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=0780 (2 bytes)
+           decode_error: OutOfDataError: AuthToken.level: out of data (At bit offset: 16)
+  [PER ] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=800702dead80 (6 bytes)
+           MEANING DRIFT: deviceId: 7 -> 128; level: 'admin' -> 'none'
+           reenc=8000
+  [UPER] old -> new  decode=OK          meaning=DIFFERENT   sign_same_bytes=True
+           wire=0780 (2 bytes)
+           MEANING DRIFT: deviceId: 7 -> 15; level: 'admin' -> 'none'
+           reenc=0780
+  [UPER] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=83816f56c0 (5 bytes)
+           MEANING DRIFT: deviceId: 7 -> 131
+           reenc=8380
+
+C2-extension-append  Extension addition after extension marker (...)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=30090201070a01020c0178 (11 bytes)
+           reenc=30090201070a01020c0178
+  [BER ] new -> old  decode=OK          meaning=SAME        sign_same_bytes=False
+           wire=300d0201070a01020c01780402aabb (15 bytes)
+           reenc=30090201070a01020c0178
+  [PER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=False
+           wire=80078040020178 (7 bytes)
+           reenc=800780c0020178
+  [PER ] new -> old  decode=OK          meaning=SAME        sign_same_bytes=False
+           wire=800780e00201780302aabb (11 bytes)
+           reenc=80078040020178
+  [UPER] old -> new  decode=OK          meaning=SAME        sign_same_bytes=False
+           wire=83c020402f00 (6 bytes)
+           reenc=83c060201780
+  [UPER] new -> old  decode=OK          meaning=SAME        sign_same_bytes=False
+           wire=83c070201780302aabb0 (10 bytes)
+           reenc=83c020402f00
+
+C3a-constraint-widen  Constraint widening INTEGER(0..255) -> (0..65535)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=3004020200c8 (6 bytes)
+           reenc=3004020200c8
+  [BER ] new -> old  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=30040202012c (6 bytes)
+           reenc=30040202012c
+  [PER ] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=c8 (1 bytes)
+           decode_error: OutOfDataError: AuthToken.maxPower: out of data (At bit offset: 0)
+  [PER ] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=012c (2 bytes)
+           MEANING DRIFT: maxPower: 300 -> 1
+           reenc=01
+  [UPER] old -> new  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=c8 (1 bytes)
+           decode_error: OutOfDataError: AuthToken.maxPower: out of data (At bit offset: 0)
+  [UPER] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=012c (2 bytes)
+           MEANING DRIFT: maxPower: 300 -> 1
+           reenc=01
+
+C3b-constraint-narrow  Constraint narrowing INTEGER(0..255) -> (0..254)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=3004020200ff (6 bytes)
+           reenc=3004020200ff
+  [BER ] new -> old  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=3003020164 (5 bytes)
+           reenc=3003020164
+  [PER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=ff (1 bytes)
+           reenc=ff
+  [PER ] new -> old  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=64 (1 bytes)
+           reenc=64
+  [UPER] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=ff (1 bytes)
+           reenc=ff
+  [UPER] new -> old  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=64 (1 bytes)
+           reenc=64
+
+C4a-enum-middle-insert  ENUMERATED middle insertion (renumbers user/admin)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=DIFFERENT   sign_same_bytes=True
+           wire=30030a0102 (5 bytes)
+           MEANING DRIFT: level: 'admin' -> 'user'
+           reenc=30030a0102
+  [BER ] new -> old  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=30030a0103 (5 bytes)
+           decode_error: DecodeError: AuthToken.level: Expected enumeration value 0, 1 or 2, but got 3. (At offset: 4)
+  [PER ] old -> new  decode=OK          meaning=DIFFERENT   sign_same_bytes=True
+           wire=80 (1 bytes)
+           MEANING DRIFT: level: 'admin' -> 'user'
+           reenc=80
+  [PER ] new -> old  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=c0 (1 bytes)
+           decode_error: DecodeError: AuthToken.level: Expected enumeration index 0, 1 or 2, but got 3.
+  [UPER] old -> new  decode=OK          meaning=DIFFERENT   sign_same_bytes=True
+           wire=80 (1 bytes)
+           MEANING DRIFT: level: 'admin' -> 'user'
+           reenc=80
+  [UPER] new -> old  decode=FAIL        meaning=N/A         sign_same_bytes=N/A
+           wire=c0 (1 bytes)
+           decode_error: DecodeError: AuthToken.level: Expected enumeration index 0, 1 or 2, but got 3.
+
+C4b-enum-extension  ENUMERATED extension enumerant after (...)
+----------------------------------------------------------------------------------------------------
+  [BER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=30030a0102 (5 bytes)
+           reenc=30030a0102
+  [BER ] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=30030a0103 (5 bytes)
+           MEANING DRIFT: level: 'guest' -> None
+  [PER ] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=40 (1 bytes)
+           reenc=40
+  [PER ] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=80 (1 bytes)
+           MEANING DRIFT: level: 'guest' -> None
+  [UPER] old -> new  decode=OK          meaning=SAME        sign_same_bytes=True
+           wire=40 (1 bytes)
+           reenc=40
+  [UPER] new -> old  decode=OK          meaning=DIFFERENT   sign_same_bytes=False
+           wire=80 (1 bytes)
+           MEANING DRIFT: level: 'guest' -> None
