@@ -3,6 +3,7 @@ import logging
 import re
 import struct
 from collections.abc import Callable, Iterable, Iterator, KeysView, Sequence
+from dataclasses import dataclass
 from hashlib import md5, sha256, sha384, sha512
 from typing import (
     Any,
@@ -102,6 +103,21 @@ class PDFTextExtractionNotAllowed(PDFEncryptionError):
 LITERAL_OBJSTM = LIT("ObjStm")
 LITERAL_XREF = LIT("XRef")
 LITERAL_CATALOG = LIT("Catalog")
+
+
+@dataclass(frozen=True)
+class _ObjStmObject:
+    """An object resolved from an object stream.
+
+    ``objid`` and ``offset`` are the values declared in the object stream
+    header, not the values requested by the cross-reference table. Keeping
+    both allows ``_getobj_objstm`` to verify that the xref entry and the
+    header entry describe the same object.
+    """
+
+    objid: int
+    offset: int
+    obj: object
 
 
 class PDFBaseXRef:
@@ -706,7 +722,7 @@ class PDFDocument:
         self.decipher: DecipherCallable | None = None
         self._parser = None
         self._cached_objs: dict[int, tuple[object, int]] = {}
-        self._parsed_objs: dict[int, tuple[list[object], int]] = {}
+        self._parsed_objs: dict[int, list[_ObjStmObject]] = {}
         self._parser = parser
         self._parser.set_document(self)
         self.is_printable = self.is_modifiable = self.is_extractable = True
@@ -768,39 +784,190 @@ class PDFDocument:
         self._parser.fallback = False  # need to read streams with exact length
 
     def _getobj_objstm(self, stream: PDFStream, index: int, objid: int) -> object:
-        if stream.objid in self._parsed_objs:
-            (objs, n) = self._parsed_objs[stream.objid]
-        else:
-            (objs, n) = self._get_objects(stream)
-            if self.caching:
-                assert stream.objid is not None
-                self._parsed_objs[stream.objid] = (objs, n)
-        i = n * 2 + index
-        try:
-            obj = objs[i]
-        except IndexError as err:
-            raise PDFSyntaxError(f"index too big: {index!r}") from err
-        return obj
+        if index < 0:
+            raise PDFSyntaxError(
+                f"negative index in object stream: objid={objid!r} "
+                f"stream={stream.objid!r} index={index!r}"
+            )
+        entries = self._get_objects(stream)
+        if index >= len(entries):
+            raise PDFSyntaxError(
+                f"index too big: objid={objid!r} stream={stream.objid!r} "
+                f"index={index!r} N={len(entries)!r}"
+            )
+        entry = entries[index]
+        if entry.objid != objid:
+            raise PDFSyntaxError(
+                f"objid mismatch in object stream: requested objid={objid!r} "
+                f"stream={stream.objid!r} index={index!r} "
+                f"header objid={entry.objid!r}"
+            )
+        return entry.obj
 
-    def _get_objects(self, stream: PDFStream) -> tuple[list[object], int]:
+    def _get_objects(self, stream: PDFStream) -> list[_ObjStmObject]:
+        """Parse the object stream header and resolve its objects.
+
+        The header is a sequence of ``objid offset`` pairs. ``N`` gives the
+        number of pairs and ``First`` gives the offset of the first object
+        body. Header entry ``i`` is bound to the ``i``-th object parsed from
+        the body, so its offset must equal that object's start. Together with
+        the xref index this prevents a header entry from pointing at another
+        object, into the header itself or outside the stream and silently
+        returning different content than the requested object.
+        """
+        if stream.objid is not None and stream.objid in self._parsed_objs:
+            return self._parsed_objs[stream.objid]
+        entries = self._parse_objstm(stream)
+        if self.caching and stream.objid is not None:
+            self._parsed_objs[stream.objid] = entries
+        return entries
+
+    def _parse_objstm(self, stream: PDFStream) -> list[_ObjStmObject]:
         if stream.get("Type") is not LITERAL_OBJSTM and settings.STRICT:
             raise PDFSyntaxError(f"Not a stream object: {stream!r}")
         try:
-            n = cast(int, stream["N"])
+            n = stream["N"]
         except KeyError:
             if settings.STRICT:
                 raise PDFSyntaxError(f"N is not defined: {stream!r}") from None
             n = 0
-        parser = PDFStreamParser(stream.get_data())
-        parser.set_document(self)
-        objs: list[object] = []
         try:
-            while 1:
-                (_, obj) = parser.nextobject()
-                objs.append(obj)
-        except PSEOF:
-            pass
-        return (objs, n)
+            first = stream["First"]
+        except KeyError:
+            raise PDFSyntaxError(
+                f"First is not defined in object stream: stream={stream.objid!r}"
+            ) from None
+        if not isinstance(n, int):
+            raise PDFSyntaxError(
+                f"invalid N in object stream: stream={stream.objid!r} N={n!r}"
+            )
+        if n < 0:
+            raise PDFSyntaxError(
+                f"negative N in object stream: stream={stream.objid!r} N={n!r}"
+            )
+
+        data = stream.get_data()
+        if n > len(data):
+            raise PDFSyntaxError(
+                f"N larger than object stream: stream={stream.objid!r} "
+                f"N={n!r} length={len(data)!r}"
+            )
+
+        # Parse exactly N header pairs. The byte position after the last
+        # header token must not be past First: the header and the object
+        # bodies may not overlap. Whitespace between them is allowed.
+        parser = PDFStreamParser(data)
+        parser.set_document(self)
+        header: list[tuple[int, int]] = []
+        for _ in range(n):
+            try:
+                (_, header_objid) = parser.nexttoken()
+                (_, header_offset) = parser.nexttoken()
+            except PSEOF as err:
+                raise PDFSyntaxError(
+                    f"truncated object stream header: stream={stream.objid!r} "
+                    f"N={n!r} parsed={len(header)!r}"
+                ) from err
+            if not isinstance(header_objid, int) or not isinstance(header_offset, int):
+                raise PDFSyntaxError(
+                    f"invalid object stream header: stream={stream.objid!r} "
+                    f"index={len(header)!r} objid={header_objid!r} "
+                    f"offset={header_offset!r}"
+                )
+            header.append((header_objid, header_offset))
+
+        if not isinstance(first, int):
+            raise PDFSyntaxError(
+                f"invalid First in object stream: stream={stream.objid!r} "
+                f"First={first!r}"
+            )
+        if first < 0:
+            raise PDFSyntaxError(
+                f"negative First in object stream: stream={stream.objid!r} "
+                f"First={first!r}"
+            )
+        if first > len(data):
+            raise PDFSyntaxError(
+                f"First beyond end of object stream: stream={stream.objid!r} "
+                f"First={first!r} length={len(data)!r}"
+            )
+        header_end = parser.bufpos + parser.charpos
+        if header_end > first:
+            raise PDFSyntaxError(
+                f"object stream header overlaps body: stream={stream.objid!r} "
+                f"N={n!r} First={first!r} header_end={header_end!r}"
+            )
+
+        # Parse the body from First and record the exact token position of
+        # every object. Offsets are relative to First. Header entry i must
+        # point at the i-th body object, which binds the header to the body
+        # and prevents an offset from selecting a different object.
+        body_by_index: list[tuple[int, object]] = []
+        parser = PDFStreamParser(data)
+        parser.set_document(self)
+        parser.seek(first)
+        while True:
+            try:
+                (pos, obj) = parser.nextobject()
+            except PSEOF:
+                break
+            offset = pos - first
+            if offset < 0:
+                raise PDFSyntaxError(
+                    f"object before First in object stream: "
+                    f"stream={stream.objid!r} First={first!r} token_pos={pos!r}"
+                )
+            body_by_index.append((offset, obj))
+
+        entries: list[_ObjStmObject] = []
+        seen_objids: dict[int, int] = {}
+        seen_offsets: dict[int, int] = {}
+        for index, (header_objid, header_offset) in enumerate(header):
+            if header_objid in seen_objids:
+                raise PDFSyntaxError(
+                    f"duplicate objid in object stream header: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} first_index={seen_objids[header_objid]!r}"
+                )
+            seen_objids[header_objid] = index
+            if header_offset < 0:
+                raise PDFSyntaxError(
+                    f"negative offset in object stream header: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} offset={header_offset!r}"
+                )
+            if header_offset in seen_offsets:
+                raise PDFSyntaxError(
+                    f"duplicate offset in object stream header: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} offset={header_offset!r} "
+                    f"first_index={seen_offsets[header_offset]!r}"
+                )
+            seen_offsets[header_offset] = index
+            if header_offset >= len(data) - first:
+                raise PDFSyntaxError(
+                    f"object stream offset beyond end of stream: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} offset={header_offset!r} "
+                    f"First={first!r} length={len(data)!r}"
+                )
+            if index >= len(body_by_index):
+                raise PDFSyntaxError(
+                    f"object stream has fewer objects than N: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} N={n!r} parsed={len(body_by_index)!r}"
+                )
+            body_offset, body_obj = body_by_index[index]
+            if header_offset != body_offset:
+                raise PDFSyntaxError(
+                    f"object stream offset points to another object: "
+                    f"stream={stream.objid!r} objid={header_objid!r} "
+                    f"index={index!r} offset={header_offset!r} "
+                    f"object_at_index={body_offset!r}"
+                )
+            entries.append(_ObjStmObject(header_objid, header_offset, body_obj))
+
+        return entries
 
     def _getobj_parse(self, pos: int, objid: int) -> object:
         assert self._parser is not None
@@ -841,6 +1008,7 @@ class PDFDocument:
         log.debug("getobj: objid=%r", objid)
         obj: object  # Initialize to satisfy mypy; always assigned in branches below
         genno: int
+        last_error: Exception | None = None
         if objid in self._cached_objs:
             (obj, genno) = self._cached_objs[objid]
         else:
@@ -861,9 +1029,16 @@ class PDFDocument:
                     if isinstance(obj, PDFStream):
                         obj.set_objid(objid, genno)
                     break
-                except (PSEOF, PDFSyntaxError):
+                except (PSEOF, PDFSyntaxError) as err:
+                    last_error = err
                     continue
             else:
+                if last_error is not None:
+                    # Keep the object number and the source location of the
+                    # failing xref/object-stream entry for reporting.
+                    raise PDFObjectNotFound(
+                        f"{objid} (xref entry could not be resolved: {last_error})"
+                    ) from last_error
                 raise PDFObjectNotFound(objid)
             log.debug("register: objid=%r: %r", objid, obj)
             if self.caching:
