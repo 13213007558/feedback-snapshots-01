@@ -19,3 +19,12 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotASymlinkError(Error):
     pass
+
+
+class InvalidObjectError(Error):
+    """Raised when a block cannot be validated as an APFS object under any available interpretation.
+
+    The message records why each candidate interpretation (the block as stored, and the block after
+    decryption when a cipher was provided) was rejected, so the failure is attributed to the object
+    interpretation/selection stage rather than surfacing later as a crash in a deep field parse.
+    """

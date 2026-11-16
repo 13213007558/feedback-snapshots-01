@@ -4,6 +4,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar
 
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.exception import InvalidObjectError
 from dissect.apfs.util import fletcher64
 
 if TYPE_CHECKING:
@@ -67,33 +68,114 @@ class Object:
 
     @classmethod
     def from_block(cls, container: APFS, address: int, block: bytes, *, cipher: Cipher | None = None) -> Self:
-        """Load an object from its raw block data, automatically determining the correct subclass."""
-        if cipher is not None:
-            # Sometimes the block is already decrypted
-            # This is a bit hacky, but I don't currently know how to properly determine this otherwise
-            header = c_apfs.obj_phys(block)
-            if (
-                cls is Object
-                and header.o_type not in c_apfs.OBJECT_TYPE
-                and header.o_type & c_apfs.OBJECT_TYPE_MASK not in c_apfs.OBJECT_TYPE
-            ) or (
-                cls is not Object
-                and header.o_type != cls.__type__
-                and header.o_type & c_apfs.OBJECT_TYPE_MASK != cls.__type__
-            ):
-                # If the type is invalid, decrypt the block
-                block = cipher.decrypt(block, address * container.sectors_per_block)
+        """Load an object from its raw block data, automatically determining the correct subclass.
 
+        When no ``cipher`` is provided the block is assumed to be plaintext, matching the on-disk layout
+        of unencrypted containers. When a decryption context *is* provided, merely looking like a valid
+        object header is not enough: ciphertext can start with bytes that happen to form a known
+        ``o_type``. Both interpretations are therefore subjected to full object validation, and the
+        plaintext interpretation is preferred whenever it holds (blocks may already be decrypted).
+        Decryption is only attempted when the plaintext interpretation fails, and a block that validates
+        under neither interpretation raises :class:`InvalidObjectError` instead of being silently treated
+        as a generic object.
+        """
+        expected_type = cls._expected_type()
+
+        if cipher is None:
+            return cls._instantiate(container, address, block, cipher=None)
+
+        plain_reason = cls._validate_block(block, address, expected_type)
+        if plain_reason is None:
+            # The block is already plaintext (or stored unencrypted even though a cipher is in scope).
+            return cls._instantiate(container, address, block, cipher=cipher)
+
+        decrypted = cipher.decrypt(bytes(block), address * container.sectors_per_block)
+        encrypted_reason = cls._validate_block(decrypted, address, expected_type)
+        if encrypted_reason is None:
+            return cls._instantiate(container, address, decrypted, cipher=cipher)
+
+        raise InvalidObjectError(
+            f"Block at address {address} could not be validated as an APFS object: "
+            f"plaintext interpretation rejected ({plain_reason}); "
+            f"decrypted interpretation rejected ({encrypted_reason})"
+        )
+
+    @classmethod
+    def _instantiate(cls, container: APFS, address: int, block: bytes, *, cipher: Cipher | None) -> Self:
+        """Construct the appropriate (sub)class for an already validated block."""
         if cls is not Object:
-            # If a subclass is called directly, use that class
             return cls(container, address, block=block, cipher=cipher)
 
-        # Otherwise, determine the class based on the object type
         header = c_apfs.obj_phys(block)
         subcls = Object.__known_types__.get(header.o_type, None) or Object.__known_types__.get(
             header.o_type & c_apfs.OBJECT_TYPE_MASK, Object
         )
         return subcls(container, address, block=block, cipher=cipher)
+
+    @classmethod
+    def _expected_type(cls) -> int | None:
+        """The object type a concrete loader expects, or ``None`` for generic, type-agnostic loading."""
+        if cls is Object or cls.__type__ == c_apfs.OBJECT_TYPE_INVALID:
+            return None
+
+        # A BTree's addressable root block is stored with the BTREE type; its child nodes use BTREE_NODE.
+        if cls.__type__ == c_apfs.OBJECT_TYPE_BTREE:
+            return c_apfs.OBJECT_TYPE_BTREE
+
+        return cls.__type__
+
+    @classmethod
+    def _validate_block(cls, block: bytes, address: int, expected_type: int | None) -> str | None:
+        """Validate an object interpretation without constructing any subclass.
+
+        Returns ``None`` when the block is a valid object, otherwise a human readable reason describing
+        the first failed check. Validation covers the object type, the storage class, the checksum and,
+        where applicable, the physical address / oid identity.
+        """
+        if len(block) < len(c_apfs.obj_phys):
+            return f"block too small for obj_phys ({len(block)} bytes)"
+
+        header = c_apfs.obj_phys(block)
+        type_value = header.o_type
+        base_type = type_value & c_apfs.OBJECT_TYPE_MASK
+
+        # Keybag types are four-character-codes stored in the full 32-bit word, not a low-16-bit type.
+        is_keybag = type_value in (
+            c_apfs.OBJECT_TYPE_CONTAINER_KEYBAG,
+            c_apfs.OBJECT_TYPE_VOLUME_KEYBAG,
+            c_apfs.OBJECT_TYPE_MEDIA_KEYBAG,
+        )
+
+        if not is_keybag and base_type not in c_apfs.OBJECT_TYPE:
+            return f"unknown object type {base_type:#x}"
+
+        if expected_type is not None:
+            if expected_type >= c_apfs.OBJECT_TYPE_CONTAINER_KEYBAG:
+                if type_value != expected_type:
+                    return f"unexpected object type {type_value:#x}, expected {expected_type:#x}"
+            elif base_type != expected_type:
+                return f"unexpected object type {base_type:#x}, expected {expected_type:#x}"
+        elif not is_keybag and type_value not in c_apfs.OBJECT_TYPE:
+            return f"unknown object type flags {type_value:#x}"
+
+        storage = type_value & c_apfs.OBJ_STORAGETYPE_MASK
+        if storage not in (c_apfs.OBJ_VIRTUAL, c_apfs.OBJ_EPHEMERAL, c_apfs.OBJ_PHYSICAL):
+            return f"invalid storage class {storage:#x}"
+
+        if not is_keybag and type_value & ~c_apfs.OBJECT_TYPE_FLAGS_DEFINED_MASK != base_type:
+            return f"undefined object type flags set in {type_value:#x}"
+
+        checksum = int.from_bytes(header.o_cksum, "little")
+        if fletcher64(bytes(block[c_apfs.MAX_CKSUM_SIZE :])) != checksum:
+            return "invalid object checksum"
+
+        # Physical objects are addressed directly: their oid must equal their block address.
+        # Virtual and ephemeral objects are addressed through an object map, so no such constraint holds.
+        # Keybags occupy a physical block range but carry no addressing oid, so they are exempt.
+        if not is_keybag and storage == c_apfs.OBJ_PHYSICAL and header.o_oid != address:
+            return f"physical object oid {header.o_oid} does not match block address {address}"
+
+        return None
 
     @cached_property
     def checksum(self) -> int:
@@ -151,7 +233,7 @@ class Object:
     @cached_property
     def is_encrypted(self) -> bool:
         """Check if the object is encrypted."""
-        return self.header.o_type & c_apfs.OBJECT_TYPE_FLAGS_MASK == c_apfs.OBJ_ENCRYPTED
+        return bool(self.header.o_type & c_apfs.OBJ_ENCRYPTED)
 
     @cached_property
     def subtype(self) -> c_apfs.OBJECT_TYPE:
