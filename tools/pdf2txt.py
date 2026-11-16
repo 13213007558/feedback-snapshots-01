@@ -10,13 +10,20 @@ from collections.abc import Container, Iterable
 from typing import Any
 
 import pdfminer.high_level
+from pdfminer import forensic
 from pdfminer.layout import LAParams
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.utils import AnyIO
 
 logging.basicConfig()
 
-OUTPUT_TYPES = ((".htm", "html"), (".html", "html"), (".xml", "xml"), (".tag", "tag"))
+OUTPUT_TYPES = (
+    (".htm", "html"),
+    (".html", "html"),
+    (".xml", "xml"),
+    (".tag", "tag"),
+    (".forensic.json", "forensic"),
+)
 
 
 def float_or_disabled(x: str) -> float | None:
@@ -48,6 +55,22 @@ def extract_text(
 ) -> None:
     if not files:
         raise PDFValueError("Must provide files to work upon!")
+
+    if output_type == "forensic":
+        for fname in files:
+            rendered = forensic.forensic_report_json(
+                fname,
+                password=password,
+                page_numbers=page_numbers,
+                maxpages=maxpages,
+                caching=not disable_caching,
+            )
+            if outfile == "-":
+                sys.stdout.write(rendered + "\n")
+            else:
+                with open(outfile, "w", encoding=codec) as forensic_out:
+                    forensic_out.write(rendered)
+        return
 
     if output_type == "text" and outfile != "-":
         for override, alttype in OUTPUT_TYPES:
@@ -235,7 +258,9 @@ def create_parser() -> argparse.ArgumentParser:
         "-t",
         type=str,
         default="text",
-        help="Type of output to generate {text,html,xml,tag}.",
+        help="Type of output to generate {text,html,xml,tag,hocr,forensic}. "
+        "'forensic' emits a JSON report keeping ActualText reading order and "
+        "the actually drawn glyphs as separate evidence channels.",
     )
     output_params.add_argument(
         "--codec",

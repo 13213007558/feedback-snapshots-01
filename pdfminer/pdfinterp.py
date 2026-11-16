@@ -1,6 +1,7 @@
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Union, cast
 
@@ -66,6 +67,24 @@ LITERAL_TEXT = LIT("Text")
 LITERAL_FONT = LIT("Font")
 LITERAL_FORM = LIT("Form")
 LITERAL_IMAGE = LIT("Image")
+
+
+@dataclass(frozen=True)
+class TagLocation:
+    """Where a marked-content operator was encountered.
+
+    :param page: one-based index of the page being interpreted.
+    :param form_xobject: name of the Form XObject whose content stream
+        contained the operator, or ``None`` for the page content stream.
+    """
+
+    page: int
+    form_xobject: str | None = None
+
+    def describe(self) -> str:
+        if self.form_xobject is None:
+            return f"page {self.page}"
+        return f"page {self.page}, Form XObject {self.form_xobject!r}"
 
 
 class PDFTextState:
@@ -378,6 +397,10 @@ class PDFPageInterpreter:
         self.stream_ids: set[int] = set()
         # Track stream IDs from parent interpreters in the call stack
         self.parent_stream_ids: set[int] = set()
+        # Zero-based index of the page currently being interpreted.
+        self.pageno: int = 0
+        # Name of the Form XObject whose content stream is active, if any.
+        self.form_name: str | None = None
 
     def dup(self) -> "PDFPageInterpreter":
         return self.__class__(self.rsrcmgr, self.device)
@@ -393,6 +416,7 @@ class PDFPageInterpreter:
         interp = self.dup()
         interp.parent_stream_ids.update(self.parent_stream_ids)
         interp.parent_stream_ids.update(self.stream_ids)
+        interp.pageno = self.pageno
         return interp
 
     def init_resources(self, resources: dict[object, object]) -> None:
@@ -435,6 +459,52 @@ class PDFPageInterpreter:
             elif k == "XObject":
                 for xobjid, xobjstrm in dict_value(v).items():
                     self.xobjmap[xobjid] = xobjstrm
+
+    def resolve_marked_props(self, props: PDFStackT) -> dict[object, object] | None:
+        """Resolve a marked-content property list to a plain dictionary.
+
+        The ``BDC``/``DP`` operators accept either an inline dictionary or a
+        name referencing an entry of the current resource dictionary's
+        ``Properties`` subdictionary (PDF 1.7, Table 320). Indirect object
+        references inside either form are followed. Returns ``None`` when the
+        argument does not resolve to a dictionary.
+        """
+        resolved = resolve1(props)
+        if isinstance(resolved, PSLiteral):
+            name = literal_name(resolved)
+            properties = dict_value(self.resources).get("Properties")
+            if properties is None:
+                log.warning(
+                    "Marked-content property %r cannot be resolved because the "
+                    "current resource dictionary has no Properties entry "
+                    "(page %d, Form XObject %r)",
+                    name,
+                    self.pageno + 1,
+                    self.form_name,
+                )
+                return None
+            try:
+                resolved = resolve1(dict_value(properties)[name])
+            except (KeyError, TypeError):
+                log.warning(
+                    "Marked-content property %r is not defined in the Properties "
+                    "resource dictionary (page %d, Form XObject %r)",
+                    name,
+                    self.pageno + 1,
+                    self.form_name,
+                )
+                return None
+        if isinstance(resolved, dict):
+            return dict_value(resolved)
+        if props is not None:
+            log.warning(
+                "Marked-content property list %r did not resolve to a dictionary "
+                "(page %d, Form XObject %r)",
+                props,
+                self.pageno + 1,
+                self.form_name,
+            )
+        return None
 
     def init_state(self, ctm: Matrix) -> None:
         """Initialize the text and graphic states for rendering a page."""
@@ -1034,7 +1104,7 @@ class PDFPageInterpreter:
     def do_MP(self, tag: PDFStackT) -> None:
         """Define marked-content point"""
         if isinstance(tag, PSLiteral):
-            self.device.do_tag(tag)
+            self.device.do_tag(tag, None, self._tag_location())
         else:
             log.warning(
                 "Cannot define marked-content point because %r is not a PSLiteral",
@@ -1044,7 +1114,9 @@ class PDFPageInterpreter:
     def do_DP(self, tag: PDFStackT, props: PDFStackT) -> None:
         """Define marked-content point with property list"""
         if isinstance(tag, PSLiteral):
-            self.device.do_tag(tag, props)
+            self.device.do_tag(
+                tag, self.resolve_marked_props(props), self._tag_location()
+            )
         else:
             log.warning(
                 "Cannot define marked-content point with property list "
@@ -1055,7 +1127,7 @@ class PDFPageInterpreter:
     def do_BMC(self, tag: PDFStackT) -> None:
         """Begin marked-content sequence"""
         if isinstance(tag, PSLiteral):
-            self.device.begin_tag(tag)
+            self.device.begin_tag(tag, None, self._tag_location())
         else:
             log.warning(
                 "Cannot begin marked-content sequence because %r is not a PSLiteral",
@@ -1065,7 +1137,9 @@ class PDFPageInterpreter:
     def do_BDC(self, tag: PDFStackT, props: PDFStackT) -> None:
         """Begin marked-content sequence with property list"""
         if isinstance(tag, PSLiteral):
-            self.device.begin_tag(tag, props)
+            self.device.begin_tag(
+                tag, self.resolve_marked_props(props), self._tag_location()
+            )
         else:
             log.warning(
                 "Cannot begin marked-content sequence with property list "
@@ -1075,7 +1149,14 @@ class PDFPageInterpreter:
 
     def do_EMC(self) -> None:
         """End marked-content sequence"""
-        self.device.end_tag()
+        self.device.end_tag(self._tag_location())
+
+    def _tag_location(self) -> "TagLocation":
+        """Capture where a marked-content operator was encountered."""
+        return TagLocation(
+            page=self.pageno + 1,
+            form_xobject=self.form_name,
+        )
 
     def do_Tc(self, space: PDFStackT) -> None:
         """Set character spacing.
@@ -1336,11 +1417,13 @@ class PDFPageInterpreter:
             xobjres = xobj.get("Resources")
             resources = dict_value(xobjres) if xobjres else self.resources.copy()
             self.device.begin_figure(xobjid, bbox, matrix)
+            interpreter.form_name = xobjid
             interpreter.render_contents(
                 resources,
                 [xobj],
                 ctm=mult_matrix(matrix, self.ctm),
             )
+            interpreter.form_name = None
             self.device.end_figure(xobjid)
         elif subtype is LITERAL_IMAGE and "Width" in xobj and "Height" in xobj:
             self.device.begin_figure(xobjid, (0, 0, 1, 1), MATRIX_IDENTITY)
@@ -1364,6 +1447,7 @@ class PDFPageInterpreter:
         self.device.begin_page(page, ctm)
         self.render_contents(page.resources, page.contents, ctm=ctm)
         self.device.end_page(page)
+        self.pageno += 1
 
     def render_contents(
         self,

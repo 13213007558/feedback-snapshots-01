@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         PDFResourceManager,
         PDFStackT,
         PDFTextState,
+        TagLocation,
     )
 
 
@@ -51,13 +52,23 @@ class PDFDevice:
     def set_ctm(self, ctm: Matrix) -> None:
         self.ctm = ctm
 
-    def begin_tag(self, tag: PSLiteral, props: Optional["PDFStackT"] = None) -> None:
+    def begin_tag(
+        self,
+        tag: PSLiteral,
+        props: Optional["PDFStackT"] = None,
+        location: "Optional[TagLocation]" = None,
+    ) -> None:
         pass
 
-    def end_tag(self) -> None:
+    def end_tag(self, location: "Optional[TagLocation]" = None) -> None:
         pass
 
-    def do_tag(self, tag: PSLiteral, props: Optional["PDFStackT"] = None) -> None:
+    def do_tag(
+        self,
+        tag: PSLiteral,
+        props: Optional["PDFStackT"] = None,
+        location: "Optional[TagLocation]" = None,
+    ) -> None:
         pass
 
     def begin_page(self, page: PDFPage, ctm: Matrix) -> None:
@@ -300,7 +311,12 @@ class TagExtractor(PDFDevice):
         self._write("</page>\n")
         self.pageno += 1
 
-    def begin_tag(self, tag: PSLiteral, props: Optional["PDFStackT"] = None) -> None:
+    def begin_tag(
+        self,
+        tag: PSLiteral,
+        props: Optional["PDFStackT"] = None,
+        location: "Optional[TagLocation]" = None,
+    ) -> None:
         s = ""
         if isinstance(props, dict):
             s = "".join(
@@ -313,14 +329,19 @@ class TagExtractor(PDFDevice):
         self._write(out_s)
         self._stack.append(tag)
 
-    def end_tag(self) -> None:
+    def end_tag(self, location: "Optional[TagLocation]" = None) -> None:
         assert self._stack, str(self.pageno)
         tag = self._stack.pop(-1)
         out_s = f"</{utils.enc(cast(str, tag.name))}>"
         self._write(out_s)
 
-    def do_tag(self, tag: PSLiteral, props: Optional["PDFStackT"] = None) -> None:
-        self.begin_tag(tag, props)
+    def do_tag(
+        self,
+        tag: PSLiteral,
+        props: Optional["PDFStackT"] = None,
+        location: "Optional[TagLocation]" = None,
+    ) -> None:
+        self.begin_tag(tag, props, location)
         self._stack.pop(-1)
 
     def _write(self, s: str) -> None:

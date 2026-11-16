@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- ActualText-aware forensic extraction in `pdfminer.forensic`, exposing the
+  accessible reading order and the actually drawn glyphs as separate evidence
+  channels, with nested marked content, `Properties`-referenced attribute
+  dictionaries, Form XObject resources and unclosed-marker diagnostics, plus a
+  `forensic` output type for `pdf2txt.py`
+
+### Fixed
+
 - Restore `cmap` and `cmap_clean` targets to `Makefile ([#1256](https://github.com/pdfminer/pdfminer.six/pull/1256))
 
 ### Fixed

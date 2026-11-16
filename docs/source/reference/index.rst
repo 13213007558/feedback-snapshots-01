@@ -9,3 +9,4 @@ API Reference
     commandline
     highlevel
     composable
+    forensic
