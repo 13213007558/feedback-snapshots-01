@@ -246,6 +246,10 @@ typedef struct CONSOLE_PROPS {
     char  color_table[64];
 };
 
+typedef struct CONSOLE_FE_PROPS {
+    uint32  code_page;                        // A 32-bit, unsigned integer that specifies the console code page used to display console output. This only describes console output and MUST NOT be assumed to encode the LNK's ANSI string fields.
+};
+
 typedef struct TYPED_PROPERTY_VALUE {
     uint16 type;                        // MUST be a value from the PropertyType enumeration, indicating the type of property represented.
     char padding[2];                    // MUST be set to zero, and any nonzero value SHOULD be rejected.
