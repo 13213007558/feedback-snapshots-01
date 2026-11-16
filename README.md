@@ -22,6 +22,12 @@ instead of a slower pure Python implementation. Both implementations are provide
 Pre-build wheels are available for most common platforms and the native implementation will automatically be used if available.
 In the rare case that a pre-build wheel is not available, please refer to `dissect.util` for build instructions.
 
+All compression backends follow the same block contract: a block contains exactly one compressed stream or frame,
+the complete input must be consumed, trailing bytes and concatenated streams/frames are rejected, and the decompressed
+size must not exceed the block bound (`SQUASHFS_METADATA_SIZE` for metadata blocks, the filesystem block size for file
+data blocks). The raw LZO and LZ4 formats have no end marker, so their adapters additionally verify how much input was
+consumed and reject a second block appended to a valid one.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

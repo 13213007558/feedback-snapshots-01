@@ -10,17 +10,17 @@ from bisect import bisect_right
 from functools import cache, cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.util import ts
-from dissect.util.stream import RunlistStream
-
 from dissect.squashfs import compression
 from dissect.squashfs.c_squashfs import INODE_STRUCT_MAP, TYPE_MAP, c_squashfs
 from dissect.squashfs.exceptions import (
+    CompressionError,
     FileNotFoundError,
     NotADirectoryError,
     NotAFileError,
     NotASymlinkError,
 )
+from dissect.util import ts
+from dissect.util.stream import RunlistStream
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -146,6 +146,9 @@ class SquashFS:
             # Data block
             compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK == 0
             length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT_BLOCK
+            # A file data block (including a fragment block) decompresses to at most
+            # the filesystem block size.
+            expected = self.block_size
         else:
             # Metadata block
             self.fh.seek(block)
@@ -154,17 +157,24 @@ class SquashFS:
             compressed = length & c_squashfs.SQUASHFS_COMPRESSED_BIT == 0
             length = length & ~c_squashfs.SQUASHFS_COMPRESSED_BIT
             block += 2
+            # Metadata blocks have a fixed upper bound that is independent of the
+            # filesystem block size.
+            expected = c_squashfs.SQUASHFS_METADATA_SIZE
 
         self.fh.seek(block)
         data = self.fh.read(length)
 
         if not compressed:
+            # The uncompressed flag means the stored bytes are the block contents
+            # verbatim; the bound still applies because a larger block is invalid.
+            if len(data) > expected:
+                raise CompressionError(f"Uncompressed block is {len(data)} bytes, expected at most {expected}")
             return block + length, data
 
         if self._compression is None:
             raise RuntimeError(f"Tried to read compressed block {block} but no compression initialized")
 
-        return block + length, self._compression.decompress(data, self.block_size)
+        return block + length, self._compression.decompress(data, expected)
 
     def _read_fragment(self, fragment: int, offset: int, length: int) -> bytes:
         entry = self._lookup_fragment(fragment)
