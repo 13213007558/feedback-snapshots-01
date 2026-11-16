@@ -53,6 +53,9 @@ group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument("-p", "--password", nargs="?", const="", dest="password", help="password text")
 group.add_argument("-t", "--test", dest="test_encrypted", action="store_true", help="test if the file is encrypted")
 parser.add_argument("-e", dest="encrypt", action="store_true", help="encryption mode (default is false)")
+parser.add_argument("-f", "--format", dest="format", choices=["ooxml", "doc97", "xls97", "ppt97"], default=None,
+                    help="parse the input as this format instead of relying on auto-detection "
+                         "(the chosen format's structural validation still applies)")
 parser.add_argument("-v", dest="verbose", action="store_true", help="print verbose information")
 parser.add_argument("infile", nargs="?", type=argparse.FileType("rb"), help="input file")
 parser.add_argument("outfile", nargs="?", type=argparse.FileType("wb"), help="output file (if blank, stdout is used)")
@@ -99,7 +102,7 @@ def main():
         if not olefile.isOleFile(args.infile):
             raise exceptions.FileFormatError("Not an OLE file")
 
-        file = OfficeFile(args.infile)
+        file = OfficeFile(args.infile, format=args.format)
         file.load_key(password=password)
 
         file.decrypt(args.outfile)

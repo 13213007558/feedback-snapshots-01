@@ -1,4 +1,10 @@
 
+Unreleased
+===================
+
+  * Add explicit format selection: `OfficeFile(file, format=...)` and CLI `-f/--format` (ooxml, doc97, xls97, ppt97); the chosen format's structural validation still applies
+  * Document format-detection boundaries for OLE containers carrying features of several formats (docs/format-detection-boundary.md)
+
 v6.1.0 / 2026-11-04
 ===================
 

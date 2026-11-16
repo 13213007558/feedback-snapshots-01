@@ -4,12 +4,27 @@ import olefile
 
 from msoffcrypto import exceptions
 
+_FORMAT_CLASSES = {
+    "ooxml": ("msoffcrypto.format.ooxml", "OOXMLFile"),
+    "doc97": ("msoffcrypto.format.doc97", "Doc97File"),
+    "xls97": ("msoffcrypto.format.xls97", "Xls97File"),
+    "ppt97": ("msoffcrypto.format.ppt97", "Ppt97File"),
+}
 
-def OfficeFile(file):
+
+def OfficeFile(file, format=None):
     """Return an office file object based on the format of given file.
 
     Args:
         file (:obj:`_io.BufferedReader`): Input file.
+        format (:obj:`str`, optional: one of "ooxml", "doc97", "xls97",
+            "ppt97"): Force the file to be parsed as the given format
+            instead of relying on stream-name auto-detection.  The chosen
+            format class still performs its own structural validation
+            (e.g. OOXMLFile requires a parseable EncryptionInfo stream in
+            an OLE container, Doc97File requires a WordDocument stream
+            with a readable FIB), so an explicit choice cannot turn an
+            invalid file into a valid one.
 
     Returns:
         BaseOfficeFile object.
@@ -40,6 +55,19 @@ def OfficeFile(file):
     Given file handle will not be closed, the file position will most certainly
     change.
     """
+    if format is not None:
+        if format not in _FORMAT_CLASSES:
+            raise exceptions.FileFormatError(
+                "Unknown format {!r}; expected one of: {}".format(
+                    format, ", ".join(sorted(_FORMAT_CLASSES))
+                )
+            )
+        module_name, class_name = _FORMAT_CLASSES[format]
+        import importlib
+
+        cls = getattr(importlib.import_module(module_name), class_name)
+        return cls(file)
+
     file.seek(0)  # required by isOleFile
     if olefile.isOleFile(file):
         ole = olefile.OleFileIO(file)
@@ -50,7 +78,8 @@ def OfficeFile(file):
     else:
         raise exceptions.FileFormatError("Unsupported file format")
 
-    # TODO: Make format specifiable by option in case of obstruction
+    # Auto-detection is first-match by stream name; use the format argument
+    # to override it when a container carries features of several formats.
     # Try this first; see https://github.com/nolze/msoffcrypto-tool/issues/17
     if ole.exists("EncryptionInfo"):
         from msoffcrypto.format.ooxml import OOXMLFile
