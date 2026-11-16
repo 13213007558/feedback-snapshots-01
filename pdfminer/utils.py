@@ -19,6 +19,7 @@ from typing import (
 from pdfminer.pdfexceptions import PDFTypeError, PDFValueError
 
 if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
     from pdfminer.layout import LTComponent
 
 import contextlib
@@ -123,7 +124,12 @@ def paeth_predictor(left: int, above: int, upper_left: int) -> int:
 
 
 def apply_tiff_predictor(
-    colors: int, columns: int, bitspercomponent: int, data: bytes
+    colors: int,
+    columns: int,
+    bitspercomponent: int,
+    data: bytes,
+    budget: "DecodeBudget | None" = None,
+    layer: str = "TIFF predictor",
 ) -> bytes:
     """Reverse the effect of the TIFF predictor 2
 
@@ -136,6 +142,11 @@ def apply_tiff_predictor(
         raise PDFValueError(error_msg)
     bpp = colors * (bitspercomponent // 8)
     nbytes = columns * bpp
+    if budget is not None:
+        # The predictor preserves the number of bytes. Validate the
+        # full output up front so an oversized declared scanline is
+        # rejected before its buffers are built.
+        budget.charge(layer, len(data))
     buf: list[int] = []
     for scanline_i in range(0, len(data), nbytes):
         raw: list[int] = []
@@ -156,6 +167,8 @@ def apply_png_predictor(
     columns: int,
     bitspercomponent: int,
     data: bytes,
+    budget: "DecodeBudget | None" = None,
+    layer: str = "PNG predictor",
 ) -> bytes:
     """Reverse the effect of the PNG predictor
 
@@ -167,6 +180,14 @@ def apply_png_predictor(
 
     nbytes = colors * columns * bitspercomponent // 8
     bpp = colors * bitspercomponent // 8  # number of bytes per complete pixel
+    if budget is not None:
+        if nbytes:
+            # Each scanline drops its one-byte filter type, so the
+            # restored output is slightly smaller than the input.
+            budget.charge(layer, max(0, len(data) - len(data) // (nbytes + 1)))
+        else:
+            # Degenerate scanline width: only filter-type bytes are read.
+            budget.charge(layer, 0)
     buf = bytearray()
     line_above = bytearray(columns)
     for scanline_i in range(0, len(data), nbytes + 1):

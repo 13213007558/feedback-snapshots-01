@@ -13,6 +13,7 @@ from pdfminer.converter import (
     TextConverter,
     XMLConverter,
 )
+from pdfminer.decodebudget import DecodeBudget
 from pdfminer.image import ImageWriter
 from pdfminer.layout import LAParams, LTPage
 from pdfminer.pdfdevice import PDFDevice, TagExtractor
@@ -38,6 +39,7 @@ def extract_text_to_fp(
     strip_control: bool = False,
     debug: bool = False,
     disable_caching: bool = False,
+    decode_budget: DecodeBudget | None = None,
     **kwargs: Any,
 ) -> None:
     """Parses text from inf-file and writes to outfp file-like object.
@@ -65,6 +67,9 @@ def extract_text_to_fp(
     :param strip_control: Does what it says on the tin
     :param debug: Output more logging data
     :param disable_caching: Does what it says on the tin
+    :param decode_budget: Optional :class:`DecodeBudget` limiting the
+        amount of data stream filters and predictors may produce while
+        this document is processed.
     :param other:
     :return: nothing, acting as it does on two streams. Use StringIO to get
         strings.
@@ -137,6 +142,7 @@ def extract_text_to_fp(
         maxpages=maxpages,
         password=password,
         caching=not disable_caching,
+        decode_budget=decode_budget,
     ):
         page.rotate = (page.rotate + rotation) % 360
         interpreter.process_page(page)
@@ -152,6 +158,7 @@ def extract_text(
     caching: bool = True,
     codec: str = "utf-8",
     laparams: LAParams | None = None,
+    decode_budget: DecodeBudget | None = None,
 ) -> str:
     """Parse and return the text contained in a PDF file.
 
@@ -164,6 +171,8 @@ def extract_text(
     :param codec: Text decoding codec
     :param laparams: An LAParams object from pdfminer.layout. If None, uses
         some default settings that often work well.
+    :param decode_budget: Optional :class:`DecodeBudget` limiting decoded
+        stream output while the document is processed.
     :return: a string containing all of the text extracted.
     """
     if laparams is None:
@@ -181,6 +190,7 @@ def extract_text(
             maxpages=maxpages,
             password=password,
             caching=caching,
+            decode_budget=decode_budget,
         ):
             interpreter.process_page(page)
 
@@ -194,6 +204,7 @@ def extract_pages(
     maxpages: int = 0,
     caching: bool = True,
     laparams: LAParams | None = None,
+    decode_budget: DecodeBudget | None = None,
 ) -> Iterator[LTPage]:
     """Extract and yield LTPage objects
 
@@ -205,6 +216,8 @@ def extract_pages(
     :param caching: If resources should be cached
     :param laparams: An LAParams object from pdfminer.layout. If None, uses
         some default settings that often work well.
+    :param decode_budget: Optional :class:`DecodeBudget` limiting decoded
+        stream output while the document is processed.
     :return: LTPage objects
     """
     if laparams is None:
@@ -221,6 +234,7 @@ def extract_pages(
             maxpages=maxpages,
             password=password,
             caching=caching,
+            decode_budget=decode_budget,
         ):
             interpreter.process_page(page)
             layout = device.get_result()

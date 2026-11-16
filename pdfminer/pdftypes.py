@@ -21,6 +21,7 @@ from pdfminer.runlength import rldecode
 from pdfminer.utils import apply_png_predictor, apply_tiff_predictor
 
 if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
     from pdfminer.pdfdocument import PDFDocument
 
 logger = logging.getLogger(__name__)
@@ -240,12 +241,119 @@ def decompress_corrupted(data: bytes) -> bytes:
     return result_str
 
 
+def flate_decode_bounded(
+    data: bytes,
+    budget: "DecodeBudget | None",
+    layer: str,
+) -> bytes:
+    """Decompress zlib data while enforcing the decode budget.
+
+    The decompressor is driven with ``max_length`` so every individual
+    call returns at most a bounded number of output bytes, and the
+    budget is charged for every chunk *before* it is appended. An
+    oversized stream therefore aborts early instead of being fully
+    allocated first. When no budget is supplied the behavior is
+    equivalent to a plain :func:`zlib.decompress` call.
+    """
+    if budget is None:
+        return zlib.decompress(data)
+    default_output_chunk = 64 * 1024
+    decompressor = zlib.decompressobj()
+    chunks: list[bytes] = []
+    view = memoryview(data)
+    input_offset = 0
+    while True:
+        # Cap each decompress() call by both the per-step limit and the
+        # remaining document budget, so a single call can never hand
+        # back more than the configured bounds allow.
+        caps = [default_output_chunk]
+        if budget.step_limit is not None:
+            step_room = budget.step_limit - budget.step_consumed
+            if step_room <= 0:
+                budget.check(layer, 1)
+            caps.append(max(step_room, 1))
+        remaining_total = budget.remaining()
+        if remaining_total is not None:
+            caps.append(max(remaining_total, 1))
+        max_length = min(caps)
+
+        if input_offset < len(view):
+            chunk = decompressor.decompress(
+                bytes(view[input_offset:]),
+                max_length,
+            )
+            input_offset = len(view) - len(decompressor.unused_data)
+        else:
+            chunk = b""
+        if chunk:
+            budget.charge(layer, len(chunk))
+            chunks.append(chunk)
+        if len(chunk) < max_length:
+            # Either the stream ended or internal buffers were drained.
+            while True:
+                tail = decompressor.flush(max_length)
+                if not tail:
+                    break
+                budget.charge(layer, len(tail))
+                chunks.append(tail)
+            break
+    return b"".join(chunks)
+
+
+def decompress_corrupted_bounded(
+    data: bytes,
+    budget: "DecodeBudget | None",
+    layer: str,
+) -> bytes:
+    """Budget-aware variant of :func:`decompress_corrupted`."""
+    decompressor = zlib.decompressobj()
+    f = io.BytesIO(data)
+    chunks: list[bytes] = []
+    buffer = f.read(1)
+    i = 0
+    try:
+        while buffer:
+            if budget is None:
+                chunk = decompressor.decompress(buffer)
+                replayed = False
+            else:
+                caps = [64 * 1024]
+                if budget.step_limit is not None:
+                    step_room = budget.step_limit - budget.step_consumed
+                    caps.append(max(step_room, 1))
+                remaining_total = budget.remaining()
+                if remaining_total is not None:
+                    caps.append(max(remaining_total, 1))
+                max_length = min(caps)
+                chunk = decompressor.decompress(buffer, max_length)
+                replayed = bool(decompressor.unconsumed_tail)
+                if replayed:
+                    # The output cap was hit before all input was
+                    # consumed; re-feed the same byte without advancing
+                    # the input position or the byte counter.
+                    f.seek(-1, io.SEEK_CUR)
+            if chunk:
+                if budget is not None:
+                    budget.charge(layer, len(chunk))
+                chunks.append(chunk)
+            if not replayed:
+                i += 1
+            buffer = f.read(1)
+    except zlib.error:
+        # Let the error propagate if we're not yet in the CRC checksum
+        if i < len(data) - 3:
+            raise
+        logger.warning("Data-loss while decompressing corrupted data")
+    return b"".join(chunks)
+
+
 class PDFStream(PDFObject):
     def __init__(
         self,
         attrs: dict[str, Any],
         rawdata: bytes,
         decipher: DecipherCallable | None = None,
+        budget: "DecodeBudget | None" = None,
     ) -> None:
         assert isinstance(attrs, dict), str(type(attrs))
         self.attrs = attrs
@@ -254,6 +362,7 @@ class PDFStream(PDFObject):
         self.data: bytes | None = None
         self.objid: int | None = None
         self.genno: int | None = None
+        self.budget = budget
 
     def set_objid(self, objid: int, genno: int) -> None:
         self.objid = objid
@@ -321,11 +430,15 @@ class PDFStream(PDFObject):
             self.data = data
             self.rawdata = None
             return
-        for f, params in filters:
+        budget = self.budget
+        for filter_index, (f, params) in enumerate(filters):
+            layer = self._filter_layer_name(f, filter_index)
+            if budget is not None:
+                budget.begin_step(layer)
             if f in LITERALS_FLATE_DECODE:
                 # will get errors if the document is encrypted.
                 try:
-                    data = zlib.decompress(data)
+                    data = flate_decode_bounded(data, budget, layer)
 
                 except zlib.error as e:
                     if settings.STRICT:
@@ -333,26 +446,29 @@ class PDFStream(PDFObject):
                         raise PDFException(error_msg) from e
 
                     try:
-                        data = decompress_corrupted(data)
+                        data = decompress_corrupted_bounded(data, budget, layer)
                     except zlib.error:
                         data = b""
 
             elif f in LITERALS_LZW_DECODE:
-                data = lzwdecode(data)
+                data = lzwdecode(data, budget=budget, layer=layer)
             elif f in LITERALS_ASCII85_DECODE:
-                data = ascii85decode(data)
+                data = ascii85decode(data, budget=budget, layer=layer)
             elif f in LITERALS_ASCIIHEX_DECODE:
-                data = asciihexdecode(data)
+                data = asciihexdecode(data, budget=budget, layer=layer)
             elif f in LITERALS_RUNLENGTH_DECODE:
-                data = rldecode(data)
+                data = rldecode(data, budget=budget, layer=layer)
             elif f in LITERALS_CCITTFAX_DECODE:
-                data = ccittfaxdecode(data, params)
+                data = ccittfaxdecode(data, params, budget=budget, layer=layer)
             elif f in LITERALS_DCT_DECODE:
                 # This is probably a JPG stream
                 # it does not need to be decoded twice.
                 # Just return the stream to the user.
                 pass
             elif f in LITERALS_JBIG2_DECODE or f in LITERALS_JPX_DECODE:
+                # These filters hand the encoded bytes straight to an
+                # external library; pdfminer never expands them, so
+                # there is no unbounded allocation to govern.
                 pass
             elif f == LITERAL_CRYPT:
                 # not yet..
@@ -362,6 +478,9 @@ class PDFStream(PDFObject):
             # apply predictors
             if params and "Predictor" in params:
                 pred = int_value(params["Predictor"])
+                predictor_layer = f"{layer} predictor"
+                if budget is not None:
+                    budget.begin_step(predictor_layer)
                 if pred == 1:
                     # no predictor
                     pass
@@ -376,6 +495,8 @@ class PDFStream(PDFObject):
                         columns,
                         bitspercomponent,
                         data,
+                        budget=budget,
+                        layer=predictor_layer,
                     )
                 elif pred >= 10:
                     # PNG predictor
@@ -389,12 +510,22 @@ class PDFStream(PDFObject):
                         columns,
                         bitspercomponent,
                         data,
+                        budget=budget,
+                        layer=predictor_layer,
                     )
                 else:
                     error_msg = f"Unsupported predictor: {pred!r}"
                     raise PDFNotImplementedError(error_msg)
         self.data = data
         self.rawdata = None
+
+    @staticmethod
+    def _filter_layer_name(f: Any, filter_index: int) -> str:
+        try:
+            name = f.name
+        except AttributeError:
+            name = str(f)
+        return f"filter {filter_index} ({name})"
 
     def get_data(self) -> bytes:
         if self.data is None:

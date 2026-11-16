@@ -5,8 +5,17 @@
 #  * public domain *
 #
 
+from typing import TYPE_CHECKING
 
-def rldecode(data: bytes) -> bytes:
+if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
+
+
+def rldecode(
+    data: bytes,
+    budget: "DecodeBudget | None" = None,
+    layer: str = "RunLengthDecode",
+) -> bytes:
     """RunLength decoder (Adobe version) implementation based on PDF Reference
     version 1.4 section 3.3.4:
         The RunLengthDecode filter decodes data that has been encoded in a
@@ -28,9 +37,15 @@ def rldecode(data: bytes) -> bytes:
             break
 
         if 0 <= length < 128:
-            decoded_array.extend(next(data_iter) for _ in range(length + 1))
+            run_length = length + 1
+            if budget is not None:
+                budget.charge(layer, run_length)
+            decoded_array.extend(next(data_iter) for _ in range(run_length))
 
         if length > 128:
-            run = [next(data_iter)] * (257 - length)
+            run_length = 257 - length
+            if budget is not None:
+                budget.charge(layer, run_length)
+            run = [next(data_iter)] * run_length
             decoded_array.extend(run)
     return bytes(decoded_array)

@@ -4,6 +4,7 @@ from collections.abc import Container, Iterator
 from typing import Any, BinaryIO, ClassVar
 
 from pdfminer import settings
+from pdfminer.decodebudget import DecodeBudget
 from pdfminer.pdfdocument import (
     PDFDocument,
     PDFNoPageLabels,
@@ -158,11 +159,17 @@ class PDFPage:
         password: str = "",
         caching: bool = True,
         check_extractable: bool = False,
+        decode_budget: DecodeBudget | None = None,
     ) -> Iterator["PDFPage"]:
         # Create a PDF parser object associated with the file object.
         parser = PDFParser(fp)
         # Create a PDF document object that stores the document structure.
-        doc = PDFDocument(parser, password=password, caching=caching)
+        doc = PDFDocument(
+            parser,
+            password=password,
+            caching=caching,
+            decode_budget=decode_budget,
+        )
         # Check if the document allows text extraction.
         # If not, warn the user and proceed.
         if not doc.is_extractable:

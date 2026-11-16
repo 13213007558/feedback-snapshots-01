@@ -1,9 +1,12 @@
 import logging
 from collections.abc import Iterator
 from io import BytesIO
-from typing import BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, cast
 
 from pdfminer.pdfexceptions import PDFEOFError, PDFException
+
+if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +16,12 @@ class CorruptDataError(PDFException):
 
 
 class LZWDecoder:
-    def __init__(self, fp: BinaryIO) -> None:
+    def __init__(
+        self,
+        fp: BinaryIO,
+        budget: "DecodeBudget | None" = None,
+        layer: str = "LZWDecode",
+    ) -> None:
         self.fp = fp
         self.buff = 0
         self.bpos = 8
@@ -21,6 +29,8 @@ class LZWDecoder:
         # NB: self.table stores None only in indices 256 and 257
         self.table: list[bytes | None] = []
         self.prevbuf: bytes | None = None
+        self.budget = budget
+        self.layer = layer
 
     def readbits(self, bits: int) -> int:
         v = 0
@@ -89,6 +99,8 @@ class LZWDecoder:
             except CorruptDataError:
                 # just ignore corrupt data and stop yielding there
                 break
+            if x and self.budget is not None:
+                self.budget.charge(self.layer, len(x))
             yield x
 
             logger.debug(
@@ -100,7 +112,11 @@ class LZWDecoder:
             )
 
 
-def lzwdecode(data: bytes) -> bytes:
+def lzwdecode(
+    data: bytes,
+    budget: "DecodeBudget | None" = None,
+    layer: str = "LZWDecode",
+) -> bytes:
     fp = BytesIO(data)
-    s = LZWDecoder(fp).run()
+    s = LZWDecoder(fp, budget=budget, layer=layer).run()
     return b"".join(s)

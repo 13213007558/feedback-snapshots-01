@@ -17,6 +17,7 @@ from pdfminer import settings
 from pdfminer.arcfour import Arcfour
 from pdfminer.casting import safe_int
 from pdfminer.data_structures import NumberTree
+from pdfminer.decodebudget import DecodeBudget
 from pdfminer.pdfexceptions import (
     PDFException,
     PDFKeyError,
@@ -696,6 +697,7 @@ class PDFDocument:
         password: str = "",
         caching: bool = True,
         fallback: bool = True,
+        decode_budget: DecodeBudget | None = None,
     ) -> None:
         """Set the document to use a given PDFParser object."""
         self.caching = caching
@@ -707,6 +709,7 @@ class PDFDocument:
         self._parser = None
         self._cached_objs: dict[int, tuple[object, int]] = {}
         self._parsed_objs: dict[int, tuple[list[object], int]] = {}
+        self.decode_budget = decode_budget
         self._parser = parser
         self._parser.set_document(self)
         self.is_printable = self.is_modifiable = self.is_extractable = True

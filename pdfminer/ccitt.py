@@ -14,12 +14,16 @@
 import array
 from collections.abc import Callable, Iterator, MutableSequence, Sequence
 from typing import (
+    TYPE_CHECKING,
     Any,
     ClassVar,
     cast,
 )
 
 from pdfminer.pdfexceptions import PDFException, PDFValueError
+
+if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
 
 
 def get_bytes(data: bytes) -> Iterator[int]:
@@ -334,10 +338,18 @@ class CCITTG4Parser(BitParser):
 
     _color: int
 
-    def __init__(self, width: int, bytealign: bool = False) -> None:
+    def __init__(
+        self,
+        width: int,
+        bytealign: bool = False,
+        budget: "DecodeBudget | None" = None,
+        layer: str = "CCITTFaxDecode",
+    ) -> None:
         BitParser.__init__(self)
         self.width = width
         self.bytealign = bytealign
+        self.budget = budget
+        self.layer = layer
         self.reset()
 
     def feedbytes(self, data: bytes) -> None:
@@ -535,8 +547,16 @@ class CCITTFaxDecoder(CCITTG4Parser):
         width: int,
         bytealign: bool = False,
         reversed: bool = False,
+        budget: "DecodeBudget | None" = None,
+        layer: str = "CCITTFaxDecode",
     ) -> None:
-        CCITTG4Parser.__init__(self, width, bytealign=bytealign)
+        CCITTG4Parser.__init__(
+            self,
+            width,
+            bytealign=bytealign,
+            budget=budget,
+            layer=layer,
+        )
         self.reversed = reversed
         self._buf = b""
 
@@ -545,6 +565,10 @@ class CCITTFaxDecoder(CCITTG4Parser):
 
     def output_line(self, y: int, bits: Sequence[int]) -> None:
         arr = array.array("B", [0] * ((len(bits) + 7) // 8))
+        if self.budget is not None:
+            # Charge before retaining the line so a stream with an
+            # unbounded number of scanlines is stopped while decoding.
+            self.budget.charge(self.layer, len(arr))
         if self.reversed:
             bits = [1 - b for b in bits]
         for i, b in enumerate(bits):
@@ -553,13 +577,24 @@ class CCITTFaxDecoder(CCITTG4Parser):
         self._buf += arr.tobytes()
 
 
-def ccittfaxdecode(data: bytes, params: dict[str, object]) -> bytes:
+def ccittfaxdecode(
+    data: bytes,
+    params: dict[str, object],
+    budget: "DecodeBudget | None" = None,
+    layer: str = "CCITTFaxDecode",
+) -> bytes:
     K = params.get("K")
     if K == -1:
         cols = cast(int, params.get("Columns"))
         bytealign = cast(bool, params.get("EncodedByteAlign"))
         reversed = cast(bool, params.get("BlackIs1"))
-        parser = CCITTFaxDecoder(cols, bytealign=bytealign, reversed=reversed)
+        parser = CCITTFaxDecoder(
+            cols,
+            bytealign=bytealign,
+            reversed=reversed,
+            budget=budget,
+            layer=layer,
+        )
     else:
         raise PDFValueError(K)
     parser.feedbytes(data)

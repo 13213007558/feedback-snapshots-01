@@ -128,7 +128,12 @@ class PDFParser(PSStackParser[Union[PSKeyword, PDFStream, PDFObjRef, None]]):
                 data[:10],
             )
             assert self.doc is not None
-            stream = PDFStream(dic, bytes(data), self.doc.decipher)
+            stream = PDFStream(
+                dic,
+                bytes(data),
+                self.doc.decipher,
+                budget=self.doc.decode_budget,
+            )
             self.push((pos, stream))
 
         else:

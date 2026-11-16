@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Per-document `DecodeBudget` that bounds the output of stream filters and predictors, with separate per-step and document-wide limits; decoders charge incrementally so decompression-bomb streams are stopped before their full output is allocated.
+
 - Restore `cmap` and `cmap_clean` targets to `Makefile ([#1256](https://github.com/pdfminer/pdfminer.six/pull/1256))
 
 ### Fixed

@@ -2,7 +2,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from io import BytesIO
-from typing import Union, cast
+from typing import TYPE_CHECKING, Union, cast
 
 from pdfminer import settings
 from pdfminer.casting import safe_cmyk, safe_float, safe_int, safe_matrix, safe_rgb
@@ -49,6 +49,9 @@ from pdfminer.utils import (
     choplist,
     mult_matrix,
 )
+
+if TYPE_CHECKING:
+    from pdfminer.decodebudget import DecodeBudget
 
 log = logging.getLogger(__name__)
 
@@ -255,9 +258,14 @@ class PDFResourceManager:
 
 
 class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
-    def __init__(self, streams: Sequence[object]) -> None:
+    def __init__(
+        self,
+        streams: Sequence[object],
+        budget: "DecodeBudget | None" = None,
+    ) -> None:
         self.streams = streams
         self.istream = 0
+        self.budget = budget
         # PSStackParser.__init__(fp=None) is safe only because we've overloaded
         # all the methods that would attempt to access self.fp without first
         # calling self.fillfp().
@@ -350,7 +358,7 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                 (pos, data) = self.get_inline_data(pos + len(b"ID "), target=eos)
                 if eos != b"EI":  # it may be necessary for decoding
                     data += eos
-                obj = PDFStream(d, data)
+                obj = PDFStream(d, data, budget=self.budget)
                 self.push((pos, obj))
                 if eos == b"EI":  # otherwise it is still in the stream
                     self.push((pos, self.KEYWORD_EI))
@@ -1411,7 +1419,11 @@ class PDFPageInterpreter:
                 valid_streams.append(stream)
                 self.stream_ids.add(stream.objid)
         try:
-            parser = PDFContentParser(valid_streams)
+            # Inline images are parsed from the already-decoded content
+            # streams, so reuse the document budget attached to those
+            # streams instead of letting inline decoding go unbounded.
+            budget = valid_streams[0].budget if valid_streams else None
+            parser = PDFContentParser(valid_streams, budget=budget)
         except PSEOF:
             # empty page
             return
