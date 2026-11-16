@@ -488,27 +488,43 @@ class _Ctap1ClientBackend(_ClientBackend):
         if user_verification == UserVerificationRequirement.REQUIRED or not allow_list:
             raise CtapError(CtapError.ERR.UNSUPPORTED_OPTION)
 
-        app_param = sha256(rp_id.encode())
+        extensions = options.extensions or {}
+        appid = extensions.get("appid")
+
         client_param = client_data.hash
-        for cred in allow_list:
-            try:
-                auth_resp = _call_polling(
-                    self._poll_delay,
-                    event,
-                    self._on_keepalive,
-                    self.ctap1.authenticate,
-                    client_param,
-                    app_param,
-                    cred.id,
-                )
-                assertions = [
-                    AssertionResponse.from_ctap1(app_param, _as_cbor(cred), auth_resp)
-                ]
-                return AssertionSelection(client_data, assertions)
-            except ClientError as e:
-                if e.code == ClientError.ERR.TIMEOUT:
-                    raise  # Other errors are ignored so we move to the next.
-        raise ClientError.ERR.DEVICE_INELIGIBLE()
+
+        def _try_credentials(app_param):
+            for cred in allow_list:
+                try:
+                    auth_resp = _call_polling(
+                        self._poll_delay,
+                        event,
+                        self._on_keepalive,
+                        self.ctap1.authenticate,
+                        client_param,
+                        app_param,
+                        cred.id,
+                    )
+                    return AssertionResponse.from_ctap1(
+                        app_param, _as_cbor(cred), auth_resp
+                    )
+                except ClientError as e:
+                    if e.code == ClientError.ERR.TIMEOUT:
+                        raise  # Other errors are ignored so we move to the next.
+            return None
+
+        assertion = _try_credentials(sha256(rp_id.encode()))
+        appid_used = False
+        if assertion is None and appid:
+            # Fall back to the U2F AppID for credentials registered under it
+            assertion = _try_credentials(sha256(appid.encode()))
+            appid_used = assertion is not None
+
+        if assertion is None:
+            raise ClientError.ERR.DEVICE_INELIGIBLE()
+
+        extension_results = {"appid": appid_used} if appid else {}
+        return AssertionSelection(client_data, [assertion], extension_results)
 
 
 class _Ctap2ClientAssertionSelection(AssertionSelection):

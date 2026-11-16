@@ -27,6 +27,7 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import struct
 import unittest
 from typing import Any, Mapping, cast
 from unittest import mock
@@ -34,14 +35,16 @@ from unittest import mock
 from fido2 import cbor
 from fido2.client import ClientError, DefaultClientDataCollector, Fido2Client
 from fido2.ctap import CtapError
-from fido2.ctap1 import RegistrationData
-from fido2.ctap2 import AttestationResponse, Info
-from fido2.hid import CAPABILITY
+from fido2.ctap1 import APDU, Ctap1, RegistrationData
+from fido2.ctap2 import AttestationResponse, Ctap2, Info
+from fido2.hid import CAPABILITY, CTAPHID
 from fido2.utils import sha256
 from fido2.webauthn import (
     AttestationObject,
+    AuthenticatorData,
     CollectedClientData,
     PublicKeyCredentialCreationOptions,
+    PublicKeyCredentialRequestOptions,
 )
 
 APP_ID = "https://foo.example.com"
@@ -203,3 +206,318 @@ class TestFido2Client(unittest.TestCase):
         self.assertEqual(client_data.challenge, challenge)
 
         self.assertEqual(response.attestation_object.fmt, "fido-u2f")
+
+
+class SoftwareU2fDevice:
+    """Software CTAP1 (U2F) authenticator recording every APDU sent to it."""
+
+    capabilities = 0  # No CTAP2 support
+
+    def __init__(self, known_credentials=(), user_presence=0x01):
+        self.apdus = []  # (ins, p1, data) of every APDU received
+        self.known = set(known_credentials)  # (app_param, key_handle) pairs
+        self.user_presence = user_presence
+
+    def call(self, cmd, request, *args):
+        _, ins, p1, _, _, length = struct.unpack(">BBBBBH", request[:7])
+        data = request[7 : 7 + length]
+        self.apdus.append((ins, p1, data))
+        if ins == Ctap1.INS.VERSION:
+            return b"U2F_V2" + struct.pack(">H", APDU.OK)
+        if ins == Ctap1.INS.REGISTER:
+            return bytes(REG_DATA) + struct.pack(">H", APDU.OK)
+        if ins == Ctap1.INS.AUTHENTICATE:
+            app_param = data[32:64]
+            key_handle = data[65 : 65 + data[64]]
+            if (app_param, key_handle) not in self.known:
+                return struct.pack(">H", APDU.WRONG_DATA)
+            if p1 == 0x07:  # check-only
+                return struct.pack(">H", APDU.USE_NOT_SATISFIED)
+            sig = bytes([self.user_presence]) + struct.pack(">I", 1) + b"signature"
+            return sig + struct.pack(">H", APDU.OK)
+        return struct.pack(">H", APDU.WRONG_DATA)
+
+
+class SoftwareCtap2Device:
+    """Software CTAP2 authenticator recording every CTAP command sent to it."""
+
+    capabilities = CAPABILITY.CBOR
+
+    def __init__(self):
+        self.commands = []  # (cmd, decoded CBOR params) of every command received
+
+    def call(self, cmd, request, event=None, on_keepalive=None):
+        code = request[0]
+        params = cbor.decode(request[1:]) if len(request) > 1 else {}
+        self.commands.append((code, params))
+        if code == Ctap2.CMD.GET_INFO:
+            return b"\x00" + cbor.encode(cbor.decode(_INFO_NO_PIN))
+        if code == Ctap2.CMD.MAKE_CREDENTIAL:
+            return b"\x00" + cbor.encode(cbor.decode(_MC_RESP))
+        if code == Ctap2.CMD.GET_ASSERTION:
+            auth_data = sha256(rp["id"].encode()) + b"\x01" + struct.pack(">I", 1)
+            return b"\x00" + cbor.encode(
+                {1: {"id": b"test-handle", "type": "public-key"}, 2: auth_data, 3: b"sig"}
+            )
+        return bytes([CtapError.ERR.INVALID_COMMAND])
+
+
+class NegotiationErrorDevice(SoftwareU2fDevice):
+    """Claims CTAP2 support but fails the CTAP2 capability negotiation."""
+
+    capabilities = CAPABILITY.CBOR
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cbor_commands = []
+
+    def call(self, cmd, request, *args):
+        if cmd == CTAPHID.CBOR:
+            self.cbor_commands.append(request[0])
+            return bytes([CtapError.ERR.INVALID_COMMAND])
+        return super().call(cmd, request, *args)
+
+
+class TestCtap1Compat(unittest.TestCase):
+    """WebAuthn options to CTAP1 translation: allowed and rejected requests."""
+
+    def _client(self, dev):
+        return Fido2Client(dev, CLIENT_DATA_COLLECTOR)
+
+    def _creation_options(self, **overrides):
+        params = {
+            "rp": rp,
+            "user": user,
+            "challenge": challenge,
+            "pub_key_cred_params": [{"type": "public-key", "alg": -7}],
+        }
+        params.update(overrides)
+        return PublicKeyCredentialCreationOptions(**params)
+
+    def _request_options(self, **overrides):
+        params = {
+            "challenge": challenge,
+            "rp_id": rp["id"],
+            "allow_credentials": [{"type": "public-key", "id": b"test-handle"}],
+        }
+        params.update(overrides)
+        return PublicKeyCredentialRequestOptions(**params)
+
+    # Requests allowed to succeed through the compat path
+
+    def test_make_credential_allowed(self):
+        dev = SoftwareU2fDevice()
+        response = self._client(dev).make_credential(self._creation_options())
+
+        # Exactly one REGISTER APDU, carrying client and RP hashes
+        self.assertEqual(len(dev.apdus), 1)
+        ins, _, data = dev.apdus[0]
+        self.assertEqual(ins, Ctap1.INS.REGISTER)
+        client_data = response.response.client_data
+        self.assertEqual(data, client_data.hash + sha256(rp["id"].encode()))
+
+        attestation = response.response.attestation_object
+        self.assertEqual(attestation.fmt, "fido-u2f")
+        # UP and AT only: user touch must not be reported as verification
+        self.assertEqual(
+            attestation.auth_data.flags,
+            AuthenticatorData.FLAG.AT | AuthenticatorData.FLAG.UP,
+        )
+        # Optional extensions get a clear (empty) result
+        self.assertEqual(response.client_extension_results, {})
+
+    def test_make_credential_uv_preferred_allowed(self):
+        dev = SoftwareU2fDevice()
+        response = self._client(dev).make_credential(
+            self._creation_options(
+                authenticator_selection={"userVerification": "preferred"}
+            )
+        )
+        flags = response.response.attestation_object.auth_data.flags
+        self.assertEqual(flags & AuthenticatorData.FLAG.UV, 0)
+        self.assertNotEqual(flags & AuthenticatorData.FLAG.UP, 0)
+
+    def test_make_credential_resident_key_preferred_allowed(self):
+        dev = SoftwareU2fDevice()
+        response = self._client(dev).make_credential(
+            self._creation_options(authenticator_selection={"residentKey": "preferred"})
+        )
+        self.assertEqual(response.response.attestation_object.fmt, "fido-u2f")
+
+    def test_get_assertion_allowed(self):
+        handle = b"test-handle"
+        app_param = sha256(rp["id"].encode())
+        dev = SoftwareU2fDevice(known_credentials=[(app_param, handle)])
+        selection = self._client(dev).get_assertion(self._request_options())
+
+        ins, p1, data = dev.apdus[0]
+        self.assertEqual(ins, Ctap1.INS.AUTHENTICATE)
+        self.assertEqual(p1, 0x03)  # enforce-user-presence-and-sign
+        self.assertEqual(data[32:64], app_param)
+
+        response = selection.get_response(0)
+        self.assertEqual(
+            response.response.authenticator_data.flags, AuthenticatorData.FLAG.UP
+        )
+        self.assertEqual(response.client_extension_results, {})
+
+    def test_get_assertion_flags_not_exaggerated(self):
+        # Device (incorrectly) reports the UV bit; the client must mask it
+        handle = b"test-handle"
+        app_param = sha256(rp["id"].encode())
+        dev = SoftwareU2fDevice(
+            known_credentials=[(app_param, handle)], user_presence=0x05
+        )
+        selection = self._client(dev).get_assertion(self._request_options())
+        flags = selection.get_response(0).response.authenticator_data.flags
+        self.assertEqual(flags, AuthenticatorData.FLAG.UP)
+        self.assertEqual(flags & AuthenticatorData.FLAG.UV, 0)
+
+    def test_get_assertion_appid_fallback(self):
+        handle = b"test-handle"
+        appid = "https://appid.example.com"
+        dev = SoftwareU2fDevice(
+            known_credentials=[(sha256(appid.encode()), handle)]
+        )
+        options = self._request_options(extensions={"appid": appid})
+        selection = self._client(dev).get_assertion(options)
+
+        # First attempt uses the RP ID, the fallback uses the appid
+        app_params = [data[32:64] for _, _, data in dev.apdus]
+        self.assertEqual(
+            app_params, [sha256(rp["id"].encode()), sha256(appid.encode())]
+        )
+
+        response = selection.get_response(0)
+        self.assertEqual(response.client_extension_results, {"appid": True})
+        auth_data = response.response.authenticator_data
+        self.assertEqual(auth_data[:32], sha256(appid.encode()))
+        self.assertEqual(auth_data.flags, AuthenticatorData.FLAG.UP)
+
+    def test_get_assertion_appid_not_used(self):
+        handle = b"test-handle"
+        app_param = sha256(rp["id"].encode())
+        dev = SoftwareU2fDevice(known_credentials=[(app_param, handle)])
+        options = self._request_options(
+            extensions={"appid": "https://appid.example.com"}
+        )
+        selection = self._client(dev).get_assertion(options)
+
+        self.assertEqual(len(dev.apdus), 1)  # No fallback attempted
+        response = selection.get_response(0)
+        self.assertEqual(response.client_extension_results, {"appid": False})
+        auth_data = response.response.authenticator_data
+        self.assertEqual(auth_data[:32], app_param)
+
+    def test_get_assertion_appid_no_match(self):
+        dev = SoftwareU2fDevice()
+        options = self._request_options(
+            extensions={"appid": "https://appid.example.com"}
+        )
+        with self.assertRaises(ClientError) as cm:
+            self._client(dev).get_assertion(options)
+        self.assertEqual(cm.exception.code, ClientError.ERR.DEVICE_INELIGIBLE)
+
+    # Requests that must be rejected before any command is sent
+
+    def test_make_credential_rejected_requests(self):
+        rejected = [
+            # Legacy requireResidentKey
+            self._creation_options(
+                authenticator_selection={"requireResidentKey": True}
+            ),
+            # Modern residentKey required
+            self._creation_options(
+                authenticator_selection={"residentKey": "required"}
+            ),
+            # User verification required
+            self._creation_options(
+                authenticator_selection={"userVerification": "required"}
+            ),
+            # No allowed algorithm usable by CTAP1
+            self._creation_options(
+                pub_key_cred_params=[{"type": "public-key", "alg": -257}]
+            ),
+            self._creation_options(
+                pub_key_cred_params=[{"type": "public-key", "alg": -8}]
+            ),
+            # Enterprise attestation
+            self._creation_options(attestation="enterprise"),
+        ]
+        for options in rejected:
+            dev = SoftwareU2fDevice()
+            with self.assertRaises(ClientError) as cm:
+                self._client(dev).make_credential(options)
+            self.assertEqual(
+                cm.exception.code, ClientError.ERR.CONFIGURATION_UNSUPPORTED
+            )
+            # Rejected before sending any command to the authenticator
+            self.assertEqual(dev.apdus, [])
+
+    def test_get_assertion_rejected_requests(self):
+        rejected = [
+            # User verification required
+            self._request_options(user_verification="required"),
+            # Empty allow list requires discoverable credentials
+            self._request_options(allow_credentials=[]),
+        ]
+        for options in rejected:
+            dev = SoftwareU2fDevice()
+            with self.assertRaises(ClientError) as cm:
+                self._client(dev).get_assertion(options)
+            self.assertEqual(
+                cm.exception.code, ClientError.ERR.CONFIGURATION_UNSUPPORTED
+            )
+            self.assertEqual(dev.apdus, [])
+
+    # CTAP2-capable and negotiation-failing devices
+
+    def test_ctap2_device_commands(self):
+        dev = SoftwareCtap2Device()
+        client = self._client(dev)
+        response = client.make_credential(
+            self._creation_options(
+                authenticator_selection={"userVerification": "discouraged"}
+            )
+        )
+
+        mc = [params for code, params in dev.commands if code == Ctap2.CMD.MAKE_CREDENTIAL]
+        self.assertEqual(len(mc), 1)
+        self.assertEqual(mc[0][1], response.response.client_data.hash)
+        self.assertEqual(mc[0][2], rp)
+        self.assertEqual(mc[0][4], [{"type": "public-key", "alg": -7}])
+        self.assertNotIn(7, mc[0])  # No rk/uv options set
+
+        dev.commands.clear()
+        selection = client.get_assertion(
+            self._request_options(user_verification="discouraged")
+        )
+        ga = [params for code, params in dev.commands if code == Ctap2.CMD.GET_ASSERTION]
+        self.assertEqual(ga[-1][1], rp["id"])
+        self.assertEqual(
+            ga[-1][3], [{"type": "public-key", "id": b"test-handle"}]
+        )
+        flags = selection.get_response(0).response.authenticator_data.flags
+        self.assertEqual(flags, AuthenticatorData.FLAG.UP)
+
+    def test_ctap2_uv_required_rejected_before_sending(self):
+        dev = SoftwareCtap2Device()  # No PIN/UV configured
+        with self.assertRaises(ClientError) as cm:
+            self._client(dev).make_credential(
+                self._creation_options(
+                    authenticator_selection={"userVerification": "required"}
+                )
+            )
+        self.assertEqual(cm.exception.code, ClientError.ERR.CONFIGURATION_UNSUPPORTED)
+        sent = [code for code, _ in dev.commands]
+        self.assertNotIn(Ctap2.CMD.MAKE_CREDENTIAL, sent)
+
+    def test_negotiation_error_falls_back_to_ctap1(self):
+        dev = NegotiationErrorDevice()
+        response = self._client(dev).make_credential(self._creation_options())
+
+        # CTAP2 negotiation was attempted and failed
+        self.assertEqual(dev.cbor_commands, [Ctap2.CMD.GET_INFO])
+        # The ceremony completed over CTAP1 APDUs
+        self.assertEqual([ins for ins, _, _ in dev.apdus], [Ctap1.INS.REGISTER])
+        self.assertEqual(response.response.attestation_object.fmt, "fido-u2f")
