@@ -35,6 +35,7 @@ from threading import Event, Timer
 from typing import Any, Callable, Mapping, Sequence, overload
 from urllib.parse import urlparse
 
+from .. import cbor
 from ..cose import ES256
 from ..ctap import CtapDevice, CtapError
 from ..ctap1 import APDU, ApduError, Ctap1
@@ -568,11 +569,15 @@ class _Ctap2ClientBackend(_ClientBackend):
         # Use fresh info
         info = self.ctap2.get_info()
 
-        # Filter out credential IDs which are too long
+        # Distinguish the three separate limits:
+        # max_cred_id_length filters individual credential IDs, while
+        # max_creds_in_list and max_msg_size constrain the batched requests.
         max_len = info.max_cred_id_length
         if max_len:
             cred_list = [c for c in cred_list if len(c.id) <= max_len]
 
+        # This is a silent preflight probe: the zero client_data_hash means the
+        # resulting assertions are never valid WebAuthn authentication results.
         client_data_hash = b"\0" * 32
         if pin_token:
             pin_auth = pin_protocol.authenticate(pin_token, client_data_hash)
@@ -581,9 +586,53 @@ class _Ctap2ClientBackend(_ClientBackend):
             pin_auth = None
             version = None
 
+        # The number of credentials per request is bounded both by the
+        # authenticator's max_creds_in_list and by the encoded message size.
         max_creds = info.max_creds_in_list or 1
+
+        def _msg_size(allow_list):
+            # Mirror the encoding performed in Ctap2.send_cbor, including the
+            # leading command byte, to stay within info.max_msg_size.
+            request = {
+                1: rp_id,
+                2: client_data_hash,
+                3: _cbor_list(allow_list),
+                5: {"up": False},
+            }
+            if pin_auth is not None:
+                request[6] = pin_auth
+                request[7] = version
+            return 1 + len(cbor.encode(request))
+
+        def _chunk_fits(allow_list):
+            return _msg_size(allow_list) <= info.max_msg_size
+
+        def _in_probe_scope(assertion, chunk):
+            # A well-behaved device must only return a credential that is part
+            # of the allow_list sent in the current probe. Reject anything else,
+            # including IDs belonging to another batch.
+            credential = assertion.credential or {}
+            returned_id = credential.get("id")
+            if returned_id is None:
+                # The credential ID may be omitted when the allow_list has a
+                # single entry, in which case the only probed credential is used.
+                return len(chunk) == 1
+            returned_type = credential.get("type")
+            return any(
+                cred.id == returned_id
+                and (returned_type is None or cred.type == returned_type)
+                for cred in chunk
+            )
+
         while cred_list:
-            chunk = cred_list[:max_creds]
+            # Never grow beyond max_creds_in_list, and shrink further when the
+            # CBOR-encoded request would exceed max_msg_size. The remaining
+            # credentials stay in cred_list, so nothing is ever skipped.
+            chunk_size = min(max_creds, len(cred_list))
+            while chunk_size > 1 and not _chunk_fits(cred_list[:chunk_size]):
+                chunk_size -= 1
+            chunk = cred_list[:chunk_size]
+
             try:
                 assertions = self.ctap2.get_assertions(
                     rp_id,
@@ -596,21 +645,35 @@ class _Ctap2ClientBackend(_ClientBackend):
                     event=event,
                     on_keepalive=on_keepalive,
                 )
-                if len(chunk) == 1:
-                    # Credential ID might be omitted from assertions
-                    return chunk[0]
-                else:
-                    return PublicKeyCredentialDescriptor(**assertions[0].credential)
             except CtapError as e:
                 match e.code:
-                    case CtapError.ERR.REQUEST_TOO_LARGE if max_creds > 1:
-                        # Message is too large, try smaller chunks
-                        max_creds -= 1
+                    case CtapError.ERR.REQUEST_TOO_LARGE if chunk_size > 1:
+                        # The device imposes a lower limit than its info
+                        # advertised. Remember it and retry the same
+                        # credentials in a smaller chunk, discarding nothing.
+                        max_creds = chunk_size - 1
+                        continue
                     case CtapError.ERR.NO_CREDENTIALS:
-                        # All creds in chunk are discarded
-                        cred_list = cred_list[max_creds:]
+                        # None of the credentials in this chunk are present.
+                        cred_list = cred_list[chunk_size:]
                     case _:
+                        # Cancellation and any other/unknown error are not a
+                        # signal that no credentials match: propagate them.
                         raise
+                continue
+
+            # The probe matched a credential. It must belong to this chunk.
+            assertion = assertions[0]
+            if not _in_probe_scope(assertion, chunk):
+                # The device returned an out-of-scope candidate; do not trust it
+                # and keep probing the remaining credentials.
+                cred_list = cred_list[chunk_size:]
+                continue
+
+            if len(chunk) == 1 or assertion.credential.get("id") is None:
+                # Credential ID might be omitted from assertions
+                return chunk[0]
+            return PublicKeyCredentialDescriptor(**assertion.credential)
 
         # No matches found
         return None

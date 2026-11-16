@@ -35,13 +35,17 @@ from fido2 import cbor
 from fido2.client import ClientError, DefaultClientDataCollector, Fido2Client
 from fido2.ctap import CtapError
 from fido2.ctap1 import RegistrationData
-from fido2.ctap2 import AttestationResponse, Info
+from fido2.ctap2 import AttestationResponse, AssertionResponse, Info
 from fido2.hid import CAPABILITY
 from fido2.utils import sha256
 from fido2.webauthn import (
     AttestationObject,
+    AuthenticatorData,
     CollectedClientData,
     PublicKeyCredentialCreationOptions,
+    PublicKeyCredentialDescriptor,
+    PublicKeyCredentialRequestOptions,
+    PublicKeyCredentialType,
 )
 
 APP_ID = "https://foo.example.com"
@@ -203,3 +207,392 @@ class TestFido2Client(unittest.TestCase):
         self.assertEqual(client_data.challenge, challenge)
 
         self.assertEqual(response.attestation_object.fmt, "fido-u2f")
+
+
+_ZERO_HASH = b"\0" * 32
+RP_ID = "example.com"
+
+
+def _make_info(max_creds_in_list=0, max_msg_size=1024, max_cred_id_length=0):
+    return Info(
+        versions=["FIDO_2_1"],
+        extensions=[],
+        options={"rk": True, "up": True, "clientPin": False},
+        max_msg_size=max_msg_size,
+        max_creds_in_list=max_creds_in_list,
+        max_cred_id_length=max_cred_id_length,
+    )
+
+
+def _cred(cred_id):
+    return PublicKeyCredentialDescriptor(
+        type=PublicKeyCredentialType.PUBLIC_KEY, id=cred_id
+    )
+
+
+def _assertion(cred_id):
+    return AssertionResponse(
+        credential={"type": "public-key", "id": cred_id},
+        auth_data=AuthenticatorData.create(b"\0" * 32, 0, 0),
+        signature=b"signature",
+    )
+
+
+class _FakeAuthenticator:
+    """Software authenticator modelling the silent preflight probes."""
+
+    def __init__(
+        self,
+        info,
+        present=(),
+        max_batch=None,
+        reject_when=None,
+        respond=None,
+    ):
+        self._info = info
+        self._present = set(present)
+        self._max_batch = max_batch
+        self._reject_when = reject_when
+        self._respond = respond
+        self.probes = []
+        self.calls = []
+        self.device = mock.Mock()
+
+    @property
+    def info(self):
+        return self._info
+
+    def get_info(self):
+        return self._info
+
+    def get_assertions(
+        self,
+        rp_id,
+        client_data_hash,
+        allow_list,
+        extensions,
+        options,
+        pin_auth,
+        pin_uv_protocol,
+        event=None,
+        on_keepalive=None,
+    ):
+        ids = [entry["id"] for entry in (allow_list or [])]
+        record = {
+            "rp_id": rp_id,
+            "client_data_hash": client_data_hash,
+            "ids": ids,
+            "options": options,
+        }
+        self.calls.append(record)
+        # Preflight probes are silent (zero hash) requests with UP disabled.
+        if client_data_hash == _ZERO_HASH and options == {"up": False}:
+            self.probes.append(record)
+
+        if self._reject_when is not None:
+            error = self._reject_when(record)
+            if error is not None:
+                raise CtapError(error)
+
+        if self._max_batch is not None and len(ids) > self._max_batch:
+            raise CtapError(CtapError.ERR.REQUEST_TOO_LARGE)
+
+        matched = [i for i in ids if i in self._present]
+        if not matched:
+            raise CtapError(CtapError.ERR.NO_CREDENTIALS)
+
+        if self._respond is not None:
+            return self._respond(matched[0], ids)
+        return [_assertion(matched[0])]
+
+
+def _make_client(authenticator):
+    dev = mock.Mock()
+    dev.capabilities = CAPABILITY.CBOR
+    with mock.patch("fido2.client.Ctap2", return_value=authenticator):
+        return Fido2Client(dev, CLIENT_DATA_COLLECTOR)
+
+
+class TestFilterCredsPreflight(unittest.TestCase):
+    def _filter(self, authenticator, creds):
+        backend = _make_client(authenticator)._backend
+        return backend._filter_creds(RP_ID, list(creds), None, None, mock.Mock(), None)
+
+    def test_shrinks_batch_on_request_too_large_and_matches_last(self):
+        creds = [_cred(b"c%d" % i) for i in range(5)]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=5),
+            present=[b"c4"],
+            max_batch=2,
+        )
+
+        result = self._filter(authenticator, creds)
+
+        self.assertEqual(result.id, b"c4")
+        self.assertGreaterEqual(len(authenticator.probes), 2)
+        # The advertised-size batch is attempted first, then chunks shrink one
+        # step at a time until the device accepts at most max_batch credentials.
+        self.assertEqual(len(authenticator.probes[0]["ids"]), 5)
+        sizes = [len(p["ids"]) for p in authenticator.probes]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        self.assertLessEqual(sizes[-1], 2)
+        # Shrinking never skips a credential: every ID is covered.
+        probed = {i for p in authenticator.probes for i in p["ids"]}
+        self.assertEqual(probed, {c.id for c in creds})
+        # Silent probes always use the zero client_data_hash.
+        self.assertTrue(
+            all(p["client_data_hash"] == _ZERO_HASH for p in authenticator.probes)
+        )
+
+    def test_no_credentials_advances_without_skipping(self):
+        creds = [_cred(b"a"), _cred(b"b"), _cred(b"c"), _cred(b"d")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=2), present=[]
+        )
+
+        self.assertIsNone(self._filter(authenticator, creds))
+        self.assertEqual(
+            [p["ids"] for p in authenticator.probes],
+            [[b"a", b"b"], [b"c", b"d"]],
+        )
+
+    def test_rejects_credential_outside_probe_scope(self):
+        creds = [_cred(b"a"), _cred(b"b"), _cred(b"c")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=3),
+            present=[b"a", b"b", b"c"],
+            respond=lambda matched, ids: [_assertion(b"foreign")],
+        )
+
+        result = self._filter(authenticator, creds)
+
+        self.assertIsNone(result)
+        # The out-of-scope candidate does not stop the scan.
+        probed = [i for p in authenticator.probes for i in p["ids"]]
+        self.assertEqual(sorted(probed), [b"a", b"b", b"c"])
+
+    def test_rejects_wrong_credential_type_even_when_id_matches(self):
+        creds = [_cred(b"a"), _cred(b"b"), _cred(b"c")]
+
+        def wrong_type(matched, ids):
+            return [
+                AssertionResponse(
+                    credential={"type": "unexpected", "id": matched},
+                    auth_data=AuthenticatorData.create(b"\0" * 32, 0, 0),
+                    signature=b"signature",
+                )
+            ]
+
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=3),
+            present=[b"b"],
+            respond=wrong_type,
+        )
+
+        self.assertIsNone(self._filter(authenticator, creds))
+
+    def test_omitted_credential_id_only_trusted_for_single_entry(self):
+        auth_data = AuthenticatorData.create(b"\0" * 32, 0, 0)
+        no_cred = [
+            AssertionResponse(
+                credential={}, auth_data=auth_data, signature=b"signature"
+            )
+        ]
+
+        # Multi-credential chunk: an omitted ID cannot identify a credential.
+        multi = _FakeAuthenticator(
+            _make_info(max_creds_in_list=3),
+            present=[b"a", b"b", b"c"],
+            respond=lambda matched, ids: no_cred,
+        )
+        self.assertIsNone(
+            self._filter(multi, [_cred(b"a"), _cred(b"b"), _cred(b"c")])
+        )
+
+        # Single-credential chunk: the only probed credential is unambiguous.
+        single = _FakeAuthenticator(
+            _make_info(max_creds_in_list=1),
+            present=[b"x"],
+            respond=lambda matched, ids: no_cred,
+        )
+        result = self._filter(single, [_cred(b"x")])
+        self.assertEqual(result.id, b"x")
+
+    def test_accepts_in_scope_credential(self):
+        creds = [_cred(b"a"), _cred(b"b"), _cred(b"c")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=3), present=[b"b"]
+        )
+
+        result = self._filter(authenticator, creds)
+
+        self.assertEqual(result.id, b"b")
+        self.assertEqual(len(authenticator.probes), 1)
+
+    def test_keeps_batch_under_encoded_max_message_size(self):
+        long_id = b"x" * 200
+        creds = [_cred(long_id + bytes([i])) for i in range(4)]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=4, max_msg_size=512),
+            present=[creds[3].id],
+        )
+
+        result = self._filter(authenticator, creds)
+        self.assertEqual(result.id, creds[3].id)
+
+        for probe in authenticator.probes:
+            message = cbor.encode(
+                {
+                    1: RP_ID,
+                    2: _ZERO_HASH,
+                    3: [{"type": "public-key", "id": i} for i in probe["ids"]],
+                    5: {"up": False},
+                }
+            )
+            # Command byte plus CBOR payload must stay within max_msg_size.
+            self.assertLessEqual(1 + len(message), 512)
+        probed = {i for p in authenticator.probes for i in p["ids"]}
+        self.assertEqual(probed, {c.id for c in creds})
+
+    def test_filters_credential_ids_exceeding_max_length(self):
+        creds = [_cred(b"short"), _cred(b"y" * 10), _cred(b"ok")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=4, max_cred_id_length=8),
+            present=[b"y" * 10],
+        )
+
+        result = self._filter(authenticator, creds)
+
+        self.assertIsNone(result)
+        probed = [i for p in authenticator.probes for i in p["ids"]]
+        self.assertEqual(sorted(probed), [b"ok", b"short"])
+
+    def test_cancel_error_is_not_treated_as_no_credentials(self):
+        creds = [_cred(b"a"), _cred(b"b")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=2),
+            present=[b"a"],
+            reject_when=lambda p: CtapError.ERR.KEEPALIVE_CANCEL,
+        )
+
+        with self.assertRaises(CtapError) as ctx:
+            self._filter(authenticator, creds)
+        self.assertEqual(ctx.exception.code, CtapError.ERR.KEEPALIVE_CANCEL)
+
+    def test_unknown_error_is_not_treated_as_no_credentials(self):
+        creds = [_cred(b"a"), _cred(b"b")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=2),
+            reject_when=lambda p: CtapError.ERR.OTHER,
+        )
+
+        with self.assertRaises(CtapError) as ctx:
+            self._filter(authenticator, creds)
+        self.assertEqual(ctx.exception.code, CtapError.ERR.OTHER)
+        self.assertEqual(len(authenticator.probes), 1)
+
+    def test_single_credential_too_large_propagates(self):
+        creds = [_cred(b"only")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=1), max_batch=0
+        )
+
+        with self.assertRaises(CtapError) as ctx:
+            self._filter(authenticator, creds)
+        self.assertEqual(ctx.exception.code, CtapError.ERR.REQUEST_TOO_LARGE)
+
+
+class TestPreflightFullFlow(unittest.TestCase):
+    def test_exclude_match_blocks_registration_with_real_challenge(self):
+        creds = [_cred(b"c%d" % i) for i in range(5)]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=5), present=[b"c4"], max_batch=2
+        )
+        authenticator.make_credential = mock.Mock(
+            side_effect=CtapError(CtapError.ERR.CREDENTIAL_EXCLUDED)
+        )
+        client = _make_client(authenticator)
+
+        with self.assertRaises(ClientError) as ctx:
+            client.make_credential(
+                PublicKeyCredentialCreationOptions(
+                    rp=rp,
+                    user=user,
+                    challenge=challenge,
+                    pub_key_cred_params=[{"type": "public-key", "alg": -7}],
+                    exclude_credentials=creds,
+                    authenticator_selection={"userVerification": "discouraged"},
+                )
+            )
+        self.assertEqual(ctx.exception.code, ClientError.ERR.DEVICE_INELIGIBLE)
+
+        # Preflight probes shrink batches and cover every credential with the
+        # silent zero hash.
+        self.assertGreaterEqual(len(authenticator.probes), 2)
+        self.assertTrue(
+            all(p["client_data_hash"] == _ZERO_HASH for p in authenticator.probes)
+        )
+        probed = {i for p in authenticator.probes for i in p["ids"]}
+        self.assertEqual(probed, {c.id for c in creds})
+
+        # The real make_credential uses the actual challenge (never the zero
+        # hash) and the matched exclude credential.
+        authenticator.make_credential.assert_called_once()
+        mc_args = authenticator.make_credential.call_args[0]
+        self.assertNotEqual(mc_args[0], _ZERO_HASH)
+        self.assertEqual(mc_args[4], [{"type": "public-key", "id": b"c4"}])
+
+    def test_authentication_uses_original_challenge_after_preflight(self):
+        creds = [_cred(b"c%d" % i) for i in range(4)]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=4), present=[b"c3"]
+        )
+        client = _make_client(authenticator)
+
+        selection = client.get_assertion(
+            PublicKeyCredentialRequestOptions(
+                rp_id=RP_ID,
+                challenge=challenge,
+                allow_credentials=creds,
+                user_verification="discouraged",
+            )
+        )
+
+        calls = authenticator.calls
+        # All but the final call are zero-hash preflight probes.
+        self.assertTrue(
+            all(c["client_data_hash"] == _ZERO_HASH for c in calls[:-1])
+        )
+        final = calls[-1]
+        self.assertNotEqual(final["client_data_hash"], _ZERO_HASH)
+        self.assertEqual(final["client_data_hash"], selection._client_data.hash)
+        # The real authentication targets the credential found by the preflight.
+        self.assertEqual(final["ids"], [b"c3"])
+
+    def test_no_allow_match_still_sends_dummy_credential(self):
+        creds = [_cred(b"a"), _cred(b"b")]
+        authenticator = _FakeAuthenticator(
+            _make_info(max_creds_in_list=2), present=[]
+        )
+        client = _make_client(authenticator)
+
+        with self.assertRaises(ClientError) as ctx:
+            client.get_assertion(
+                PublicKeyCredentialRequestOptions(
+                    rp_id=RP_ID,
+                    challenge=challenge,
+                    allow_credentials=creds,
+                    user_verification="discouraged",
+                )
+            )
+        self.assertEqual(ctx.exception.code, ClientError.ERR.DEVICE_INELIGIBLE)
+
+        calls = authenticator.calls
+        # One zero-hash preflight probe covering both credentials, then a single
+        # real authentication attempt using the dummy credential.
+        self.assertEqual(len(authenticator.probes), 1)
+        self.assertEqual(authenticator.probes[0]["ids"], [b"a", b"b"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["client_data_hash"], _ZERO_HASH)
+        self.assertNotEqual(calls[-1]["client_data_hash"], _ZERO_HASH)
+        self.assertEqual(calls[-1]["ids"], [b"\0"])

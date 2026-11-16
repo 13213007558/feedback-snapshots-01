@@ -3,6 +3,10 @@
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
     specified in Metadata Statement 3.1.1.
+ ** Fido2Client: Harden allow/exclude credential preflight probing. Distinguish
+    max_creds_in_list, max_msg_size and max_cred_id_length when batching, never skip
+    credentials while shrinking, only accept assertions within the probed batch, and
+    propagate cancellation/unknown errors instead of treating them as no match.
 
 * Version 2.2.1 (released 2026-06-29)
  ** Server example: Migrate build tool from poetry to uv.
