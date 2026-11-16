@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Locate the end of an inline image from its declared dimensions or filter end-of-data marker instead of the first `EI` bytes, so `EI` sequences inside the image data are no longer mistaken for the `EI` operator; ambiguous boundaries are reported and the following content keeps its original source
 - Reproducibility issue when generating cmap `.json.gz` files ([#1242](https://github.com/pdfminer/pdfminer.six/pull/1242))
 - Switch to `bytearray` in `apply_png_predictor` to avoid out of memory error (and speed it up) ([#1247](https://github.com/pdfminer/pdfminer.six/pull/1247))
 - Check the type of `N` when creating an `ICCBased` color space ([#1252](http3://github.com/pdfminer/pdfminer.six/pull/1253))

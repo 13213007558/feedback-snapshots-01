@@ -1,12 +1,15 @@
 import logging
-import re
-from collections.abc import Mapping, Sequence
+import zlib
+from collections.abc import Iterator, Mapping, Sequence
 from io import BytesIO
 from typing import Union, cast
 
 from pdfminer import settings
+from pdfminer.ascii85 import ascii85decode, asciihexdecode
 from pdfminer.casting import safe_cmyk, safe_float, safe_int, safe_matrix, safe_rgb
+from pdfminer.ccitt import ccittfaxdecode
 from pdfminer.cmapdb import CMap, CMapBase, CMapDB
+from pdfminer.lzw import lzwdecode
 from pdfminer.pdfcolor import PREDEFINED_COLORSPACE, PDFColorSpace
 from pdfminer.pdfdevice import PDFDevice, PDFTextSeq
 from pdfminer.pdfexceptions import PDFException, PDFValueError
@@ -21,6 +24,11 @@ from pdfminer.pdffont import (
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdftypes import (
     LITERALS_ASCII85_DECODE,
+    LITERALS_ASCIIHEX_DECODE,
+    LITERALS_CCITTFAX_DECODE,
+    LITERALS_FLATE_DECODE,
+    LITERALS_LZW_DECODE,
+    LITERALS_RUNLENGTH_DECODE,
     PDFObjRef,
     PDFStream,
     dict_value,
@@ -40,6 +48,7 @@ from pdfminer.psparser import (
     keyword_name,
     literal_name,
 )
+from pdfminer.runlength import rldecode
 from pdfminer.utils import (
     MATRIX_IDENTITY,
     Matrix,
@@ -254,6 +263,26 @@ class PDFResourceManager:
         return font
 
 
+class InlineImageData:
+    """The raw bytes of an inline image and how its boundary was found.
+
+    ``data`` is the image content (excluding the ``ID`` whitespace and the
+    terminating operator), ``eod`` is the end-of-data marker that bounded
+    it (``EI``, or a filter marker such as ``~>``) and ``end`` is the
+    absolute content-stream position of that marker.
+    """
+
+    __slots__ = ("data", "eod", "end")
+
+    def __init__(self, data: bytes, eod: bytes, end: int) -> None:
+        self.data = data
+        self.eod = eod
+        self.end = end
+
+    def __repr__(self) -> str:
+        return f"<InlineImageData: len={len(self.data)}, eod={self.eod!r}>"
+
+
 class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
     def __init__(self, streams: Sequence[object]) -> None:
         self.streams = streams
@@ -278,6 +307,29 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
         self.fillfp()
         PSStackParser.seek(self, pos)
 
+    def _current_stream_index(self) -> int:
+        """Index of the content stream backing the current file object.
+
+        ``fillfp`` advances ``istream`` past the active stream, so the
+        backing stream is always ``istream - 1`` once ``fp`` is open.
+        """
+        assert self.fp is not None
+        return self.istream - 1
+
+    def _reposition(self, stream_index: int, pos: int) -> None:
+        """Move to per-stream offset ``pos`` within ``stream_index``.
+
+        Unlike :meth:`seek`, this works even after a scan has consumed the
+        current stream (which sets ``fp`` to ``None`` and advances
+        ``istream``): the target stream is reloaded on demand.  Inline
+        images never span streams, so ``stream_index`` always names a
+        stream that is current or already consumed.
+        """
+        if self.istream != stream_index + 1 or not self.fp:
+            self.istream = stream_index + 1
+            self.fp = BytesIO(stream_value(self.streams[stream_index]).get_data())
+        PSStackParser.seek(self, pos)
+
     def fillbuf(self) -> bool:
         if self.charpos < len(self.buf):
             return False
@@ -292,35 +344,391 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
         self.charpos = 0
         return new_stream
 
-    def get_inline_data(self, pos: int, target: bytes = b"EI") -> tuple[int, bytes]:
-        self.seek(pos)
-        i = 0
-        data = b""
-        while i <= len(target):
-            self.fillbuf()
-            if i:
+    # Whitespace defined in PDF Reference, table 1 (section 3.1.1).
+    _WHITESPACE = frozenset(b"\x00\t\n\x0c\r ")
+    # End-of-data markers of the filters that carry their own one
+    # (PDF Reference, section 4.8.6, table 4.42).  Every other filter, and
+    # the unfiltered case, is terminated by the ``EI`` operator.
+    _FILTER_EOD: Mapping[object, bytes] = {
+        LIT("ASCII85Decode"): b"~>",
+        LIT("A85"): b"~>",
+        LIT("ASCIIHexDecode"): b">",
+        LIT("AHx"): b">",
+    }
+
+    def _next_byte(self) -> int:
+        """Return the byte at the current position and advance past it.
+
+        The fixed-size read buffer (``BUFSIZ``) is refilled transparently,
+        so a terminator split over a buffer boundary is still recognised.
+        Raises :class:`PSEOF` when no more data is available.
+        """
+        self.fillbuf()
+        ci = self.buf[self.charpos]
+        self.charpos += 1
+        return ci
+
+    def _iter_stream_bytes(self, stream_index: int) -> Iterator[int]:
+        """Yield the remaining bytes of content stream ``stream_index`` only.
+
+        An inline image is always contained in a single content stream, so
+        this iterator stops at that stream's end instead of silently
+        continuing into the next stream (which would mix two separate
+        per-stream offset spaces).  The read buffer is refilled as needed,
+        which is what lets a multi-byte terminator straddle a buffer.
+        """
+        active = stream_index + 1
+        while True:
+            if self.istream != active or not self.fp:
+                return
+            if self.charpos < len(self.buf):
                 ci = self.buf[self.charpos]
-                c = bytes((ci,))
-                data += c
                 self.charpos += 1
-                if (len(target) <= i and c.isspace()) or (
-                    i < len(target) and c == (bytes((target[i],)))
-                ):
-                    i += 1
-                else:
-                    i = 0
-            else:
+                yield ci
+                continue
+            # Refill without consuming into the next stream: detect the
+            # boundary by remembering the file object before the refill.
+            current_fp = self.fp
+            try:
+                self.fillbuf()
+            except PSEOF:
+                return
+            if self.fp is not current_fp or self.istream != active:
+                return
+
+    def _peek_byte(self, stream_index: int) -> int | None:
+        """Return the byte at the current position without consuming it."""
+        if self.istream != stream_index + 1 or not self.fp:
+            return None
+        try:
+            self.fillbuf()
+        except PSEOF:
+            return None
+        if self.istream != stream_index + 1:
+            return None
+        return self.buf[self.charpos]
+
+    def _read_bytes(self, stream_index: int, length: int) -> bytes:
+        """Consume and return the next ``length`` bytes from the stream.
+
+        The read transparently crosses the fixed-size buffer boundary but
+        never leaves content stream ``stream_index``.  Fewer than
+        ``length`` bytes are returned only when the end of the stream is
+        reached.
+        """
+        chunks: list[bytes] = []
+        remaining = length
+        active = stream_index + 1
+        while remaining > 0 and self.istream == active and self.fp:
+            if self.charpos >= len(self.buf):
+                current_fp = self.fp
                 try:
-                    j = self.buf.index(target[0], self.charpos)
-                    data += self.buf[self.charpos : j + 1]
-                    self.charpos = j + 1
-                    i = 1
-                except ValueError:
-                    data += self.buf[self.charpos :]
-                    self.charpos = len(self.buf)
-        data = data[: -(len(target) + 1)]  # strip the last part
-        data = re.sub(rb"(\x0d\x0a|[\x0d\x0a])$", b"", data)
-        return (pos, data)
+                    self.fillbuf()
+                except PSEOF:
+                    break
+                if self.fp is not current_fp or self.istream != active:
+                    break
+            chunk = self.buf[self.charpos : self.charpos + remaining]
+            if not chunk:
+                break
+            chunks.append(chunk)
+            self.charpos += len(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _expected_image_length(attrs: Mapping[str, object]) -> int | None:
+        """Number of bytes an unfiltered inline image must occupy.
+
+        PDF Reference, section 4.8.6: for an image without a filter the
+        amount of image data is determined entirely by ``W``, ``H``,
+        ``BPC`` and the number of colour components, so the terminator is
+        located by length rather than by searching for ``EI`` bytes that
+        may legitimately occur inside the image data.
+        """
+        try:
+            width = int(attrs["W"])
+            height = int(attrs["H"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        # The default bits-per-component is 1 (PDF Reference, table 4.41).
+        try:
+            bpc = int(attrs.get("BPC", 1))
+        except (TypeError, ValueError):
+            return None
+        if bpc <= 0:
+            return None
+        cs = attrs.get("CS", LIT("DeviceGray"))
+        if isinstance(cs, PSLiteral):
+            name = cs.name
+            if not isinstance(name, str):
+                return None
+            ncomponents = {
+                "G": 1,
+                "DeviceGray": 1,
+                "CalGray": 1,
+                "RGB": 3,
+                "DeviceRGB": 3,
+                "CalRGB": 3,
+                "Lab": 3,
+                "CMYK": 4,
+                "DeviceCMYK": 4,
+            }.get(name)
+            if ncomponents is None:
+                # Indexed, Separation, DeviceN, Pattern, ... always use a
+                # single component per sample (section 4.8.6).
+                ncomponents = 1
+        else:
+            # An array-based colour space (e.g. [/Indexed ...]); the number
+            # of components cannot be resolved here, so the length is unknown.
+            return None
+        total_bits = width * height * ncomponents * bpc
+        # Sub-byte samples are packed, rounding up to a whole byte.
+        return (total_bits + 7) // 8
+
+    def _consume_leading_whitespace(self, stream_index: int) -> None:
+        """Skip the single whitespace that terminates the ``ID`` operator."""
+        first = self._peek_byte(stream_index)
+        if first is not None and first in self._WHITESPACE:
+            self._next_byte()
+
+    def _find_ei_boundary(
+        self, stream_index: int, data_length: int
+    ) -> tuple[int, bytes] | None:
+        """Confirm the ``EI`` operator that ends an unfiltered image.
+
+        The image must occupy exactly ``data_length`` bytes (derived from
+        ``W``, ``H``, ``BPC`` and the colour space).  After reading that
+        many bytes, verify that an ``EI`` operator follows, separated from
+        the data only by whitespace / a line ending.  Returns the
+        (per-stream) position of ``EI`` and the image data, or ``None``.
+        """
+        data = self._read_bytes(stream_index, data_length)
+        if len(data) != data_length:
+            return None
+        while True:
+            following = self._peek_byte(stream_index)
+            if following is None:
+                return None
+            if following in self._WHITESPACE:
+                self._next_byte()
+                continue
+            break
+        ei_pos = self._match_at_cursor(stream_index, b"EI")
+        if ei_pos is None:
+            return None
+        return ei_pos, bytes(data)
+
+    def _match_at_cursor(
+        self, stream_index: int, marker: bytes
+    ) -> int | None:
+        """Check whether ``marker`` begins at the current cursor position.
+
+        The bytes are inspected through the stream-bounded iterator so a
+        marker that straddles a read buffer is detected.  On a match the
+        cursor is repositioned at the first byte of the marker and its
+        (per-stream) position is returned; otherwise the cursor is restored
+        to where the check started.
+        """
+        start = self.bufpos + self.charpos
+        matched = bytearray()
+        for ci in self._iter_stream_bytes(stream_index):
+            matched.append(ci)
+            if bytes(matched) != marker[: len(matched)]:
+                self._reposition(stream_index, start)
+                return None
+            if bytes(matched) == marker:
+                self._reposition(stream_index, start)
+                return start
+        self._reposition(stream_index, start)
+        return None
+
+    def _find_filtered_boundary(
+        self, stream_index: int, filters: Sequence[object]
+    ) -> "InlineImageData | None":
+        """Locate the end of a filtered inline image.
+
+        Filters with an explicit end-of-data marker (ASCII85 and
+        ASCIIHex) are bounded by that marker.  Otherwise every candidate
+        ``EI`` operator (an ``EI`` followed by whitespace or the end of
+        the content) is tried and the boundary is accepted only when the
+        data up to it decodes without error.  Returns an
+        :class:`InlineImageData`, or ``None`` when no boundary can be
+        established with sufficient evidence; in that case the parser
+        position is restored to the start of the image data.
+        """
+        start = self.bufpos + self.charpos
+        eod = self._FILTER_EOD.get(filters[0])
+        if eod is not None:
+            data = bytearray()
+            # Accumulate bytes until the end-of-data marker is matched,
+            # scanning only the current stream so a split marker works.
+            matched = 0
+            for ci in self._iter_stream_bytes(stream_index):
+                if ci == eod[matched]:
+                    matched += 1
+                    if matched == len(eod):
+                        end = self.bufpos + self.charpos
+                        # The marker belongs to the encoded data and is
+                        # required by the decoder; the EI operator remains
+                        # in the stream and is tokenised normally.
+                        image = bytes(data) + eod
+                        return InlineImageData(data=image, eod=eod, end=end)
+                else:
+                    if matched:
+                        data.extend(eod[:matched])
+                    data.append(ci)
+                    matched = 1 if ci == eod[0] else 0
+            self._reposition(stream_index, start)
+            return None
+
+        candidates = self._collect_ei_candidates(stream_index)
+        validated: list[tuple[int, bytes]] = []
+        for ei_pos, data in candidates:
+            if self._decodes_cleanly(data, filters):
+                validated.append((ei_pos, data))
+        if len(validated) == 1:
+            (ei_pos, data) = validated[0]
+            self._reposition(stream_index, ei_pos)
+            return InlineImageData(data=data, eod=b"EI", end=ei_pos)
+        if not validated:
+            log.warning(
+                "Inline image: no decodable EI boundary found among %d "
+                "candidate(s); leaving the remainder of the content stream "
+                "untouched",
+                len(candidates),
+            )
+        else:
+            log.warning(
+                "Inline image: %d EI boundaries decode successfully; the "
+                "end of the image is ambiguous, leaving the remainder of "
+                "the content stream untouched",
+                len(validated),
+            )
+        self._reposition(stream_index, start)
+        return None
+
+    def _collect_ei_candidates(
+        self, stream_index: int
+    ) -> list[tuple[int, bytes]]:
+        """Scan forward and record every plausible ``EI`` operator.
+
+        A candidate is an ``EI`` byte sequence followed by PDF whitespace
+        or the end of the content, which is what distinguishes the
+        operator from the same bytes occurring inside binary image data.
+        Each entry pairs the (per-stream) position of the ``EI`` with the
+        complete image data that would result from cutting there.  The
+        parser position is restored to where the scan began.
+        """
+        start = self.bufpos + self.charpos
+        data = bytearray()
+        candidates: list[tuple[int, bytes]] = []
+        saw_e = False
+        for ci in self._iter_stream_bytes(stream_index):
+            if saw_e and ci == ord("I"):
+                ei_pos = self.bufpos + self.charpos - 2
+                following = self._peek_byte(stream_index)
+                if following is None or following in self._WHITESPACE:
+                    # data currently ends with the leading "E"; drop it so
+                    # the cut excludes the whole "EI" operator.
+                    candidates.append((ei_pos, bytes(data[:-1])))
+            data.append(ci)
+            saw_e = ci == ord("E")
+        self._reposition(stream_index, start)
+        return candidates
+
+    def _decodes_cleanly(
+        self, data: bytes, filters: Sequence[object]
+    ) -> bool:
+        """Return whether ``data`` survives the whole filter chain.
+
+        The check is deliberately strict: the normal non-STRICT decoding
+        path tolerates truncated Flate streams (it falls back to
+        ``decompress_corrupted``), which would make every premature EI cut
+        look valid.  A boundary is only accepted when each filter decodes
+        without error, which is what distinguishes the real end of the
+        image from an ``EI`` that merely happens to occur earlier.
+        """
+        current = data
+        try:
+            for filt in filters:
+                current = self._strict_decode(filt, current)
+        except Exception:  # noqa: BLE001 - any failure rejects the cut
+            return False
+        return True
+
+    @staticmethod
+    def _strict_decode(filt: object, data: bytes) -> bytes:
+        """Apply one filter, raising on any invalid or truncated input."""
+        if filt in LITERALS_FLATE_DECODE:
+            return zlib.decompress(data)
+        if filt in LITERALS_LZW_DECODE:
+            return lzwdecode(data)
+        if filt in LITERALS_ASCII85_DECODE:
+            return ascii85decode(data)
+        if filt in LITERALS_ASCIIHEX_DECODE:
+            return asciihexdecode(data)
+        if filt in LITERALS_RUNLENGTH_DECODE:
+            return rldecode(data)
+        if filt in LITERALS_CCITTFAX_DECODE:
+            return ccittfaxdecode(data, {})
+        # DCT/JPEG, JBIG2 and JPX are passed through untouched, so any cut
+        # is structurally acceptable for them and must be disambiguated by
+        # other means (the whitespace-delimited EI candidate ordering).
+        return data
+
+    def get_inline_data(
+        self,
+        pos: int,
+        attrs: Mapping[str, object],
+        filters: Sequence[object] | None,
+    ) -> "InlineImageData | None":
+        """Extract the data of an inline image.
+
+        ``pos`` points just past the ``ID`` operator and its mandatory
+        single whitespace.  ``attrs`` are the inline image dictionary
+        entries and ``filters`` is its (possibly empty) filter chain.
+
+        Returns an :class:`InlineImageData` whose ``data`` holds the image
+        bytes and ``eod`` records how the boundary was found, or ``None``
+        when the boundary cannot be determined reliably.  In the latter
+        case the parser position is restored to ``pos`` so the following
+        content (e.g. text shown with ``BT``/``Tj``) keeps its original
+        source instead of being swallowed as image data.
+        """
+        self.seek(pos)
+        stream_index = self._current_stream_index()
+        self._consume_leading_whitespace(stream_index)
+
+        if filters is not None:
+            return self._find_filtered_boundary(stream_index, filters)
+
+        expected = self._expected_image_length(attrs)
+        if expected is not None:
+            found = self._find_ei_boundary(stream_index, expected)
+            if found is None:
+                log.warning(
+                    "Inline image: expected the EI operator %d byte(s) "
+                    "after the start of the data but could not confirm it; "
+                    "leaving the remainder of the content stream untouched",
+                    expected,
+                )
+                self._reposition(stream_index, pos)
+                return None
+            ei_pos, data = found
+            return InlineImageData(data=data, eod=b"EI", end=ei_pos)
+
+        # No dimensional information to locate the boundary: fall back to
+        # the first whitespace-delimited EI operator rather than guessing.
+        candidates = self._collect_ei_candidates(stream_index)
+        if not candidates:
+            self._reposition(stream_index, pos)
+            return None
+        ei_pos, data = candidates[0]
+        self._reposition(stream_index, ei_pos)
+        return InlineImageData(data=data, eod=b"EI", end=ei_pos)
 
     def flush(self) -> None:
         self.add_results(*self.popall())
@@ -340,19 +748,25 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                     error_msg = f"Invalid dictionary construct: {objs!r}"
                     raise PSTypeError(error_msg)
                 d = {literal_name(k): resolve1(v) for (k, v) in choplist(2, objs)}
-                eos = b"EI"
-                filter = d.get("F")
-                if filter is not None:
-                    if isinstance(filter, PSLiteral):
-                        filter = [filter]
-                    if filter[0] in LITERALS_ASCII85_DECODE:
-                        eos = b"~>"
-                (pos, data) = self.get_inline_data(pos + len(b"ID "), target=eos)
-                if eos != b"EI":  # it may be necessary for decoding
-                    data += eos
-                obj = PDFStream(d, data)
+                filters = d.get("F")
+                if isinstance(filters, PSLiteral):
+                    filters = [filters]
+                image = self.get_inline_data(
+                    pos + len(b"ID "), d, filters
+                )
+                if image is None:
+                    # The end of the image could not be located reliably.
+                    # Leave the raw bytes in the content stream so that any
+                    # real operators that follow are still parsed from
+                    # their original source instead of being swallowed.
+                    if settings.STRICT:
+                        raise PSTypeError(
+                            "Could not determine the end of the inline image"
+                        )
+                    return
+                obj = PDFStream(d, image.data)
                 self.push((pos, obj))
-                if eos == b"EI":  # otherwise it is still in the stream
+                if image.eod == b"EI":
                     self.push((pos, self.KEYWORD_EI))
             except PSTypeError:
                 if settings.STRICT:
