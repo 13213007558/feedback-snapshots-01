@@ -1,4 +1,8 @@
 * Version 2.2.2 (unreleased)
+ ** LargeBlobs: Add optional bounds to get_blob/read_blob_array for stored array
+    size, candidate entry count, and decompressed content size. Decompression is
+    now budgeted incrementally (never sized by the declared orig_size), and
+    failures on authenticated entries are raised instead of masked as missing.
  ** Attestation: Use cryptography's certificate issuer verification when available,
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as

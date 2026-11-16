@@ -46,9 +46,24 @@ def _compress(data):
     return o.compress(data) + o.flush()
 
 
-def _decompress(data):
+def _decompress(data, max_size=None):
     o = zlib.decompressobj(wbits=-zlib.MAX_WBITS)
-    return o.decompress(data) + o.flush()
+    if max_size is None:
+        out = o.decompress(data) + o.flush()
+    else:
+        # Decompress incrementally, bounded by max_size. The declared
+        # orig_size is never used to size allocations.
+        limit = max_size + 1
+        out = o.decompress(data, limit)
+        while o.unconsumed_tail and len(out) < limit:
+            out += o.decompress(o.unconsumed_tail, limit - len(out))
+        if len(out) > max_size:
+            raise ValueError("Decompressed data exceeds maximum size")
+    if not o.eof:
+        raise zlib.error("Incomplete compressed stream")
+    if o.unused_data:
+        raise ValueError("Trailing data after compressed stream")
+    return out
 
 
 def _lb_ad(orig_size):
@@ -114,9 +129,14 @@ class LargeBlobs:
             else None
         )
 
-    def read_blob_array(self) -> Sequence[Mapping[int, Any]]:
+    def read_blob_array(
+        self, max_array_size: int | None = None
+    ) -> Sequence[Mapping[int, Any]]:
         """Gets the entire contents of the Large Blobs array.
 
+        :param max_array_size: Optional maximum number of bytes to read from
+            the authenticator. If the stored array exceeds this, a ValueError
+            is raised.
         :return: The CBOR decoded list of Large Blobs.
         """
         offset = 0
@@ -124,6 +144,8 @@ class LargeBlobs:
         while True:
             fragment = self.ctap.large_blobs(offset, get=self.max_fragment_length)[1]
             buf += fragment
+            if max_array_size is not None and len(buf) > max_array_size:
+                raise ValueError("Large blob array exceeds maximum size")
             if len(fragment) < self.max_fragment_length:
                 break
             offset += self.max_fragment_length
@@ -173,20 +195,43 @@ class LargeBlobs:
 
             offset += ln
 
-    def get_blob(self, large_blob_key: bytes) -> bytes | None:
+    def get_blob(
+        self,
+        large_blob_key: bytes,
+        max_size: int | None = None,
+        max_entries: int | None = None,
+        max_array_size: int | None = None,
+    ) -> bytes | None:
         """Gets the Large Blob stored for a single credential.
 
+        Entries which do not authenticate with the given key are skipped.
+        Once an entry does authenticate, any failure to decompress or
+        validate it is raised rather than masked as a missing blob.
+
         :param large_blob_key: The largeBlobKey for the credential, or None.
+        :param max_size: Optional maximum allowed size of the decompressed
+            contents. Decompression is bounded by this value; the declared
+            orig_size is verified against the actual result but never used
+            to size allocations.
+        :param max_entries: Optional maximum number of candidate entries to
+            examine before giving up with a ValueError.
+        :param max_array_size: Optional maximum size of the stored array,
+            passed on to read_blob_array.
         :returns: The decrypted and deflated value stored for the credential.
         """
-        for entry in self.read_blob_array():
+        for index, entry in enumerate(self.read_blob_array(max_array_size)):
+            if max_entries is not None and index >= max_entries:
+                raise ValueError("Too many candidate entries")
             try:
                 compressed, orig_size = _lb_unpack(large_blob_key, entry)
-                decompressed = _decompress(compressed)
-                if len(decompressed) == orig_size:
-                    return decompressed
-            except (ValueError, zlib.error):
-                continue
+            except ValueError:
+                continue  # Not addressed to this key, keep looking
+            # The entry authenticated with this key: failures from here on
+            # are genuine and must not be masked as "no data".
+            decompressed = _decompress(compressed, max_size)
+            if len(decompressed) != orig_size:
+                raise ValueError("Decompressed size does not match orig_size")
+            return decompressed
         return None
 
     def put_blob(self, large_blob_key: bytes, data: bytes | None) -> None:
