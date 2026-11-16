@@ -1,4 +1,9 @@
 
+Unreleased
+==========
+
+  * Fix(ooxml): reject malformed Agile EncryptionInfo descriptors before key derivation; require namespace-qualified, uniquely related `keyData`, `dataIntegrity`, and password `encryptedKey` elements, and validate cipher parameters and encoded lengths
+
 v6.1.0 / 2026-11-04
 ===================
 
