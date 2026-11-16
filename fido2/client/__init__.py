@@ -45,7 +45,13 @@ from ..ctap2.extensions import (
     Ctap2Extension,
     RegistrationExtensionProcessor,
 )
-from ..ctap2.pin import ClientPin, PinProtocol
+from ..ctap2.pin import (
+    ClientPin,
+    PinProtocol,
+    TokenPermissionError,
+    TokenPolicy,
+    TokenResult,
+)
 from ..hid import STATUS
 from ..rpid import verify_rp_id
 from ..utils import sha256
@@ -556,11 +562,13 @@ class _Ctap2ClientBackend(_ClientBackend):
         device: CtapDevice,
         user_interaction: UserInteraction,
         extensions: Sequence[Ctap2Extension],
+        token_policy: TokenPolicy = TokenPolicy.LEGACY,
     ):
         self.ctap2 = Ctap2(device)
         self.info = self.ctap2.info
         self._extensions = extensions
         self.user_interaction = user_interaction
+        self.token_policy = token_policy
 
     def _filter_creds(
         self, rp_id, cred_list, pin_protocol, pin_token, event, on_keepalive
@@ -682,9 +690,14 @@ class _Ctap2ClientBackend(_ClientBackend):
         if allow_uv and info.options.get("uv"):
             if ClientPin.is_token_supported(info):
                 if self.user_interaction.request_uv(permissions, rp_id):
-                    return client_pin.get_uv_token(
-                        permissions, rp_id, event, on_keepalive
+                    result = client_pin.get_uv_token(
+                        permissions,
+                        rp_id,
+                        event,
+                        on_keepalive,
+                        policy=self.token_policy,
                     )
+                    return self._unwrap_token(result)
             elif allow_internal_uv:
                 if self.user_interaction.request_uv(permissions, rp_id):
                     return None  # No token, use uv=True
@@ -693,13 +706,31 @@ class _Ctap2ClientBackend(_ClientBackend):
         if info.options.get("clientPin"):
             pin = self.user_interaction.request_pin(permissions, rp_id)
             if pin:
-                return client_pin.get_pin_token(pin, permissions, rp_id)
+                try:
+                    result = client_pin.get_pin_token(
+                        pin, permissions, rp_id, policy=self.token_policy
+                    )
+                except TokenPermissionError as e:
+                    raise ClientError.ERR.CONFIGURATION_UNSUPPORTED(e)
+                return self._unwrap_token(result)
             raise PinRequiredError()
 
         # Client PIN not configured.
         raise ClientError.ERR.CONFIGURATION_UNSUPPORTED(
             "User verification not configured"
         )
+
+    @staticmethod
+    def _unwrap_token(result):
+        if isinstance(result, TokenResult):
+            if result.unmet:
+                logger.info(
+                    "PIN/UV token issued without the requested constraints: "
+                    "%s",
+                    ", ".join(result.unmet),
+                )
+            return result.token
+        return result
 
     def _get_auth_params(
         self,
@@ -1072,6 +1103,12 @@ class Fido2Client(WebAuthnClient):
     :param device: CtapDevice to use.
     :param str origin: The origin to use.
     :param verify: Function to verify an RP ID for a given origin.
+    :param token_policy: Strategy used when requesting permission-scoped
+        PIN/UV tokens. Defaults to :data:`TokenPolicy.LEGACY`, which keeps
+        working with authenticators that only implement the unrestricted
+        legacy command but records the constraints that could not be enforced.
+        Set :data:`TokenPolicy.REQUIRED` to reject such authenticators instead
+        of accepting an unscoped token.
     """
 
     def __init__(
@@ -1080,6 +1117,7 @@ class Fido2Client(WebAuthnClient):
         client_data_collector: ClientDataCollector,
         user_interaction: UserInteraction = UserInteraction(),
         extensions: Sequence[Ctap2Extension] = _DEFAULT_EXTENSIONS,
+        token_policy: TokenPolicy = TokenPolicy.LEGACY,
     ):
         self._client_data_collector = client_data_collector
 
@@ -1088,7 +1126,7 @@ class Fido2Client(WebAuthnClient):
 
         try:
             self._backend: _ClientBackend = _Ctap2ClientBackend(
-                device, user_interaction, extensions
+                device, user_interaction, extensions, token_policy
             )
         except (ValueError, CtapError):
             self._backend = _Ctap1ClientBackend(device, user_interaction)

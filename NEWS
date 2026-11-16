@@ -1,4 +1,11 @@
 * Version 2.2.2 (unreleased)
+ ** ClientPin: Add an explicit TokenPolicy (REQUIRED/LEGACY) for obtaining
+    permission-scoped PIN/UV tokens. Constrained requests now validate the
+    permission/RP ID combination and never silently fall back to the
+    unrestricted legacy command; compatibility requests return a TokenResult
+    describing any constraints that could not be enforced. Fido2Client accepts
+    a token_policy argument and threads it through both the PIN and built-in
+    UV token paths.
  ** Attestation: Use cryptography's certificate issuer verification when available,
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as

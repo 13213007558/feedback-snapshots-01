@@ -32,7 +32,14 @@ from .base import (  # noqa
     AssertionResponse,
 )
 
-from .pin import ClientPin, PinProtocolV1, PinProtocolV2  # noqa
+from .pin import (  # noqa
+    ClientPin,
+    PinProtocolV1,
+    PinProtocolV2,
+    TokenPermissionError,
+    TokenPolicy,
+    TokenResult,
+)
 from .credman import CredentialManagement  # noqa
 from .bio import FPBioEnrollment, CaptureError  # noqa
 from .blob import LargeBlobs  # noqa

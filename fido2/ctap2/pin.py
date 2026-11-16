@@ -30,8 +30,8 @@ from __future__ import annotations
 import abc
 import logging
 import os
-from dataclasses import dataclass
-from enum import IntEnum, IntFlag, unique
+from dataclasses import dataclass, field
+from enum import Enum, IntEnum, IntFlag, unique
 from threading import Event
 from typing import Any, Callable, ClassVar, Mapping
 
@@ -92,6 +92,57 @@ class PinProtocol(abc.ABC):
 class _PinUv:
     protocol: PinProtocol
     token: bytes
+
+
+class TokenPermissionError(ValueError):
+    """Raised when a requested PIN/UV token constraint cannot be satisfied.
+
+    This covers both invalid constraint combinations (for example an RP ID
+    supplied without the GET_ASSERTION permission) and authenticators which
+    lack the capability needed to enforce the requested constraints.
+    """
+
+
+class TokenPolicy(Enum):
+    """Strategy for obtaining a PIN/UV token with permission constraints.
+
+    :cvar REQUIRED: The constraints must be enforced by the authenticator.
+        The restricted CTAP commands are used, and the request fails if the
+        authenticator does not support restricted tokens or if the constraints
+        are invalid. No fallback to the legacy, unrestricted command is ever
+        performed.
+    :cvar LEGACY: The constraints are enforced when the authenticator supports
+        restricted tokens. If it does not, the legacy command is used
+        explicitly and the returned :class:`TokenResult` describes the
+        constraints that could not be satisfied.
+    """
+
+    REQUIRED = "required"
+    LEGACY = "legacy"
+
+
+@dataclass
+class TokenResult:
+    """The outcome of an explicitly policy-driven token request.
+
+    :param token: The PIN/UV token.
+    :param policy: The policy that was used to obtain the token.
+    :param permissions: The permissions requested for the token.
+    :param permissions_rpid: The RP ID requested for the token, if any.
+    :param restricted: True if the authenticator actually scoped the token to
+        the requested permissions and RP ID, False if an unrestricted legacy
+        token was issued.
+    :param unmet: Constraints that could not be satisfied. When non-empty, the
+        returned token carries no permission scope and callers must not assume
+        it is limited to the requested RP or operation.
+    """
+
+    token: bytes
+    policy: "TokenPolicy"
+    permissions: "ClientPin.PERMISSION | None" = None
+    permissions_rpid: str | None = None
+    restricted: bool = True
+    unmet: tuple[str, ...] = field(default_factory=tuple)
 
 
 class PinProtocolV1(PinProtocol):
@@ -283,47 +334,163 @@ class ClientPin:
 
         return self.protocol.encapsulate(pk)
 
+    def _validate_permissions(
+        self,
+        permissions: ClientPin.PERMISSION | None,
+        permissions_rpid: str | None,
+    ) -> None:
+        """Validate that the requested constraints are internally consistent.
+
+        The CTAP specification only allows an RP ID to be sent together with
+        the getAssertion permission, makeCredential may not be combined with
+        any other permission, and an RP ID may only scope a constrained
+        token.
+        """
+        if permissions is None:
+            if permissions_rpid is not None:
+                raise TokenPermissionError(
+                    "permissions_rpid requires permissions to be set"
+                )
+            return
+
+        if not permissions:
+            raise TokenPermissionError(
+                "permissions must include at least one permission"
+            )
+
+        if (
+            ClientPin.PERMISSION.MAKE_CREDENTIAL in permissions
+            and permissions != ClientPin.PERMISSION.MAKE_CREDENTIAL
+        ):
+            raise TokenPermissionError(
+                "MAKE_CREDENTIAL cannot be combined with other permissions"
+            )
+
+        if permissions_rpid is not None:
+            if ClientPin.PERMISSION.GET_ASSERTION not in permissions:
+                raise TokenPermissionError(
+                    "permissions_rpid requires the GET_ASSERTION permission"
+                )
+            if not isinstance(permissions_rpid, str) or not permissions_rpid:
+                raise TokenPermissionError(
+                    "permissions_rpid must be a non-empty string"
+                )
+
+    def _resolve_token_policy(
+        self,
+        permissions: ClientPin.PERMISSION | None,
+        permissions_rpid: str | None,
+        policy: TokenPolicy,
+        *,
+        via_uv: bool,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Decide whether a restricted command may be used.
+
+        Returns a tuple of (use_restricted_command, unmet_constraints). The
+        restricted commands are never used silently: callers either require
+        them (and get an error) or explicitly accept a legacy token along with
+        a description of the constraints that could not be enforced.
+        """
+        token_supported = ClientPin.is_token_supported(self.ctap.info)
+
+        unmet: list[str] = []
+        if not token_supported:
+            unmet.append("pinUvAuthToken")
+            if permissions is not None:
+                unmet.append(f"permissions={int(permissions)}")
+            if permissions_rpid is not None:
+                unmet.append(f"permissions_rpid={permissions_rpid}")
+
+        if not token_supported and policy is TokenPolicy.REQUIRED:
+            method = "get_uv_token" if via_uv else "get_pin_token"
+            raise TokenPermissionError(
+                f"Authenticator does not support restricted PIN/UV tokens "
+                f"(pinUvAuthToken), cannot honor {method} constraints under "
+                f"TokenPolicy.REQUIRED"
+            )
+
+        return token_supported, tuple(unmet)
+
     def get_pin_token(
         self,
         pin: str,
         permissions: ClientPin.PERMISSION | None = None,
         permissions_rpid: str | None = None,
-    ) -> bytes:
+        policy: TokenPolicy | None = None,
+    ) -> bytes | TokenResult:
         """Get a PIN/UV token from the authenticator using PIN.
 
         :param pin: The PIN of the authenticator.
         :param permissions: The permissions to associate with the token.
-        :param permissions_rpid: The permissions RPID to associate with the token.
-        :return: A PIN/UV token.
+        :param permissions_rpid: The permissions RPID to associate with the
+            token.
+        :param policy: The token acquisition strategy. If None, a plain token
+            is returned with the legacy behavior of ignoring constraints on
+            authenticators without pinUvAuthToken support. Pass a
+            :class:`TokenPolicy` to make the handling of constraints explicit:
+            with :data:`TokenPolicy.REQUIRED` an unsupported authenticator
+            raises :class:`TokenPermissionError`, while
+            :data:`TokenPolicy.LEGACY` returns a :class:`TokenResult`
+            describing any constraint that could not be satisfied.
+        :return: A PIN/UV token, or a :class:`TokenResult` when a policy is
+            provided.
         """
         if not ClientPin.is_supported(self.ctap.info):
             raise ValueError("Authenticator does not support get_pin_token")
+
+        self._validate_permissions(permissions, permissions_rpid)
 
         key_agreement, shared_secret = self._get_shared_secret()
 
         pin_hash = sha256(pin.encode())[:16]
         pin_hash_enc = self.protocol.encrypt(shared_secret, pin_hash)
 
-        if ClientPin.is_token_supported(self.ctap.info) and permissions is not None:
-            cmd = ClientPin.CMD.GET_TOKEN_USING_PIN
+        if policy is None:
+            # Backwards compatible behavior: fall back silently.
+            if ClientPin.is_token_supported(self.ctap.info) and permissions is not None:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN
+            else:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN_LEGACY
+                permissions = None
+                permissions_rpid = None
+            unmet: tuple[str, ...] = ()
+            restricted = cmd is ClientPin.CMD.GET_TOKEN_USING_PIN
         else:
-            cmd = ClientPin.CMD.GET_TOKEN_USING_PIN_LEGACY
-            # Ignore permissions if not supported
-            permissions = None
-            permissions_rpid = None
+            restricted, unmet = self._resolve_token_policy(
+                permissions, permissions_rpid, policy, via_uv=False
+            )
+            if restricted:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN
+            else:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN_LEGACY
 
         resp = self.ctap.client_pin(
             self.protocol.VERSION,
             cmd,
             key_agreement=key_agreement,
             pin_hash_enc=pin_hash_enc,
-            permissions=permissions,
-            permissions_rpid=permissions_rpid,
+            permissions=permissions if restricted else None,
+            permissions_rpid=permissions_rpid if restricted else None,
         )
         pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
-        logger.debug(f"Got PIN token for permissions: {permissions}")
-        return self.protocol.validate_token(
+        logger.debug(
+            "Got PIN token (restricted=%s) for permissions: %s",
+            restricted,
+            permissions if restricted else None,
+        )
+        token = self.protocol.validate_token(
             self.protocol.decrypt(shared_secret, pin_token_enc)
+        )
+
+        if policy is None:
+            return token
+        return TokenResult(
+            token=token,
+            policy=policy,
+            permissions=permissions,
+            permissions_rpid=permissions_rpid,
+            restricted=restricted,
+            unmet=unmet,
         )
 
     def get_uv_token(
@@ -332,20 +499,44 @@ class ClientPin:
         permissions_rpid: str | None = None,
         event: Event | None = None,
         on_keepalive: Callable[[int], None] | None = None,
-    ) -> bytes:
+        policy: TokenPolicy | None = None,
+    ) -> bytes | TokenResult:
         """Get a PIN/UV token from the authenticator using built-in UV.
 
         :param permissions: The permissions to associate with the token.
-        :param permissions_rpid: The permissions RPID to associate with the token.
+        :param permissions_rpid: The permissions RPID to associate with the
+            token.
         :param event: An optional threading.Event which can be used to cancel
             the invocation.
         :param on_keepalive: An optional callback to handle keep-alive messages
             from the authenticator. The function is only called once for
             consecutive keep-alive messages with the same status.
-        :return: A PIN/UV token.
+        :param policy: The token acquisition strategy. If None, a plain token
+            is returned. Pass a :class:`TokenPolicy` to make the handling of
+            the requested constraints explicit, see :meth:`get_pin_token`.
+        :return: A PIN/UV token, or a :class:`TokenResult` when a policy is
+            provided.
         """
-        if not ClientPin.is_token_supported(self.ctap.info):
-            raise ValueError("Authenticator does not support get_uv_token")
+        self._validate_permissions(permissions, permissions_rpid)
+
+        if policy is None:
+            if not ClientPin.is_token_supported(self.ctap.info):
+                raise ValueError("Authenticator does not support get_uv_token")
+            restricted = True
+            unmet: tuple[str, ...] = ()
+        else:
+            restricted, unmet = self._resolve_token_policy(
+                permissions, permissions_rpid, policy, via_uv=True
+            )
+
+        if not restricted:
+            # Built-in UV has no legacy token command: the only downgrade is
+            # the uv=True option without a token, which cannot carry any
+            # permission scope. Fail rather than pretending constraints hold.
+            raise TokenPermissionError(
+                "Authenticator does not support restricted PIN/UV tokens "
+                "(pinUvAuthToken), no legacy UV token command is available"
+            )
 
         key_agreement, shared_secret = self._get_shared_secret()
 
@@ -360,9 +551,24 @@ class ClientPin:
         )
 
         pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
-        logger.debug(f"Got UV token for permissions: {permissions}")
-        return self.protocol.validate_token(
+        logger.debug(
+            "Got UV token (restricted=%s) for permissions: %s",
+            restricted,
+            permissions,
+        )
+        token = self.protocol.validate_token(
             self.protocol.decrypt(shared_secret, pin_token_enc)
+        )
+
+        if policy is None:
+            return token
+        return TokenResult(
+            token=token,
+            policy=policy,
+            permissions=permissions,
+            permissions_rpid=permissions_rpid,
+            restricted=True,
+            unmet=unmet,
         )
 
     def get_pin_retries(self) -> tuple[int, int | None]:
