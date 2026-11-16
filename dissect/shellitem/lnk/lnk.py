@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import typing
+from dataclasses import dataclass
+from enum import Enum
 from io import BytesIO
 from struct import unpack
 from typing import Any, BinaryIO
@@ -19,11 +21,45 @@ from dissect.shellitem.lnk.c_lnk import (
 )
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Mapping
     from io import BufferedReader
 
 log = logging.getLogger(__name__)
 logging.lastResort = None
 logging.raiseExceptions = False
+
+
+class FolderReferenceStatus(str, Enum):
+    """Status of correlating a SPECIAL_FOLDER_PROPS or KNOWN_FOLDER_PROPS offset with the target IDList."""
+
+    RESOLVED = "resolved"
+    NO_IDLIST = "no_target_idlist"
+    MID_ITEM = "offset_mid_item"
+    AT_TERMINAL = "offset_at_terminal"
+    OUT_OF_RANGE = "offset_out_of_range"
+
+
+@dataclass
+class LnkFolderReference:
+    """Correlation result of a SPECIAL_FOLDER_PROPS or KNOWN_FOLDER_PROPS block with the target IDList.
+
+    The folder identifiers in these blocks are not full disk paths. A path is only derived when the caller
+    supplies an offline folder mapping; the analysis machine's own user folders are never consulted.
+
+    When ``tracking_disabled`` is set, the DisableKnownFolderTracking link flag instructed the shell to
+    ignore these blocks when loading the link, so the reference must not be interpreted as the actual
+    launch target and no path is derived from it.
+    """
+
+    block_name: str
+    folder_id: UUID | int
+    offset: int
+    status: FolderReferenceStatus
+    first_child_index: int | None = None
+    itemid_range: tuple[int, int] | None = None
+    tracking_disabled: bool = False
+    resolved_path: str | None = None
+    mapping_key: str | int | None = None
 
 
 class LnkExtraData:
@@ -350,6 +386,44 @@ class LnkTargetIdList:
         self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=buff.read())
         self.target_idlist = c_lnk.LINK_TARGET_IDLIST(idlist_size=self.size, idlist=self.idlist)
 
+    def item_offsets(self) -> list[int]:
+        """Return the byte offset of each ItemID relative to the start of the IDList.
+
+        The offsets stored in the SPECIAL_FOLDER_PROPS and KNOWN_FOLDER_PROPS extra data blocks are
+        relative to the start of the IDList, i.e. directly after the IDListSize field.
+        """
+        offsets = []
+        offset = 0
+        for itemid in self.idlist.itemid_list if self.idlist else []:
+            offsets.append(offset)
+            offset += itemid.itemid_size
+        return offsets
+
+    def find_itemid(self, offset: int) -> tuple[FolderReferenceStatus, int | None]:
+        """Locate the ItemID at a byte offset into the IDList.
+
+        Args:
+            offset: Offset in bytes, relative to the start of the IDList.
+
+        Returns:
+            Tuple of the correlation status and, when the offset points exactly at the start of an
+            ItemID, the index of that ItemID in the IDList. The index is None for every other status.
+        """
+        if not self.idlist:
+            return FolderReferenceStatus.NO_IDLIST, None
+
+        item_offset = 0
+        for index, itemid in enumerate(self.idlist.itemid_list):
+            if offset == item_offset:
+                return FolderReferenceStatus.RESOLVED, index
+            if item_offset < offset < item_offset + itemid.itemid_size:
+                return FolderReferenceStatus.MID_ITEM, None
+            item_offset += itemid.itemid_size
+
+        if offset == item_offset:
+            return FolderReferenceStatus.AT_TERMINAL, None
+        return FolderReferenceStatus.OUT_OF_RANGE, None
+
     def __repr__(self) -> str:
         return repr(self.target_idlist)
 
@@ -455,6 +529,67 @@ class Lnk:
     def clsid(self) -> UUID:
         """Returns the class id (clsid) of the LNK file."""
         return UUID(bytes_le=self.link_header.link_clsid)
+
+    def folder_references(self, folder_mapping: Mapping[str | int, str] | None = None) -> list[LnkFolderReference]:
+        """Correlate SPECIAL_FOLDER_PROPS and KNOWN_FOLDER_PROPS blocks with the target IDList.
+
+        Both blocks declare a folder (by special folder ID or known folder GUID) and an offset into the
+        link target IDList of the first child ItemID of that folder. Neither is a full disk path by
+        itself. For each block present, the offset is resolved against the IDList and, when both blocks
+        are present, a reference is returned for each of them in the order they appear in the file.
+
+        A path is only derived when the caller supplies an offline folder mapping; the analysis
+        machine's own user folders are never consulted. When the DisableKnownFolderTracking link flag
+        is set, these blocks are ignored when the shell loads the link, so the returned references are
+        marked as tracking disabled and no path is derived from them.
+
+        Args:
+            folder_mapping: Optional offline mapping of folder identifiers to paths. Keys are the
+                string representation of the known folder GUID for KNOWN_FOLDER_PROPS blocks, or the
+                integer special folder ID for SPECIAL_FOLDER_PROPS blocks.
+
+        Returns:
+            A list of LnkFolderReference objects, one per folder block encountered.
+        """
+        references = []
+        tracking_disabled = bool(self.flags) and bool(self.flag("disable_known_folder_tracking"))
+
+        for block_name, block in self.extradata.extradata.items():
+            if block_name == "KNOWN_FOLDER_PROPS":
+                folder_id = block.known_folder_id
+                mapping_key: str | int = str(folder_id)
+            elif block_name == "SPECIAL_FOLDER_PROPS":
+                folder_id = block.special_folder_id
+                mapping_key = folder_id
+            else:
+                continue
+
+            status, first_child_index = self.target_idlist.find_itemid(block.offset)
+            itemid_range = None
+            if first_child_index is not None:
+                itemid_range = (first_child_index, len(self.target_idlist.idlist.itemid_list))
+
+            resolved_path = None
+            used_mapping_key = None
+            if not tracking_disabled and folder_mapping is not None and mapping_key in folder_mapping:
+                resolved_path = folder_mapping[mapping_key]
+                used_mapping_key = mapping_key
+
+            references.append(
+                LnkFolderReference(
+                    block_name=block_name,
+                    folder_id=folder_id,
+                    offset=block.offset,
+                    status=status,
+                    first_child_index=first_child_index,
+                    itemid_range=itemid_range,
+                    tracking_disabled=tracking_disabled,
+                    resolved_path=resolved_path,
+                    mapping_key=used_mapping_key,
+                )
+            )
+
+        return references
 
     def __repr__(self) -> str:
         return f"{self.link_header} {self.target_idlist} {self.linkinfo.link_info} {self.stringdata} {self.extradata}"

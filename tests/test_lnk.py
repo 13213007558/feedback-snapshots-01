@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import struct
+from io import BytesIO
 from typing import TYPE_CHECKING
+from uuid import UUID
 
+import pytest
 from dissect.util.ts import uuid1timestamp
 
-from dissect.shellitem.lnk import Lnk, c_lnk
+from dissect.shellitem.lnk import FolderReferenceStatus, Lnk, c_lnk
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -207,3 +211,140 @@ def test_vista_and_above_idlist_lnk_props(vista_idlist_lnk_file: Path) -> None:
     assert vista_props.size == 0x62  # 98
     assert vista_props.idlist.itemid_list[0].itemid_size == 0x60  # 96
     assert len(vista_props.idlist.itemid_list[0].data) == 0x5E  # 94
+
+
+KNOWN_FOLDER_GUID = UUID("374de290-123f-4565-9164-39c4925e467b")  # FOLDERID_Downloads
+SPECIAL_FOLDER_ID = 0x27  # CSIDL_MYPICTURES
+
+# ItemID sizes of the synthetic target IDList. Item boundaries land at offsets 0, 12 and 26,
+# the TerminalID at offset 42.
+ITEMID_SIZES = (0x0C, 0x0E, 0x10)
+KNOWN_FOLDER_OFFSET = 0x0C
+SPECIAL_FOLDER_OFFSET = 0x1A
+
+ALICE_FOLDER_MAPPING = {
+    str(KNOWN_FOLDER_GUID): "C:\\Users\\alice\\Downloads",
+    SPECIAL_FOLDER_ID: "C:\\Users\\alice\\Pictures",
+}
+BOB_FOLDER_MAPPING = {
+    str(KNOWN_FOLDER_GUID): "D:\\Profiles\\bob\\Downloads",
+    SPECIAL_FOLDER_ID: "D:\\Profiles\\bob\\Pictures",
+}
+
+
+def _lnk_header(link_flags: int) -> bytes:
+    clsid = UUID("00021401-0000-0000-c000-000000000046").bytes_le
+    header = struct.pack("<I", 0x4C) + clsid + struct.pack("<II", link_flags, 0x20)
+    return header + b"\x00" * (0x4C - len(header))
+
+
+def _target_idlist() -> bytes:
+    items = b"".join(
+        struct.pack("<H", size) + bytes([0x41 + index]) * (size - 2) for index, size in enumerate(ITEMID_SIZES)
+    )
+    idlist = items + b"\x00\x00"
+    return struct.pack("<H", len(idlist)) + idlist
+
+
+def _known_folder_block(offset: int) -> bytes:
+    return struct.pack("<II", 0x1C, 0xA000000B) + KNOWN_FOLDER_GUID.bytes_le + struct.pack("<I", offset)
+
+
+def _special_folder_block(offset: int) -> bytes:
+    return struct.pack("<II", 0x10, 0xA0000005) + struct.pack("<II", SPECIAL_FOLDER_ID, offset)
+
+
+def _build_folder_lnk(
+    link_flags: int = 0x81,
+    known_folder_offset: int | None = KNOWN_FOLDER_OFFSET,
+    special_folder_offset: int | None = SPECIAL_FOLDER_OFFSET,
+) -> BytesIO:
+    data = _lnk_header(link_flags) + _target_idlist()
+    if special_folder_offset is not None:
+        data += _special_folder_block(special_folder_offset)
+    if known_folder_offset is not None:
+        data += _known_folder_block(known_folder_offset)
+    return BytesIO(data + b"\x00\x00\x00\x00")
+
+
+@pytest.mark.parametrize(
+    ("folder_mapping", "downloads_path", "pictures_path"),
+    [
+        (ALICE_FOLDER_MAPPING, "C:\\Users\\alice\\Downloads", "C:\\Users\\alice\\Pictures"),
+        (BOB_FOLDER_MAPPING, "D:\\Profiles\\bob\\Downloads", "D:\\Profiles\\bob\\Pictures"),
+    ],
+)
+def test_folder_references_offline_user_mappings(
+    folder_mapping: dict, downloads_path: str, pictures_path: str
+) -> None:
+    lnk_file = Lnk(_build_folder_lnk())
+    references = {reference.block_name: reference for reference in lnk_file.folder_references(folder_mapping)}
+
+    assert set(references) == {"KNOWN_FOLDER_PROPS", "SPECIAL_FOLDER_PROPS"}
+
+    known_folder = references["KNOWN_FOLDER_PROPS"]
+    assert known_folder.folder_id == KNOWN_FOLDER_GUID
+    assert known_folder.offset == KNOWN_FOLDER_OFFSET
+    assert known_folder.status == FolderReferenceStatus.RESOLVED
+    assert known_folder.first_child_index == 1
+    assert known_folder.itemid_range == (1, len(ITEMID_SIZES))
+    assert known_folder.resolved_path == downloads_path
+    assert known_folder.mapping_key == str(KNOWN_FOLDER_GUID)
+    assert not known_folder.tracking_disabled
+
+    special_folder = references["SPECIAL_FOLDER_PROPS"]
+    assert special_folder.folder_id == SPECIAL_FOLDER_ID
+    assert special_folder.offset == SPECIAL_FOLDER_OFFSET
+    assert special_folder.status == FolderReferenceStatus.RESOLVED
+    assert special_folder.first_child_index == 2
+    assert special_folder.itemid_range == (2, len(ITEMID_SIZES))
+    assert special_folder.resolved_path == pictures_path
+    assert special_folder.mapping_key == SPECIAL_FOLDER_ID
+    assert not special_folder.tracking_disabled
+
+
+def test_folder_references_without_mapping() -> None:
+    lnk_file = Lnk(_build_folder_lnk())
+    references = lnk_file.folder_references()
+
+    assert len(references) == 2
+    for reference in references:
+        assert reference.status == FolderReferenceStatus.RESOLVED
+        assert reference.resolved_path is None
+        assert reference.mapping_key is None
+
+
+@pytest.mark.parametrize(
+    ("known_folder_offset", "status"),
+    [
+        (0x0D, FolderReferenceStatus.MID_ITEM),  # in range, but not on an ItemID boundary
+        (0x2A, FolderReferenceStatus.AT_TERMINAL),  # points at the TerminalID
+        (0x30, FolderReferenceStatus.OUT_OF_RANGE),  # beyond the IDList
+    ],
+)
+def test_folder_reference_offset_status(known_folder_offset: int, status: FolderReferenceStatus) -> None:
+    lnk_file = Lnk(_build_folder_lnk(known_folder_offset=known_folder_offset, special_folder_offset=None))
+    (reference,) = lnk_file.folder_references(ALICE_FOLDER_MAPPING)
+
+    assert reference.folder_id == KNOWN_FOLDER_GUID
+    assert reference.offset == known_folder_offset
+    assert reference.status == status
+    assert reference.first_child_index is None
+    assert reference.itemid_range is None
+    # the folder identifier itself is still decoded against the offline mapping
+    assert reference.resolved_path == ALICE_FOLDER_MAPPING[str(KNOWN_FOLDER_GUID)]
+    assert reference.mapping_key == str(KNOWN_FOLDER_GUID)
+
+
+def test_folder_references_disable_known_folder_tracking() -> None:
+    link_flags = 0x81 | int(c_lnk.LINK_FLAGS.disable_known_folder_tracking)
+    lnk_file = Lnk(_build_folder_lnk(link_flags=link_flags))
+    references = lnk_file.folder_references(ALICE_FOLDER_MAPPING)
+
+    assert len(references) == 2
+    for reference in references:
+        # the blocks are ignored when the shell loads the link, so they are not the actual launch target
+        assert reference.tracking_disabled
+        assert reference.resolved_path is None
+        assert reference.mapping_key is None
+        assert reference.status == FolderReferenceStatus.RESOLVED
