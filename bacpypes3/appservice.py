@@ -592,6 +592,17 @@ class ClientSSM(SSM):
         if _debug:
             ClientSSM._debug("confirmation %r", apdu)
 
+        # a finished transaction no longer accepts traffic; late segments for
+        # an aborted exchange are dropped so a half-assembled response never
+        # reaches the application and the finished state is not disturbed
+        if self.state in (COMPLETED, ABORTED):
+            if _debug:
+                ClientSSM._debug(
+                    "    - late APDU ignored in state %s",
+                    SSM.transactionLabels[self.state],
+                )
+            return
+
         if self.state == SEGMENTED_REQUEST:
             await self.segmented_request(apdu)
         elif self.state == AWAIT_CONFIRMATION:
@@ -652,10 +663,13 @@ class ClientSSM(SSM):
             if _debug:
                 ClientSSM._debug("    - segment ack")
 
-            # actual window size is provided by server
-            self.actualWindowSize = apdu.apduWin
+            # the first ack negotiates the window; remember the size before
+            # testing whether later acks fall inside it
+            if self.actualWindowSize is None:
+                self.actualWindowSize = apdu.apduWin
 
-            # duplicate ack received?
+            # duplicate ack received?  a stale acknowledgement from a previous
+            # window must not renegotiate the window size mid-transaction
             if not self.in_window(apdu.apduSeq, self.initialSequenceNumber):
                 if _debug:
                     ClientSSM._debug("    - not in window")
@@ -672,6 +686,9 @@ class ClientSSM(SSM):
                 if _debug:
                     ClientSSM._debug("    - more segments to send")
 
+                # only an in-window ack reaches this point, so the window
+                # size comes from a legitimate negotiation, never a stale ack
+                self.actualWindowSize = apdu.apduWin
                 self.initialSequenceNumber = (apdu.apduSeq + 1) % 256
                 self.segmentRetryCount = 0
                 await self.fill_window(self.initialSequenceNumber)
@@ -887,20 +904,61 @@ class ClientSSM(SSM):
             return
 
         # proper segment number
-        if apdu.apduSeq != (self.lastSequenceNumber + 1) % 256:
+        expected_sequence = (self.lastSequenceNumber + 1) % 256
+        if apdu.apduSeq != expected_sequence:
+            if self.in_window(apdu.apduSeq, self.initialSequenceNumber):
+                # a segment at or behind the last one accepted in order is a
+                # legitimate retransmission; the modular distance survives
+                # sequence-number wrap-around
+                behind = (self.lastSequenceNumber - apdu.apduSeq) % 256
+                if behind < self.actualWindowSize:
+                    if _debug:
+                        ClientSSM._debug(
+                            "    - duplicate segment %s retransmitted",
+                            apdu.apduSeq,
+                        )
+
+                    self.restart_timer(self.segmentTimeout)
+                    segack = SegmentAckPDU(
+                        0,
+                        0,
+                        self.invokeID,
+                        self.lastSequenceNumber,
+                        self.actualWindowSize,
+                    )
+                    await self.request(segack)
+                    return
+
+                # a gap inside the window: negatively acknowledge the last
+                # segment received in order and do not buffer this one
+                if _debug:
+                    ClientSSM._debug(
+                        "    - segment %s received out of order, should be %s",
+                        apdu.apduSeq,
+                        expected_sequence,
+                    )
+
+                self.restart_timer(self.segmentTimeout)
+                segack = SegmentAckPDU(
+                    1,
+                    0,
+                    self.invokeID,
+                    self.lastSequenceNumber,
+                    self.actualWindowSize,
+                )
+                await self.request(segack)
+                return
+
+            # the sequence number is outside the negotiated window: abort
+            # rather than splicing an unrelated segment into the response
             if _debug:
                 ClientSSM._debug(
-                    "    - segment %s received out of order, should be %s",
-                    apdu.apduSeq,
-                    (self.lastSequenceNumber + 1) % 256,
+                    "    - segment %s received outside the window", apdu.apduSeq
                 )
 
-            # segment received out of order
-            self.restart_timer(self.segmentTimeout)
-            segack = SegmentAckPDU(
-                1, 0, self.invokeID, self.lastSequenceNumber, self.actualWindowSize
-            )
-            await self.request(segack)
+            abort = self.abort(AbortReason.windowSizeOutOfRange)
+            await self.request(abort)  # send it to the device
+            await self.response(abort)  # send it to the application
             return
 
         # add the data
@@ -1021,6 +1079,18 @@ class ServerSSM(SSM):
         the transaction."""
         if _debug:
             ServerSSM._debug("indication %r", apdu)
+
+        # a transaction that has run to completion or been aborted no longer
+        # accepts traffic; late segments (e.g. ones already in flight when
+        # the abort was sent) are dropped so a half-assembled message never
+        # reaches the application and the finished state is not disturbed
+        if self.state in (COMPLETED, ABORTED):
+            if _debug:
+                ServerSSM._debug(
+                    "    - late APDU ignored in state %s",
+                    SSM.transactionLabels[self.state],
+                )
+            return
 
         if self.state == IDLE:
             await self.idle(apdu)
@@ -1361,23 +1431,65 @@ class ServerSSM(SSM):
             return
 
         # proper segment number
-        if apdu.apduSeq != (self.lastSequenceNumber + 1) % 256:
+        expected_sequence = (self.lastSequenceNumber + 1) % 256
+        if apdu.apduSeq != expected_sequence:
+            if self.in_window(apdu.apduSeq, self.initialSequenceNumber):
+                # a segment at or behind the last one accepted in order is a
+                # legitimate retransmission; the modular distance survives
+                # sequence-number wrap-around
+                behind = (self.lastSequenceNumber - apdu.apduSeq) % 256
+                if behind < self.actualWindowSize:
+                    if _debug:
+                        ServerSSM._debug(
+                            "    - duplicate segment %d retransmitted",
+                            apdu.apduSeq,
+                        )
+
+                    self.restart_timer(self.segmentTimeout)
+
+                    segack = SegmentAckPDU(
+                        0,
+                        1,
+                        self.invokeID,
+                        self.lastSequenceNumber,
+                        self.actualWindowSize,
+                    )
+                    await self.response(segack)
+                    return
+
+                # a gap inside the window: this segment is ahead of the next
+                # one expected, so negatively acknowledge the last segment
+                # received in order and do not buffer it
+                if _debug:
+                    ServerSSM._debug(
+                        "    - segment %d received out of order, should be %d",
+                        apdu.apduSeq,
+                        expected_sequence,
+                    )
+
+                self.restart_timer(self.segmentTimeout)
+
+                segack = SegmentAckPDU(
+                    1,
+                    1,
+                    self.invokeID,
+                    self.lastSequenceNumber,
+                    self.actualWindowSize,
+                )
+                await self.response(segack)
+                return
+
+            # the sequence number is outside the negotiated window: the
+            # sender and receiver have lost synchronization, so abort rather
+            # than splicing an unrelated segment into the assembly
             if _debug:
                 ServerSSM._debug(
-                    "    - segment %d received out of order, should be %d",
-                    apdu.apduSeq,
-                    (self.lastSequenceNumber + 1) % 256,
+                    "    - segment %d received outside the window", apdu.apduSeq
                 )
 
-            # segment received out of order
-            self.restart_timer(self.segmentTimeout)
-
-            # send back a segment ack
-            segack = SegmentAckPDU(
-                1, 1, self.invokeID, self.initialSequenceNumber, self.actualWindowSize
-            )
-
-            await self.response(segack)
+            abort = self.abort(AbortReason.windowSizeOutOfRange)
+            await self.response(abort)  # send it to the device
+            await self.request(abort)  # send it to the application
             return
 
         # add the data
@@ -1468,10 +1580,13 @@ class ServerSSM(SSM):
             if _debug:
                 ServerSSM._debug("    - segment ack")
 
-            # actual window size is provided by client
-            self.actualWindowSize = apdu.apduWin
+            # the first ack negotiates the window; remember the size before
+            # testing whether later acks fall inside it
+            if self.actualWindowSize is None:
+                self.actualWindowSize = apdu.apduWin
 
-            # duplicate ack received?
+            # duplicate ack received?  a stale acknowledgement for a previous
+            # window must not renegotiate the window size mid-transaction
             if not self.in_window(apdu.apduSeq, self.initialSequenceNumber):
                 if _debug:
                     ServerSSM._debug("    - not in window")
@@ -1488,6 +1603,9 @@ class ServerSSM(SSM):
                     ServerSSM._debug("    - more segments to send")
 
                 self.initialSequenceNumber = (apdu.apduSeq + 1) % 256
+
+                # only an in-window ack reaches this point, so this is a
+                # legitimate (re)negotiation of the window, never a stale one
                 self.actualWindowSize = apdu.apduWin
                 self.segmentRetryCount = 0
                 await self.fill_window(self.initialSequenceNumber)
