@@ -5,6 +5,10 @@ class Error(Exception):
     pass
 
 
+class InvalidBTreeNode(Error, ValueError):
+    """Raised when a B-tree node violates the APFS on-disk layout."""
+
+
 class FileNotFoundError(Error, FileNotFoundError):
     pass
 

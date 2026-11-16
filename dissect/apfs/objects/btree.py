@@ -4,6 +4,7 @@ from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.exception import InvalidBTreeNode
 from dissect.apfs.objects.base import Object
 from dissect.apfs.objects.btree_node import BTreeNode
 from dissect.apfs.util import cmp_default
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
 
     from dissect.apfs.apfs import APFS
     from dissect.apfs.objects.omap import ObjectMap
+
+MAX_TREE_DEPTH = 64
 
 
 class BTree(Object):
@@ -35,7 +38,33 @@ class BTree(Object):
         self.header = self.root.header
 
         # Root nodes have a btree_info struct at the end of the block
+        if len(self.root.block) < len(c_apfs.btree_info):
+            raise InvalidBTreeNode(
+                f"B-tree root node {address:#x}: block of 0x{len(self.root.block):x} bytes is too small "
+                f"for the 0x{len(c_apfs.btree_info):x}-byte btree_info trailer"
+            )
+
         self.info = c_apfs.btree_info(self.root.block[-len(c_apfs.btree_info) :])
+
+        if not self.root.is_root:
+            raise InvalidBTreeNode(f"B-tree root node {address:#x} does not have the root flag set")
+
+        if self.root.type != c_apfs.OBJECT_TYPE.BTREE:
+            raise InvalidBTreeNode(
+                f"B-tree root node {address:#x}: object type is {_type_name(self.root.type)}, expected BTREE"
+            )
+
+        if self.info.bt_fixed.bt_node_size < len(c_apfs.btree_node_phys) + len(c_apfs.btree_info):
+            raise InvalidBTreeNode(
+                f"B-tree root node {address:#x}: btree_info node size 0x{self.info.bt_fixed.bt_node_size:x} "
+                f"is too small for the node header and btree_info trailer"
+            )
+
+        if self.info.bt_fixed.bt_node_size > len(self.root.block):
+            raise InvalidBTreeNode(
+                f"B-tree root node {address:#x}: btree_info node size 0x{self.info.bt_fixed.bt_node_size:x} "
+                f"exceeds block length 0x{len(self.root.block):x}"
+            )
 
         self._read_key = lru_cache(128)(self._read_key)
         self._node_child = lru_cache(128)(self._node_child)
@@ -86,6 +115,7 @@ class BTree(Object):
             node: The B-tree node to read from.
             idx: The index of the key to read.
         """
+        self._validate(node)
         entry = node.toc[idx]
 
         if node._has_fixed_kv_size:
@@ -104,17 +134,22 @@ class BTree(Object):
             node: The B-tree node to read from.
             idx: The index of the value to read.
         """
+        self._validate(node)
         entry = node.toc[idx]
 
         if node._has_fixed_kv_size:
             offset = entry.v
-            size = self._val_size
+            size = len(c_apfs.oid_t) if node.is_nonleaf else self._val_size
         else:
             offset = entry.v.off
             size = entry.v.len
 
         value_offset = self._node_size - (len(c_apfs.btree_info) if node.is_root else 0)
         return bytes(node.block[value_offset - offset : value_offset - offset + size])
+
+    def _validate(self, node: BTreeNode) -> None:
+        """Validate the layout of a B-tree node."""
+        node.check(node_size=self._node_size, key_size=self._key_size, val_size=self._val_size)
 
     def _node_child(
         self, node: BTreeNode, idx: int, omap: ObjectMap | None = None, oid: int = 0, xid: int | None = None
@@ -131,7 +166,16 @@ class BTree(Object):
         if node.is_leaf:
             raise TypeError("Cannot traverse from a leaf node")
 
-        child_oid = c_apfs.oid_t(self._read_value(node, idx))
+        self._validate(node)
+
+        raw_child_oid = self._read_value(node, idx)
+        if len(raw_child_oid) != len(c_apfs.oid_t):
+            raise InvalidBTreeNode(
+                f"B-tree node {node.address:#x}: TOC entry {idx}: child OID is {len(raw_child_oid)} bytes, "
+                f"expected {len(c_apfs.oid_t)}"
+            )
+
+        child_oid = c_apfs.oid_t(raw_child_oid)
 
         if self._uses_physical_oid:
             child_node = BTreeNode.from_address(self.container, child_oid, cipher=self.cipher)
@@ -141,6 +185,31 @@ class BTree(Object):
             if not omap:
                 raise ValueError("Cannot resolve virtual OID without an Object Map")
             child_node = BTreeNode.from_address(self.container, omap.lookup(oid + child_oid, xid), cipher=self.cipher)
+
+        if child_node.address == node.address:
+            raise InvalidBTreeNode(
+                f"B-tree node {node.address:#x}: TOC entry {idx}: child OID {child_oid:#x} points to the node itself"
+            )
+
+        if child_node.type != c_apfs.OBJECT_TYPE.BTREE_NODE:
+            raise InvalidBTreeNode(
+                f"B-tree node {node.address:#x}: TOC entry {idx}: child node {child_node.address:#x} has "
+                f"object type {_type_name(child_node.type)}, expected BTREE_NODE"
+            )
+
+        if child_node.subtype != node.subtype:
+            raise InvalidBTreeNode(
+                f"B-tree node {node.address:#x}: TOC entry {idx}: child node {child_node.address:#x} has "
+                f"subtype {_type_name(child_node.subtype)}, expected {_type_name(node.subtype)}"
+            )
+
+        self._validate(child_node)
+
+        if child_node.level != node.level - 1:
+            raise InvalidBTreeNode(
+                f"B-tree node {node.address:#x}: TOC entry {idx}: child node {child_node.address:#x} is at "
+                f"level {child_node.level}, expected level {node.level - 1}"
+            )
 
         return child_node
 
@@ -160,6 +229,11 @@ class BTree(Object):
             exact: If ``True``, only return if an exact match is found.
             cmp: Comparison function to use. Should return -1, 0, or 1
         """
+        self._validate(node)
+
+        if node.nkeys == 0:
+            return -1
+
         lo, hi = 0, node.nkeys - 1
 
         while lo <= hi:
@@ -200,13 +274,30 @@ class BTree(Object):
             xid: The transaction ID to use for resolving virtual child objects.
         """
         node = self.root
+        visited = {node.address}
 
         while node.is_nonleaf:
+            if len(visited) > MAX_TREE_DEPTH:
+                raise InvalidBTreeNode(
+                    f"B-tree search exceeded the maximum tree depth of {MAX_TREE_DEPTH} nodes "
+                    f"(node {node.address:#x})"
+                )
+
             idx = self._node_search(node, key, cmp=cmp)
             node = self._node_child(node, idx, omap, oid, xid)
+
+            if node.address in visited:
+                raise InvalidBTreeNode(f"B-tree search encountered a cycle through node {node.address:#x}")
+
+            visited.add(node.address)
 
         idx = self._node_search(node, key, exact=exact, cmp=cmp)
         if idx >= node.nkeys or idx == -1:
             raise KeyError(f"Key not found: {key!r}")
 
         return self._read_value(node, idx)
+
+
+def _type_name(value: c_apfs.OBJECT_TYPE) -> str:
+    """Render an object type or subtype, including values without an enum name."""
+    return value.name or f"{int(value):#x}"

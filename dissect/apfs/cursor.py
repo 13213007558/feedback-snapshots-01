@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from dissect.apfs.objects.btree import cmp_default
+from dissect.apfs.exception import InvalidBTreeNode
+from dissect.apfs.objects.btree import MAX_TREE_DEPTH, cmp_default
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -67,6 +68,7 @@ class Cursor:
         """Move the cursor to the first item in the B-Tree."""
         self.reset()
         while self._node.is_nonleaf:
+            self._check_depth()
             self.push()
 
         return self._node.nkeys != 0
@@ -75,6 +77,7 @@ class Cursor:
         """Move the cursor to the last item in the B-Tree."""
         self.reset()
         while self._node.is_nonleaf:
+            self._check_depth()
             self._idx = self._node.nkeys - 1
             self.push()
 
@@ -103,6 +106,7 @@ class Cursor:
 
             # Then push down to the next leaf
             while self._node.is_nonleaf:
+                self._check_depth()
                 self.push()
         else:
             return False
@@ -132,6 +136,7 @@ class Cursor:
 
             # Then push down to the rightmost leaf
             while self._node.is_nonleaf:
+                self._check_depth()
                 self._idx = self._node.nkeys - 1
                 self.push()
         else:
@@ -140,9 +145,21 @@ class Cursor:
 
         return True
 
+    def _check_depth(self) -> None:
+        """Check that pushing down another level stays within the maximum B-tree depth."""
+        if len(self._stack) >= MAX_TREE_DEPTH:
+            raise InvalidBTreeNode(
+                f"B-tree traversal exceeded the maximum tree depth of {MAX_TREE_DEPTH} nodes "
+                f"(node {self._node.address:#x})"
+            )
+
     def push(self) -> Self:
         """Push down to the child node at the current index."""
+        self._check_depth()
         child_node = self.btree._node_child(self._node, self._idx, self.omap, self.oid, self.xid)
+
+        if any(parent.address == child_node.address for parent, _ in self._stack):
+            raise InvalidBTreeNode(f"B-tree traversal encountered a cycle through node {child_node.address:#x}")
 
         self._stack.append((self._node, self._idx))
         self._node = child_node
