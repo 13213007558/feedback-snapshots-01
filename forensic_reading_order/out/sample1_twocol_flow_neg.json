@@ -1,0 +1,7331 @@
+{
+  "source_file": "/Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-132/workspace/forensic_reading_order/sample1_twocol.pdf",
+  "tool": "pdfminer.six tracing prototype",
+  "provenance_note": "stream_order and geometry are file facts; grouping and output_order are LAParams-dependent inference; pairs marked ambiguous_overlap have no uniquely determinable order.",
+  "pages": [
+    {
+      "page": 1,
+      "laparams": {
+        "line_overlap": 0.5,
+        "char_margin": 2.0,
+        "line_margin": 0.5,
+        "word_margin": 0.1,
+        "boxes_flow": -0.5,
+        "detect_vertical": false,
+        "all_texts": false
+      },
+      "char_count": 31,
+      "chars": [
+        {
+          "id": 0,
+          "text": "L",
+          "render_index": 16,
+          "bbox": [
+            50.0,
+            697.52,
+            56.67,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            50.0,
+            700.0
+          ]
+        },
+        {
+          "id": 1,
+          "text": "1",
+          "render_index": 17,
+          "bbox": [
+            56.67,
+            697.52,
+            63.34,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            56.672,
+            700.0
+          ]
+        },
+        {
+          "id": 2,
+          "text": "-",
+          "render_index": 18,
+          "bbox": [
+            63.34,
+            697.52,
+            67.34,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            63.344,
+            700.0
+          ]
+        },
+        {
+          "id": 3,
+          "text": "a",
+          "render_index": 19,
+          "bbox": [
+            67.34,
+            697.52,
+            74.01,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            67.34,
+            700.0
+          ]
+        },
+        {
+          "id": 4,
+          "text": "l",
+          "render_index": 20,
+          "bbox": [
+            74.01,
+            697.52,
+            76.68,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            74.012,
+            700.0
+          ]
+        },
+        {
+          "id": 5,
+          "text": "p",
+          "render_index": 21,
+          "bbox": [
+            76.68,
+            697.52,
+            83.35,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            76.676,
+            700.0
+          ]
+        },
+        {
+          "id": 6,
+          "text": "h",
+          "render_index": 22,
+          "bbox": [
+            83.35,
+            697.52,
+            90.02,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            83.348,
+            700.0
+          ]
+        },
+        {
+          "id": 7,
+          "text": "a",
+          "render_index": 23,
+          "bbox": [
+            90.02,
+            697.52,
+            96.69,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            90.02,
+            700.0
+          ]
+        },
+        {
+          "id": 8,
+          "text": "L",
+          "render_index": 24,
+          "bbox": [
+            50.0,
+            677.52,
+            56.67,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            50.0,
+            680.0
+          ]
+        },
+        {
+          "id": 9,
+          "text": "2",
+          "render_index": 25,
+          "bbox": [
+            56.67,
+            677.52,
+            63.34,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            56.672,
+            680.0
+          ]
+        },
+        {
+          "id": 10,
+          "text": "-",
+          "render_index": 26,
+          "bbox": [
+            63.34,
+            677.52,
+            67.34,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            63.344,
+            680.0
+          ]
+        },
+        {
+          "id": 11,
+          "text": "b",
+          "render_index": 27,
+          "bbox": [
+            67.34,
+            677.52,
+            74.01,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            67.34,
+            680.0
+          ]
+        },
+        {
+          "id": 12,
+          "text": "e",
+          "render_index": 28,
+          "bbox": [
+            74.01,
+            677.52,
+            80.68,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            74.012,
+            680.0
+          ]
+        },
+        {
+          "id": 13,
+          "text": "t",
+          "render_index": 29,
+          "bbox": [
+            80.68,
+            677.52,
+            84.02,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            80.684,
+            680.0
+          ]
+        },
+        {
+          "id": 14,
+          "text": "a",
+          "render_index": 30,
+          "bbox": [
+            84.02,
+            677.52,
+            90.69,
+            689.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            84.02,
+            680.0
+          ]
+        },
+        {
+          "id": 15,
+          "text": "R",
+          "render_index": 0,
+          "bbox": [
+            320.0,
+            707.52,
+            328.66,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            320.0,
+            710.0
+          ]
+        },
+        {
+          "id": 16,
+          "text": "1",
+          "render_index": 1,
+          "bbox": [
+            328.66,
+            707.52,
+            335.34,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            328.664,
+            710.0
+          ]
+        },
+        {
+          "id": 17,
+          "text": "-",
+          "render_index": 2,
+          "bbox": [
+            335.34,
+            707.52,
+            339.33,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            335.336,
+            710.0
+          ]
+        },
+        {
+          "id": 18,
+          "text": "g",
+          "render_index": 3,
+          "bbox": [
+            339.33,
+            707.52,
+            346.0,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            339.332,
+            710.0
+          ]
+        },
+        {
+          "id": 19,
+          "text": "a",
+          "render_index": 4,
+          "bbox": [
+            346.0,
+            707.52,
+            352.68,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            346.004,
+            710.0
+          ]
+        },
+        {
+          "id": 20,
+          "text": "m",
+          "render_index": 5,
+          "bbox": [
+            352.68,
+            707.52,
+            362.67,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            352.676,
+            710.0
+          ]
+        },
+        {
+          "id": 21,
+          "text": "m",
+          "render_index": 6,
+          "bbox": [
+            362.67,
+            707.52,
+            372.67,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            362.672,
+            710.0
+          ]
+        },
+        {
+          "id": 22,
+          "text": "a",
+          "render_index": 7,
+          "bbox": [
+            372.67,
+            707.52,
+            379.34,
+            719.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            372.668,
+            710.0
+          ]
+        },
+        {
+          "id": 23,
+          "text": "R",
+          "render_index": 8,
+          "bbox": [
+            320.0,
+            687.52,
+            328.66,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            320.0,
+            690.0
+          ]
+        },
+        {
+          "id": 24,
+          "text": "2",
+          "render_index": 9,
+          "bbox": [
+            328.66,
+            687.52,
+            335.34,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            328.664,
+            690.0
+          ]
+        },
+        {
+          "id": 25,
+          "text": "-",
+          "render_index": 10,
+          "bbox": [
+            335.34,
+            687.52,
+            339.33,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            335.336,
+            690.0
+          ]
+        },
+        {
+          "id": 26,
+          "text": "d",
+          "render_index": 11,
+          "bbox": [
+            339.33,
+            687.52,
+            346.0,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            339.332,
+            690.0
+          ]
+        },
+        {
+          "id": 27,
+          "text": "e",
+          "render_index": 12,
+          "bbox": [
+            346.0,
+            687.52,
+            352.68,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            346.004,
+            690.0
+          ]
+        },
+        {
+          "id": 28,
+          "text": "l",
+          "render_index": 13,
+          "bbox": [
+            352.68,
+            687.52,
+            355.34,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            352.676,
+            690.0
+          ]
+        },
+        {
+          "id": 29,
+          "text": "t",
+          "render_index": 14,
+          "bbox": [
+            355.34,
+            687.52,
+            358.68,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            355.34,
+            690.0
+          ]
+        },
+        {
+          "id": 30,
+          "text": "a",
+          "render_index": 15,
+          "bbox": [
+            358.68,
+            687.52,
+            365.35,
+            699.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            358.676,
+            690.0
+          ]
+        }
+      ],
+      "lines": [
+        {
+          "line_id": 0,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            50.0,
+            697.52,
+            96.69,
+            709.52
+          ],
+          "char_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "box_id": 0
+        },
+        {
+          "line_id": 1,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            50.0,
+            677.52,
+            90.69,
+            689.52
+          ],
+          "char_ids": [
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14
+          ],
+          "box_id": 1
+        },
+        {
+          "line_id": 2,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            320.0,
+            707.52,
+            379.34,
+            719.52
+          ],
+          "char_ids": [
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22
+          ],
+          "box_id": 2
+        },
+        {
+          "line_id": 3,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            320.0,
+            687.52,
+            365.35,
+            699.52
+          ],
+          "char_ids": [
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30
+          ],
+          "box_id": 3
+        }
+      ],
+      "boxes": [
+        {
+          "box_id": 0,
+          "kind": "LTTextBoxHorizontal",
+          "index": 0,
+          "bbox": [
+            50.0,
+            697.52,
+            96.69,
+            709.52
+          ],
+          "line_ids": [
+            0
+          ]
+        },
+        {
+          "box_id": 1,
+          "kind": "LTTextBoxHorizontal",
+          "index": 1,
+          "bbox": [
+            50.0,
+            677.52,
+            90.69,
+            689.52
+          ],
+          "line_ids": [
+            1
+          ]
+        },
+        {
+          "box_id": 2,
+          "kind": "LTTextBoxHorizontal",
+          "index": 2,
+          "bbox": [
+            320.0,
+            707.52,
+            379.34,
+            719.52
+          ],
+          "line_ids": [
+            2
+          ]
+        },
+        {
+          "box_id": 3,
+          "kind": "LTTextBoxHorizontal",
+          "index": 3,
+          "bbox": [
+            320.0,
+            687.52,
+            365.35,
+            699.52
+          ],
+          "line_ids": [
+            3
+          ]
+        }
+      ],
+      "output_sequence": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "output_text": "L1-alphaL2-betaR1-gammaR2-delta",
+      "pairs": [
+        {
+          "pair": [
+            0,
+            1
+          ],
+          "texts": [
+            "L",
+            "1"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            2
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            3
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            4
+          ],
+          "texts": [
+            "L",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            5
+          ],
+          "texts": [
+            "L",
+            "p"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            6
+          ],
+          "texts": [
+            "L",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            7
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            8
+          ],
+          "texts": [
+            "L",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            9
+          ],
+          "texts": [
+            "L",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            10
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            11
+          ],
+          "texts": [
+            "L",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            12
+          ],
+          "texts": [
+            "L",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            13
+          ],
+          "texts": [
+            "L",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            14
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            15
+          ],
+          "texts": [
+            "L",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            16
+          ],
+          "texts": [
+            "L",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            17
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            18
+          ],
+          "texts": [
+            "L",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            19
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            20
+          ],
+          "texts": [
+            "L",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            21
+          ],
+          "texts": [
+            "L",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            22
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            23
+          ],
+          "texts": [
+            "L",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            24
+          ],
+          "texts": [
+            "L",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            25
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            26
+          ],
+          "texts": [
+            "L",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            27
+          ],
+          "texts": [
+            "L",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            28
+          ],
+          "texts": [
+            "L",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            29
+          ],
+          "texts": [
+            "L",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            30
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            2
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            3
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            4
+          ],
+          "texts": [
+            "1",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            5
+          ],
+          "texts": [
+            "1",
+            "p"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            6
+          ],
+          "texts": [
+            "1",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            7
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            8
+          ],
+          "texts": [
+            "1",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            9
+          ],
+          "texts": [
+            "1",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            10
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            11
+          ],
+          "texts": [
+            "1",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            12
+          ],
+          "texts": [
+            "1",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            13
+          ],
+          "texts": [
+            "1",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            14
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            15
+          ],
+          "texts": [
+            "1",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            16
+          ],
+          "texts": [
+            "1",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            17
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            18
+          ],
+          "texts": [
+            "1",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            19
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            20
+          ],
+          "texts": [
+            "1",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            21
+          ],
+          "texts": [
+            "1",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            22
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            23
+          ],
+          "texts": [
+            "1",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            24
+          ],
+          "texts": [
+            "1",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            25
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            26
+          ],
+          "texts": [
+            "1",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            27
+          ],
+          "texts": [
+            "1",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            28
+          ],
+          "texts": [
+            "1",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            29
+          ],
+          "texts": [
+            "1",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            30
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            3
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            4
+          ],
+          "texts": [
+            "-",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            5
+          ],
+          "texts": [
+            "-",
+            "p"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            6
+          ],
+          "texts": [
+            "-",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            7
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            8
+          ],
+          "texts": [
+            "-",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            9
+          ],
+          "texts": [
+            "-",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            10
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            11
+          ],
+          "texts": [
+            "-",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            12
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            13
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            14
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            15
+          ],
+          "texts": [
+            "-",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            16
+          ],
+          "texts": [
+            "-",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            17
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            18
+          ],
+          "texts": [
+            "-",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            19
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            20
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            21
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            22
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            23
+          ],
+          "texts": [
+            "-",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            24
+          ],
+          "texts": [
+            "-",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            25
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            26
+          ],
+          "texts": [
+            "-",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            27
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            28
+          ],
+          "texts": [
+            "-",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            29
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            30
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            4
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            5
+          ],
+          "texts": [
+            "a",
+            "p"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            6
+          ],
+          "texts": [
+            "a",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            7
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            8
+          ],
+          "texts": [
+            "a",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            9
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            10
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            11
+          ],
+          "texts": [
+            "a",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            12
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            13
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            14
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            15
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            16
+          ],
+          "texts": [
+            "a",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            17
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            18
+          ],
+          "texts": [
+            "a",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            19
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            20
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            21
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            22
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            23
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            24
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            25
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            26
+          ],
+          "texts": [
+            "a",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            27
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            28
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            29
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            30
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            5
+          ],
+          "texts": [
+            "l",
+            "p"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            6
+          ],
+          "texts": [
+            "l",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            7
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            8
+          ],
+          "texts": [
+            "l",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            9
+          ],
+          "texts": [
+            "l",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            10
+          ],
+          "texts": [
+            "l",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            11
+          ],
+          "texts": [
+            "l",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            12
+          ],
+          "texts": [
+            "l",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            13
+          ],
+          "texts": [
+            "l",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            14
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            15
+          ],
+          "texts": [
+            "l",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            16
+          ],
+          "texts": [
+            "l",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            17
+          ],
+          "texts": [
+            "l",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            18
+          ],
+          "texts": [
+            "l",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            19
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            20
+          ],
+          "texts": [
+            "l",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            21
+          ],
+          "texts": [
+            "l",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            22
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            23
+          ],
+          "texts": [
+            "l",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            24
+          ],
+          "texts": [
+            "l",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            25
+          ],
+          "texts": [
+            "l",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            26
+          ],
+          "texts": [
+            "l",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            27
+          ],
+          "texts": [
+            "l",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            28
+          ],
+          "texts": [
+            "l",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            29
+          ],
+          "texts": [
+            "l",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            30
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            6
+          ],
+          "texts": [
+            "p",
+            "h"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            7
+          ],
+          "texts": [
+            "p",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            8
+          ],
+          "texts": [
+            "p",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            9
+          ],
+          "texts": [
+            "p",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            10
+          ],
+          "texts": [
+            "p",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            11
+          ],
+          "texts": [
+            "p",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            12
+          ],
+          "texts": [
+            "p",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            13
+          ],
+          "texts": [
+            "p",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            14
+          ],
+          "texts": [
+            "p",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            15
+          ],
+          "texts": [
+            "p",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            16
+          ],
+          "texts": [
+            "p",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            17
+          ],
+          "texts": [
+            "p",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            18
+          ],
+          "texts": [
+            "p",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            19
+          ],
+          "texts": [
+            "p",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            20
+          ],
+          "texts": [
+            "p",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            21
+          ],
+          "texts": [
+            "p",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            22
+          ],
+          "texts": [
+            "p",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            23
+          ],
+          "texts": [
+            "p",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            24
+          ],
+          "texts": [
+            "p",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            25
+          ],
+          "texts": [
+            "p",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            26
+          ],
+          "texts": [
+            "p",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            27
+          ],
+          "texts": [
+            "p",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            28
+          ],
+          "texts": [
+            "p",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            29
+          ],
+          "texts": [
+            "p",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            30
+          ],
+          "texts": [
+            "p",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            7
+          ],
+          "texts": [
+            "h",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            8
+          ],
+          "texts": [
+            "h",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            9
+          ],
+          "texts": [
+            "h",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            10
+          ],
+          "texts": [
+            "h",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            11
+          ],
+          "texts": [
+            "h",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            12
+          ],
+          "texts": [
+            "h",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            13
+          ],
+          "texts": [
+            "h",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            14
+          ],
+          "texts": [
+            "h",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            15
+          ],
+          "texts": [
+            "h",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            16
+          ],
+          "texts": [
+            "h",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            17
+          ],
+          "texts": [
+            "h",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            18
+          ],
+          "texts": [
+            "h",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            19
+          ],
+          "texts": [
+            "h",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            20
+          ],
+          "texts": [
+            "h",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            21
+          ],
+          "texts": [
+            "h",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            22
+          ],
+          "texts": [
+            "h",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            23
+          ],
+          "texts": [
+            "h",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            24
+          ],
+          "texts": [
+            "h",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            25
+          ],
+          "texts": [
+            "h",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            26
+          ],
+          "texts": [
+            "h",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            27
+          ],
+          "texts": [
+            "h",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            28
+          ],
+          "texts": [
+            "h",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            29
+          ],
+          "texts": [
+            "h",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            30
+          ],
+          "texts": [
+            "h",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            8
+          ],
+          "texts": [
+            "a",
+            "L"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            9
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            10
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            11
+          ],
+          "texts": [
+            "a",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            12
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            13
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            14
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            15
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            16
+          ],
+          "texts": [
+            "a",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            17
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            18
+          ],
+          "texts": [
+            "a",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            19
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            20
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            21
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            22
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            23
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            24
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            25
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            26
+          ],
+          "texts": [
+            "a",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            27
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            28
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            29
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            7,
+            30
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            9
+          ],
+          "texts": [
+            "L",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            10
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            11
+          ],
+          "texts": [
+            "L",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            12
+          ],
+          "texts": [
+            "L",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            13
+          ],
+          "texts": [
+            "L",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            14
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            15
+          ],
+          "texts": [
+            "L",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            16
+          ],
+          "texts": [
+            "L",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            17
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            18
+          ],
+          "texts": [
+            "L",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            19
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            20
+          ],
+          "texts": [
+            "L",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            21
+          ],
+          "texts": [
+            "L",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            22
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            23
+          ],
+          "texts": [
+            "L",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            24
+          ],
+          "texts": [
+            "L",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            25
+          ],
+          "texts": [
+            "L",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            26
+          ],
+          "texts": [
+            "L",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            27
+          ],
+          "texts": [
+            "L",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            28
+          ],
+          "texts": [
+            "L",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            29
+          ],
+          "texts": [
+            "L",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            8,
+            30
+          ],
+          "texts": [
+            "L",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            10
+          ],
+          "texts": [
+            "2",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            11
+          ],
+          "texts": [
+            "2",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            12
+          ],
+          "texts": [
+            "2",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            13
+          ],
+          "texts": [
+            "2",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            14
+          ],
+          "texts": [
+            "2",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            15
+          ],
+          "texts": [
+            "2",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            16
+          ],
+          "texts": [
+            "2",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            17
+          ],
+          "texts": [
+            "2",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            18
+          ],
+          "texts": [
+            "2",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            19
+          ],
+          "texts": [
+            "2",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            20
+          ],
+          "texts": [
+            "2",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            21
+          ],
+          "texts": [
+            "2",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            22
+          ],
+          "texts": [
+            "2",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            23
+          ],
+          "texts": [
+            "2",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            24
+          ],
+          "texts": [
+            "2",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            25
+          ],
+          "texts": [
+            "2",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            26
+          ],
+          "texts": [
+            "2",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            27
+          ],
+          "texts": [
+            "2",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            28
+          ],
+          "texts": [
+            "2",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            29
+          ],
+          "texts": [
+            "2",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            9,
+            30
+          ],
+          "texts": [
+            "2",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            11
+          ],
+          "texts": [
+            "-",
+            "b"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            12
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            13
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            14
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            15
+          ],
+          "texts": [
+            "-",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            16
+          ],
+          "texts": [
+            "-",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            17
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            18
+          ],
+          "texts": [
+            "-",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            19
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            20
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            21
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            22
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            23
+          ],
+          "texts": [
+            "-",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            24
+          ],
+          "texts": [
+            "-",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            25
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            26
+          ],
+          "texts": [
+            "-",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            27
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            28
+          ],
+          "texts": [
+            "-",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            29
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            10,
+            30
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            12
+          ],
+          "texts": [
+            "b",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            13
+          ],
+          "texts": [
+            "b",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            14
+          ],
+          "texts": [
+            "b",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            15
+          ],
+          "texts": [
+            "b",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            16
+          ],
+          "texts": [
+            "b",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            17
+          ],
+          "texts": [
+            "b",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            18
+          ],
+          "texts": [
+            "b",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            19
+          ],
+          "texts": [
+            "b",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            20
+          ],
+          "texts": [
+            "b",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            21
+          ],
+          "texts": [
+            "b",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            22
+          ],
+          "texts": [
+            "b",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            23
+          ],
+          "texts": [
+            "b",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            24
+          ],
+          "texts": [
+            "b",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            25
+          ],
+          "texts": [
+            "b",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            26
+          ],
+          "texts": [
+            "b",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            27
+          ],
+          "texts": [
+            "b",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            28
+          ],
+          "texts": [
+            "b",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            29
+          ],
+          "texts": [
+            "b",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            11,
+            30
+          ],
+          "texts": [
+            "b",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            13
+          ],
+          "texts": [
+            "e",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            14
+          ],
+          "texts": [
+            "e",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            15
+          ],
+          "texts": [
+            "e",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            16
+          ],
+          "texts": [
+            "e",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            17
+          ],
+          "texts": [
+            "e",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            18
+          ],
+          "texts": [
+            "e",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            19
+          ],
+          "texts": [
+            "e",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            20
+          ],
+          "texts": [
+            "e",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            21
+          ],
+          "texts": [
+            "e",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            22
+          ],
+          "texts": [
+            "e",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            23
+          ],
+          "texts": [
+            "e",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            24
+          ],
+          "texts": [
+            "e",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            25
+          ],
+          "texts": [
+            "e",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            26
+          ],
+          "texts": [
+            "e",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            27
+          ],
+          "texts": [
+            "e",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            28
+          ],
+          "texts": [
+            "e",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            29
+          ],
+          "texts": [
+            "e",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            12,
+            30
+          ],
+          "texts": [
+            "e",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            14
+          ],
+          "texts": [
+            "t",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            15
+          ],
+          "texts": [
+            "t",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            16
+          ],
+          "texts": [
+            "t",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            17
+          ],
+          "texts": [
+            "t",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            18
+          ],
+          "texts": [
+            "t",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            19
+          ],
+          "texts": [
+            "t",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            20
+          ],
+          "texts": [
+            "t",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            21
+          ],
+          "texts": [
+            "t",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            22
+          ],
+          "texts": [
+            "t",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            23
+          ],
+          "texts": [
+            "t",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            24
+          ],
+          "texts": [
+            "t",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            25
+          ],
+          "texts": [
+            "t",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            26
+          ],
+          "texts": [
+            "t",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            27
+          ],
+          "texts": [
+            "t",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            28
+          ],
+          "texts": [
+            "t",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            29
+          ],
+          "texts": [
+            "t",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            13,
+            30
+          ],
+          "texts": [
+            "t",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            15
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            16
+          ],
+          "texts": [
+            "a",
+            "1"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            17
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            18
+          ],
+          "texts": [
+            "a",
+            "g"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            19
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            20
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            21
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            22
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            23
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            24
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            25
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            26
+          ],
+          "texts": [
+            "a",
+            "d"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            27
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            28
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            29
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            14,
+            30
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "after",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            16
+          ],
+          "texts": [
+            "R",
+            "1"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            17
+          ],
+          "texts": [
+            "R",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            18
+          ],
+          "texts": [
+            "R",
+            "g"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            19
+          ],
+          "texts": [
+            "R",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            20
+          ],
+          "texts": [
+            "R",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            21
+          ],
+          "texts": [
+            "R",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            22
+          ],
+          "texts": [
+            "R",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            23
+          ],
+          "texts": [
+            "R",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            24
+          ],
+          "texts": [
+            "R",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            25
+          ],
+          "texts": [
+            "R",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            26
+          ],
+          "texts": [
+            "R",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            27
+          ],
+          "texts": [
+            "R",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            28
+          ],
+          "texts": [
+            "R",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            29
+          ],
+          "texts": [
+            "R",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            15,
+            30
+          ],
+          "texts": [
+            "R",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            17
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            18
+          ],
+          "texts": [
+            "1",
+            "g"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            19
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            20
+          ],
+          "texts": [
+            "1",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            21
+          ],
+          "texts": [
+            "1",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            22
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            23
+          ],
+          "texts": [
+            "1",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            24
+          ],
+          "texts": [
+            "1",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            25
+          ],
+          "texts": [
+            "1",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            26
+          ],
+          "texts": [
+            "1",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            27
+          ],
+          "texts": [
+            "1",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            28
+          ],
+          "texts": [
+            "1",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            29
+          ],
+          "texts": [
+            "1",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            16,
+            30
+          ],
+          "texts": [
+            "1",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            18
+          ],
+          "texts": [
+            "-",
+            "g"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            19
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            20
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            21
+          ],
+          "texts": [
+            "-",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            22
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            23
+          ],
+          "texts": [
+            "-",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            24
+          ],
+          "texts": [
+            "-",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            25
+          ],
+          "texts": [
+            "-",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            26
+          ],
+          "texts": [
+            "-",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            27
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            28
+          ],
+          "texts": [
+            "-",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            29
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            17,
+            30
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            19
+          ],
+          "texts": [
+            "g",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            20
+          ],
+          "texts": [
+            "g",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            21
+          ],
+          "texts": [
+            "g",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            22
+          ],
+          "texts": [
+            "g",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            23
+          ],
+          "texts": [
+            "g",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            24
+          ],
+          "texts": [
+            "g",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            25
+          ],
+          "texts": [
+            "g",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            26
+          ],
+          "texts": [
+            "g",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            27
+          ],
+          "texts": [
+            "g",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            28
+          ],
+          "texts": [
+            "g",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            29
+          ],
+          "texts": [
+            "g",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            18,
+            30
+          ],
+          "texts": [
+            "g",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            20
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            21
+          ],
+          "texts": [
+            "a",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            22
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            23
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            24
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            25
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            26
+          ],
+          "texts": [
+            "a",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            27
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            28
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            29
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            19,
+            30
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            21
+          ],
+          "texts": [
+            "m",
+            "m"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            22
+          ],
+          "texts": [
+            "m",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            23
+          ],
+          "texts": [
+            "m",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            24
+          ],
+          "texts": [
+            "m",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            25
+          ],
+          "texts": [
+            "m",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            26
+          ],
+          "texts": [
+            "m",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            27
+          ],
+          "texts": [
+            "m",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            28
+          ],
+          "texts": [
+            "m",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            29
+          ],
+          "texts": [
+            "m",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            20,
+            30
+          ],
+          "texts": [
+            "m",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            22
+          ],
+          "texts": [
+            "m",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            23
+          ],
+          "texts": [
+            "m",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            24
+          ],
+          "texts": [
+            "m",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            25
+          ],
+          "texts": [
+            "m",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            26
+          ],
+          "texts": [
+            "m",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            27
+          ],
+          "texts": [
+            "m",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            28
+          ],
+          "texts": [
+            "m",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            29
+          ],
+          "texts": [
+            "m",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            21,
+            30
+          ],
+          "texts": [
+            "m",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            23
+          ],
+          "texts": [
+            "a",
+            "R"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            24
+          ],
+          "texts": [
+            "a",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            25
+          ],
+          "texts": [
+            "a",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            26
+          ],
+          "texts": [
+            "a",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            27
+          ],
+          "texts": [
+            "a",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            28
+          ],
+          "texts": [
+            "a",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            29
+          ],
+          "texts": [
+            "a",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            22,
+            30
+          ],
+          "texts": [
+            "a",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            24
+          ],
+          "texts": [
+            "R",
+            "2"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            25
+          ],
+          "texts": [
+            "R",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            26
+          ],
+          "texts": [
+            "R",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            27
+          ],
+          "texts": [
+            "R",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            28
+          ],
+          "texts": [
+            "R",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            29
+          ],
+          "texts": [
+            "R",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            23,
+            30
+          ],
+          "texts": [
+            "R",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            25
+          ],
+          "texts": [
+            "2",
+            "-"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            26
+          ],
+          "texts": [
+            "2",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            27
+          ],
+          "texts": [
+            "2",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            28
+          ],
+          "texts": [
+            "2",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            29
+          ],
+          "texts": [
+            "2",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            24,
+            30
+          ],
+          "texts": [
+            "2",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            25,
+            26
+          ],
+          "texts": [
+            "-",
+            "d"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            25,
+            27
+          ],
+          "texts": [
+            "-",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            25,
+            28
+          ],
+          "texts": [
+            "-",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            25,
+            29
+          ],
+          "texts": [
+            "-",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            25,
+            30
+          ],
+          "texts": [
+            "-",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            26,
+            27
+          ],
+          "texts": [
+            "d",
+            "e"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            26,
+            28
+          ],
+          "texts": [
+            "d",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            26,
+            29
+          ],
+          "texts": [
+            "d",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            26,
+            30
+          ],
+          "texts": [
+            "d",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            27,
+            28
+          ],
+          "texts": [
+            "e",
+            "l"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            27,
+            29
+          ],
+          "texts": [
+            "e",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            27,
+            30
+          ],
+          "texts": [
+            "e",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            28,
+            29
+          ],
+          "texts": [
+            "l",
+            "t"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            28,
+            30
+          ],
+          "texts": [
+            "l",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            29,
+            30
+          ],
+          "texts": [
+            "t",
+            "a"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        }
+      ]
+    }
+  ]
+}

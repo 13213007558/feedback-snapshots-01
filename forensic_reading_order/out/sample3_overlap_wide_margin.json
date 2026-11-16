@@ -1,0 +1,653 @@
+{
+  "source_file": "/Users/apple/Documents/用户反馈项目/run-control/first-five/jobs/FB-20261115-SEC16-132/workspace/forensic_reading_order/sample3_overlap.pdf",
+  "tool": "pdfminer.six tracing prototype",
+  "provenance_note": "stream_order and geometry are file facts; grouping and output_order are LAParams-dependent inference; pairs marked ambiguous_overlap have no uniquely determinable order.",
+  "pages": [
+    {
+      "page": 1,
+      "laparams": {
+        "line_overlap": 0.5,
+        "char_margin": 3.0,
+        "line_margin": 0.5,
+        "word_margin": 0.1,
+        "boxes_flow": 0.5,
+        "detect_vertical": false,
+        "all_texts": false
+      },
+      "char_count": 8,
+      "chars": [
+        {
+          "id": 0,
+          "text": "A",
+          "render_index": 0,
+          "bbox": [
+            100.0,
+            697.52,
+            108.0,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            100.0,
+            700.0
+          ]
+        },
+        {
+          "id": 1,
+          "text": "A",
+          "render_index": 1,
+          "bbox": [
+            108.0,
+            697.52,
+            116.01,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            108.004,
+            700.0
+          ]
+        },
+        {
+          "id": 2,
+          "text": "A",
+          "render_index": 2,
+          "bbox": [
+            116.01,
+            697.52,
+            124.01,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            116.008,
+            700.0
+          ]
+        },
+        {
+          "id": 3,
+          "text": "A",
+          "render_index": 3,
+          "bbox": [
+            124.01,
+            697.52,
+            132.02,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            124.012,
+            700.0
+          ]
+        },
+        {
+          "id": 4,
+          "text": "B",
+          "render_index": 4,
+          "bbox": [
+            112.0,
+            697.52,
+            120.0,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            112.0,
+            700.0
+          ]
+        },
+        {
+          "id": 5,
+          "text": "B",
+          "render_index": 5,
+          "bbox": [
+            120.0,
+            697.52,
+            128.01,
+            709.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            120.004,
+            700.0
+          ]
+        },
+        {
+          "id": 6,
+          "text": "Q",
+          "render_index": 6,
+          "bbox": [
+            430.0,
+            647.52,
+            439.34,
+            659.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            430.0,
+            650.0
+          ]
+        },
+        {
+          "id": 7,
+          "text": "P",
+          "render_index": 7,
+          "bbox": [
+            400.0,
+            647.52,
+            408.0,
+            659.52
+          ],
+          "upright": true,
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            400.0,
+            650.0
+          ]
+        }
+      ],
+      "lines": [
+        {
+          "line_id": 0,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            100.0,
+            697.52,
+            132.02,
+            709.52
+          ],
+          "char_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "box_id": 0
+        },
+        {
+          "line_id": 1,
+          "kind": "LTTextLineHorizontal",
+          "bbox": [
+            400.0,
+            647.52,
+            439.34,
+            659.52
+          ],
+          "char_ids": [
+            6,
+            7
+          ],
+          "box_id": 1
+        }
+      ],
+      "boxes": [
+        {
+          "box_id": 0,
+          "kind": "LTTextBoxHorizontal",
+          "index": 0,
+          "bbox": [
+            100.0,
+            697.52,
+            132.02,
+            709.52
+          ],
+          "line_ids": [
+            0
+          ]
+        },
+        {
+          "box_id": 1,
+          "kind": "LTTextBoxHorizontal",
+          "index": 1,
+          "bbox": [
+            400.0,
+            647.52,
+            439.34,
+            659.52
+          ],
+          "line_ids": [
+            1
+          ]
+        }
+      ],
+      "output_sequence": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "output_text": "AAAABBQP",
+      "pairs": [
+        {
+          "pair": [
+            0,
+            1
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            2
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            3
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            4
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            5
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            6
+          ],
+          "texts": [
+            "A",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            0,
+            7
+          ],
+          "texts": [
+            "A",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            2
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            3
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            4
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "ambiguous_overlap",
+          "bbox_overlap": true
+        },
+        {
+          "pair": [
+            1,
+            5
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            6
+          ],
+          "texts": [
+            "A",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            1,
+            7
+          ],
+          "texts": [
+            "A",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            3
+          ],
+          "texts": [
+            "A",
+            "A"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            4
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "ambiguous_overlap",
+          "bbox_overlap": true
+        },
+        {
+          "pair": [
+            2,
+            5
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "ambiguous_overlap",
+          "bbox_overlap": true
+        },
+        {
+          "pair": [
+            2,
+            6
+          ],
+          "texts": [
+            "A",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            2,
+            7
+          ],
+          "texts": [
+            "A",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            4
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            5
+          ],
+          "texts": [
+            "A",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "ambiguous_overlap",
+          "bbox_overlap": true
+        },
+        {
+          "pair": [
+            3,
+            6
+          ],
+          "texts": [
+            "A",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            3,
+            7
+          ],
+          "texts": [
+            "A",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            5
+          ],
+          "texts": [
+            "B",
+            "B"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            6
+          ],
+          "texts": [
+            "B",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            4,
+            7
+          ],
+          "texts": [
+            "B",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            6
+          ],
+          "texts": [
+            "B",
+            "Q"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            5,
+            7
+          ],
+          "texts": [
+            "B",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "inferred_layout",
+          "bbox_overlap": false
+        },
+        {
+          "pair": [
+            6,
+            7
+          ],
+          "texts": [
+            "Q",
+            "P"
+          ],
+          "stream_relation": "before",
+          "output_relation": "before",
+          "basis": "file_stream",
+          "bbox_overlap": false
+        }
+      ]
+    }
+  ]
+}
