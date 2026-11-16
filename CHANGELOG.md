@@ -1,4 +1,13 @@
 
+Unreleased
+==========
+
+  * Add `OOXMLFile.open_package_view()` for seekable, read-only random access to
+    ECMA-376 Agile payloads without decrypting the whole `EncryptedPackage` into
+    memory. Supports cross-segment, backward and short-tail reads, distinguishes
+    the declared size from the decryptable range, and caches whole-package HMAC
+    verification only for the same read-only ciphertext source.
+
 v6.1.0 / 2026-11-04
 ===================
 

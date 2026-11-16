@@ -123,6 +123,50 @@ file.load_key(secret_key=binascii.unhexlify("AE8C36E68B4BB9EA46E5544A5FDB6693875
 file.decrypt(open("decrypted.docx", "wb"), verify_integrity=True)
 ```
 
+#### Random access to an Agile payload
+
+For ECMA-376 Agile files you can inspect the decrypted `EncryptedPackage`
+without decrypting it all into memory. The returned view is a seekable,
+read-only binary stream and decrypts only the 4096-byte segments it needs.
+
+```python
+with open("encrypted.docx", "rb") as f:
+    file = msoffcrypto.OfficeFile(f)
+    file.load_key(password="Passw0rd", verify_password=True)
+
+    view = file.open_package_view()
+
+    # Read an arbitrary range: from inside a segment, across segments,
+    # backwards, or up to the end (the final read is simply short).
+    view.read_range(0, 4)          # first four bytes of the payload
+    view.read_range(4090, 20)      # spans a segment boundary
+    view.read_range(0, 4)          # seeking backwards is fine
+    view.seek(0)
+    view.read(1024)
+
+    print(view.declared_size, view.available_size, view.stats)
+```
+
+`declared_size` is the length in the package header, while `available_size` is
+what can actually be returned (a truncated package produces a short final
+read). `stats` reports actual source bytes read, segments decrypted and cache
+hits, so the cost of a read is measurable.
+
+Integrity is a property of the whole `EncryptedPackage`, not of the segments a
+read happens to touch:
+
+```python
+view = file.open_package_view(require_integrity=True)
+view.read_range(0, 16)  # first read performs one full-stream HMAC check
+view.read_range(8192, 16)  # verification is reused; only this segment is read
+```
+
+A successful check is reused only for the same read-only ciphertext. Replacing
+the source with `view.replace_source(...)` discards it; for file-backed sources
+it is also discarded when the file's identity or metadata changes. Without
+`require_integrity`, a successful local read says nothing about the rest of the
+package.
+
 Supported key types are
 
 - Passwords

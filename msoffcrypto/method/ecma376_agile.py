@@ -5,7 +5,9 @@ import functools
 import hmac
 import io
 import logging
+import os
 import secrets
+from dataclasses import dataclass
 from hashlib import sha1, sha256, sha384, sha512
 from struct import pack, unpack
 
@@ -13,6 +15,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+import olefile
 
 from msoffcrypto import exceptions
 from msoffcrypto.method.container.ecma376_encrypted import ECMA376Encrypted
@@ -162,9 +166,664 @@ def _generate_iv(params: ECMA376AgileCipherParams, blkKey, salt_value):
     return _normalize_key(hashCalc(salt_value + blkKey).digest(), params.blockSize)
 
 
+@dataclass(frozen=True)
+class PackageViewStats:
+    """Counters describing the work performed by an :class:`ECMA376AgilePackageView`.
+
+    ``source_bytes_read`` is the number of bytes actually fetched from the
+    encrypted package source, including the 8-byte package header, ciphertext
+    segments and the bytes consumed by a full integrity pass.  It is not the
+    size of the stream unless the whole stream was read.
+
+    ``segments_decrypted`` counts AES-CBC segment decryptions that were not
+    served from the view's segment cache.  ``segment_cache_hits`` counts reads
+    served from that cache.  ``integrity_verifications`` counts full-stream
+    HMAC passes actually performed (not the reads that reused one), and
+    ``integrity_bytes_read`` is the number of encrypted bytes those passes
+    hashed.
+    """
+
+    source_bytes_read: int = 0
+    segments_decrypted: int = 0
+    segment_cache_hits: int = 0
+    integrity_verifications: int = 0
+    integrity_bytes_read: int = 0
+    plaintext_bytes_returned: int = 0
+
+
+class _PackageSource:
+    """Read-only random-access byte source used by the package view."""
+
+    size = 0
+
+    def read_at(self, offset, length):
+        raise NotImplementedError
+
+    def binding_token(self):
+        """Return a token identifying this exact immutable ciphertext.
+
+        The token changes if the source is replaced or if the underlying file
+        changes.  ``None`` means the source cannot promise stable contents and
+        a verification result must therefore never be reused.
+        """
+        return None
+
+    def close(self):
+        pass
+
+
+def _file_binding_token(fileobj):
+    """Cheap identity for a file object, including inode/mtime if available."""
+    try:
+        fileno = fileobj.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    st = os.fstat(fileno)
+    return (
+        id(fileobj),
+        fileno,
+        st.st_dev,
+        st.st_ino,
+        st.st_size,
+        st.st_mtime_ns,
+        st.st_ctime_ns,
+    )
+
+
+class BytesPackageSource(_PackageSource):
+    """Immutable, read-only snapshot of an encrypted package."""
+
+    def __init__(self, data):
+        self._data = bytes(data)
+        self.size = len(self._data)
+        self._token = ("bytes", id(self._data))
+
+    def read_at(self, offset, length):
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        return self._data[offset : offset + length]
+
+    def binding_token(self):
+        return self._token
+
+
+class SeekablePackageSource(_PackageSource):
+    """Read-only source backed by a seekable binary file object.
+
+    The caller keeps ownership of ``fileobj``; this source only seeks and reads
+    it.  Verification results are tied to the file's inode/size/mtime/ctime so
+    that an in-place modification invalidates a previous full-stream check.
+    """
+
+    def __init__(self, fileobj):
+        self._file = fileobj
+        pos = fileobj.tell()
+        fileobj.seek(0, os.SEEK_END)
+        self.size = fileobj.tell()
+        fileobj.seek(pos)
+
+    def read_at(self, offset, length):
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        if offset >= self.size or length == 0:
+            return b""
+        self._file.seek(offset)
+        return self._file.read(min(length, self.size - offset))
+
+    def binding_token(self):
+        return _file_binding_token(self._file)
+
+
+class OleStreamPackageSource(_PackageSource):
+    """Read-only source that reads an OLE stream sector-by-sector.
+
+    Unlike ``olefile.OleFileIO.openstream()`` this does not materialise the
+    entire ``EncryptedPackage`` stream in memory.  Only the requested bytes of
+    the stream's sectors (or its mini-stream, for a small package) are read.
+    """
+
+    def __init__(self, ole, stream_name="EncryptedPackage"):
+        sid = ole._find(stream_name)
+        entry = ole.direntries[sid]
+        if entry.entry_type != olefile.STGTY_STREAM:
+            raise exceptions.FileFormatError(
+                "{} is not an OLE stream".format(stream_name)
+            )
+
+        self._ole = ole
+        self._stream_name = stream_name
+        self.size = entry.size
+        self._chain = None
+        self._embedded = None
+
+        if entry.size == 0:
+            self._chain = []
+        elif entry.is_minifat:
+            # A mini-stream is by definition smaller than the 4096-byte cutoff;
+            # copying it does not defeat the purpose of the package view.
+            self._embedded = BytesPackageSource(ole.openstream(stream_name).read())
+        else:
+            if not entry.sect_chain:
+                entry.build_sect_chain(ole)
+            self._chain = list(entry.sect_chain)
+            self._fp = ole.fp
+            self._sector_size = ole.sector_size
+
+    def read_at(self, offset, length):
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        if offset >= self.size or length == 0:
+            return b""
+
+        if self._embedded is not None:
+            return self._embedded.read_at(offset, length)
+
+        remaining = min(length, self.size - offset)
+        sector_index = offset // self._sector_size
+        sector_offset = offset % self._sector_size
+        result = bytearray()
+        chain = self._chain
+
+        while remaining:
+            if sector_index >= len(chain):
+                raise exceptions.DecryptionError(
+                    "EncryptedPackage stream is truncated"
+                )
+            sector = chain[sector_index]
+            if sector >= olefile.MAXREGSECT:
+                raise exceptions.DecryptionError(
+                    "EncryptedPackage stream contains an invalid sector"
+                )
+
+            take = min(self._sector_size - sector_offset, remaining)
+            self._fp.seek(self._sector_size * (sector + 1) + sector_offset)
+            chunk = self._fp.read(take)
+            if len(chunk) != take:
+                raise exceptions.DecryptionError(
+                    "EncryptedPackage stream is truncated"
+                )
+
+            result += chunk
+            remaining -= take
+            sector_index += 1
+            sector_offset = 0
+
+        return bytes(result)
+
+    def binding_token(self):
+        file_token = _file_binding_token(self._ole.fp)
+        if file_token is None:
+            # No stable file identity (e.g. an in-memory OLE container):
+            # never reuse a verification result.
+            return None
+        return (id(self._ole), self._stream_name, self.size, file_token)
+
+    def close(self):
+        if self._embedded is not None:
+            self._embedded.close()
+
+
+class ECMA376AgilePackageView(io.RawIOBase):
+    """Seekable, read-only view over a decrypted Agile ``EncryptedPackage``.
+
+    The view decrypts only the 4096-byte AES-CBC segments needed for a given
+    read.  ``read()``/``seek()`` follow normal file semantics; ``read_range()``
+    provides explicit random access.
+
+    ``declared_size`` is the length stored in the 8-byte package header,
+    ``encrypted_size`` is the number of ciphertext bytes in the stream (after
+    the header), and ``available_size`` is the number of plaintext bytes that
+    can actually be returned.  Normally ``available_size == declared_size``;
+    for a truncated package it is bounded by the ciphertext capacity and the
+    final read is short.
+
+    Integrity is a property of the whole ``EncryptedPackage`` stream, not of
+    the segments touched by a read.  With ``require_integrity=True`` the first
+    read performs one full-stream HMAC pass before any plaintext is returned.
+    That result is reused only while the source is provably the same read-only
+    ciphertext (see :meth:`verify_integrity`).
+    """
+
+    SEGMENT_LENGTH = 4096
+    INTEGRITY_CHUNK_SIZE = 65536
+
+    def __init__(
+        self,
+        secret_key,
+        key_data_salt,
+        hash_algorithm,
+        block_size,
+        encrypted_hmac_key,
+        encrypted_hmac_value,
+        source,
+        require_integrity=False,
+        cache_segments=16,
+    ):
+        super().__init__()
+        self._secret_key = secret_key
+        self._key_data_salt = key_data_salt
+        self._hash_algorithm = hash_algorithm
+        self._block_size = int(block_size)
+        self._source = (
+            source if isinstance(source, _PackageSource) else _make_package_source(source)
+        )
+        self._encrypted_hmac_key = encrypted_hmac_key
+        self._encrypted_hmac_value = encrypted_hmac_value
+        self._require_integrity = bool(require_integrity)
+
+        if self._block_size <= 0:
+            raise ValueError("block size must be positive")
+        if cache_segments is None or cache_segments <= 0:
+            cache_segments = 0
+        self._cache_segments = cache_segments
+        self._segment_cache = {}
+        self._cache_order = []
+
+        self._pos = 0
+        self._verified_token = None
+        self._verified = False
+        self._stats = {
+            "source_bytes_read": 0,
+            "segments_decrypted": 0,
+            "segment_cache_hits": 0,
+            "integrity_verifications": 0,
+            "integrity_bytes_read": 0,
+            "plaintext_bytes_returned": 0,
+        }
+
+        header = self._read_source(0, 8)
+        if len(header) != 8:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage stream is too short to contain a size header"
+            )
+        (self.declared_size,) = unpack("<Q", header)
+        self.encrypted_size = max(0, self._source.size - 8)
+        # AES-CBC can only decrypt complete blocks.  Any trailing partial block
+        # is not part of the returnable plaintext range.
+        self._decryptable_size = (
+            self.encrypted_size // self._block_size
+        ) * self._block_size
+        self.available_size = min(self.declared_size, self._decryptable_size)
+
+        # A local segment decrypt succeeding does not say anything about the
+        # rest of the package: keep this flag independent from reads.
+        self._truncated = self.declared_size > self._decryptable_size
+
+    # -- source helpers -------------------------------------------------
+    def _read_source(self, offset, length):
+        data = self._source.read_at(offset, length)
+        self._stats["source_bytes_read"] += len(data)
+        return data
+
+    # -- statistics -----------------------------------------------------
+    @property
+    def stats(self):
+        """Return a snapshot of :class:`PackageViewStats`."""
+        return PackageViewStats(**self._stats)
+
+    def reset_stats(self):
+        """Reset all counters without discarding cached segments."""
+        for key in self._stats:
+            self._stats[key] = 0
+
+    def replace_source(self, source):
+        """Point the view at a different ciphertext source.
+
+        Any previous integrity verification is discarded unconditionally: even
+        if the new source happens to report the same binding token, it is not
+        the ciphertext that was authenticated.  Cached plaintext segments are
+        dropped as well, since they belong to the old source.
+        """
+        new_source = _make_package_source(source)
+        old_source = self._source
+        self._source = new_source
+        self._segment_cache.clear()
+        self._cache_order.clear()
+        self._verified = False
+        self._verified_token = None
+        if old_source is not new_source:
+            old_source.close()
+
+        header = self._read_source(0, 8)
+        if len(header) != 8:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage stream is too short to contain a size header"
+            )
+        (self.declared_size,) = unpack("<Q", header)
+        self.encrypted_size = max(0, self._source.size - 8)
+        self._decryptable_size = (
+            self.encrypted_size // self._block_size
+        ) * self._block_size
+        self.available_size = min(self.declared_size, self._decryptable_size)
+        self._truncated = self.declared_size > self._decryptable_size
+        self._pos = 0
+
+    @property
+    def source_bytes_read(self):
+        return self._stats["source_bytes_read"]
+
+    @property
+    def segments_decrypted(self):
+        return self._stats["segments_decrypted"]
+
+    @property
+    def decryptable_size(self):
+        """Ciphertext capacity in complete AES blocks, excluding the header."""
+        return self._decryptable_size
+
+    @property
+    def truncated(self):
+        """True when the declared plaintext size exceeds ciphertext capacity."""
+        return self._truncated
+
+    @property
+    def verified(self):
+        """True if the current source passed verification and is unchanged.
+
+        For a source without a stable identity, a successful check is true
+        only until the source is replaced; it is never reused for a later
+        check.
+        """
+        if not self._verified:
+            return False
+        if self._verified_token is None:
+            return True
+        return self._source.binding_token() == self._verified_token
+
+    # -- segment decryption --------------------------------------------
+    def _decrypt_segment(self, index):
+        cached = self._segment_cache.get(index)
+        if cached is not None:
+            self._stats["segment_cache_hits"] += 1
+            self._touch_cache(index)
+            return cached
+
+        segment_offset = index * self.SEGMENT_LENGTH
+        segment_length = min(
+            self.SEGMENT_LENGTH, self._decryptable_size - segment_offset
+        )
+        if segment_length <= 0:
+            return b""
+        if segment_length % self._block_size:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage segment is not block aligned"
+            )
+
+        ciphertext = self._read_source(8 + segment_offset, segment_length)
+        if len(ciphertext) != segment_length:
+            raise exceptions.DecryptionError(
+                "EncryptedPackage stream is truncated"
+            )
+
+        hash_calc = _get_hash_func(self._hash_algorithm)
+        salt_with_block_key = self._key_data_salt + pack("<I", index)
+        iv = hash_calc(salt_with_block_key).digest()[: self._block_size]
+        plaintext = _decrypt_aes_cbc(ciphertext, self._secret_key, iv)
+        self._stats["segments_decrypted"] += 1
+
+        if self._cache_segments:
+            self._segment_cache[index] = plaintext
+            self._touch_cache(index)
+            while len(self._cache_order) > self._cache_segments:
+                evicted = self._cache_order.pop(0)
+                self._segment_cache.pop(evicted, None)
+
+        return plaintext
+
+    def _touch_cache(self, index):
+        try:
+            self._cache_order.remove(index)
+        except ValueError:
+            pass
+        self._cache_order.append(index)
+
+    # -- integrity ------------------------------------------------------
+    def _integrity_parameters(self):
+        hash_calc = _get_hash_func(self._hash_algorithm)
+        iv1 = hash_calc(self._key_data_salt + blkKey_dataIntegrity1).digest()
+        iv1 = iv1[: self._block_size]
+        iv2 = hash_calc(self._key_data_salt + blkKey_dataIntegrity2).digest()
+        iv2 = iv2[: self._block_size]
+
+        hash_size = hash_calc().digest_size
+        hmac_key = _decrypt_aes_cbc(
+            self._encrypted_hmac_key, self._secret_key, iv1
+        )[:hash_size]
+        hmac_value = _decrypt_aes_cbc(
+            self._encrypted_hmac_value, self._secret_key, iv2
+        )[:hash_size]
+        return hmac_key, hmac_value, hash_calc
+
+    def verify_integrity(self, force=False):
+        """Verify the HMAC of the complete ``EncryptedPackage`` stream.
+
+        Returns ``True`` when valid.  A successful result is reused only for
+        the exact same read-only ciphertext: the cache is dropped as soon as
+        the source binding changes (for example after the backing file is
+        modified or replaced).  Sources without a stable identity
+        (``binding_token() is None``) are never reused and are re-read for
+        every check.  A failed check is never cached.
+        """
+        token = self._source.binding_token()
+        if (
+            not force
+            and self._verified
+            and token is not None
+            and token == self._verified_token
+        ):
+            return True
+
+        hmac_key, hmac_value, hash_calc = self._integrity_parameters()
+        msg_hmac = hmac.new(hmac_key, digestmod=hash_calc)
+
+        offset = 0
+        while offset < self._source.size:
+            chunk = self._read_source(
+                offset, min(self.INTEGRITY_CHUNK_SIZE, self._source.size - offset)
+            )
+            if not chunk:
+                raise exceptions.DecryptionError(
+                    "EncryptedPackage stream ended during integrity verification"
+                )
+            msg_hmac.update(chunk)
+            offset += len(chunk)
+
+        self._stats["integrity_verifications"] += 1
+        self._stats["integrity_bytes_read"] += offset
+
+        verified = hmac.compare_digest(hmac_value, msg_hmac.digest())
+        if verified and token is not None:
+            # If the source changed while it was being hashed, the bytes that
+            # were authenticated are not the bytes currently exposed; do not
+            # reuse this result.
+            verified = self._source.binding_token() == token
+
+        if verified:
+            self._verified = True
+            self._verified_token = token
+        else:
+            self._verified = False
+            self._verified_token = None
+        return verified
+
+    def _ensure_integrity(self):
+        if not self._require_integrity:
+            return
+        if not self.verify_integrity():
+            raise exceptions.InvalidKeyError(
+                "Payload integrity verification failed"
+            )
+
+    def require_integrity(self, enabled=True):
+        """Enable or disable whole-package verification for subsequent reads.
+
+        Enabling this does not by itself verify the package; the next
+        non-empty read does.  Disabling it does not discard an existing
+        successful verification, which can still be inspected via
+        :attr:`verified`.
+        """
+        self._require_integrity = bool(enabled)
+        return self
+
+    # -- reading --------------------------------------------------------
+    def read_range(self, offset, length):
+        """Read up to ``length`` plaintext bytes starting at ``offset``.
+
+        ``offset`` may start inside a segment, a range may span any number of
+        segments, and seeking backwards is allowed.  A range extending past
+        ``available_size`` is shortened rather than padded; ``b""`` is
+        returned when ``offset`` is at or beyond the end.
+        """
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        if self.closed:
+            raise ValueError("I/O operation on closed package view")
+        if offset >= self.available_size or length == 0:
+            return b""
+
+        self._ensure_integrity()
+
+        end = min(offset + length, self.available_size)
+        position = offset
+        out = bytearray()
+
+        while position < end:
+            segment_index = position // self.SEGMENT_LENGTH
+            segment_offset = position % self.SEGMENT_LENGTH
+            segment = self._decrypt_segment(segment_index)
+            if segment_offset >= len(segment):
+                break
+            take = min(len(segment) - segment_offset, end - position)
+            out += segment[segment_offset : segment_offset + take]
+            position += take
+
+        if self._require_integrity and self._verified_token is not None:
+            # The source may have changed while the segments were being read.
+            # Do not hand out plaintext authenticated against other bytes.
+            token = self._source.binding_token()
+            if token != self._verified_token:
+                self._verified = False
+                self._verified_token = None
+                raise exceptions.InvalidKeyError(
+                    "Payload integrity verification failed"
+                )
+
+        self._stats["plaintext_bytes_returned"] += len(out)
+        return bytes(out)
+
+    def read(self, size=-1):
+        if self.closed:
+            raise ValueError("I/O operation on closed package view")
+        if size is None or size < 0:
+            size = self.available_size - self._pos
+        data = self.read_range(self._pos, size)
+        self._pos += len(data)
+        return data
+
+    def readinto(self, buffer):
+        if self.closed:
+            raise ValueError("I/O operation on closed package view")
+        data = self.read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        if self.closed:
+            raise ValueError("I/O operation on closed package view")
+        if whence == os.SEEK_SET:
+            new_pos = offset
+        elif whence == os.SEEK_CUR:
+            new_pos = self._pos + offset
+        elif whence == os.SEEK_END:
+            new_pos = self.declared_size + offset
+        else:
+            raise ValueError("invalid whence value")
+        if new_pos < 0:
+            raise ValueError("negative seek position")
+        self._pos = new_pos
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def writable(self):
+        return False
+
+    @property
+    def size(self):
+        """Declared plaintext size from the package header."""
+        return self.declared_size
+
+    def close(self):
+        if not self.closed:
+            self._segment_cache.clear()
+            self._cache_order.clear()
+            self._source.close()
+        super().close()
+
+
+def _make_package_source(source):
+    """Coerce bytes/file objects into a read-only :class:`_PackageSource`."""
+    if isinstance(source, _PackageSource):
+        return source
+    if isinstance(source, olefile.OleFileIO):
+        return OleStreamPackageSource(source)
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return BytesPackageSource(source)
+    if hasattr(source, "read") and hasattr(source, "seek"):
+        try:
+            source.fileno()
+        except (AttributeError, OSError, ValueError):
+            # An in-memory stream can be snapshotted so later mutation cannot
+            # invalidate (or reuse) a verification result.
+            position = source.tell()
+            source.seek(0)
+            data = source.read()
+            source.seek(position)
+            return BytesPackageSource(data)
+        return SeekablePackageSource(source)
+    raise TypeError("Unsupported package source: {!r}".format(type(source)))
+
+
 class ECMA376Agile:
     def __init__(self):
         pass
+
+    @staticmethod
+    def open_package_view(
+        secret_key,
+        info,
+        source,
+        require_integrity=False,
+        cache_segments=16,
+    ):
+        """Return a seekable, read-only view over an Agile payload.
+
+        ``info`` is the mapping produced by ``_parseinfo_agile``.  ``source``
+        may be an OLE ``OleFileIO``, a seekable binary file, or a bytes-like
+        object containing the full ``EncryptedPackage`` stream.
+        """
+        if isinstance(source, olefile.OleFileIO):
+            source = OleStreamPackageSource(source)
+
+        return ECMA376AgilePackageView(
+            secret_key,
+            info["keyDataSalt"],
+            info["keyDataHashAlgorithm"],
+            info["keyDataBlockSize"],
+            info["encryptedHmacKey"],
+            info["encryptedHmacValue"],
+            source,
+            require_integrity=require_integrity,
+            cache_segments=cache_segments,
+        )
 
     @staticmethod
     def _derive_iterated_hash_from_password(

@@ -248,6 +248,48 @@ class OOXMLFile(base.BaseOfficeFile):
         else:
             raise exceptions.DecryptionError("No key specified")
 
+    def open_package_view(self, require_integrity=False, cache_segments=16):
+        """Return a seekable, read-only view over the decrypted payload.
+
+        Only the requested 4096-byte segments of ``EncryptedPackage`` are
+        decrypted; the whole stream is never materialised.  This is currently
+        available for ECMA-376 Agile encryption only.
+
+        Args:
+            require_integrity: If true, the first read performs a complete
+                HMAC check of the whole ``EncryptedPackage`` stream and raises
+                :class:`msoffcrypto.exceptions.InvalidKeyError` if it fails.
+                A successful result is reused only while the same read-only
+                ciphertext is still in place.
+            cache_segments: Number of decrypted 4096-byte segments to keep in
+                memory (``0`` disables the cache).
+
+        Returns:
+            ECMA376AgilePackageView: A read-only, seekable binary stream.
+
+        >>> with open("tests/inputs/example_password.docx", "rb") as f:
+        ...     officefile = OOXMLFile(f)
+        ...     officefile.load_key(password="Password1234_", verify_password=True)
+        ...     view = officefile.open_package_view()
+        ...     view.read_range(0, 4)[:2]
+        b'PK'
+        """
+        if self.type != "agile":
+            raise exceptions.DecryptionError(
+                "Random-access package views are only supported for "
+                "ECMA-376 Agile encryption"
+            )
+        if self.secret_key is None:
+            raise exceptions.DecryptionError("No key specified")
+
+        return ECMA376Agile.open_package_view(
+            self.secret_key,
+            self.info,
+            self.file,
+            require_integrity=require_integrity,
+            cache_segments=cache_segments,
+        )
+
     def decrypt(self, outfile, verify_integrity=False):
         """
         >>> from msoffcrypto import exceptions
