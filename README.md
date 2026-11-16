@@ -465,7 +465,25 @@ credential.authenticator_extension_outputs
 
 ### Attestation Types
 
-You can define what trust policy to enforce by setting `acceptable_attestation_types` config to a subset of `['None', 'Self', 'Basic', 'AttCA', 'Basic_or_AttCA']` and `attestation_root_certificates_finders` to an object that responds to `#find` and returns the corresponding root certificate for each registration. The `#find` method will be called passing keyword arguments `attestation_format`, `aaguid` and `attestation_certificate_key_id`.
+You can define what trust policy to enforce by setting `acceptable_attestation_types` config to a subset of `['None', 'Self', 'Basic', 'AttCA', 'Basic_or_AttCA']` and `attestation_root_certificates_finders` to an object, or an ordered array of objects, that respond to `#find`. The `#find` method will be called passing keyword arguments `attestation_format`, `aaguid` and `attestation_certificate_key_id`.
+
+Finders are consulted in order, for example an internal allowlist first and a public root source second. A finder can return an array of root certificates, `nil`, or one of the explicit results below. Arrays and `nil` are the legacy interface: a non-empty array is a hit and an empty array or `nil` is a no-match.
+
+```ruby
+WebAuthn::AttestationRootCertificatesFinder::Result.found(certificates, source: :my_internal_allowlist)
+WebAuthn::AttestationRootCertificatesFinder::Result.not_found(source: :my_internal_allowlist)
+WebAuthn::AttestationRootCertificatesFinder::Result.denied(source: :my_internal_allowlist, reason: "revoked")
+WebAuthn::AttestationRootCertificatesFinder::Result.unavailable(source: :my_internal_allowlist, reason: "timeout")
+```
+
+- `found` stops resolution and returns the certificates together with the source that provided them.
+- `not_found` continues with the next finder.
+- `denied` stops verification immediately. Later finders and per-format default roots are never consulted, so an internal explicit rejection cannot be overridden by a public root source.
+- `unavailable` stops verification by default. Continuing with the next finder is allowed only by the relying party's trusted configuration via `attestation_root_certificates_finder_unavailable_policy` (`:fail` by default, or `:continue`). If resolution continues but no later source finds a root, the result is still reported as unavailable, not as a no-match.
+
+These results are policy inputs, not proof of trust. The selected root certificates must still validate the attestation certificate chain. A finder hit based on the client-provided AAGUID cannot by itself make registration succeed.
+
+After verification, `WebAuthn::AuthenticatorAttestationResponse#attestation_root_certificates_result` exposes the result used for chain validation, including its `status`, `certificates` and `source`.
 
 ## Testing Your Integration
 

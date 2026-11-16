@@ -38,6 +38,8 @@ module WebAuthn
                    :acceptable_attestation_types=,
                    :attestation_root_certificates_finders,
                    :attestation_root_certificates_finders=,
+                   :attestation_root_certificates_finder_unavailable_policy,
+                   :attestation_root_certificates_finder_unavailable_policy=,
                    :encoder,
                    :encoder=,
                    :legacy_u2f_appid,

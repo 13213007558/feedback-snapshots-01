@@ -62,6 +62,7 @@ module WebAuthn
       :aaguid,
       :attestation_statement,
       :attestation_certificate_key_id,
+      :attestation_root_certificates_result,
       :authenticator_data,
       :credential
     )

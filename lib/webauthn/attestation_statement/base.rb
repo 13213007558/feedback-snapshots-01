@@ -4,6 +4,7 @@ require "cose/algorithm"
 require "cose/error"
 require "cose/rsapkcs1_algorithm"
 require "openssl"
+require "webauthn/attestation_root_certificates_finder"
 require "webauthn/authenticator_data/attested_credential_data"
 require "webauthn/error"
 
@@ -49,7 +50,51 @@ module WebAuthn
         attestation_certificate.subject_key_identifier&.unpack1("H*")
       end
 
+      # The root-certificate resolution used by the last chain verification,
+      # including which source made the decision. It is nil before a chain
+      # verification that needed roots is attempted.
+      def attestation_root_certificates_result
+        @attestation_root_certificates_result
+      end
+
       private
+
+      # A found result is only an input to chain validation; it never
+      # establishes trust on its own.
+      def resolve_attestation_root_certificates(aaguid: nil, attestation_certificate_key_id: nil)
+        results = (@attestation_root_certificates_results ||= {})
+        cache_key = [
+          relying_party.attestation_root_certificates_finders.object_id,
+          aaguid,
+          attestation_certificate_key_id
+        ]
+
+        @attestation_root_certificates_result =
+          results[cache_key] ||= begin
+            result =
+              AttestationRootCertificatesFinder::Resolver.new(
+                relying_party.attestation_root_certificates_finders,
+                relying_party: relying_party
+              ).resolve(
+                attestation_format: format,
+                aaguid: aaguid,
+                attestation_certificate_key_id: attestation_certificate_key_id
+              )
+
+            if result.not_found? && respond_to?(:default_root_certificates, true)
+              default_certificates = default_root_certificates
+
+              if default_certificates&.any?
+                result = AttestationRootCertificatesFinder::Found.new(
+                  certificates: default_certificates,
+                  source: :default
+                )
+              end
+            end
+
+            result
+          end
+      end
 
       attr_reader :statement, :relying_party
 
@@ -129,24 +174,31 @@ module WebAuthn
       end
 
       def root_certificates(aaguid: nil, attestation_certificate_key_id: nil)
-        root_certificates =
-          relying_party.attestation_root_certificates_finders.reduce([]) do |certs, finder|
-            if certs.empty?
-              finder.find(
-                attestation_format: format,
-                aaguid: aaguid,
-                attestation_certificate_key_id: attestation_certificate_key_id
-              ) || []
-            else
-              certs
-            end
-          end
+        result = resolve_attestation_root_certificates(
+          aaguid: aaguid,
+          attestation_certificate_key_id: attestation_certificate_key_id
+        )
 
-        if root_certificates.empty? && respond_to?(:default_root_certificates, true)
-          default_root_certificates
+        case result.status
+        when :denied
+          raise AttestationRootCertificatesFinder::DeniedError,
+                "Attestation root certificate finder denied the attestation" \
+                "#{source_suffix(result)}#{reason_suffix(result)}"
+        when :unavailable
+          raise AttestationRootCertificatesFinder::UnavailableError,
+                "Attestation root certificate finder is unavailable" \
+                "#{source_suffix(result)}#{reason_suffix(result)}"
         else
-          root_certificates
+          result.certificates
         end
+      end
+
+      def source_suffix(result)
+        result.source ? " (source: #{result.source.inspect})" : ""
+      end
+
+      def reason_suffix(result)
+        result.reason ? ": #{result.reason}" : ""
       end
 
       def valid_signature?(authenticator_data, client_data_hash, public_key = attestation_certificate.public_key)

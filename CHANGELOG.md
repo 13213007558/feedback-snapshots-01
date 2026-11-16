@@ -2,6 +2,11 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add explicit `found`, `not_found`, `denied` and `unavailable` results to attestation root certificate finders. A denial now terminates verification instead of falling back to a later finder or default roots. Unavailability is controlled by the new `attestation_root_certificates_finder_unavailable_policy` configuration (`:fail` by default). Legacy finders returning an array or `nil` keep working.
+- Expose the resolved `#attestation_root_certificates_result`, including its source, on `WebAuthn::AuthenticatorAttestationResponse`.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

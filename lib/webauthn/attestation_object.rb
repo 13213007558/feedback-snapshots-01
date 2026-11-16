@@ -42,6 +42,6 @@ module WebAuthn
     end
 
     def_delegators :authenticator_data, :credential, :aaguid
-    def_delegators :attestation_statement, :attestation_certificate_key_id
+    def_delegators :attestation_statement, :attestation_certificate_key_id, :attestation_root_certificates_result
   end
 end

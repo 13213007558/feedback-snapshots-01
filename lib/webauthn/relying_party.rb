@@ -29,6 +29,7 @@ module WebAuthn
       silent_authentication: false,
       acceptable_attestation_types: ['None', 'Self', 'Basic', 'AttCA', 'Basic_or_AttCA', 'AnonCA'],
       attestation_root_certificates_finders: [],
+      attestation_root_certificates_finder_unavailable_policy: :fail,
       legacy_u2f_appid: nil
     )
       @algorithms = algorithms
@@ -42,6 +43,8 @@ module WebAuthn
       @credential_options_timeout = credential_options_timeout
       @silent_authentication = silent_authentication
       @acceptable_attestation_types = acceptable_attestation_types
+      @attestation_root_certificates_finder_unavailable_policy =
+        attestation_root_certificates_finder_unavailable_policy
       @legacy_u2f_appid = legacy_u2f_appid
       self.origin = origin
       self.attestation_root_certificates_finders = attestation_root_certificates_finders
@@ -58,6 +61,7 @@ module WebAuthn
                   :credential_options_timeout,
                   :silent_authentication,
                   :acceptable_attestation_types,
+                  :attestation_root_certificates_finder_unavailable_policy,
                   :legacy_u2f_appid
 
     attr_reader :attestation_root_certificates_finders
