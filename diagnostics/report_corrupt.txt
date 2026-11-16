@@ -1,0 +1,54 @@
+==============================================================================
+BLF CURRENT vs SHADOW OFFLINE COMPARISON  -  diagnostics/sample_corrupt.blf
+==============================================================================
+file size=33792  primary magic valid=True dump=1 descriptors=6
+
+### CONTROL PAIR
+  [current] type=0 status=parsed      offset=0 size=1024
+             control: magic_valid=True dump=1 extend=CLFS_EXTEND_STATE.ClfsExtendStateNone flush_block=0 blocks=6
+  [shadow ] type=1 status=zero_block  offset=1024 size=1024
+             detail: block header at offset 1024 is all-zero/uninitialized (no metadata transaction stored here)
+
+### GENERAL PAIR
+  [current] type=2 status=parsed      offset=2048 size=31232
+             base: dump=33 IdLog=752f16000519ea11a810000d3aa41ef3 active=2 clients=1 usn=1
+             stream id=0 name=\Device\HarddiskVolume3\wd\compilerTemp\BMT.SignCompDB.1lltmqvq.24r\MetadataEsdGen\mounted_image\Windows\System32\config\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf
+                 lsn_archive_tail   phys=0xffffffff00000000 (container=4294967295 record=0 INVALID)
+                 lsn_base           phys=0x0000000000008401 (container=0 record=33793)
+                 lsn_last           phys=0x0000000000009200 (container=0 record=37376)
+                 lsn_flush          phys=0x0000000000008401 (container=0 record=33793)
+                 lsn_physical_base  phys=0x0000000000009001 (container=0 record=36865)
+             container id=1 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000002.regtrans-ms
+             container id=0 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000001.regtrans-ms
+  [shadow ] type=3 status=unparseable offset=33280 size=31232
+             detail: block header at offset 33280 cannot be decoded: ValueError: memoryview assignment: lvalue and rvalue have different structures
+
+### SCRATCH PAIR
+  [current] type=4 status=missing     offset=64512 size=512
+             detail: descriptor points to offset 64512 image_size 512 but file is only 33792 bytes; block is truncated away
+  [shadow ] type=5 status=missing     offset=65024 size=512
+             detail: descriptor points to offset 65024 image_size 512 but file is only 33792 bytes; block is truncated away
+
+### FINDINGS  (note 'divergent' = expected snapshot difference, not corruption)
+  [consistent           ] primary control block readable: control block at 0 has valid magic and declares 6 metadata descriptors
+  [undecidable          ] shadow control slot uninitialized: shadow control slot is an all-zero block: no previous control transaction was persisted there (or it was never used). This is not evidence of corruption and gives no second control view to compare.
+  [undecidable          ] general block only one side readable (current): the current general block parsed; the other side is unparseable. Single-view metadata can still establish container identity, but no cross-copy comparison is possible and the missing side cannot be assumed equal or deleted.
+  [undecidable          ] general block shadow unreadable: unparseable: block header at offset 33280 cannot be decoded: ValueError: memoryview assignment: lvalue and rvalue have different structures
+  [undecidable          ] scratch (current) unavailable: missing: descriptor points to offset 64512 image_size 512 but file is only 33792 bytes; block is truncated away
+  [undecidable          ] scratch (shadow) unavailable: missing: descriptor points to offset 65024 image_size 512 but file is only 33792 bytes; block is truncated away
+
+### LIMITATIONS / UNDECIDABLE GROUNDS
+  - dissect.clfs parses block checksums but never verifies them; checksum_raw is evidence only and cannot authenticate a block's integrity here.
+  - No wall-clock timestamp is stored in the parsed control/base/scratch structures. Nothing in this report orders events by time; LSN magnitude is explicitly not used as a clock.
+  - Shadow blocks are previous metadata transaction images, not deletion records: a shadow-only entry is never labelled a deleted object.
+  - control shadow: zero_block at descriptor offset 1024 -> block header at offset 1024 is all-zero/uninitialized (no metadata transaction stored here)
+  - general shadow: unparseable at descriptor offset 33280 -> block header at offset 33280 cannot be decoded: ValueError: memoryview assignment: lvalue and rvalue have different structures
+  - scratch current: missing at descriptor offset 64512 -> descriptor points to offset 64512 image_size 512 but file is only 33792 bytes; block is truncated away
+  - scratch shadow: missing at descriptor offset 65024 -> descriptor points to offset 65024 image_size 512 but file is only 33792 bytes; block is truncated away
+  - general block(s) not readable on: shadow. Cross-copy agreement cannot be evaluated; conclusions rely on the single readable view and are marked undecidable where the second view would be needed.
+
+### READABLE CONTAINER SET - MINIMUM EVIDENCE
+  Minimum BLF-metadata evidence for a readable container set: (1) the primary control record's magic is valid and its descriptor table locates a general block whose (2) log-block header and base record parse, (3) client symbol table yields >=1 stream, and (4) container symbol table yields >=1 container context each with a non-empty name, positive size and an id that can be matched to a stream. One readable general-block view is sufficient metadata evidence; a second readable view only corroborates it. To actually read log records, each named .regtrans-ms container must additionally exist on disk, be readable, and its first log-block header must parse at the stream's container start offset; archive-tail LSN validity is NOT required.
+  view=current metadata_minimum_met=True (parsed=True stream=True container_ctx=True well_formed=True)
+  view=shadow  metadata_minimum_met=False (parsed=False stream=False container_ctx=False well_formed=False)
+  metadata evidence established: True from views ['current']; two-view corroboration: False

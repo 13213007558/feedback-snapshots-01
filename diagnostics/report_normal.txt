@@ -1,0 +1,78 @@
+==============================================================================
+BLF CURRENT vs SHADOW OFFLINE COMPARISON  -  tests/data/DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf
+==============================================================================
+file size=65536  primary magic valid=True dump=1 descriptors=6
+
+### CONTROL PAIR
+  [current] type=0 status=parsed      offset=0 size=1024
+             control: magic_valid=True dump=1 extend=CLFS_EXTEND_STATE.ClfsExtendStateNone flush_block=0 blocks=6
+  [shadow ] type=1 status=zero_block  offset=1024 size=1024
+             detail: block header at offset 1024 is all-zero/uninitialized (no metadata transaction stored here)
+
+### GENERAL PAIR
+  [current] type=2 status=parsed      offset=2048 size=31232
+             base: dump=33 IdLog=752f16000519ea11a810000d3aa41ef3 active=2 clients=1 usn=1
+             stream id=0 name=\Device\HarddiskVolume3\wd\compilerTemp\BMT.SignCompDB.1lltmqvq.24r\MetadataEsdGen\mounted_image\Windows\System32\config\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf
+                 lsn_archive_tail   phys=0xffffffff00000000 (container=4294967295 record=0 INVALID)
+                 lsn_base           phys=0x0000000000008401 (container=0 record=33793)
+                 lsn_last           phys=0x0000000000009200 (container=0 record=37376)
+                 lsn_flush          phys=0x0000000000008401 (container=0 record=33793)
+                 lsn_physical_base  phys=0x0000000000009001 (container=0 record=36865)
+             container id=1 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000002.regtrans-ms
+             container id=0 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000001.regtrans-ms
+  [shadow ] type=3 status=parsed      offset=33280 size=31232
+             base: dump=34 IdLog=752f16000519ea11a810000d3aa41ef3 active=2 clients=1 usn=1
+             stream id=0 name=\Device\HarddiskVolume3\wd\compilerTemp\BMT.SignCompDB.1lltmqvq.24r\MetadataEsdGen\mounted_image\Windows\System32\config\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf
+                 lsn_archive_tail   phys=0xffffffff00000000 (container=4294967295 record=0 INVALID)
+                 lsn_base           phys=0x0000000000009001 (container=0 record=36865)
+                 lsn_last           phys=0x0000000000009200 (container=0 record=37376)
+                 lsn_flush          phys=0x0000000000009001 (container=0 record=36865)
+                 lsn_physical_base  phys=0x0000000000009001 (container=0 record=36865)
+             container id=1 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000002.regtrans-ms
+             container id=0 size=524288 name=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000001.regtrans-ms
+
+### SCRATCH PAIR
+  [current] type=4 status=parsed      offset=64512 size=512
+             truncate: {'dump_count': 1, 'client_change_offset': 0, 'owner_page_offset': 0}
+  [shadow ] type=5 status=zero_block  offset=65024 size=512
+             detail: block header at offset 65024 is all-zero/uninitialized (no metadata transaction stored here)
+
+### FINDINGS  (note 'divergent' = expected snapshot difference, not corruption)
+  [consistent           ] primary control block readable: control block at 0 has valid magic and declares 6 metadata descriptors
+  [consistent           ] log identity IdLog: both general blocks carry IdLog 752f16000519ea11a810000d3aa41ef3 (same physical log)
+  [consistent           ] container id 0 identity: current name/size=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000001.regtrans-ms/524288; shadow name/size=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000001.regtrans-ms/524288
+  [consistent           ] container id 1 identity: current name/size=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000002.regtrans-ms/524288; shadow name/size=%BLF%\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TMContainer00000000000000000002.regtrans-ms/524288
+  [consistent           ] stream 0 name: current='\\Device\\HarddiskVolume3\\wd\\compilerTemp\\BMT.SignCompDB.1lltmqvq.24r\\MetadataEsdGen\\mounted_image\\Windows\\System32\\config\\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf' shadow='\\Device\\HarddiskVolume3\\wd\\compilerTemp\\BMT.SignCompDB.1lltmqvq.24r\\MetadataEsdGen\\mounted_image\\Windows\\System32\\config\\DRIVERS{53b39e70-18c4-11ea-a811-000d3aa4692b}.TM.blf'
+  [consistent           ] stream 0 id: current=0 shadow=0
+  [consistent           ] stream 0 file_attributes_raw: current=258 shadow=258
+  [consistent           ] stream 0 container_start_offset: current=36864 shadow=36864
+  [consistent           ] stream 0 lsn_archive_tail: both views 0xffffffff00000000 (container 4294967295 record 0, CLFS invalid LSN)
+  [consistent           ] stream 0 lsn_last: both views 0x0000000000009200 (container 0 record 37376)
+  [consistent           ] stream 0 lsn_physical_base: both views 0x0000000000009001 (container 0 record 36865)
+  [consistent           ] base header next_client: current=1 shadow=1
+  [consistent           ] base header next_container: current=0 shadow=0
+  [consistent           ] base header free_containers: current=0 shadow=0
+  [consistent           ] base header active_containers: current=2 shadow=2
+  [consistent           ] base header free_containers_count: current=0 shadow=0
+  [consistent           ] base header busy_containers: current=0 shadow=0
+  [consistent           ] base header usn: current=1 shadow=1
+  [consistent           ] base header clients: current=1 shadow=1
+  [consistent           ] scratch (current) present, no truncate change: scratch block parsed; ClientChangeOffset=0 and OwnerPageOffset=0 indicate no staged truncate client/owner change in this copy
+  [contradictory/divergent] stream 0 lsn_base: current 0x0000000000008401 (c=0 r=33793) vs shadow 0x0000000000009001 (c=0 r=36865). The two transaction images record different logical positions -- an expected snapshot divergence, not proof of on-disk corruption. An LSN encodes ContainerId:RecordIndex only; do NOT infer that the larger numeric LSN was written later in wall-clock time, and do not merge the two values.
+  [contradictory/divergent] stream 0 lsn_flush: current 0x0000000000008401 (c=0 r=33793) vs shadow 0x0000000000009001 (c=0 r=36865). The two transaction images record different logical positions -- an expected snapshot divergence, not proof of on-disk corruption. An LSN encodes ContainerId:RecordIndex only; do NOT infer that the larger numeric LSN was written later in wall-clock time, and do not merge the two values.
+  [undecidable          ] shadow control slot uninitialized: shadow control slot is an all-zero block: no previous control transaction was persisted there (or it was never used). This is not evidence of corruption and gives no second control view to compare.
+  [undecidable/divergent] metadata transaction counter (DumpCount): DumpCount current=33 vs shadow=34: unequal counters prove the two blocks belong to different metadata transactions (double-buffer alternation), but they do not by themselves identify which slot is the committed 'latest' state, nor carry any wall-clock time. Treat as divergent snapshots, not as an ordering signal.
+  [undecidable          ] scratch (shadow) uninitialized: all-zero scratch block: no truncate information stored; cannot confirm or deny truncation
+
+### LIMITATIONS / UNDECIDABLE GROUNDS
+  - dissect.clfs parses block checksums but never verifies them; checksum_raw is evidence only and cannot authenticate a block's integrity here.
+  - No wall-clock timestamp is stored in the parsed control/base/scratch structures. Nothing in this report orders events by time; LSN magnitude is explicitly not used as a clock.
+  - Shadow blocks are previous metadata transaction images, not deletion records: a shadow-only entry is never labelled a deleted object.
+  - control shadow: zero_block at descriptor offset 1024 -> block header at offset 1024 is all-zero/uninitialized (no metadata transaction stored here)
+  - scratch shadow: zero_block at descriptor offset 65024 -> block header at offset 65024 is all-zero/uninitialized (no metadata transaction stored here)
+
+### READABLE CONTAINER SET - MINIMUM EVIDENCE
+  Minimum BLF-metadata evidence for a readable container set: (1) the primary control record's magic is valid and its descriptor table locates a general block whose (2) log-block header and base record parse, (3) client symbol table yields >=1 stream, and (4) container symbol table yields >=1 container context each with a non-empty name, positive size and an id that can be matched to a stream. One readable general-block view is sufficient metadata evidence; a second readable view only corroborates it. To actually read log records, each named .regtrans-ms container must additionally exist on disk, be readable, and its first log-block header must parse at the stream's container start offset; archive-tail LSN validity is NOT required.
+  view=current metadata_minimum_met=True (parsed=True stream=True container_ctx=True well_formed=True)
+  view=shadow  metadata_minimum_met=True (parsed=True stream=True container_ctx=True well_formed=True)
+  metadata evidence established: True from views ['current', 'shadow']; two-view corroboration: True
