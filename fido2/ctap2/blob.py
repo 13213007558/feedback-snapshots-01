@@ -117,8 +117,23 @@ class LargeBlobs:
     def read_blob_array(self) -> Sequence[Mapping[int, Any]]:
         """Gets the entire contents of the Large Blobs array.
 
+        This method is lenient, for backwards compatibility: If the stored
+        data cannot be integrity verified (eg. due to a checksum mismatch) an
+        empty list is returned, as if no data was stored. Callers which modify
+        the stored data based on its current contents must therefore NOT use
+        this method, but rather ensure the integrity of the data (see
+        put_blob, which does this internally).
+
         :return: The CBOR decoded list of Large Blobs.
         """
+        buf = self._read_raw()
+        data, check = buf[:-16], buf[-16:]
+        if check != sha256(data)[:-16]:
+            return []
+        return cast(Sequence[Mapping[int, Any]], cbor.decode(data))
+
+    def _read_raw(self) -> bytes:
+        """Reads the raw (still checksum-suffixed) Large Blobs storage."""
         offset = 0
         buf = b""
         while True:
@@ -127,11 +142,29 @@ class LargeBlobs:
             if len(fragment) < self.max_fragment_length:
                 break
             offset += self.max_fragment_length
+        return buf
 
+    def _read_verified_blob_array(self) -> list[Mapping[int, Any]]:
+        """Reads the Large Blobs array, requiring it to be fully intact.
+
+        Unlike read_blob_array, this raises a ValueError if the stored data
+        fails integrity verification, or does not decode to a CBOR array,
+        rather than silently treating the authenticator as empty. This
+        distinguishes an empty store from corrupted or unsupported data,
+        which must never be overwritten by a read-modify-write operation.
+
+        :return: The CBOR decoded list of Large Blobs.
+        """
+        buf = self._read_raw()
+        if not buf:
+            return []  # Nothing stored
         data, check = buf[:-16], buf[-16:]
         if check != sha256(data)[:-16]:
-            return []
-        return cast(Sequence[Mapping[int, Any]], cbor.decode(data))
+            raise ValueError("Large blob array checksum mismatch")
+        entries = cbor.decode(data)
+        if not isinstance(entries, list):
+            raise ValueError("Large blob array is not a CBOR array")
+        return entries
 
     def write_blob_array(self, blob_array: Sequence[Mapping[int, Any]]) -> None:
         """Writes the entire Large Blobs array.
@@ -193,6 +226,13 @@ class LargeBlobs:
         """Stores a Large Blob for a single credential.
 
         Any existing entries for the same credential will be replaced.
+        Entries which cannot be decrypted with the given key (eg. entries
+        belonging to other credentials, or in an unsupported format) are
+        kept as-is.
+
+        If the currently stored array cannot be read and verified in its
+        entirety, a ValueError is raised and nothing is written, to avoid
+        destroying existing data.
 
         :param large_blob_key: The largeBlobKey for the credential.
         :param data: The data to compress, encrypt and store.
@@ -200,11 +240,13 @@ class LargeBlobs:
         modified = data is not None
         entries = []
 
-        for entry in self.read_blob_array():
+        for entry in self._read_verified_blob_array():
             try:
                 _lb_unpack(large_blob_key, entry)
                 modified = True
             except ValueError:
+                # Entry for another credential, or in a format we don't
+                # understand: preserve it as-is.
                 entries.append(entry)
 
         if data is not None:
@@ -215,6 +257,10 @@ class LargeBlobs:
 
     def delete_blob(self, large_blob_key: bytes) -> None:
         """Deletes any Large Blob(s) stored for a single credential.
+
+        If no entry exists for the credential, this is a no-op and nothing
+        is written to the authenticator. Like put_blob, a ValueError is
+        raised if the stored array cannot be verified.
 
         :param large_blob_key: The largeBlobKey for the credential.
         """
