@@ -713,6 +713,51 @@ present in the IdP's metadata.
   settings.security[:want_assertions_signed]  = true  # Require the IdP to sign its SAML Assertions
 ```
 
+#### Encrypted Assertions and Signature Boundaries
+
+When the Response contains an `<EncryptedAssertion>`, ruby-saml decrypts it into a
+separate document and keeps the original Response untouched. This preserves two
+independent trust boundaries:
+
+- An **outer signature** covers the `Response` element, including the encrypted
+  assertion payload as it was received. It protects the message metadata (issuer,
+  destination, status, InResponseTo) and the ciphertext of the assertion.
+- An **inner signature** covers the decrypted `Assertion` element. It protects the
+  user identity and attributes inside the assertion.
+
+Either boundary can authenticate the assertion, so both deployment orders are
+supported:
+
+1. The IdP signs the outer Response only, and the assertion inside is encrypted
+   but unsigned.
+2. The IdP leaves the Response unsigned and signs the Assertion before encrypting it.
+
+If both are signed, both must verify. A signature that does not directly cover
+the `Response` or the `Assertion` is rejected. Decrypting an assertion is never
+sufficient on its own: an encrypted but unsigned assertion in an unsigned
+Response is rejected.
+
+The decrypted plaintext must be exactly one element with the expected root
+(`Assertion`, `NameID`, or `Attribute`) in the SAML assertion namespace. Extra
+elements, trailing text, a different root, or a different namespace are rejected
+instead of being silently discarded.
+
+After a failed validation, no assertion-derived values are exposed: `name_id`,
+`attributes`, `sessionindex`, `assertion_id`, and the other assertion accessors
+return `nil`/empty, and a previously cached successful result is cleared.
+
+`Response#signature_presence` reports which boundaries are present, and
+`Response#signature_coverage` reports which of them were cryptographically
+verified during the last validation. Both are informational only; use
+`Response#is_valid?` to decide whether the response is authenticated.
+
+```ruby
+  response = OneLogin::RubySaml::Response.new(saml_response, settings: settings)
+  if response.is_valid?
+    response.signature_coverage # => { response: true, assertion: false }
+  end
+```
+
 #### Certificate and Signature Validation
 
 You may require SP and IdP certificates to be non-expired using the following settings:

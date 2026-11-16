@@ -18,6 +18,13 @@ module CertificateHelper
     OpenSSL::PKey::RSA.new(1024)
   end
 
+  # Builds a self-signed pair that can be reused as local IdP/SP material
+  # without depending on any fixture that is about to expire.
+  def generate_pair_material
+    pair = generate_pair_hash
+    [pair[:certificate], pair[:private_key]]
+  end
+
   def generate_cert(key = generate_key, not_before: nil, not_after: nil)
     cert = OpenSSL::X509::Certificate.new
     cert.version = 2

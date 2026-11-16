@@ -214,6 +214,19 @@ module XMLSecurity
 
     attr_writer :signed_element_id
 
+    # When set, validation only considers the signature that references this
+    # element ID (and whose parent element carries the same ID). This allows a
+    # document that contains several signatures, such as a signed Response with
+    # a signed Assertion, to verify each boundary independently.
+    attr_reader :signature_target_id
+
+    def signature_target_id=(value)
+      return if @signature_target_id == value
+
+      @signature_target_id = value
+      reset_elements
+    end
+
     def initialize(response, errors = [])
       super(response)
       @errors = errors
@@ -226,6 +239,7 @@ module XMLSecurity
       @signature = nil
       @signature_algorithm = nil
       @ref = nil
+      @working_copy = nil
       @processed = false
     end
 
@@ -238,17 +252,14 @@ module XMLSecurity
     end
 
     def signed_element_id
+      return @signature_target_id if @signature_target_id
       @signed_element_id ||= extract_signed_element_id
     end
 
     # Validates the referenced_xml, which is the signed part of the document
     def validate_document(idp_cert_fingerprint, soft = true, options = {})
       # get cert from response
-      cert_element = REXML::XPath.first(
-        self,
-        "//ds:X509Certificate",
-        { "ds"=>DSIG }
-      )
+      cert_element = certificate_element
 
       if cert_element
         base64_cert = OneLogin::RubySaml::Utils.element_text(cert_element)
@@ -287,11 +298,7 @@ module XMLSecurity
 
     def validate_document_with_cert(idp_cert, soft = true)
       # get cert from response
-      cert_element = REXML::XPath.first(
-        self,
-        "//ds:X509Certificate",
-        { "ds"=>DSIG }
-      )
+      cert_element = certificate_element
 
       if cert_element
         base64_cert = OneLogin::RubySaml::Utils.element_text(cert_element)
@@ -328,11 +335,7 @@ module XMLSecurity
       @working_copy ||= REXML::Document.new(self.to_s).root
 
       # get signature node
-      sig_element = REXML::XPath.first(
-          @working_copy,
-          "//ds:Signature",
-          {"ds"=>DSIG}
-      )
+      sig_element = signature_element_for(@working_copy)
 
       return if sig_element.nil?
 
@@ -363,8 +366,19 @@ module XMLSecurity
         'ds' => DSIG
       )
 
-      noko_sig_element = nokogiri_document.at_xpath('//ds:Signature', 'ds' => DSIG)
+      noko_sig_element = if @signature_target_id
+        nokogiri_document.xpath(
+          "//*[@ID=$id]/ds:Signature",
+          { 'ds' => DSIG },
+          { 'id' => @signature_target_id }
+        ).first
+      else
+        nokogiri_document.at_xpath('//ds:Signature', 'ds' => DSIG)
+      end
+      return if noko_sig_element.nil?
+
       noko_signed_info_element = noko_sig_element.at_xpath('./ds:SignedInfo', 'ds' => DSIG)
+      return if noko_signed_info_element.nil?
 
       @cached_signed_info = noko_signed_info_element.canonicalize(canon_algorithm)
 
@@ -374,7 +388,7 @@ module XMLSecurity
       noko_sig_element.remove
 
       # get inclusive namespaces
-      inclusive_namespaces = extract_inclusive_namespaces
+      inclusive_namespaces = extract_inclusive_namespaces(sig_element)
 
       # check digests
       @ref = REXML::XPath.first(rexml_signed_info, "./ds:Reference", {"ds"=>DSIG})
@@ -440,6 +454,49 @@ module XMLSecurity
 
     private
 
+    # Returns the X509Certificate that belongs to the signature being verified.
+    #
+    # @return [REXML::Element|nil]
+    def certificate_element
+      if @signature_target_id
+        signature = REXML::XPath.first(
+          self,
+          "//*[@ID=$id]/ds:Signature",
+          { "ds" => DSIG },
+          { "id" => @signature_target_id }
+        )
+        return nil if signature.nil?
+
+        return REXML::XPath.first(signature, ".//ds:X509Certificate", { "ds" => DSIG })
+      end
+
+      REXML::XPath.first(self, "//ds:X509Certificate", { "ds" => DSIG })
+    end
+
+    # Selects the signature element to verify. With a signature target ID only
+    # a signature whose parent carries that ID (and whose Reference points at
+    # it) is accepted, so multiple signatures in one document do not interfere.
+    #
+    # @param root [REXML::Element]
+    # @return [REXML::Element|nil]
+    def signature_element_for(root)
+      signatures = REXML::XPath.match(root, "//ds:Signature", { "ds" => DSIG })
+      return signatures.first if @signature_target_id.nil?
+
+      signatures.find do |signature|
+        parent = signature.parent
+        next false unless parent && parent.attributes && parent.attributes["ID"] == @signature_target_id
+
+        reference = REXML::XPath.first(signature, "./ds:SignedInfo/ds:Reference", { "ds" => DSIG })
+        next false if reference.nil?
+
+        uri = reference.attributes["URI"].to_s
+        # An absent or empty Reference URI signs the whole document, which here
+        # is the parent element carrying the target ID.
+        uri.empty? || uri == "##{@signature_target_id}"
+      end
+    end
+
     def process_transforms(ref, canon_algorithm)
       transforms = REXML::XPath.match(
         ref,
@@ -472,6 +529,8 @@ module XMLSecurity
     end
 
     def extract_signed_element_id
+      return @signature_target_id if @signature_target_id
+
       reference_element = REXML::XPath.first(
         self,
         "//ds:Signature/ds:SignedInfo/ds:Reference",
@@ -484,12 +543,20 @@ module XMLSecurity
       sei.nil? ? reference_element.parent.parent.parent.attribute("ID").value : sei
     end
 
-    def extract_inclusive_namespaces
-      element = REXML::XPath.first(
-        self,
-        "//ec:InclusiveNamespaces",
-        { "ec" => C14N }
-      )
+    def extract_inclusive_namespaces(signature_element = nil)
+      element = if signature_element
+        REXML::XPath.first(
+          signature_element,
+          ".//ec:InclusiveNamespaces",
+          { "ec" => C14N }
+        )
+      else
+        REXML::XPath.first(
+          self,
+          "//ec:InclusiveNamespaces",
+          { "ec" => C14N }
+        )
+      end
       if element
         prefix_list = element.attributes.get_attribute("PrefixList").value
         prefix_list.split(" ")

@@ -345,6 +345,108 @@ class UtilsTest < Minitest::Test
     end
   end
 
+  describe '.parse_decrypted_element' do
+    let(:assertion_namespace) { 'urn:oasis:names:tc:SAML:2.0:assertion' }
+
+    it 'accepts a single assertion element' do
+      xml = %(<saml:Assertion xmlns:saml="#{assertion_namespace}"><saml:Issuer>x</saml:Issuer></saml:Assertion>)
+      source, root = OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+
+      assert_equal xml, source
+      assert_equal 'Assertion', root.name
+    end
+
+    it 'accepts leading whitespace and an XML declaration' do
+      xml = %(<?xml version="1.0"?>\n<saml:Assertion xmlns:saml="#{assertion_namespace}"/>)
+      _, root = OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+
+      assert_equal 'Assertion', root.name
+    end
+
+    it 'rejects extra sibling elements after the assertion' do
+      xml = %(<saml:Assertion xmlns:saml="#{assertion_namespace}"/><evil xmlns="urn:evil">pwn</evil>)
+
+      error = assert_raises(OneLogin::RubySaml::ValidationError) do
+        OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+      end
+      assert_includes error.message, 'Invalid decrypted Assertion'
+    end
+
+    it 'rejects trailing text after the assertion' do
+      xml = %(<saml:Assertion xmlns:saml="#{assertion_namespace}"/>trailing)
+
+      assert_raises(OneLogin::RubySaml::ValidationError) do
+        OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+      end
+    end
+
+    it 'rejects a different root element' do
+      xml = %(<Evil xmlns="urn:evil"/>)
+
+      error = assert_raises(OneLogin::RubySaml::ValidationError) do
+        OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+      end
+      assert_includes error.message, "Unexpected root element 'Evil'"
+    end
+
+    it 'rejects an assertion root in the wrong namespace' do
+      xml = %(<saml:Assertion xmlns:saml="urn:evil"/>)
+
+      error = assert_raises(OneLogin::RubySaml::ValidationError) do
+        OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+      end
+      assert_includes error.message, "Unexpected namespace 'urn:evil'"
+    end
+
+    it 'supplies a missing saml namespace declaration without altering content' do
+      xml = %(<saml:Assertion><saml:Issuer>x</saml:Issuer></saml:Assertion>)
+      source, root = OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+
+      assert_includes source, %(xmlns:saml="#{assertion_namespace}")
+      assert_equal 'x', root.elements['saml:Issuer'].text
+    end
+
+    it 'resolves prefixes from namespaces in scope at the encrypted element' do
+      xml = %(<saml:Assertion xmlns:saml="#{assertion_namespace}"><saml:AttributeValue xsi:type="xs:string">v</saml:AttributeValue></saml:Assertion>)
+
+      source, root = OneLogin::RubySaml::Utils.parse_decrypted_element(
+        xml,
+        'Assertion',
+        assertion_namespace,
+        'xs' => 'http://www.w3.org/2001/XMLSchema',
+        'xsi' => 'http://www.w3.org/2001/XMLSchema-instance'
+      )
+      assert_includes source, 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+      assert_equal 'v', root.elements['saml:AttributeValue'].text
+    end
+
+    it 'rejects unknown namespace prefixes instead of guessing them' do
+      xml = %(<saml:Assertion xmlns:saml="#{assertion_namespace}" xmlns:evil="urn:evil"><evil:payload/></saml:Assertion>)
+      # A declared prefix is fine; an undeclared one is not.
+      _, root = OneLogin::RubySaml::Utils.parse_decrypted_element(xml, 'Assertion')
+      assert_equal 'Assertion', root.name
+
+      undeclared = %(<saml:Assertion xmlns:saml="#{assertion_namespace}"><unknown:payload/></saml:Assertion>)
+      assert_raises(OneLogin::RubySaml::ValidationError) do
+        OneLogin::RubySaml::Utils.parse_decrypted_element(undeclared, 'Assertion')
+      end
+    end
+  end
+
+  describe '.remove_block_padding' do
+    it 'removes the padding length indicated by the last byte' do
+      assert_equal 'abc', OneLogin::RubySaml::Utils.remove_block_padding("abc\x02\x02", 16)
+    end
+
+    it 'removes ISO 10126-style padding with random bytes' do
+      assert_equal '<Assertion/>', OneLogin::RubySaml::Utils.remove_block_padding("<Assertion/>\xAA\xBB\x03", 16)
+    end
+
+    it 'does not remove a block when the last byte is out of range' do
+      assert_equal "abc".b, OneLogin::RubySaml::Utils.remove_block_padding("abc".b, 16)
+    end
+  end
+
   describe '.decrypt_multi' do
     let(:private_key) { ruby_saml_key }
     let(:invalid_key1) { CertificateHelper.generate_key }

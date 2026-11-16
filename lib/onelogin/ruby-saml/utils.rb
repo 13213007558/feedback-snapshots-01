@@ -17,6 +17,16 @@ module OneLogin
                    :redirect => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".freeze }.freeze
       DSIG = "http://www.w3.org/2000/09/xmldsig#".freeze
       XENC = "http://www.w3.org/2001/04/xmlenc#".freeze
+      ASSERTION = "urn:oasis:names:tc:SAML:2.0:assertion".freeze
+      PROTOCOL = "urn:oasis:names:tc:SAML:2.0:protocol".freeze
+      XML_PREFIXES = {
+        "saml" => ASSERTION,
+        "samlp" => PROTOCOL,
+        "ds" => DSIG,
+        "xenc" => XENC,
+        "xs" => "http://www.w3.org/2001/XMLSchema",
+        "xsi" => "http://www.w3.org/2001/XMLSchema-instance"
+      }.freeze
       DURATION_FORMAT = %r(^
         (-?)P                       # 1: Duration sign
         (?:
@@ -276,6 +286,184 @@ module OneLogin
         error_msg
       end
 
+      # Parses a decrypted XML payload that must consist of exactly one element
+      # with the expected local name and namespace. Padding and namespace
+      # declarations are handled explicitly; any additional plaintext outside
+      # the root element is rejected.
+      #
+      # @param xml [String] The decrypted payload
+      # @param expected_root [String] The expected root local name
+      # @param expected_namespace [String] The expected root namespace URI
+      # @param available_namespaces [Hash<String, String>] Namespace declarations
+      #   in scope at the encrypted element, used to resolve prefixes that the
+      #   plaintext inherited from its original document
+      # @return [Array(String, REXML::Element)] The repaired XML string and the root element
+      # @raise [ValidationError] if the payload is not a single, expected element
+      #
+      def self.parse_decrypted_element(xml, expected_root, expected_namespace = ASSERTION, available_namespaces = {})
+        raise ValidationError.new("Empty decrypted #{expected_root}") if xml.nil? || xml.strip.empty?
+
+        namespaces = XML_PREFIXES.merge(available_namespaces || {})
+        source = xml
+        injected = []
+
+        5.times do
+          begin
+            nokogiri_document = XMLSecurity::BaseDocument.safe_load_xml(source, true)
+            rexml_document = REXML::Document.new(source)
+            validate_decrypted_root!(nokogiri_document, rexml_document, expected_root, expected_namespace)
+            return [source, rexml_document.root]
+          rescue StandardError => error
+            prefixes = missing_namespace_prefixes(error) - injected
+            if prefixes.empty? || prefixes.any? { |prefix| !namespaces.key?(prefix) }
+              raise ValidationError.new("Invalid decrypted #{expected_root}: #{error.message}")
+            end
+
+            injected.concat(prefixes)
+            source = inject_namespace_declarations(source, prefixes, namespaces)
+          end
+        end
+
+        raise ValidationError.new("Invalid decrypted #{expected_root}: unable to resolve XML namespace prefixes")
+      end
+
+      # Validates that a parsed document contains exactly one root element with
+      # the expected name and namespace.
+      #
+      # @param nokogiri_document [Nokogiri::XML::Document]
+      # @param rexml_document [REXML::Document]
+      # @param expected_root [String]
+      # @param expected_namespace [String]
+      def self.validate_decrypted_root!(nokogiri_document, rexml_document, expected_root, expected_namespace)
+        raise "No root element found" if nokogiri_document.root.nil? || rexml_document.root.nil?
+
+        noko_elements = nokogiri_document.children.select(&:element?)
+        rexml_elements = rexml_document.children.select { |node| node.is_a?(REXML::Element) }
+        raise "Multiple root elements found" unless noko_elements.size == 1 && rexml_elements.size == 1
+
+        unexpected_noko = nokogiri_document.children.reject do |node|
+          node.element? || node.comment? || node.processing_instruction? ||
+            (node.text? && node.text.strip.empty?)
+        end
+        raise "Unexpected content outside the root element" unless unexpected_noko.empty?
+
+        unexpected_rexml = rexml_document.children.reject do |node|
+          node.is_a?(REXML::Element) || node.is_a?(REXML::Comment) || node.is_a?(REXML::XMLDecl) ||
+            (node.respond_to?(:value) && node.value.to_s.strip.empty?)
+        end
+        raise "Unexpected content outside the root element" unless unexpected_rexml.empty?
+
+        local_name = nokogiri_document.root.name.split(':').last
+        unless local_name == expected_root
+          raise "Unexpected root element '#{local_name}', expected '#{expected_root}'"
+        end
+
+        namespace = nokogiri_document.root.namespace && nokogiri_document.root.namespace.href
+        unless namespace == expected_namespace
+          raise "Unexpected namespace '#{namespace}' for root element '#{local_name}'"
+        end
+      end
+      private_class_method :validate_decrypted_root!
+
+      # Collects namespace declarations in scope at an element, so a decrypted
+      # payload that inherited prefixes from its enclosing document can still be
+      # parsed without inventing bindings for unknown prefixes.
+      #
+      # @param element [REXML::Element]
+      # @return [Hash<String, String>]
+      def self.in_scope_namespaces(element)
+        element.namespaces || {}
+      rescue StandardError
+        {}
+      end
+
+      # Extracts namespace prefixes reported as missing by Nokogiri or REXML.
+      #
+      # @param error [StandardError]
+      # @return [Array<String>]
+      def self.missing_namespace_prefixes(error)
+        message = error.message.to_s
+        prefixes = message.scan(/Namespace prefix ([^\s]+)/).flatten
+        prefixes.concat(message.scan(/Undefined prefix ([^\s]+) found/).flatten)
+        prefixes.map { |prefix| prefix.sub(/[:;,].*/, '') }.reject(&:empty?).uniq
+      end
+      private_class_method :missing_namespace_prefixes
+
+      # Injects namespace declarations on the root start tag. Only prefixes
+      # known to the SAML/XML Signature/XML Encryption vocabularies are used.
+      #
+      # @param xml [String]
+      # @param prefixes [Array<String>]
+      # @param namespaces [Hash<String, String>]
+      # @return [String]
+      def self.inject_namespace_declarations(xml, prefixes, namespaces = XML_PREFIXES)
+        start_index, end_index = root_tag_bounds(xml)
+        existing_tag = xml[start_index..end_index]
+        desired = prefixes.map { |prefix| [prefix, namespaces[prefix]] }
+
+        # Replace a conflicting declaration instead of duplicating it, which is
+        # not well-formed XML.
+        desired.each do |prefix, namespace|
+          pattern = /\s+xmlns:#{Regexp.escape(prefix)}\s*=\s*("[^"]*"|'[^']*')/
+          existing_tag = existing_tag.sub(pattern, %( xmlns:#{prefix}="#{namespace}"))
+        end
+
+        missing = desired.reject { |prefix, _| existing_tag.include?("xmlns:#{prefix}=") }
+        insertion = missing.map { |prefix, namespace| %(xmlns:#{prefix}="#{namespace}") }.join(' ')
+
+        updated_tag = if insertion.empty?
+          existing_tag
+        else
+          position = existing_tag.end_with?('/>') ? existing_tag.length - 2 : existing_tag.length - 1
+          existing_tag[0...position] + ' ' + insertion + existing_tag[position..]
+        end
+
+        xml[0...start_index] + updated_tag + xml[(end_index + 1)..]
+      end
+      private_class_method :inject_namespace_declarations
+
+      # Finds the byte bounds of the root start tag, skipping declarations,
+      # comments, processing instructions and doctypes.
+      #
+      # @param xml [String]
+      # @return [Array(Integer, Integer)]
+      def self.root_tag_bounds(xml)
+        length = xml.length
+        index = xml.byteslice(0, 3) == "\xEF\xBB\xBF".b ? 3 : 0
+
+        loop do
+          index += 1 while index < length && xml[index] =~ /\s/
+          if xml[index, 4] == '<!--'
+            index = xml.index('-->', index) + 3
+          elsif xml[index, 2] == '<?'
+            index = xml.index('?>', index) + 2
+          elsif xml[index, 2] == '<!'
+            index = xml.index('>', index) + 1
+          else
+            break
+          end
+        end
+
+        raise "No root element found" unless xml[index] == '<'
+
+        start_index = index
+        index += 1
+        quote = nil
+        while index < length
+          character = xml[index]
+          if quote
+            quote = nil if character == quote
+          else
+            quote = character if character == '"' || character == "'"
+            break if character == '>'
+          end
+          index += 1
+        end
+
+        [start_index, index]
+      end
+      private_class_method :root_tag_bounds
+
       # Obtains the decrypted string from an Encrypted node element in XML,
       # given multiple private keys to try.
       # @param encrypted_node [REXML::Element] The Encrypted element
@@ -384,6 +572,7 @@ module OneLogin
           cipher.padding, cipher.key, cipher.iv = 0, symmetric_key, cipher_text[0..iv_len-1]
           assertion_plaintext = cipher.update(data)
           assertion_plaintext << cipher.final
+          assertion_plaintext = remove_block_padding(assertion_plaintext, cipher.block_size)
         elsif auth_cipher
           iv_len, text_len, tag_len = auth_cipher.iv_len, cipher_text.length, 16
           data = cipher_text[iv_len..text_len-1-tag_len]
@@ -447,6 +636,26 @@ module OneLogin
       # passed, nil will be returned.
       def self.element_text(element)
         element.texts.map(&:value).join if element
+      end
+
+      # Removes the padding of a block cipher plaintext. XML Encryption permits
+      # arbitrary padding bytes as long as the final block encodes the padding
+      # length, so the trailing length byte is authoritative. PKCS#7 padding is
+      # also accepted.
+      #
+      # @param plaintext [String] The decrypted text including padding
+      # @param block_size [Integer] The cipher block size
+      # @return [String] The plaintext with the padding removed
+      def self.remove_block_padding(plaintext, block_size)
+        return plaintext if plaintext.nil? || plaintext.empty?
+
+        padding_length = plaintext.getbyte(-1)
+        if padding_length && padding_length > 0 && padding_length <= block_size && padding_length <= plaintext.bytesize
+          plaintext = plaintext.byteslice(0, plaintext.bytesize - padding_length)
+        end
+
+        plaintext = '' if plaintext.bytesize == 1 && plaintext.getbyte(0) == 0
+        plaintext
       end
     end
   end

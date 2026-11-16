@@ -1,5 +1,12 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Encrypted assertions: parse the decrypted plaintext strictly as a single expected element (Assertion/NameID/Attribute) and reject trailing elements, trailing text, a wrong root, or a wrong namespace instead of trimming them with a regex.
+* Encrypted assertions: keep the original Response intact and verify outer and inner signatures independently, so outer-signed and inner-signed deployments both work and each boundary must verify on the document that actually contains it.
+* Encrypted assertions: stop stripping cipher padding with a trailing-byte regex; the XML Encryption padding length is now removed explicitly.
+* Response: expose `signature_presence` and `signature_coverage`, and clear all assertion-derived caches when validation fails so business fields are never served from a rejected assertion.
+* LogoutRequest: apply the same strict decrypted-NameID parsing.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner

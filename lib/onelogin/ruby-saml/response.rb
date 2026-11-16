@@ -34,6 +34,40 @@ module OneLogin
 
       attr_accessor :soft
 
+      # Records which signature boundaries were cryptographically verified during
+      # the last validation run. A successful decryption does not imply identity
+      # authentication; the assertion is only trustworthy when at least one of
+      # these boundaries covers it and the remaining validations pass.
+      #
+      # @return [Hash]
+      def signature_coverage
+        {
+          :response => !!@response_signature_verified,
+          :assertion => !!@assertion_signature_verified
+        }
+      end
+
+      # @return [Boolean] whether a direct signature on the Response element exists
+      def response_signature_present?
+        !response_signature_node.nil?
+      end
+
+      # @return [Boolean] whether a direct signature on the (decrypted) Assertion exists
+      def assertion_signature_present?
+        !assertion_signature_node.nil?
+      rescue ValidationError
+        false
+      end
+
+      # @return [Hash] which signature boundaries are present, independent of
+      #   whether they were verified
+      def signature_presence
+        {
+          :response => response_signature_present?,
+          :assertion => assertion_signature_present?
+        }
+      end
+
       # Response available options
       # This is not a whitelist to allow people extending OneLogin::RubySaml:Response
       # and pass custom options
@@ -69,6 +103,12 @@ module OneLogin
 
         @response = decode_raw_saml(response, settings)
         @document = XMLSecurity::SignedDocument.new(@response, @errors)
+
+        @response_signature_verified = false
+        @assertion_signature_verified = false
+        @assertion_signature_document = nil
+        @assertion_rejected = false
+        @decryption_error = nil
 
         if assertion_encrypted?
           @decrypted_document = generate_decrypted_document
@@ -398,35 +438,84 @@ module OneLogin
       #
       def validate(collect_errors = false)
         reset_errors!
-        return false unless validate_response_state
+        reset_assertion_state!
+        @assertion_rejected = false
+        @errors << @decryption_error if @decryption_error
 
-        validations = [
-          :validate_version,
-          :validate_id,
-          :validate_success_status,
-          :validate_num_assertion,
-          :validate_signed_elements,
-          :validate_structure,
-          :validate_no_duplicated_attributes,
-          :validate_in_response_to,
-          :validate_one_conditions,
-          :validate_conditions,
-          :validate_one_authnstatement,
-          :validate_audience,
-          :validate_destination,
-          :validate_issuer,
-          :validate_session_expiration,
-          :validate_subject_confirmation,
-          :validate_name_id,
-          :validate_signature
-        ]
+        valid = false
+        begin
+          return false unless validate_response_state
 
-        if collect_errors
-          validations.each { |validation| send(validation) }
-          @errors.empty?
-        else
-          validations.all? { |validation| send(validation) }
+          validations = [
+            :validate_version,
+            :validate_id,
+            :validate_success_status,
+            :validate_num_assertion,
+            :validate_signed_elements,
+            :validate_structure,
+            :validate_no_duplicated_attributes,
+            :validate_in_response_to,
+            :validate_one_conditions,
+            :validate_conditions,
+            :validate_one_authnstatement,
+            :validate_audience,
+            :validate_destination,
+            :validate_issuer,
+            :validate_session_expiration,
+            :validate_subject_confirmation,
+            :validate_name_id,
+            :validate_signature
+          ]
+
+          valid = if collect_errors
+            validations.each { |validation| send(validation) }
+            @errors.empty?
+          else
+            validations.all? { |validation| send(validation) }
+          end
+          valid
+        ensure
+          unless valid
+            reset_assertion_state!
+            @assertion_rejected = true
+          end
         end
+      end
+
+      # Clears everything whose trust depends on the signature boundaries so a
+      # failed validation cannot leave reusable successful data behind, and
+      # keeps business-field accessors from re-deriving values from an assertion
+      # that did not pass validation.
+      def reset_assertion_state!
+        @response_signature_verified = false
+        @assertion_signature_verified = false
+        @assertion_signature_document = nil
+        @signed_assertion = nil
+        @name_id_node = nil
+        @name_id = nil
+        @name_id_format = nil
+        @name_id_spnamequalifier = nil
+        @name_id_namequalifier = nil
+        @attr_statements = nil
+        @sessionindex = nil
+        @expires_at = nil
+        @authn_instant = nil
+        @authn_context_class_ref = nil
+        @assertion_id = nil
+        @conditions = nil
+        @not_before = nil
+        @not_on_or_after = nil
+        @audiences = nil
+        @issuers = nil
+        @decrypted_assertion_element = nil
+        @original_assertion_element = nil
+        @assertion_signature_node = nil
+        @response_signature_node = nil
+      end
+
+      # @return [Boolean] True once a validation run has rejected the response
+      def assertion_rejected?
+        !!@assertion_rejected
       end
 
 
@@ -509,28 +598,33 @@ module OneLogin
       #
       def validate_num_assertion
         error_msg = "SAML Response must contain 1 assertion"
-        assertions = REXML::XPath.match(
+        assertion_count = REXML::XPath.match(
           document,
           "//a:Assertion",
           { "a" => ASSERTION }
-        )
-        encrypted_assertions = REXML::XPath.match(
+        ).size
+        encrypted_count = REXML::XPath.match(
           document,
           "//a:EncryptedAssertion",
           { "a" => ASSERTION }
-        )
+        ).size
 
-        unless assertions.size + encrypted_assertions.size == 1
+        unless assertion_count + encrypted_count == 1
           return append_error(error_msg)
         end
 
-        unless decrypted_document.nil?
-          assertions = REXML::XPath.match(
+        if assertion_encrypted?
+          # The decrypted Assertion must be the single root element produced
+          # from the EncryptedAssertion; no sibling assertion may accompany it.
+          unless decrypted_assertion_element
+            return append_error(error_msg)
+          end
+
+          unless REXML::XPath.match(
             decrypted_document,
             "//a:Assertion",
             { "a" => ASSERTION }
-          )
-          unless assertions.size == 1
+          ).size == 1
             return append_error(error_msg)
           end
         end
@@ -848,17 +942,10 @@ module OneLogin
       end
 
       def doc_to_validate
-        # If the response contains the signature, and the assertion was encrypted, validate the original SAML Response
-        # otherwise, review if the decrypted assertion contains a signature
-        sig_elements = REXML::XPath.match(
-          document,
-          "/p:Response[@ID=$id]/ds:Signature",
-          { "p" => PROTOCOL, "ds" => DSIG },
-          { 'id' => document.signed_element_id }
-        )
-
-        use_original = sig_elements.size == 1 || decrypted_document.nil?
-        doc = use_original ? document : decrypted_document
+        # A signature on the Assertion itself is the tighter boundary and is
+        # preferred. Otherwise fall back to the outer Response signature, whose
+        # referenced XML still contains the encrypted (or plain) assertion.
+        doc = assertion_signature_node ? assertion_signature_document : document
         if !doc.processed
           doc.cache_referenced_xml(@soft, check_malformed_doc_enabled?)
         end
@@ -866,44 +953,76 @@ module OneLogin
         return doc
       end
 
-      # Validates the Signature
-      # @return [Boolean] True if not contains a Signature or if the Signature is valid, otherwise False if soft=True
-      # @raise [ValidationError] if soft == false and validation fails
+      # Verifies the signature boundaries that are present and reports which of
+      # them cover the assertion payload. A signature is verified against the
+      # document that actually contains the signed element: the original
+      # Response for outer signatures, the extracted decrypted Assertion for
+      # inner signatures. Decryption alone never counts as authentication.
       #
+      # @return [Boolean] True when every present signature verifies, otherwise False if soft=True
+      # @raise [ValidationError] if soft == false and validation fails
       def validate_signature
         error_msg = "Invalid Signature on SAML Response"
 
-        doc = doc_to_validate
+        @response_signature_verified = false
+        @assertion_signature_verified = false
 
-        sig_elements = REXML::XPath.match(
-          document,
-          "/p:Response[@ID=$id]/ds:Signature",
-          { "p" => PROTOCOL, "ds" => DSIG },
-          { 'id' => document.signed_element_id }
-        )
-
-        # Check signature node inside assertion
-        if sig_elements.nil? || sig_elements.size == 0
-          sig_elements = REXML::XPath.match(
-            doc,
-            "/p:Response/a:Assertion[@ID=$id]/ds:Signature",
-            SAML_NAMESPACES.merge({"ds"=>DSIG}),
-            { 'id' => doc.signed_element_id }
-          )
-        end
-
-        if sig_elements.size != 1
-          if sig_elements.size == 0
-             append_error("Signed element id ##{doc.signed_element_id} is not found")
-          else
-             append_error("Signed element id ##{doc.signed_element_id} is found more than once")
-          end
+        unless response_signature_node || assertion_signature_node
+          report_uncovered_signature
           return append_error(error_msg)
         end
 
-        old_errors = @errors.clone
+        if response_signature_node
+          response_doc = document
+          response_doc.signature_target_id = response_signature_node.parent.attributes["ID"]
+          unless verify_signature_on(response_doc)
+            merge_signature_errors(response_doc)
+            return append_error(error_msg)
+          end
+          @response_signature_verified = true
+        end
 
+        if assertion_signature_node
+          assertion_doc = assertion_signature_document
+          unless verify_signature_on(assertion_doc)
+            merge_signature_errors(assertion_doc)
+            return append_error(error_msg)
+          end
+          @assertion_signature_verified = true
+        end
+
+        true
+      end
+
+      # Explains why a document that contains a Signature was rejected when that
+      # signature does not directly cover the Response or the Assertion.
+      def report_uncovered_signature
+        signature = REXML::XPath.first(document, "//ds:Signature", { "ds" => DSIG })
+        return if signature.nil?
+
+        reference = REXML::XPath.first(signature, "./ds:SignedInfo/ds:Reference", { "ds" => DSIG })
+        uri = reference && reference.attributes["URI"]
+        signed_id = uri && uri[1..-1]
+        if signed_id && !signed_id.empty?
+          append_error("Signed element id ##{signed_id} is not found")
+        end
+      end
+
+      # Copies errors collected while checking one signature boundary into the
+      # response error list, preserving the specific reason (digest mismatch,
+      # fingerprint mismatch, missing signed element, etc.).
+      def merge_signature_errors(doc)
+        doc.errors.each { |message| @errors << message unless @errors.include?(message) }
+      end
+
+      # Runs the IdP certificate/fingerprint checks against one signature
+      # boundary.
+      #
+      # @param doc [XMLSecurity::SignedDocument] The document carrying the signature
+      # @return [Boolean]
+      def verify_signature_on(doc)
         idp_certs = settings.get_idp_cert_multi
+
         if idp_certs.nil? || idp_certs[:signing].empty?
           opts = {}
           opts[:fingerprint_alg] = settings.idp_cert_fingerprint_algorithm
@@ -911,43 +1030,37 @@ module OneLogin
           fingerprint = settings.get_fingerprint
           opts[:cert] = idp_cert
 
-          if fingerprint && doc.validate_document(fingerprint, @soft, opts)
-            if settings.security[:check_idp_cert_expiration]
-              if OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)
-                error_msg = "IdP x509 certificate expired"
-                return append_error(error_msg)
-              end
-            end
-          else
-            return append_error(error_msg)
-          end
-        else
-          valid = false
-          expired = false
-          idp_certs[:signing].each do |idp_cert|
-            valid = doc.validate_document_with_cert(idp_cert, true)
-            if valid
-              if settings.security[:check_idp_cert_expiration]
-                if OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)
-                  expired = true
-                end
-              end
+          return false unless fingerprint && doc.validate_document(fingerprint, @soft, opts)
 
-              # At least one certificate is valid, restore the old accumulated errors
-              @errors = old_errors
-              break
-            end
+          if settings.security[:check_idp_cert_expiration] && OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)
+            return append_error("IdP x509 certificate expired")
+          end
 
+          return true
+        end
+
+        old_errors = @errors.clone
+        valid = false
+        expired = false
+
+        idp_certs[:signing].each do |idp_cert|
+          valid = doc.validate_document_with_cert(idp_cert, true)
+          next unless valid
+
+          if settings.security[:check_idp_cert_expiration] && OneLogin::RubySaml::Utils.is_cert_expired(idp_cert)
+            expired = true
+            valid = false
+            next
           end
-          if expired
-            error_msg = "IdP x509 certificate expired"
-            return append_error(error_msg)
-          end
-          unless valid
-            # Remove duplicated errors
-            @errors = @errors.uniq
-            return append_error(error_msg)
-          end
+
+          @errors = old_errors
+          break
+        end
+
+        return append_error("IdP x509 certificate expired") if expired
+        unless valid
+          @errors = @errors.uniq
+          return false
         end
 
         true
@@ -965,42 +1078,143 @@ module OneLogin
           end
       end
 
+      # @return [REXML::Element|nil] The signature that directly covers the Response element
+      def response_signature_node
+        @response_signature_node ||= begin
+          response_element = REXML::XPath.first(document, "/p:Response", { "p" => PROTOCOL })
+          id = response_element && response_element.attributes["ID"]
+          signature_covering_element(document, response_element, id, "/p:Response/ds:Signature")
+        rescue REXML::ParseException
+          nil
+        end
+      end
+
+      # @return [REXML::Element|nil] The signature that directly covers the Assertion element
+      def assertion_signature_node
+        @assertion_signature_node ||= begin
+          assertion = decrypted_assertion_element
+          id = assertion && assertion.attributes["ID"]
+          source = decrypted_document.nil? ? document : decrypted_document
+          signature_covering_element(source, assertion, id, "/p:Response/a:Assertion/ds:Signature")
+        end
+      end
+
+      # Finds a signature directly below the given element that references the
+      # element's own ID. A signature that merely sits inside an element but
+      # signs a different element does not count as coverage.
+      def signature_covering_element(source, element, id, path)
+        return nil if element.nil? || id.nil? || id.empty?
+
+        signature = REXML::XPath.first(
+          source,
+          path,
+          SAML_NAMESPACES.merge("ds" => DSIG)
+        )
+        return nil if signature.nil?
+        return nil unless signature.parent.equal?(element)
+
+        reference = REXML::XPath.first(
+          signature,
+          "./ds:SignedInfo/ds:Reference",
+          { "ds" => DSIG }
+        )
+        uri = reference && reference.attributes["URI"]
+        # XMLDSig treats an absent or empty Reference URI as the whole document,
+        # which is the signed root element in this context.
+        signed_own_id = uri.nil? || uri.empty? || uri == "##{id}"
+        signed_own_id ? signature : nil
+      end
+
+      # @return [XMLSecurity::SignedDocument|nil] A copy of the document that
+      #   holds the Assertion signature, restricted to that boundary. A separate
+      #   object keeps the main documents free of signature-selection state.
+      def assertion_signature_document
+        @assertion_signature_document ||= begin
+          assertion = decrypted_assertion_element
+          if assertion.nil?
+            nil
+          else
+            source = decrypted_document || document
+            doc = XMLSecurity::SignedDocument.new(source.to_s, [])
+            doc.signature_target_id = assertion.attributes["ID"]
+            doc
+          end
+        end
+      end
+
+      # @return [REXML::Element|nil] The encrypted or plain Assertion element from the original Response
+      def original_assertion_element
+        @original_assertion_element ||= begin
+          element = REXML::XPath.first(
+            document,
+            "/p:Response/a:Assertion",
+            SAML_NAMESPACES
+          )
+          element
+        end
+      end
+
+      # @return [REXML::Element|nil] The decrypted Assertion element when the
+      #   Response carried an EncryptedAssertion
+      def decrypted_assertion_element
+        @decrypted_assertion_element ||= begin
+          if decrypted_document.nil?
+            original_assertion_element
+          else
+            REXML::XPath.first(
+              decrypted_document,
+              "/p:Response/a:Assertion",
+              SAML_NAMESPACES
+            )
+          end
+        end
+      end
+
       def get_cached_signed_assertion
         xml = doc_to_validate.referenced_xml
-        empty_doc = REXML::Document.new
 
-        return empty_doc if xml.nil? # when no signature/reference is found, return empty document
+        return empty_document if xml.nil? # when no signature/reference is found, return empty document
 
         root = REXML::Document.new(xml).root
 
         if root.attributes["ID"] != doc_to_validate.signed_element_id
-          return empty_doc
+          return empty_document
         end
 
-        assertion = empty_doc
+        assertion = empty_document
         if root.name == "Response"
-          if REXML::XPath.first(root, "a:Assertion", {"a" => ASSERTION})
-            assertion = REXML::XPath.first(root, "a:Assertion", {"a" => ASSERTION})
-          elsif REXML::XPath.first(root, "a:EncryptedAssertion", {"a" => ASSERTION})
-            assertion = decrypt_assertion(REXML::XPath.first(root, "a:EncryptedAssertion", {"a" => ASSERTION}))
+          if (node = REXML::XPath.first(root, "a:Assertion", {"a" => ASSERTION}))
+            assertion = node
+          elsif (node = REXML::XPath.first(root, "a:EncryptedAssertion", {"a" => ASSERTION}))
+            assertion = decrypt_assertion(node)
           end
         elsif root.name == "Assertion"
-          assertion = root
+          assertion = REXML::Document.new(xml)
         end
 
         assertion
+      rescue ValidationError
+        empty_document
       end
 
       def signed_assertion
         @signed_assertion ||= get_cached_signed_assertion
       end
 
+      def empty_document
+        REXML::Document.new
+      end
+
       # Extracts the first appearance that matches the subelt (pattern)
-      # Search on any Assertion that is signed, or has a Response parent signed
+      # Search on any Assertion that is signed, or has a Response parent signed.
+      # After a failed validation the assertion is not usable, so no value is
+      # exposed.
       # @param subelt [String] The XPath pattern
       # @return [REXML::Element | nil] If any matches, return the Element
       #
       def xpath_first_from_signed_assertion(subelt=nil)
+        return nil if assertion_rejected?
+
         doc = signed_assertion
         node = REXML::XPath.first(
             doc,
@@ -1011,11 +1225,15 @@ module OneLogin
       end
 
       # Extracts all the appearances that matches the subelt (pattern)
-      # Searches on any Assertion that is signed, or has a Response parent signed
+      # Searches on any Assertion that is signed, or has a Response parent signed.
+      # After a failed validation the assertion is not usable, so no values are
+      # exposed.
       # @param subelt [String] The XPath pattern
       # @return [Array of REXML::Element] Return all matches
       #
       def xpath_from_signed_assertion(subelt=nil)
+        return [] if assertion_rejected?
+
         doc = signed_assertion
         node = REXML::XPath.match(
             doc,
@@ -1040,7 +1258,16 @@ module OneLogin
           document_copy = Marshal.load(Marshal.dump(document))
         end
 
-        decrypt_assertion_from_document(document_copy)
+        begin
+          decrypt_assertion_from_document(document_copy)
+        rescue ValidationError => error
+          # A structurally invalid decrypted payload is a validation failure,
+          # not a crash: keep a placeholder document so the normal validation
+          # flow reports it, and expose the error instead of decrypted content.
+          @decryption_error = error.message
+          @errors << @decryption_error
+          XMLSecurity::SignedDocument.new('<samlp:Response xmlns:samlp="' + PROTOCOL + '"/>')
+        end
       end
 
       # Obtains a SAML Response with the EncryptedAssertion element decrypted
@@ -1063,57 +1290,51 @@ module OneLogin
         XMLSecurity::SignedDocument.new(response_node.to_s)
       end
 
-      # Decrypts an EncryptedAssertion element
+      # Decrypts an EncryptedAssertion element, returning the single Assertion element
       # @param encrypted_assertion_node [REXML::Element] The EncryptedAssertion element
-      # @return [REXML::Document] The decrypted EncryptedAssertion element
+      # @return [REXML::Element] The decrypted Assertion element
       #
       def decrypt_assertion(encrypted_assertion_node)
-        decrypt_element(encrypted_assertion_node, /(.*<\/(\w+:)?Assertion>)/m)
+        decrypt_element(encrypted_assertion_node, 'Assertion')
       end
 
       # Decrypts an EncryptedID element
       # @param encrypted_id_node [REXML::Element] The EncryptedID element
-      # @return [REXML::Document] The decrypted EncrypedtID element
+      # @return [REXML::Element] The decrypted NameID element
       #
       def decrypt_nameid(encrypted_id_node)
-        decrypt_element(encrypted_id_node, /(.*<\/(\w+:)?NameID>)/m)
+        decrypt_element(encrypted_id_node, 'NameID')
       end
 
       # Decrypts an EncryptedAttribute element
       # @param encrypted_attribute_node [REXML::Element] The EncryptedAttribute element
-      # @return [REXML::Document] The decrypted EncryptedAttribute element
+      # @return [REXML::Element] The decrypted Attribute element
       #
       def decrypt_attribute(encrypted_attribute_node)
-        decrypt_element(encrypted_attribute_node, /(.*<\/(\w+:)?Attribute>)/m)
+        decrypt_element(encrypted_attribute_node, 'Attribute')
       end
 
-      # Decrypt an element
-      # @param encrypt_node [REXML::Element] The encrypted element
-      # @param regexp [Regexp] The regular expression to extract the decrypted data
-      # @return [REXML::Document] The decrypted element
+      # Decrypt an element. The decrypted plaintext must be exactly one element
+      # with the expected root name and the SAML assertion namespace. Trailing
+      # noise or additional elements are rejected rather than silently dropped.
       #
-      def decrypt_element(encrypt_node, regexp)
+      # @param encrypt_node [REXML::Element] The encrypted element
+      # @param expected_root [String] The expected local name of the decrypted root
+      # @return [REXML::Element] The decrypted element
+      #
+      def decrypt_element(encrypt_node, expected_root)
         if settings.nil? || settings.get_sp_decryption_keys.empty?
           raise ValidationError.new('An ' + encrypt_node.name + ' found and no SP private key found on the settings to decrypt it')
         end
 
-        if encrypt_node.name == 'EncryptedAttribute'
-          node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-        else
-          node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">'
-        end
-
         elem_plaintext = OneLogin::RubySaml::Utils.decrypt_multi(encrypt_node, settings.get_sp_decryption_keys)
-
-        # If we get some problematic noise in the plaintext after decrypting.
-        # This quick regexp parse will grab only the Element and discard the noise.
-        elem_plaintext = elem_plaintext.match(regexp)[0]
-
-        # To avoid namespace errors if saml namespace is not defined
-        # create a parent node first with the namespace defined
-        elem_plaintext = node_header + elem_plaintext + '</node>'
-        doc = REXML::Document.new(elem_plaintext)
-        doc.root[0]
+        _, root = OneLogin::RubySaml::Utils.parse_decrypted_element(
+          elem_plaintext,
+          expected_root,
+          OneLogin::RubySaml::Utils::ASSERTION,
+          OneLogin::RubySaml::Utils.in_scope_namespaces(encrypt_node)
+        )
+        root
       end
 
       # Parse the attribute of a given node in Time format
