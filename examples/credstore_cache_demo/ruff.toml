@@ -1,0 +1,6 @@
+# Local overrides for this self-contained example. The repository-wide rule
+# set (E/F/I/S) still applies; asserts are expected in the demo script and the
+# pytest module rather than in importable library code.
+[lint.per-file-ignores]
+"demo.py" = ["S101"]
+"test_*.py" = ["S101"]
