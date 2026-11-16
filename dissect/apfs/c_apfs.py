@@ -1649,6 +1649,8 @@ FILESYSTEM_OBJECT_TYPE_MAP = {
     c_apfs.APFS_TYPE.FILE_INFO: (c_apfs.j_file_info_key, c_apfs.j_file_info_val),
 }
 
+# Extended field types are scoped to the namespace they appear in: the same numeric
+# type can mean different things for an inode and for a directory entry.
 XF_MAP = {
     c_apfs.DREC_EXT_TYPE.SIBLING_ID: c_apfs.uint64_t,
     c_apfs.INO_EXT_TYPE.SNAP_XID: c_apfs.xid_t,

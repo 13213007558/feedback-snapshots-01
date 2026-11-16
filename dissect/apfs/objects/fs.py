@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import stat
 import unicodedata
 from functools import cached_property, lru_cache
@@ -14,7 +15,13 @@ from dissect.util.ts import from_unix, from_unix_ns
 
 from dissect.apfs.c_apfs import FILESYSTEM_OBJECT_TYPE_MAP, XF_MAP, c_apfs
 from dissect.apfs.cursor import Cursor
-from dissect.apfs.exception import Error, FileNotFoundError, NotADirectoryError, NotASymlinkError
+from dissect.apfs.exception import (
+    Error,
+    FileNotFoundError,
+    InvalidXFieldError,
+    NotADirectoryError,
+    NotASymlinkError,
+)
 from dissect.apfs.objects.base import Object
 from dissect.apfs.objects.btree import BTree
 from dissect.apfs.objects.omap import ObjectMap
@@ -22,11 +29,116 @@ from dissect.apfs.stream import DecmpfsStream, FileStream
 from dissect.apfs.util import cmp_fs, cmp_fs_dir, cmp_fs_dir_hash, parse_fs_object_key
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from datetime import datetime
 
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
+
+
+class XField:
+    """A single APFS extended field.
+
+    Args:
+        type: The namespace-qualified field type. Note that the same numeric value in
+            the inode and directory entry namespaces is a different type.
+        flags: The extended field flags.
+        raw: The raw, unpadded field contents as stored on disk.
+        value: The interpreted value for known fields, or ``raw`` for unknown ones.
+        parsed: Whether ``value`` was produced by a namespace specific parser.
+        index: The position of this field in the extended field array.
+    """
+
+    __slots__ = ("type", "flags", "raw", "value", "parsed", "index")
+
+    def __init__(self, type: enum.Enum, flags: c_apfs.XF, raw: bytes, value: Any, parsed: bool, index: int):
+        self.type = type
+        self.flags = flags
+        self.raw = raw
+        self.value = value
+        self.parsed = parsed
+        self.index = index
+
+    def __repr__(self) -> str:
+        return (
+            f"<XField index={self.index} type={self.type} flags={self.flags} "
+            f"size={len(self.raw)} parsed={self.parsed}>"
+        )
+
+    @property
+    def size(self) -> int:
+        """The unpadded size of this field."""
+        return len(self.raw)
+
+    @property
+    def known(self) -> bool:
+        """Whether the numeric type is defined in this namespace."""
+        return self.type.name is not None
+
+
+class XFields(dict):
+    """The extended fields of an inode or directory entry.
+
+    This behaves like the previous ``{type: (flags, value)}`` mapping, where known
+    single-value fields resolve to their ``(flags, value)`` tuple. The mapping key is
+    always the namespace-qualified field type, so the inode and directory entry
+    namespaces cannot be confused.
+
+    Unlike a plain dict, every parsed field is preserved in :attr:`entries`. Duplicate
+    entries never overwrite earlier evidence: the mapping resolves the first occurrence,
+    while :attr:`duplicates` and :attr:`conflicts` expose all copies. Unknown fields are
+    available through :attr:`unknown` with their raw content and flags.
+
+    Args:
+        namespace: The extended field type enum this blob was parsed in.
+        entries: All parsed extended fields, in on-disk order.
+    """
+
+    def __init__(self, namespace: type[enum.Enum], entries: Iterable[XField]):
+        super().__init__()
+
+        self.namespace = namespace
+        self.entries = tuple(entries)
+
+        grouped: dict[enum.Enum, list[XField]] = {}
+        for entry in self.entries:
+            grouped.setdefault(entry.type, []).append(entry)
+            # Duplicate fields must not silently overwrite earlier evidence: the first
+            # occurrence resolves the mapping, all occurrences stay available below.
+            if entry.type not in self:
+                self[entry.type] = (entry.flags, entry.value)
+
+        self.duplicates = {type: tuple(fields) for type, fields in grouped.items() if len(fields) > 1}
+        self.conflicts = {
+            type: tuple(fields)
+            for type, fields in grouped.items()
+            if len({(field.flags, field.raw) for field in fields}) > 1
+        }
+        self.unknown = tuple(field for field in self.entries if not field.known)
+
+    def __getitem__(self, type: enum.Enum | int) -> tuple[c_apfs.XF, Any]:
+        if isinstance(type, int) and not isinstance(type, enum.Enum):
+            type = self.namespace(type)
+        return super().__getitem__(type)
+
+    def __contains__(self, type: object) -> bool:
+        if isinstance(type, int) and not isinstance(type, enum.Enum):
+            type = self.namespace(type)
+        return super().__contains__(type)
+
+    def get(self, type: enum.Enum | int, default: Any = None) -> Any:
+        if isinstance(type, int) and not isinstance(type, enum.Enum):
+            type = self.namespace(type)
+        return super().get(type, default)
+
+    def __repr__(self) -> str:
+        return f"<XFields namespace={getattr(self.namespace, '__name__', self.namespace)} fields={len(self.entries)}>"
+
+    def getall(self, type: enum.Enum | int) -> tuple[XField, ...]:
+        """Return every occurrence of a field type, including conflicting duplicates."""
+        if isinstance(type, int) and not isinstance(type, enum.Enum):
+            type = self.namespace(type)
+        return tuple(field for field in self.entries if field.type == type)
 
 
 class FS(Object):
@@ -437,17 +549,12 @@ class INode:
         return c_apfs.j_inode_val(self._inode_raw)
 
     @cached_property
-    def xfields(self) -> dict:
-        """The extended fields for this inode."""
+    def xfields(self) -> XFields:
+        """The extended fields for this inode, in the inode namespace."""
         if len(self._inode_raw) == len(c_apfs.j_inode_val):
-            return {}
+            return XFields(c_apfs.INO_EXT_TYPE, ())
 
-        result = {}
-        for field, value in _read_xfields(self._inode_raw[len(c_apfs.j_inode_val) :]):
-            type = c_apfs.INO_EXT_TYPE(field.x_type)
-            result[type] = (c_apfs.XF(field.x_flags), XF_MAP.get(type, lambda buf: buf)(value))
-
-        return result
+        return _read_xfields(self._inode_raw[len(c_apfs.j_inode_val) :], c_apfs.INO_EXT_TYPE)
 
     @cached_property
     def xattr(self) -> dict[str, XAttr]:
@@ -743,11 +850,9 @@ class DirectoryEntry:
             self.key = c_apfs.j_drec_key(key)
         self.value = c_apfs.j_drec_val(value)
 
-        self.xfields = {}
+        self.xfields = XFields(c_apfs.DREC_EXT_TYPE, ())
         if len(value) != len(c_apfs.j_drec_val):
-            for field, data in _read_xfields(value[len(c_apfs.j_drec_val) :]):
-                type = c_apfs.DREC_EXT_TYPE(field.x_type)
-                self.xfields[type] = (c_apfs.XF(field.x_flags), XF_MAP.get(type, lambda buf: buf)(data))
+            self.xfields = _read_xfields(value[len(c_apfs.j_drec_val) :], c_apfs.DREC_EXT_TYPE)
 
     def __repr__(self) -> str:
         return f"<DirectoryEntry name={self.name!r} file_id={self.file_id} dt={self.dt.name}>"
@@ -868,14 +973,113 @@ class XAttr:
         return BufferedStream(BytesIO(self.value.xdata), size=self.value.xdata_len)
 
 
-def _read_xfields(data: bytes) -> Iterator[tuple[c_apfs.x_field, bytes]]:
-    """Read extended fields from a buffer."""
-    blob = c_apfs.xf_blob(data)
-    buf = BytesIO(blob.xf_data)
-    for field in blob.xf_exts:
-        yield field, buf.read(field.x_size)
-        # Align to 8 bytes
-        buf.seek((buf.tell() + 7) & (-8))
+def _read_xfields(data: bytes, namespace: type[enum.Enum] = c_apfs.INO_EXT_TYPE) -> XFields:
+    """Parse an APFS extended field blob.
+
+    The layout is declared by the blob itself:
+
+    * ``xf_num_exts`` is the number of ``x_field`` entries in the header.
+    * ``xf_used_data`` is the total size of the aligned field data.
+    * every field value is padded to an eight byte boundary, including the last one.
+
+    The declared sizes must fit exactly in ``xf_used_data`` and the blob must contain
+    that many data bytes. Field values are interpreted using ``namespace`` so that the
+    same numeric type in an inode and in a directory entry is not conflated.
+
+    Args:
+        data: The raw extended field blob, starting at ``xf_num_exts``.
+        namespace: The extended field type enum for the record this blob belongs to.
+
+    Returns:
+        The parsed extended fields, including duplicate and unknown entries.
+
+    Raises:
+        InvalidXFieldError: If the header, ``xf_used_data``, field sizes or padding do
+            not form a structurally valid blob, or if a known field cannot be parsed.
+    """
+    if len(data) < 4:
+        raise InvalidXFieldError(f"Extended field blob is too short for a header: {len(data)} bytes")
+
+    num_exts = int.from_bytes(data[0:2], "little")
+    used_data = int.from_bytes(data[2:4], "little")
+
+    header_size = 4 + (4 * num_exts)
+    if len(data) < header_size:
+        raise InvalidXFieldError(
+            f"Extended field header declares {num_exts} fields ({header_size} bytes), "
+            f"but only {len(data)} are available"
+        )
+
+    data_end = header_size + used_data
+    if len(data) < data_end:
+        raise InvalidXFieldError(
+            f"Extended field data is truncated: need {used_data} bytes, "
+            f"but only {len(data) - header_size} are available"
+        )
+
+    # Validate the declared field table and its padding before interpreting any value,
+    # so structural errors cannot be masked by a value parser.
+    declared = []
+    offset = header_size
+    aligned_size = 0
+
+    for index in range(num_exts):
+        header_offset = 4 + (index * 4)
+        x_type = data[header_offset]
+        x_flags = data[header_offset + 1]
+        x_size = int.from_bytes(data[header_offset + 2 : header_offset + 4], "little")
+
+        value_end = offset + x_size
+        if value_end > data_end:
+            raise InvalidXFieldError(
+                f"Extended field {index} (type {x_type}) declares {x_size} bytes at offset "
+                f"{offset - header_size}, but the data region is only {used_data} bytes"
+            )
+
+        # Every field, including the last, is padded to an eight byte boundary
+        aligned = (x_size + 7) & ~7
+        if offset + aligned > data_end:
+            raise InvalidXFieldError(
+                f"Extended field {index} (type {x_type}) requires {aligned} aligned bytes at offset "
+                f"{offset - header_size}, but the data region is only {used_data} bytes"
+            )
+
+        declared.append((x_type, x_flags, offset, value_end))
+        offset += aligned
+        aligned_size += aligned
+
+    if aligned_size != used_data:
+        raise InvalidXFieldError(
+            f"Extended field sizes do not match xf_used_data: {aligned_size} aligned bytes declared, "
+            f"but xf_used_data is {used_data}"
+        )
+
+    entries = []
+    for index, (x_type, x_flags, value_start, value_end) in enumerate(declared):
+        value = bytes(data[value_start:value_end])
+        field_type = namespace(x_type)
+        parsed, is_parsed = _parse_xfield_value(field_type, value)
+        entries.append(XField(field_type, c_apfs.XF(x_flags), value, parsed, is_parsed, index))
+
+    return XFields(namespace, entries)
+
+
+def _parse_xfield_value(field_type: enum.Enum, data: bytes) -> tuple[Any, bool]:
+    """Interpret a single extended field value, returning ``(value, was_parsed)``."""
+    parser = XF_MAP.get(field_type)
+    if parser is None:
+        return data, False
+
+    expected_size = getattr(parser, "size", None)
+    if expected_size is not None and len(data) != expected_size:
+        raise InvalidXFieldError(
+            f"Extended field {field_type} has size {len(data)}, but {expected_size} bytes are expected"
+        )
+
+    try:
+        return parser(data), True
+    except Exception as e:
+        raise InvalidXFieldError(f"Failed to parse extended field {field_type} with size {len(data)}: {e}") from e
 
 
 def _hash_filename(name: str, casefold: bool) -> int:

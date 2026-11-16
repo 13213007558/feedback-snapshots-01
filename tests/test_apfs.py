@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import struct
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ import pytest
 
 from dissect.apfs.apfs import APFS, log
 from dissect.apfs.c_apfs import c_apfs
+from dissect.apfs.exception import InvalidXFieldError
+from dissect.apfs.objects.fs import INode, XFields, _read_xfields
 from tests.conftest import absolute_path
 
 if TYPE_CHECKING:
@@ -404,3 +407,237 @@ def test_large_extents() -> None:
 
             # Check that we only read one block, not the entire 128MiB extent
             mock_read_block.assert_called_once_with(1070, 1)
+
+
+def _xfield_blob(fields: list[tuple[int, int, bytes]], used_data: int | None = None) -> bytes:
+    """Build an extended field blob.
+
+    Args:
+        fields: ``(type, flags, value)`` tuples. Values are padded to eight bytes.
+        used_data: Optional override for the declared ``xf_used_data``.
+    """
+    data = b""
+    headers = b""
+    for x_type, x_flags, value in fields:
+        headers += struct.pack("<BBH", x_type, x_flags, len(value))
+        data += value + b"\x00" * (((len(value) + 7) & ~7) - len(value))
+
+    return struct.pack("<HH", len(fields), len(data) if used_data is None else used_data) + headers + data
+
+
+def _inode_raw(xfield_blob: bytes | None = None) -> bytes:
+    return b"\x00" * len(c_apfs.j_inode_val) + (xfield_blob or b"")
+
+
+def _drec_raw(xfield_blob: bytes | None = None, file_id: int = 0x42) -> bytes:
+    return struct.pack("<QQH", file_id, 0, 0) + (xfield_blob or b"")
+
+
+def test_xfield_namespace_distinguishes_same_number() -> None:
+    """The same numeric field type means something different in an inode and a directory entry."""
+    value = struct.pack("<Q", 0x1122334455667788)
+    blob = _xfield_blob([(1, 0, value)])
+
+    inode_fields = _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+    drec_fields = _read_xfields(blob, c_apfs.DREC_EXT_TYPE)
+
+    assert inode_fields.namespace is c_apfs.INO_EXT_TYPE
+    assert drec_fields.namespace is c_apfs.DREC_EXT_TYPE
+    assert inode_fields.entries[0].type == c_apfs.INO_EXT_TYPE.SNAP_XID
+    assert drec_fields.entries[0].type == c_apfs.DREC_EXT_TYPE.SIBLING_ID
+    assert inode_fields.entries[0].type != drec_fields.entries[0].type
+
+    assert inode_fields[c_apfs.INO_EXT_TYPE.SNAP_XID][1] == 0x1122334455667788
+    assert drec_fields[c_apfs.DREC_EXT_TYPE.SIBLING_ID][1] == 0x1122334455667788
+
+    # Integer lookups resolve in the namespace of the blob
+    assert inode_fields[1][1] == 0x1122334455667788
+    assert drec_fields[1][1] == 0x1122334455667788
+
+    with pytest.raises(KeyError):
+        drec_fields[c_apfs.INO_EXT_TYPE.SNAP_XID]
+
+
+def test_xfield_unknown_field_preserved() -> None:
+    """Unknown field types keep their raw bytes and flags."""
+    blob = _xfield_blob([(0xFA, c_apfs.XF.USER_FIELD | c_apfs.XF.DATA_DEPENDENT, b"\x01\x02\x03\x04\x05")])
+    fields = _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+
+    entry = fields.entries[0]
+    assert not entry.known
+    assert not entry.parsed
+    assert entry.raw == b"\x01\x02\x03\x04\x05"
+    assert entry.value == b"\x01\x02\x03\x04\x05"
+    assert entry.flags == c_apfs.XF.USER_FIELD | c_apfs.XF.DATA_DEPENDENT
+    assert entry.size == 5
+    assert fields.unknown == (entry,)
+
+    # Unknown fields are still addressable through the mapping
+    assert fields[entry.type] == (entry.flags, entry.raw)
+
+
+def test_xfield_duplicates_do_not_take_last() -> None:
+    """Conflicting duplicate single-value fields retain every occurrence and resolve the first."""
+    first = struct.pack("<Q", 0x1111)
+    second = struct.pack("<Q", 0x2222)
+    blob = _xfield_blob(
+        [
+            (c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, first),
+            (c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, second),
+        ]
+    )
+    fields = _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+
+    # The last entry must not overwrite the first
+    assert fields[c_apfs.INO_EXT_TYPE.SNAP_XID][1] == 0x1111
+    assert len(fields) == 1
+    assert len(fields.entries) == 2
+
+    occurrences = fields.getall(c_apfs.INO_EXT_TYPE.SNAP_XID)
+    assert len(occurrences) == 2
+    assert [entry.value for entry in occurrences] == [0x1111, 0x2222]
+    assert fields.duplicates[c_apfs.INO_EXT_TYPE.SNAP_XID] == occurrences
+    assert fields.conflicts[c_apfs.INO_EXT_TYPE.SNAP_XID] == occurrences
+
+
+def test_xfield_duplicates_with_identical_value_are_not_conflicts() -> None:
+    """Repeated identical fields are still duplicates, but not conflicting evidence."""
+    value = struct.pack("<Q", 0x1111)
+    blob = _xfield_blob([(c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, value)] * 2)
+    fields = _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+
+    assert len(fields.duplicates[c_apfs.INO_EXT_TYPE.SNAP_XID]) == 2
+    assert not fields.conflicts
+
+
+def test_xfield_used_data_and_padding_validation() -> None:
+    """xf_used_data must match the eight byte aligned sum of the declared field sizes."""
+    value = struct.pack("<Q", 1)
+    valid = _xfield_blob([(c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, value)])
+    assert _read_xfields(valid, c_apfs.INO_EXT_TYPE)
+
+    # used_data larger than the aligned fields, with the extra bytes actually present
+    with pytest.raises(InvalidXFieldError, match="xf_used_data"):
+        _read_xfields(
+            _xfield_blob([(c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, value)], used_data=16) + b"\x00" * 8,
+            c_apfs.INO_EXT_TYPE,
+        )
+
+    # used_data smaller than the aligned fields
+    with pytest.raises(InvalidXFieldError):
+        _read_xfields(_xfield_blob([(c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, value)], used_data=0), c_apfs.INO_EXT_TYPE)
+
+    # Declared data region is truncated
+    truncated = bytearray(valid)
+    truncated[2:4] = struct.pack("<H", 16)
+    with pytest.raises(InvalidXFieldError, match="truncated"):
+        _read_xfields(bytes(truncated), c_apfs.INO_EXT_TYPE)
+
+    # Truncated field header
+    with pytest.raises(InvalidXFieldError, match="header"):
+        _read_xfields(struct.pack("<HH", 2, 0), c_apfs.INO_EXT_TYPE)
+
+    # Field header declares more data than the used data region
+    bad = struct.pack("<HH", 1, 8) + struct.pack("<BBH", c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, 16) + b"\x00" * 8
+    with pytest.raises(InvalidXFieldError, match="data region"):
+        _read_xfields(bad, c_apfs.INO_EXT_TYPE)
+
+
+def test_xfield_known_field_size_mismatch_is_invalid() -> None:
+    """A known field with the wrong declared size is an error, not raw evidence."""
+    blob = _xfield_blob([(c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, b"\x01\x02\x03\x04")])
+    with pytest.raises(InvalidXFieldError, match="SNAP_XID"):
+        _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+
+
+def test_xfield_alignment_padding_does_not_shift_fields() -> None:
+    """A short field is padded to eight bytes before the next field is read."""
+    # A 13-byte NAME followed by a 4-byte RDEV. The NAME is padded to 16 bytes.
+    name = b"padded_name\x00\x00"
+    rdev = struct.pack("<I", 0x1234)
+    blob = _xfield_blob(
+        [
+            (c_apfs.INO_EXT_TYPE.NAME.value, 0, name),
+            (c_apfs.INO_EXT_TYPE.RDEV.value, 0, rdev),
+        ]
+    )
+    assert blob[2:4] == struct.pack("<H", 24)
+
+    fields = _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+    assert len(fields.entries) == 2
+
+    name_entry, rdev_entry = fields.entries
+    assert name_entry.raw == name
+    assert name_entry.value == name
+    assert rdev_entry.raw == rdev
+    assert rdev_entry.value == 0x1234
+
+    # Padding bytes are not part of the raw value and must not leak into the next field
+    assert b"\x00" * 3 not in name_entry.raw
+
+
+def test_xfield_duplicates_take_priority_over_later_copies() -> None:
+    """Adding duplicate support must not weaken bounds checking on later fields."""
+    first = struct.pack("<Q", 1)
+    blob = _xfield_blob(
+        [
+            (c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, first),
+            (c_apfs.INO_EXT_TYPE.SNAP_XID.value, 0, b"\x00" * 4),
+        ]
+    )
+
+    # Even though the first (valid) field resolves the mapping, the malformed duplicate
+    # still fails the blob; it is not silently ignored.
+    with pytest.raises(InvalidXFieldError, match="size"):
+        _read_xfields(blob, c_apfs.INO_EXT_TYPE)
+
+
+def test_directory_entry_xfield_errors_do_not_shift_sibling_id() -> None:
+    """A malformed directory entry blob fails without producing a shifted sibling ID."""
+    from dissect.apfs.objects.fs import DirectoryEntry
+
+    class _Volume:
+        is_case_insensitive = False
+        is_normalization_insensitive = False
+
+    # sibling_id is a known field, but its declared size does not match uint64
+    malformed = _xfield_blob([(c_apfs.DREC_EXT_TYPE.SIBLING_ID.value, 0, b"\x00" * 4)])
+
+    with pytest.raises(InvalidXFieldError):
+        DirectoryEntry(_Volume(), _drec_key(b"file"), _drec_raw(malformed))
+
+    # Truncated field data must also fail before any sibling ID is exposed
+    truncated = bytearray(_xfield_blob([(c_apfs.DREC_EXT_TYPE.SIBLING_ID.value, 0, struct.pack("<Q", 7))]))
+    truncated[2:4] = struct.pack("<H", 16)
+    with pytest.raises(InvalidXFieldError):
+        DirectoryEntry(_Volume(), _drec_key(b"file"), _drec_raw(bytes(truncated)))
+
+    # A well-formed blob still resolves the sibling ID from the directory entry namespace
+    valid = _xfield_blob([(c_apfs.DREC_EXT_TYPE.SIBLING_ID.value, 0, struct.pack("<Q", 7))])
+    entry = DirectoryEntry(_Volume(), _drec_key(b"file"), _drec_raw(valid))
+    assert entry.name == "file"
+    assert entry.sibling_id == 7
+    assert entry.xfields.namespace is c_apfs.DREC_EXT_TYPE
+
+
+def _drec_key(name: bytes) -> bytes:
+    name = name + b"\x00"
+    return struct.pack("<QH", (1 << c_apfs.OBJ_TYPE_SHIFT) | 1, len(name)) + name
+
+
+def test_inode_xfield_name_uses_inode_namespace() -> None:
+    """An inode NAME field is decoded from the inode namespace and keeps the file name intact."""
+    name = b"testfile\x00"
+    blob = _xfield_blob([(c_apfs.INO_EXT_TYPE.NAME.value, 0, name)])
+    inode = INode(None, 0x1000)
+    inode._inode_raw = _inode_raw(blob)
+
+    assert isinstance(inode.xfields, XFields)
+    assert inode.xfields.namespace is c_apfs.INO_EXT_TYPE
+    assert inode.name == "testfile"
+
+    # The same numeric type in the directory entry namespace is not an inode NAME field
+    drec_blob = _xfield_blob([(c_apfs.INO_EXT_TYPE.NAME.value, 0, b"\x08\x00\x00\x00\x00\x00\x00\x00")])
+    drec_fields = _read_xfields(drec_blob, c_apfs.DREC_EXT_TYPE)
+    assert drec_fields.entries[0].type == c_apfs.DREC_EXT_TYPE(4)
+    assert not drec_fields.entries[0].known

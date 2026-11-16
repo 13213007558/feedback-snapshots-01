@@ -19,3 +19,7 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotASymlinkError(Error):
     pass
+
+
+class InvalidXFieldError(Error, ValueError):
+    """Raised when an extended field blob is structurally invalid."""
