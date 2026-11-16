@@ -27,10 +27,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import struct
 from enum import IntEnum, unique
-from typing import Any, Mapping, Sequence
+from threading import RLock
+from typing import Any, Iterator, Mapping, Sequence
 
 from .. import cbor
 from ..ctap import CtapError
@@ -43,6 +45,180 @@ from .base import Ctap2, Info
 from .pin import PinProtocol, _PinUv
 
 logger = logging.getLogger(__name__)
+
+
+class EnumerationError(Exception):
+    """Base class for errors related to credential enumeration sessions."""
+
+
+class EnumerationConflictError(EnumerationError):
+    """An enumeration operation conflicts with an active enumeration session.
+
+    CTAP begin/next enumeration relies on server-side enumeration state held by
+    the authenticator. Only one enumeration (of RPs or credentials) can own
+    that state at a time. Starting a new enumeration, or issuing a next call
+    without a matching session, while another session is active raises this
+    error rather than silently mixing the two enumerations.
+    """
+
+
+class EnumerationSession:
+    """Owns one in-progress authenticator enumeration.
+
+    A session binds the client to a single begin/next sequence on the
+    authenticator. It must not be instantiated directly; use the
+    ``enumerate_rps_session`` or ``enumerate_creds_session`` context managers of
+    :class:`CredentialManagement`. The session is iterable and releases its
+    ownership of the authenticator enumeration state when exhausted, closed, or
+    when the surrounding context is exited (including due to an error).
+
+    :ivar kind: Whether this session enumerates RPs or credentials.
+    :ivar total: The number of entities reported by the begin call. The value
+        is fixed for the lifetime of the session, so a change in the stored
+        count mid-enumeration never silently changes the result.
+    :ivar rp_id_hash: For a credential session, the RP whose credentials are
+        enumerated. Every returned credential is checked against this hash.
+    """
+
+    @unique
+    class Kind(IntEnum):
+        RP = 0
+        CREDENTIAL = 1
+
+        @property
+        def label(self) -> str:
+            return (
+                "credentials"
+                if self is EnumerationSession.Kind.CREDENTIAL
+                else "RPs"
+            )
+
+    def __init__(
+        self,
+        credman: "CredentialManagement",
+        kind: "EnumerationSession.Kind",
+        first: Mapping[int, Any],
+        total: int,
+        rp_id_hash: bytes | None = None,
+    ):
+        self._credman = credman
+        self.kind = kind
+        self.total = total
+        self.rp_id_hash = rp_id_hash
+        self._done = False
+        self._seen = 1
+        self._buffer: list[Mapping[int, Any]] = []
+        # The first entity has already been fetched by the begin call.
+        self._buffer.append(self._validate(first))
+
+    @classmethod
+    def empty(
+        cls,
+        credman: "CredentialManagement",
+        kind: "EnumerationSession.Kind",
+        rp_id_hash: bytes | None = None,
+    ) -> "EnumerationSession":
+        # An empty session never owns authenticator enumeration state.
+        session = cls.__new__(cls)
+        session._credman = credman
+        session.kind = kind
+        session.total = 0
+        session.rp_id_hash = rp_id_hash
+        session._done = True
+        session._seen = 0
+        session._buffer = []
+        return session
+
+    @property
+    def exhausted(self) -> bool:
+        """True when the session holds no ownership of enumeration state."""
+        return self._done
+
+    def take_first(self) -> Mapping[int, Any]:
+        """Consume and return the entity fetched by the begin call.
+
+        Used by the low-level ``*_begin`` methods so that a following ``*_next``
+        returns the second entity rather than repeating the first one.
+        """
+        if not self._buffer:
+            raise EnumerationError("The begin response has already been consumed.")
+        entity = self._buffer.pop(0)
+        if self._seen >= self.total:
+            # The only entity has been handed out, so ownership ends.
+            self._release()
+        return entity
+
+    def _validate(self, entity: Mapping[int, Any]) -> Mapping[int, Any]:
+        if (
+            self.kind is EnumerationSession.Kind.CREDENTIAL
+            and self.rp_id_hash is not None
+            and CredentialManagement.RESULT.RP_ID_HASH in entity
+            and entity[CredentialManagement.RESULT.RP_ID_HASH] != self.rp_id_hash
+        ):
+            raise EnumerationError(
+                "Credential belongs to a different RP than the one being "
+                "enumerated; the authenticator enumeration state is inconsistent."
+            )
+        return entity
+
+    def _next_cmd(self) -> "CredentialManagement.CMD":
+        return (
+            CredentialManagement.CMD.ENUMERATE_CREDS_NEXT
+            if self.kind is EnumerationSession.Kind.CREDENTIAL
+            else CredentialManagement.CMD.ENUMERATE_RPS_NEXT
+        )
+
+    def _fetch_next(self) -> Mapping[int, Any]:
+        if self._done:
+            raise EnumerationConflictError(
+                "The enumeration session has already ended."
+            )
+        # next calls are not authenticated per the CTAP spec.
+        entity = self._credman._call(self._next_cmd(), auth=False)
+        entity = self._validate(entity)
+        self._seen += 1
+        if self._seen >= self.total:
+            # The entity just returned is the last one.
+            self._release()
+        return entity
+
+    def _release(self) -> None:
+        if not self._done:
+            self._done = True
+            if self._credman._active_session is self:
+                self._credman._active_session = None
+
+    def close(self) -> None:
+        """Release the authenticator enumeration state owned by the session.
+
+        Safe to call more than once. Abandoning a session this way leaves any
+        partially collected entities available via iteration, but performs no
+        automatic restart, so data from two points in time is never mixed.
+        """
+        with self._credman._enum_lock:
+            self._release()
+
+    def __iter__(self) -> Iterator[Mapping[int, Any]]:
+        return self
+
+    def __next__(self) -> Mapping[int, Any]:
+        if self._buffer:
+            entity = self._buffer.pop(0)
+            if self._seen >= self.total:
+                self._release()
+            return entity
+        if self._done:
+            raise StopIteration
+        with self._credman._enum_lock:
+            if self._done:
+                raise StopIteration
+            return self._fetch_next()
+
+    def __enter__(self) -> "EnumerationSession":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
 
 class CredentialManagement:
@@ -114,6 +290,10 @@ class CredentialManagement:
 
         self.ctap = ctap
         self.pin_uv = _PinUv(pin_uv_protocol, pin_uv_token)
+        # Serializes access to the authenticator-side enumeration state and
+        # tracks which enumeration (if any) currently owns it.
+        self._enum_lock = RLock()
+        self._active_session: EnumerationSession | None = None
 
     def _call(self, sub_cmd, params=None, auth=True):
         kwargs: dict[str, Any] = {"sub_cmd": sub_cmd, "sub_cmd_params": params}
@@ -126,6 +306,63 @@ class CredentialManagement:
                 self.pin_uv.token, msg
             )
         return self.ctap.credential_mgmt(**kwargs)
+
+    def _check_no_active_session(self, cmd: "CredentialManagement.CMD") -> None:
+        session = self._active_session
+        if session is not None and not session.exhausted:
+            raise EnumerationConflictError(
+                f"{cmd.name} cannot start while an enumeration of "
+                f"{session.kind.label} is still in progress."
+            )
+
+    def _check_active_session(
+        self, cmd: "CredentialManagement.CMD", kind: "EnumerationSession.Kind"
+    ) -> None:
+        session = self._active_session
+        if session is None or session.exhausted:
+            raise EnumerationConflictError(
+                f"{cmd.name} requires an active {kind.label} enumeration, "
+                "but none is open. Call the matching begin first."
+            )
+        if session.kind is not kind:
+            raise EnumerationConflictError(
+                f"{cmd.name} belongs to a {kind.label} enumeration, but a "
+                f"{session.kind.label} enumeration is currently active."
+            )
+
+    def _begin_session(
+        self,
+        cmd: "CredentialManagement.CMD",
+        kind: "EnumerationSession.Kind",
+        params: Mapping[int, Any] | None = None,
+        rp_id_hash: bytes | None = None,
+    ) -> EnumerationSession:
+        # Caller must hold self._enum_lock.
+        self._check_no_active_session(cmd)
+        try:
+            first = self._call(cmd, params)
+        except CtapError as e:
+            if e.code == CtapError.ERR.NO_CREDENTIALS:
+                return EnumerationSession.empty(self, kind, rp_id_hash)
+            raise
+        if kind is EnumerationSession.Kind.RP:
+            total = first[CredentialManagement.RESULT.TOTAL_RPS]
+        else:
+            total = first.get(CredentialManagement.RESULT.TOTAL_CREDENTIALS, 1)
+        session = EnumerationSession(self, kind, first, total, rp_id_hash)
+        self._active_session = session
+        return session
+
+    @property
+    def active_session(self) -> "EnumerationSession | None":
+        """The enumeration session currently owning the device, if any.
+
+        A session opened through the low-level ``*_begin`` methods must be
+        driven with the matching ``*_next`` calls or closed via
+        :meth:`EnumerationSession.close`; sessions opened through the
+        ``*_session`` context managers are closed automatically.
+        """
+        return self._active_session
 
     def get_metadata(self) -> Mapping[int, Any]:
         """Get credentials metadata.
@@ -144,36 +381,78 @@ class CredentialManagement:
         This will begin enumeration of stored RP entities, returning the first
         entity, as well as a count of the total number of entities stored.
 
+        The authenticator can only hold one enumeration cursor at a time, so
+        this raises :class:`EnumerationConflictError` if another enumeration
+        session is active on this CredentialManagement instance.
+
         :return: A dict containing RP, RP_ID_HASH, and TOTAL_RPS.
         """
-        return self._call(CredentialManagement.CMD.ENUMERATE_RPS_BEGIN)
+        with self._enum_lock:
+            session = self._begin_session(
+                CredentialManagement.CMD.ENUMERATE_RPS_BEGIN,
+                EnumerationSession.Kind.RP,
+            )
+        if session.exhausted:
+            # NO_CREDENTIALS: nothing to return, and no state was claimed.
+            raise CtapError(CtapError.ERR.NO_CREDENTIALS)
+        return session.take_first()
 
     def enumerate_rps_next(self) -> Mapping[int, Any]:
         """Get the next RP entity stored.
 
         This continues enumeration of stored RP entities, returning the next
-        entity.
+        entity. It must be paired with an open RP enumeration session; calling
+        it otherwise raises :class:`EnumerationConflictError`.
 
         :return: A dict containing RP, and RP_ID_HASH.
         """
-        return self._call(CredentialManagement.CMD.ENUMERATE_RPS_NEXT, auth=False)
+        with self._enum_lock:
+            self._check_active_session(
+                CredentialManagement.CMD.ENUMERATE_RPS_NEXT,
+                EnumerationSession.Kind.RP,
+            )
+            session = self._active_session
+            assert session is not None
+            return next(session)
+
+    @contextlib.contextmanager
+    def enumerate_rps_session(self) -> Iterator["EnumerationSession"]:
+        """Open an owned session enumerating all RP entities.
+
+        Unlike :meth:`enumerate_rps`, the returned :class:`EnumerationSession`
+        keeps explicit ownership of the authenticator enumeration state until
+        the context is exited, so other begin/next calls cannot interleave with
+        it. An authenticator with no RPs yields a session whose ``total`` is 0
+        rather than raising.
+
+        Usage::
+
+            with credman.enumerate_rps_session() as session:
+                for rp in session:
+                    ...
+        """
+        with self._enum_lock:
+            session = self._begin_session(
+                CredentialManagement.CMD.ENUMERATE_RPS_BEGIN,
+                EnumerationSession.Kind.RP,
+            )
+        try:
+            yield session
+        finally:
+            session.close()
 
     def enumerate_rps(self) -> Sequence[Mapping[int, Any]]:
         """Convenience method to enumerate all RPs.
 
-        See enumerate_rps_begin and enumerate_rps_next for details.
+        The enumeration runs inside an owned session. A NO_CREDENTIALS response
+        is reported as an empty list; any other failure (including an
+        interruption partway through) propagates instead of returning a partial
+        or empty list.
+
+        See enumerate_rps_session for an explicit, interruptible alternative.
         """
-        try:
-            first = self.enumerate_rps_begin()
-        except CtapError as e:
-            if e.code == CtapError.ERR.NO_CREDENTIALS:
-                return []
-            raise  # Other error
-        n_rps = first[CredentialManagement.RESULT.TOTAL_RPS]
-        if n_rps == 0:
-            return []
-        rest = [self.enumerate_rps_next() for _ in range(1, n_rps)]
-        return [first] + rest
+        with self.enumerate_rps_session() as session:
+            return list(session)
 
     def enumerate_creds_begin(self, rp_id_hash: bytes) -> Mapping[int, Any]:
         """Start enumeration of resident credentials.
@@ -182,43 +461,86 @@ class CredentialManagement:
         returning the first credential, as well as a count of the total number
         of resident credentials stored for the given RP.
 
+        The authenticator can only hold one enumeration cursor at a time, so
+        this raises :class:`EnumerationConflictError` if another enumeration
+        session is active on this CredentialManagement instance.
+
         :param rp_id_hash: SHA256 hash of the RP ID.
         :return: A dict containing USER, CREDENTIAL_ID, PUBLIC_KEY, and
             TOTAL_CREDENTIALS.
         """
-        return self._call(
-            CredentialManagement.CMD.ENUMERATE_CREDS_BEGIN,
-            {CredentialManagement.PARAM.RP_ID_HASH: rp_id_hash},
-        )
+        with self._enum_lock:
+            session = self._begin_session(
+                CredentialManagement.CMD.ENUMERATE_CREDS_BEGIN,
+                EnumerationSession.Kind.CREDENTIAL,
+                {CredentialManagement.PARAM.RP_ID_HASH: rp_id_hash},
+                rp_id_hash=rp_id_hash,
+            )
+        if session.exhausted:
+            # NO_CREDENTIALS: nothing to return, and no state was claimed.
+            raise CtapError(CtapError.ERR.NO_CREDENTIALS)
+        return session.take_first()
 
     def enumerate_creds_next(self) -> Mapping[int, Any]:
         """Get the next resident credential stored.
 
         This continues enumeration of resident credentials, returning the next
-        credential.
+        credential. It must be paired with an open credential enumeration
+        session; calling it otherwise raises :class:`EnumerationConflictError`.
 
         :return: A dict containing USER, CREDENTIAL_ID, and PUBLIC_KEY.
         """
-        return self._call(CredentialManagement.CMD.ENUMERATE_CREDS_NEXT, auth=False)
+        with self._enum_lock:
+            self._check_active_session(
+                CredentialManagement.CMD.ENUMERATE_CREDS_NEXT,
+                EnumerationSession.Kind.CREDENTIAL,
+            )
+            session = self._active_session
+            assert session is not None
+            return next(session)
+
+    @contextlib.contextmanager
+    def enumerate_creds_session(
+        self, rp_id_hash: bytes
+    ) -> Iterator["EnumerationSession"]:
+        """Open an owned session enumerating credentials for one RP.
+
+        Every credential produced by the session belongs to ``rp_id_hash``;
+        responses claiming a different RP_ID_HASH raise
+        :class:`EnumerationError`. The session owns the authenticator
+        enumeration state until the context is exited. An RP with no
+        credentials yields a session whose ``total`` is 0 rather than raising.
+
+        Usage::
+
+            with credman.enumerate_creds_session(rp_id_hash) as session:
+                for cred in session:
+                    ...
+        """
+        with self._enum_lock:
+            session = self._begin_session(
+                CredentialManagement.CMD.ENUMERATE_CREDS_BEGIN,
+                EnumerationSession.Kind.CREDENTIAL,
+                {CredentialManagement.PARAM.RP_ID_HASH: rp_id_hash},
+                rp_id_hash=rp_id_hash,
+            )
+        try:
+            yield session
+        finally:
+            session.close()
 
     def enumerate_creds(self, *args, **kwargs) -> Sequence[Mapping[int, Any]]:
         """Convenience method to enumerate all resident credentials for an RP.
 
-        See enumerate_creds_begin and enumerate_creds_next for details.
+        The enumeration runs inside an owned session. A NO_CREDENTIALS response
+        is reported as an empty list; any other failure (including an
+        interruption partway through) propagates instead of returning a partial
+        or empty list.
+
+        See enumerate_creds_session for an explicit, interruptible alternative.
         """
-        try:
-            first = self.enumerate_creds_begin(*args, **kwargs)
-        except CtapError as e:
-            if e.code == CtapError.ERR.NO_CREDENTIALS:
-                return []
-            raise  # Other error
-        rest = [
-            self.enumerate_creds_next()
-            for _ in range(
-                1, first.get(CredentialManagement.RESULT.TOTAL_CREDENTIALS, 1)
-            )
-        ]
-        return [first] + rest
+        with self.enumerate_creds_session(*args, **kwargs) as session:
+            return list(session)
 
     def delete_cred(self, cred_id: PublicKeyCredentialDescriptor) -> None:
         """Delete a resident credential.

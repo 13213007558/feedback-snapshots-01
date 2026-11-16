@@ -3,6 +3,13 @@
     supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
     specified in Metadata Statement 3.1.1.
+ ** CredentialManagement: Give RP/credential enumeration explicit session
+    ownership. New enumerate_rps_session and enumerate_creds_session context
+    managers serialize begin/next access to the authenticator enumeration
+    state; conflicting interleaved calls raise EnumerationConflictError instead
+    of mixing enumerations. Interrupted or failed enumerations retain their
+    incomplete state rather than restarting, and NO_CREDENTIALS is distinct
+    from an interrupted enumeration.
 
 * Version 2.2.1 (released 2026-06-29)
  ** Server example: Migrate build tool from poetry to uv.
