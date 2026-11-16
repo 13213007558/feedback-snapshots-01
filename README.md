@@ -20,6 +20,40 @@ pip install dissect.regf
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Offline composite views
+
+`dissect.regf.RegistryView` composes explicitly supplied hive files
+into registry paths such as `HKEY_LOCAL_MACHINE\SYSTEM` and
+`HKEY_CURRENT_USER`. It never reads the registry of the analysis machine.
+
+```python
+from dissect.regf import RegistryHive, RegistryView
+
+with open("SYSTEM", "rb") as system, open("SOFTWARE", "rb") as software, open("NTUSER.DAT", "rb") as ntuser:
+    view = RegistryView(
+        system=RegistryHive(system),
+        software=RegistryHive(software),
+        users={"S-1-5-21-1001": RegistryHive(ntuser)},
+        user="S-1-5-21-1001",
+    )
+
+    key = view.open("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa")
+    print(key.physical_path)  # e.g. ControlSet001\Control\Lsa
+    print(key.expand())       # source hive, physical path and Select evidence
+```
+
+`CurrentControlSet` is resolved only from the SYSTEM hive's own `Select`
+values. `Current`, `Default` and `LastKnownGood` are separate pointers and are
+never used as fallbacks for each other. When `Select\Current` is missing or
+refers to a control set that is not present, use `RegistryView(..., control_set=1)`
+or `with_control_set(1)` to supply explicit physical context. When more than one
+user hive is mounted, select a user with `with_user(sid)` or a path such as
+`HKU\S-1-5-21-1001\...`.
+
+Views are immutable: `with_user()` and `with_control_set()` return a new view,
+and keys obtained from an earlier view keep their original source hive,
+physical path and selection evidence.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
