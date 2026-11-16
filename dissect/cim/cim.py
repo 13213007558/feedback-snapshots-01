@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cim.c_cim import (
     ARRAY_STATES,
+    CIM_TYPES,
     NAMESPACE_CLASS_NAME,
     ROOT_NAMESPACE_NAME,
     SYSTEM_NAMESPACE_NAME,
@@ -22,16 +23,27 @@ from dissect.cim.classes import (
     ClassInstance,
     PropertyDefaultValues,
 )
-from dissect.cim.exceptions import Error, InvalidDatabaseError
+from dissect.cim.exceptions import (
+    AmbiguousInstanceError,
+    Error,
+    InstanceNotFoundError,
+    InvalidDatabaseError,
+    InvalidInstancePathError,
+    ObjectPathSyntaxError,
+    UnsupportedHostError,
+)
 from dissect.cim.index import Index, Key
 from dissect.cim.mappings import Mapping
 from dissect.cim.objects import Objects
-from dissect.cim.utils import find_current_mapping, parse_object_path
+from dissect.cim.utils import (
+    find_current_mapping,
+    parse_hostname,
+    parse_instance_keys,
+    parse_object_path,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from dissect.cstruct import BaseType
 
     from dissect.cim.c_cim import (
         CimType,
@@ -42,6 +54,7 @@ if TYPE_CHECKING:
         InstanceKey,
         Qualifier,
     )
+    from dissect.cstruct import BaseType
 
 
 class CIM:
@@ -103,15 +116,43 @@ class CIM:
         return Key(self, *args)
 
     def query(self, path: str, ns: Namespace | None = None) -> Namespace | Class | Instance:
+        """Query an object path.
+
+        Supports relative and absolute local object paths, namespaces, classes
+        and instances. Instance keys are punctuation-aware, so key values that
+        contain commas, equals signs, quotes or backslashes are matched exactly.
+
+        Paths pointing at a remote host are parsed but not queried: this method
+        raises :class:`UnsupportedHostError` and never performs network I/O.
+
+        Args:
+            path: Textual object path.
+            ns: Namespace to resolve relative paths against.
+
+        Raises:
+            ObjectPathSyntaxError: If the path is malformed.
+            UnsupportedHostError: If the path refers to a remote host.
+            InstanceNotFoundError: If an instance path does not match.
+            AmbiguousInstanceError: If an instance path matches more than once.
+        """
         if ns is not None and not isinstance(ns, Namespace):
             raise TypeError("namespace should be an instance of Namespace")
+
+        hostname = parse_hostname(path)
+        if hostname is not None and hostname not in ("localhost", "."):
+            raise UnsupportedHostError(
+                f"Unsupported hostname {hostname!r}: only local object paths are supported"
+            )
+
         object_path = parse_object_path(path, ns)
 
         if object_path.hostname != "localhost":
-            raise ValueError(f"Unsupported hostname: {object_path.hostname}")
+            raise UnsupportedHostError(
+                f"Unsupported hostname {object_path.hostname!r}: only local object paths are supported"
+            )
 
         if not object_path.namespace:
-            raise ValueError(f"Invalid ObjectPath: {object_path}")
+            raise ObjectPathSyntaxError(f"Invalid ObjectPath: {object_path!r}", path, 0)
 
         obj = self.namespace(object_path.namespace)
 
@@ -277,12 +318,69 @@ class Class:
                 off += len(prop.ctype)
         return off
 
-    def instance(self, key: str) -> Instance:
-        for instance in self.instances:
-            if instance.key == key:
-                return instance
+    def instance(self, key: str | dict[str, Any]) -> Instance:
+        """Return the instance with the given key.
 
-        raise IndexError
+        The key can be an :class:`InstanceKey`, a dictionary of key property
+        names to values, or a textual ``key1=value1;key2=value2`` string. Lookup
+        uses the instance index and compares the parsed key with the class's key
+        properties, so values containing commas, equals signs, quotes or
+        backslashes are matched exactly.
+
+        Raises:
+            InstanceNotFoundError: If no instance matches the key.
+            AmbiguousInstanceError: If more than one instance matches the key.
+        """
+        candidates = self._instances_for_key(key)
+        if not candidates:
+            raise InstanceNotFoundError(f"No instance of {self.name} with key {key!r}")
+        if len(candidates) > 1:
+            raise AmbiguousInstanceError(f"Multiple instances of {self.name} match key {key!r}")
+        return candidates[0]
+
+    def _instances_for_key(self, key: str | dict[str, Any]) -> list[Instance]:
+        key_values = self._normalize_key(key)
+        key_names = self.class_definition.keys
+        if not key_names:
+            raise InstanceNotFoundError(f"Class {self.name} has no key properties")
+
+        canonical = {name.lower(): name for name in key_names}
+        normalized = {}
+        for name, value in key_values.items():
+            canonical_name = canonical.get(name.lower())
+            if canonical_name is None:
+                raise InstanceNotFoundError(f"Unknown key property {name!r} for {self.name}")
+            normalized[canonical_name] = value
+
+        missing = [name for name in key_names if name not in normalized]
+        if missing:
+            raise InstanceNotFoundError(f"Missing key properties for {self.name}: {', '.join(missing)}")
+
+        typed = {}
+        for name in key_names:
+            prop = self.properties[name]
+            typed[name] = _coerce_key_value(prop, normalized[name])
+
+        lookup_key = self.cim.key().NS(self.namespace.name).CI(self.name).IL(typed)
+        found = []
+        for ref in lookup_key.references():
+            try:
+                class_instance = self.cim.get_class_instance(self, ref)
+            except (Error, IndexError, ValueError):
+                continue
+
+            if _instance_matches(class_instance, typed):
+                found.append(Instance(self.cim, self.namespace, self, class_instance))
+
+        return found
+
+    def _normalize_key(self, key: str | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(key, str):
+            key = parse_instance_keys(key, key, 0)
+        elif not isinstance(key, dict):
+            raise TypeError("key must be a string or dictionary")
+
+        return dict(key)
 
     @property
     def instances(self) -> Iterator[Instance]:
@@ -308,6 +406,12 @@ class Instance:
         self.class_definition = class_.class_definition
         self.class_instance = class_instance
 
+    def __repr__(self) -> str:
+        return f"<Instance {self.class_.name} {self.key}>"
+
+    def __str__(self) -> str:
+        return f"{self.namespace.name}:{self.class_.name}.{self.key}"
+
     @property
     def key(self) -> InstanceKey:
         return self.class_instance.key
@@ -331,6 +435,70 @@ class Instance:
     @property
     def properties(self) -> dict[str, ClassInstanceProperty]:
         return self.class_instance.properties
+
+
+def _coerce_key_value(prop: Property, value: Any) -> Any:
+    """Coerce a textual key value to the type of its key property."""
+    type_ = prop.type.type
+
+    if type_ == CIM_TYPES.BOOLEAN:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        raise InvalidInstancePathError(f"Invalid boolean value {value!r} for key {prop.name!r}")
+
+    if type_ in (
+        CIM_TYPES.INT8,
+        CIM_TYPES.UINT8,
+        CIM_TYPES.INT16,
+        CIM_TYPES.UINT16,
+        CIM_TYPES.INT32,
+        CIM_TYPES.UINT32,
+        CIM_TYPES.INT64,
+        CIM_TYPES.UINT64,
+    ):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        try:
+            return int(value, 0)
+        except (TypeError, ValueError):
+            raise InvalidInstancePathError(f"Invalid integer value {value!r} for key {prop.name!r}")
+
+    if type_ in (CIM_TYPES.REAL32, CIM_TYPES.REAL64):
+        if isinstance(value, float):
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise InvalidInstancePathError(f"Invalid real value {value!r} for key {prop.name!r}")
+
+    if isinstance(value, str):
+        return value
+    raise InvalidInstancePathError(f"Invalid value {value!r} for key {prop.name!r}")
+
+
+def _instance_matches(class_instance: ClassInstance, expected: dict[str, Any]) -> bool:
+    """Compare the key of a parsed class instance with the expected key."""
+    try:
+        actual = class_instance.key
+    except (Error, IndexError, ValueError):
+        return False
+
+    if set(actual) != set(expected):
+        return False
+
+    return all(_key_value_matches(actual[name], value) for name, value in expected.items())
+
+
+def _key_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return bool(actual) == bool(expected)
+
+    if isinstance(expected, float) or isinstance(actual, float):
+        return float(actual) == float(expected)
+
+    return actual == expected
 
 
 class Property:

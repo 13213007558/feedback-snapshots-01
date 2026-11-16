@@ -4,8 +4,6 @@ from functools import cached_property
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, BinaryIO
 
-from dissect.util.ts import wintimestamp
-
 from dissect.cim.c_cim import (
     ARRAY_STATES,
     BOOLEAN_STATES,
@@ -19,6 +17,7 @@ from dissect.cim.c_cim import (
     c_cim,
 )
 from dissect.cim.exceptions import Error
+from dissect.util.ts import wintimestamp
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -335,7 +334,12 @@ class ClassInstance:
 class InstanceKey(dict):
     """A dictionary subclass that allows for attribute-style access and assignment.
 
-    Is represented as a string in the format "key1=value1;key2=value2" or "default" if empty.
+    Is represented as a string in the format ``key1=value1;key2=value2``, or
+    ``default`` if empty.
+
+    String values that contain key syntax characters (comma, equals sign,
+    semicolon, quote, backslash or leading/trailing whitespace) are quoted and
+    escaped so that the textual form can be parsed back unambiguously.
 
     Example:
         >>> d = InstanceKey()
@@ -353,7 +357,19 @@ class InstanceKey(dict):
     def __str__(self) -> str:
         if len(self) == 0:
             return "default"
-        return ";".join([f"{key}={value}" for key, value in self.items()])
+        return ";".join([f"{key}={_format_key_value(value)}" for key, value in self.items()])
+
+
+def _format_key_value(value: Any) -> str:
+    """Format a key value for inclusion in a textual instance key."""
+    if not isinstance(value, str):
+        return str(value)
+
+    if value and value == value.strip() and not any(char in value for char in ',;="\\'):
+        return value
+
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 class Qualifier:

@@ -4,7 +4,7 @@ import hashlib
 import string
 from functools import lru_cache
 from io import BytesIO
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cim.c_cim import (
     INDEX_PAGE_INVALID,
@@ -165,6 +165,17 @@ class Key:
 
         return Key(self.cim, self.key, f"{prefix}_{digest}")
 
+    def _instance_path(self, name: str | dict[str, Any]) -> Key:
+        """Build an instance index key.
+
+        Multi-valued instance keys are hashed as the values joined by U+FFFF,
+        in the order of the class's key properties. Callers must pass an
+        ordered mapping (or a plain dict ordered in key-property order).
+        """
+        text = name if isinstance(name, str) else "￿".join(str(value) for value in name.values())
+
+        return Key(self.cim, self.key, f"IL_{self._hash(text.upper().encode('utf-16-le'))}")
+
     def _data_part(self, idx: int) -> str:
         if not self.is_data_reference:
             raise ValueError(f"Key is not a data reference: {self}")
@@ -222,5 +233,13 @@ class Key:
     def CI(self, name: str | None = None) -> Key:
         return self._path("CI", name)
 
-    def IL(self, name: str | None = None) -> Key:
+    def IL(self, name: str | dict[str, Any] | None = None) -> Key:
+        """Return the instance-list key.
+
+        When ``name`` is a string it is used as an already known digest. A
+        mapping is hashed as an instance key: values are joined with U+FFFF in
+        the iteration order of the mapping.
+        """
+        if isinstance(name, dict):
+            return self._instance_path(name)
         return self._path("IL", name)
