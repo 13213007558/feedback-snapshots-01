@@ -380,6 +380,41 @@ class TextConverter(PDFConverter[AnyIO]):
         pass
 
 
+def _escape_css_font_name(fontname: str) -> str:
+    """Escape an untrusted font name for use as a CSS font-family value.
+
+    Font names come from the PDF and are attacker-controlled. Plain HTML
+    escaping is not sufficient here because the value lives inside a CSS
+    declaration: characters like ``;``, ``{`` or ``}`` would let the name
+    terminate the declaration and inject arbitrary CSS, while quotes could
+    break out of the surrounding HTML attribute. Any character outside a
+    safe set is therefore emitted as a CSS code point escape (``\\XXXX ``),
+    which the CSS parser resolves back to the literal character. The result
+    contains no HTML-attribute-special characters either, so the attribute
+    boundary is preserved as well.
+    """
+    escaped: list[str] = []
+    for index, char in enumerate(fontname):
+        codepoint = ord(char)
+        if char.isascii():
+            safe = char.isalnum() or char in "-_ "
+        else:
+            # CSS identifiers may contain non-ASCII characters directly,
+            # except for the C1 control characters.
+            safe = codepoint >= 0xA0
+        # A leading digit or space, or a digit right after a leading "-",
+        # would invalidate the identifier, so escape those as well.
+        if safe and index == 0 and (char.isdigit() or char == " "):
+            safe = False
+        elif safe and index == 1 and char.isdigit() and fontname[0] == "-":
+            safe = False
+        if safe:
+            escaped.append(char)
+        else:
+            escaped.append(f"\\{codepoint:x} ")
+    return "".join(escaped)
+
+
 class HTMLConverter(PDFConverter[AnyIO]):
     RECT_COLORS: ClassVar[dict[str, str]] = {
         "figure": "yellow",
@@ -582,7 +617,7 @@ class HTMLConverter(PDFConverter[AnyIO]):
             fontname_without_subset_tag = fontname.split("+")[-1]
             self.write(
                 '<span style="'
-                f"font-family: {fontname_without_subset_tag}; "
+                f"font-family: {_escape_css_font_name(fontname_without_subset_tag)}; "
                 f'font-size:{fontsize * self.scale * self.fontscale}px">'
             )
             self._font = font

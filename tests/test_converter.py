@@ -1,8 +1,13 @@
 import io
+from html.parser import HTMLParser
 from tempfile import TemporaryFile
 
-from pdfminer.converter import PDFConverter, PDFLayoutAnalyzer
-from pdfminer.high_level import extract_pages
+from pdfminer.converter import (
+    PDFConverter,
+    PDFLayoutAnalyzer,
+    _escape_css_font_name,
+)
+from pdfminer.high_level import extract_pages, extract_text_to_fp
 from pdfminer.layout import LTChar, LTContainer, LTCurve, LTLine, LTRect
 from pdfminer.pdfinterp import PDFGraphicState
 from tests.helpers import absolute_sample_path
@@ -475,3 +480,190 @@ class TestBinaryDetector:
 
     def test_textiowrapper(self):
         assert not PDFConverter._is_binary_stream(io.TextIOBase())
+
+
+class _HTMLAuditParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tags: list = []
+        self.text: list = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+    def handle_startendtag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+    def handle_data(self, data):
+        self.text.append(data)
+
+
+class TestHTMLConverterOutputEscaping:
+    """HTMLConverter must treat font names, text and image names from the
+    PDF as untrusted: they must not inject tags, event handlers or extra
+    CSS declarations into the generated report."""
+
+    EVIL_FONT_NAME = 'EVIL+Font";}</style><script>alert(1)</script>{x:expression('
+    EVIL_IMAGE_NAME = 'Im"><img src=x onerror=alert(2)>'
+
+    ALLOWED_CSS_PROPERTIES = {
+        "position",
+        "border",
+        "color",
+        "left",
+        "top",
+        "width",
+        "height",
+        "font-size",
+        "font-family",
+        "writing-mode",
+    }
+
+    @staticmethod
+    def _pdf_name(raw: str) -> str:
+        # Encode as a PDF name object, escaping every non-alphanumeric byte.
+        return "".join(
+            chr(byte) if chr(byte).isalnum() and byte < 0x80 else f"#{byte:02X}"
+            for byte in raw.encode("utf-8")
+        )
+
+    def _build_malicious_pdf(self) -> bytes:
+        evil_font = self._pdf_name(self.EVIL_FONT_NAME)
+        evil_image = self._pdf_name(self.EVIL_IMAGE_NAME)
+        content = (
+            b"BT /F1 12 Tf 100 700 Td "
+            b'(Body <script>alert\\(1\\)</script> "quoted" & <b>bold</b>) Tj ET\n'
+            b"BT /F2 14 Tf 100 650 Td (Caf\\351 na\\357ve) Tj ET\n"
+            + f"q 50 0 0 50 100 400 cm /{evil_image} Do Q\n".encode()
+        )
+        image_data = b"\xff\xd8\xff\xd9"  # only stored, never decoded
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                b"/Resources << /Font << /F1 4 0 R /F2 5 0 R >> "
+                + f"/XObject << /{evil_image} 7 0 R >>".encode()
+                + b" >> /Contents 6 0 R >>"
+            ),
+            (
+                f"<< /Type /Font /Subtype /Type1 /BaseFont /{evil_font} "
+                "/Encoding /WinAnsiEncoding "
+                "/FontDescriptor << /Type /FontDescriptor "
+                f"/FontName /{evil_font} /Flags 4 "
+                "/FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 "
+                "/Descent -200 /CapHeight 700 /StemV 80 >> >>"
+            ).encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+            b"/Encoding /WinAnsiEncoding >>",
+            b"<< /Length "
+            + str(len(content)).encode()
+            + b" >>\nstream\n"
+            + content
+            + b"endstream",
+            (
+                b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+                b"/ColorSpace /DeviceRGB /BitsPerComponent 8 "
+                b"/Filter /DCTDecode /Length "
+                + str(len(image_data)).encode()
+                + b" >>\nstream\n"
+                + image_data
+                + b"\nendstream"
+            ),
+        ]
+        out = io.BytesIO()
+        out.write(b"%PDF-1.4\n")
+        offsets = []
+        for obj_id, body in enumerate(objects, start=1):
+            offsets.append(out.tell())
+            out.write(f"{obj_id} 0 obj\n".encode() + body + b"\nendobj\n")
+        xref = out.tell()
+        out.write(f"xref\n0 {len(objects) + 1}\n".encode())
+        out.write(b"0000000000 65535 f \n")
+        for offset in offsets:
+            out.write(f"{offset:010d} 00000 n \n".encode())
+        out.write(
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref}\n%%EOF\n".encode()
+        )
+        return out.getvalue()
+
+    def _convert_to_html(self, pdf_bytes: bytes, output_dir: str) -> str:
+        outfp = io.BytesIO()
+        with io.BytesIO(pdf_bytes) as inf:
+            extract_text_to_fp(
+                inf,
+                outfp,
+                output_type="html",
+                codec="utf-8",
+                output_dir=output_dir,
+            )
+        return outfp.getvalue().decode("utf-8")
+
+    def test_escape_css_font_name(self):
+        assert _escape_css_font_name("Helvetica") == "Helvetica"
+        assert _escape_css_font_name("Times New Roman") == "Times New Roman"
+        # Non-ASCII font names stay readable.
+        assert _escape_css_font_name("微软雅黑") == "微软雅黑"
+        escaped = _escape_css_font_name(
+            'x";}</style><script>alert(1)</script>{background:url(evil)'
+        )
+        for char in "\"'<>&;:{}()":
+            assert char not in escaped
+        # A leading digit would invalidate the CSS identifier.
+        assert _escape_css_font_name("9lives").startswith("\\39 ")
+
+    def test_no_injection_via_font_text_or_image(self, tmp_path):
+        html = self._convert_to_html(self._build_malicious_pdf(), str(tmp_path))
+
+        parser = _HTMLAuditParser()
+        parser.feed(html)
+        tags = [tag for tag, _ in parser.tags]
+
+        # No injected tags; the only img is the legitimate exported image.
+        assert "script" not in tags
+        assert "style" not in tags
+        assert tags.count("img") == 1
+        assert "<script" not in html
+        assert "</style>" not in html
+
+        # No event-handler attributes anywhere.
+        for _, attrs in parser.tags:
+            for attr_name in attrs:
+                assert not attr_name.lower().startswith("on")
+
+        # Every style attribute only contains expected declarations; the
+        # hostile font name cannot smuggle in extra ones.
+        font_families = []
+        for _, attrs in parser.tags:
+            style = attrs.get("style")
+            if style is None:
+                continue
+            for declaration in style.split(";"):
+                declaration = declaration.strip()
+                if not declaration:
+                    continue
+                prop, _, value = declaration.partition(":")
+                prop = prop.strip()
+                assert prop in self.ALLOWED_CSS_PROPERTIES
+                if prop == "font-family":
+                    font_families.append(value.strip())
+
+        # The normal font survives untouched; the hostile name is kept as
+        # data but neutralized into a single inert CSS identifier.
+        assert "Helvetica" in font_families
+        evil_families = [f for f in font_families if f.startswith("Font")]
+        assert len(evil_families) == 1
+        for char in "\"'<>&;:{}()":
+            assert char not in evil_families[0]
+
+        # The hostile image name is an inert attribute value, not markup.
+        img_attrs = next(attrs for tag, attrs in parser.tags if tag == "img")
+        assert img_attrs["src"] == self.EVIL_IMAGE_NAME + ".jpg"
+
+        # Body text is escaped, not dropped: markup degrades to inert text
+        # and non-ASCII content is preserved.
+        assert "&lt;script&gt;" in html
+        text = "".join(parser.text)
+        assert "alert(1)" in text
+        assert "Café naïve" in text
