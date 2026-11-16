@@ -36,6 +36,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .. import cbor
+from ..ctap import CtapError
 from ..utils import sha256
 from .base import Ctap2, Info
 from .pin import PinProtocol, _PinUv
@@ -81,6 +82,53 @@ def _lb_unpack(key, entry):
         raise ValueError("Invalid entry")
     except InvalidTag:
         raise ValueError("Wrong key")
+
+
+class LargeBlobWriteError(Exception):
+    """A large blob array write failed partway through.
+
+    The attributes of this exception describe the state the authenticator may
+    be in, so that the caller can decide how to proceed. Do not resume an
+    interrupted write by resending non-initial fragments: the authenticator
+    discards staged fragments when a command fails, and a fragment whose
+    response was lost may or may not have been applied. Use
+    :func:`LargeBlobs.read_blob_array` to determine what data the
+    authenticator actually holds before retrying the write from the
+    beginning.
+
+    :ivar offset: Byte offset of the fragment that failed.
+    :ivar bytes_written: Number of bytes written before the failure.
+    :ivar total_size: Total size of the array being written.
+    :ivar explicit_rejection: True if the authenticator explicitly rejected
+        the command with a CTAP status code, in which case the staged
+        fragments were discarded and any previously committed array should
+        still be intact. False if the response was lost (eg. transport
+        error), in which case the fragment may or may not have been applied
+        and the state of the authenticator is unknown until verified by
+        reading it back.
+    """
+
+    def __init__(
+        self,
+        offset: int,
+        total_size: int,
+        explicit_rejection: bool,
+        cause: Exception,
+    ):
+        self.offset = offset
+        self.bytes_written = offset
+        self.total_size = total_size
+        self.explicit_rejection = explicit_rejection
+        if explicit_rejection:
+            state = "explicitly rejected by the authenticator; staged data discarded"
+        else:
+            state = "response lost; the fragment may or may not have been applied"
+        super().__init__(
+            f"Large blob write failed at offset {offset} of {total_size} bytes: "
+            f"{state}. Call read_blob_array() to verify the authenticator state "
+            f"before retrying the write from the beginning."
+        )
+        self.__cause__ = cause
 
 
 class LargeBlobs:
@@ -163,13 +211,18 @@ class LargeBlobs:
                 pin_uv_param = None
                 pin_uv_protocol = None
 
-            self.ctap.large_blobs(
-                offset,
-                set=_set,
-                length=size if offset == 0 else None,
-                pin_uv_protocol=pin_uv_protocol,
-                pin_uv_param=pin_uv_param,
-            )
+            try:
+                self.ctap.large_blobs(
+                    offset,
+                    set=_set,
+                    length=size if offset == 0 else None,
+                    pin_uv_protocol=pin_uv_protocol,
+                    pin_uv_param=pin_uv_param,
+                )
+            except CtapError as e:
+                raise LargeBlobWriteError(offset, size, True, e) from e
+            except Exception as e:
+                raise LargeBlobWriteError(offset, size, False, e) from e
 
             offset += ln
 
