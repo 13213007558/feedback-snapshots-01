@@ -20,6 +20,19 @@ pip install dissect.cim
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Offline consistency diagnostics
+
+`dissect.cim.diagnostics` checks whether a copied `INDEX.BTR`, `OBJECTS.DATA` and one or more `MAPPING*.MAP` files can
+form a coherent read view. It never writes to the inputs and it keeps the object mapping and index mapping sections of
+each candidate separate:
+
+```bash
+python -m dissect.cim.diagnostics INDEX.BTR OBJECTS.DATA MAPPING1.MAP MAPPING2.MAP MAPPING3.MAP
+```
+
+The report distinguishes contradictions that are proven by the bytes on disk from questions that the supplied files
+cannot answer, such as a mapping that declares a physical page that is not present in the copied `INDEX.BTR`.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
