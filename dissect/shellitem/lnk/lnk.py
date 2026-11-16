@@ -333,21 +333,52 @@ class LnkTargetIdList:
         self.size = None
 
         if fh:
-            self.size = unpack("H", fh.read(2))[0] if size is None else size
+            if size is None:
+                size_bytes = fh.read(2)
+                self.size = unpack("H", size_bytes)[0] if len(size_bytes) == 2 else 0
+            else:
+                self.size = size
+
+            # Read at most the declared extent so a malformed IDList can never consume the structures
+            # that follow it, such as the LinkInfo.
             self._parse(fh.read(self.size))
 
     def _parse(self, buff: BinaryIO) -> None:
         idlists = []
         buff = BytesIO(buff)
+        end = len(buff.getvalue())
+        terminalid = b""
 
-        # the size of the target_idlist struct includes itself. Thus we minus 2 here.
-        while buff.tell() < self.size - 2:
-            size = unpack("H", buff.read(2))[0]
-            data = buff.read(size - 2)  # size of the struct includes the 16-bit size value. Thus we minus 2 here again.
-            itemid = c_lnk.ITEMID(itemid_size=size, data=data)
-            idlists.append(itemid)
+        # An IDList is a sequence of ITEMID structures terminated by a two-byte terminal element.
+        # ITEMIDSize includes the size field itself, so an ITEMID can never be smaller than two bytes.
+        while buff.tell() < end:
+            offset = buff.tell()
+            size_bytes = buff.read(2)
 
-        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=buff.read())
+            if len(size_bytes) < 2:
+                # A stray trailing byte cannot hold an ITEMID header, preserve it as terminal data.
+                terminalid = size_bytes
+                break
+
+            size = unpack("H", size_bytes)[0]
+
+            if size < 2:
+                # A zero size is the terminal element. Any other value smaller than the ITEMID header
+                # cannot make progress, so treat it as the end as well. Preserve the remaining bytes
+                # verbatim instead of interpreting them as another ITEMID.
+                buff.seek(offset)
+                terminalid = buff.read()
+                break
+
+            data = buff.read(min(size - 2, end - buff.tell()))
+            idlists.append(c_lnk.ITEMID(itemid_size=size, data=data))
+
+            if len(data) < size - 2:
+                # The ITEMID claims more bytes than the declared IDList extent, so it is truncated at
+                # the IDList boundary. Keep the bytes that are present and stop parsing.
+                break
+
+        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=terminalid)
         self.target_idlist = c_lnk.LINK_TARGET_IDLIST(idlist_size=self.size, idlist=self.idlist)
 
     def __repr__(self) -> str:
