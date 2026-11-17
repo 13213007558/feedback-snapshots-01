@@ -733,6 +733,7 @@ def _decode_packet(data: bytes, linktype: int) -> Optional[Frame]:
     # addresses are filled in from the link layer and/or IP/UDP headers
     pduSource: Optional[Address] = None
     pduDestination: Optional[Address] = None
+    pduForwardedBy: Optional[Address] = None
     ethernet_type: Optional[int] = None
     has_llc = False
 
@@ -972,8 +973,10 @@ def _decode_packet(data: bytes, linktype: int) -> Optional[Frame]:
                 ):
                     return frame
 
-                # update source address
+                # update source address, keep the transport source of a
+                # forwarded NPDU (the BBMD) as propagation evidence
                 if isinstance(lpdu, ForwardedNPDU):
+                    pduForwardedBy = pduSource
                     pduSource = lpdu.bvlciAddress
 
             else:
@@ -981,11 +984,15 @@ def _decode_packet(data: bytes, linktype: int) -> Optional[Frame]:
                 if isinstance(lpdu, bvll6.OriginalUnicastNPDU):
                     pduSource = lpdu.bvlciSourceVirtualAddress
                     pduDestination = lpdu.bvlciDestinationVirtualAddress
+                elif isinstance(lpdu, bvll6.ForwardedNPDU):
+                    # keep the transport source (the BBMD) as evidence
+                    pduForwardedBy = pduSource
+                    pduSource = lpdu.bvlciSourceVirtualAddress
+                    pduDestination = LocalBroadcast()
                 elif isinstance(
                     lpdu,
                     (
                         bvll6.OriginalBroadcastNPDU,
-                        bvll6.ForwardedNPDU,
                         bvll6.DistributeBroadcastToNetwork,
                     ),
                 ):
@@ -996,7 +1003,12 @@ def _decode_packet(data: bytes, linktype: int) -> Optional[Frame]:
                     return frame
 
             # reference the rest of the packet
-            pdu = PDU(lpdu.pduData, source=pduSource, destination=pduDestination)
+            pdu = PDU(
+                lpdu.pduData,
+                source=pduSource,
+                destination=pduDestination,
+                forwarded_by=pduForwardedBy,
+            )
 
         except Exception as err:
             if _debug:

@@ -145,11 +145,13 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
 
     virtual_address: VirtualAddress  # see Clause H.7.2
     vmac_addr_table: VirtualMACAddressTable
+    bbmd_addresses: Optional[List[IPv6Address]]
 
     def __init__(
         self,
         *,
         virtual_address: VirtualAddress,
+        bbmd_addresses: Optional[List[IPv6Address]] = None,
         sapID: Optional[str] = None,
         cid: Optional[str] = None,
         sid: Optional[str] = None,
@@ -162,6 +164,25 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
 
         self.virtual_address = virtual_address
         self.vmac_addr_table = VirtualMACAddressTable()
+
+        # transport addresses of the BBMDs whose Forwarded-NPDU embedded
+        # ("original") source addresses may be honored; None preserves the
+        # legacy behavior of accepting them from any sender
+        self.bbmd_addresses = bbmd_addresses
+
+    def forwarded_npdu_accepted(self, lpdu: LPDU) -> bool:
+        """Check if the transport source of a Forwarded-NPDU is a BBMD that
+        is accepted by policy to vouch for the embedded original source."""
+        if _debug:
+            BVLLServiceAccessPoint._debug(
+                "forwarded_npdu_accepted %r from %r", lpdu, lpdu.pduSource
+            )
+
+        # no policy configured, accept (legacy behavior)
+        if self.bbmd_addresses is None:
+            return True
+
+        return lpdu.pduSource in self.bbmd_addresses
 
     async def sap_indication(self, lpdu: LPDU) -> None:
         if _debug:
@@ -362,17 +383,28 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
+            # the embedded original source is only as trustworthy as the
+            # forwarder; check the transport source against policy before
+            # letting any of its claims into the virtual address table
+            if not self.forwarded_npdu_accepted(lpdu):
+                BIPNormal._warning(
+                    "forwarded NPDU from unaccepted BBMD: %r", lpdu.pduSource
+                )
+                return
+
             # update the virtual address table
             self.vmac_addr_table[
                 lpdu.bvlciSourceVirtualAddress
             ] = lpdu.bvlciSourceIPv6Address
 
-            # build a PDU with the source from the real source
+            # build a PDU with the source from the real source, keep the
+            # transport source as propagation evidence
             pdu = PDU(
                 lpdu.pduData,
                 source=lpdu.bvlciSourceVirtualAddress,
                 destination=LocalBroadcast(),
                 user_data=lpdu.pduUserData,
+                forwarded_by=lpdu.pduSource,
             )
             # if route_aware:
             #     xpdu.pduSource.addrRoute = pdu.pduSource
@@ -687,11 +719,6 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
-            # update the virtual address table
-            self.vmac_addr_table[
-                lpdu.bvlciSourceVirtualAddress
-            ] = lpdu.bvlciSourceIPv6Address
-
             # check the BBMD registration status, we may not be registered
             if not self._registration_event.is_set():
                 if _debug:
@@ -704,12 +731,21 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
                     BIPForeign._debug("    - packet dropped, not from the BBMD")
                 return
 
-            # build a PDU with the source from the source virtual address
+            # update the virtual address table only after the transport
+            # source has been accepted, its claims are not trustworthy
+            # before that
+            self.vmac_addr_table[
+                lpdu.bvlciSourceVirtualAddress
+            ] = lpdu.bvlciSourceIPv6Address
+
+            # build a PDU with the source from the source virtual address,
+            # keep the BBMD transport address as propagation evidence
             pdu = PDU(
                 lpdu.pduData,
                 source=lpdu.bvlciSourceVirtualAddress,
                 destination=LocalBroadcast(),
                 user_data=lpdu.pduUserData,
+                forwarded_by=lpdu.pduSource,
             )
             if _debug:
                 BIPForeign._debug("    - pdu: %r", pdu)
@@ -1323,12 +1359,14 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                     lpdu.bvlciSourceVirtualAddress
                 ] = lpdu.bvlciSourceIPv6Address
 
-                # build a PDU with a local broadcast address
+                # build a PDU with a local broadcast address, keep the peer
+                # transport address as propagation evidence
                 pdu = PDU(
                     lpdu.pduData,
                     source=lpdu.bvlciSourceVirtualAddress,
                     destination=LocalBroadcast(),
                     user_data=lpdu.pduUserData,
+                    forwarded_by=lpdu.pduSource,
                 )
                 if _debug:
                     BIPNormal._debug("    - pdu: %r", pdu)
@@ -1411,12 +1449,14 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                 # update the virtual address table
                 self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
 
-                # build a PDU with a local broadcast address
+                # build a PDU with a local broadcast address; the foreign
+                # device sent this directly, this BBMD is the forwarder
                 pdu = PDU(
                     lpdu.pduData,
                     source=lpdu.bvlciSourceVirtualAddress,
                     destination=LocalBroadcast(),
                     user_data=lpdu.pduUserData,
+                    forwarded_by=self.bbmdAddress,
                 )
                 if _debug:
                     BIPBBMD._debug("    - pdu: %r", pdu)

@@ -1850,6 +1850,7 @@ class PCI(DebugContents):
     pduExpectingReply: bool
     pduNetworkPriority: int
     pduUserData: Optional[bytes]
+    pduForwardedBy: Optional[Any]
 
     def __init__(
         self,
@@ -1859,6 +1860,7 @@ class PCI(DebugContents):
         expectingReply: bool = False,
         networkPriority: int = 0,
         user_data: Optional[bytes] = None,
+        forwarded_by: Optional[Any] = None,
     ) -> None:
         if _debug:
             PCI._debug("__init__")
@@ -1874,6 +1876,11 @@ class PCI(DebugContents):
         self.pduNetworkPriority = networkPriority
         self.pduUserData = user_data
 
+        # transport address of the intermediate node (such as a BBMD) that
+        # forwarded this message, when it was not sent by its original
+        # source directly; propagation evidence only, not a trust decision
+        self.pduForwardedBy = forwarded_by
+
     def update(self, pci: PCI) -> None:
         """Copy the PCI fields."""
         if _debug:
@@ -1885,6 +1892,7 @@ class PCI(DebugContents):
         self.pduExpectingReply = pci.pduExpectingReply
         self.pduNetworkPriority = pci.pduNetworkPriority
         self.pduUserData = pci.pduUserData
+        self.pduForwardedBy = pci.pduForwardedBy
 
     def pci_contents(
         self,
@@ -1908,6 +1916,7 @@ class PCI(DebugContents):
             ("expectingReply", self.pduExpectingReply),
             ("networkPriority", self.pduNetworkPriority),
             ("user_data", self.pduUserData),
+            ("forwarded_by", self.pduForwardedBy),
         ):
             if _debug:
                 PCI._debug("    - %r: %r", k, v)

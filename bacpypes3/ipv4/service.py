@@ -230,9 +230,12 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
 
     _debug: Callable[..., None]
 
+    bbmd_addresses: Optional[List[IPv4Address]]
+
     def __init__(
         self,
         *,
+        bbmd_addresses: Optional[List[IPv4Address]] = None,
         sapID: Optional[str] = None,
         cid: Optional[str] = None,
         sid: Optional[str] = None,
@@ -242,6 +245,25 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
         Client.__init__(self, cid=cid)
         Server.__init__(self, sid=sid)
         ServiceAccessPoint.__init__(self, sapID=sapID)
+
+        # transport addresses of the BBMDs whose Forwarded-NPDU embedded
+        # ("original") source addresses may be honored; None preserves the
+        # legacy behavior of accepting them from any sender
+        self.bbmd_addresses = bbmd_addresses
+
+    def forwarded_npdu_accepted(self, lpdu: LPDU) -> bool:
+        """Check if the transport source of a Forwarded-NPDU is a BBMD that
+        is accepted by policy to vouch for the embedded original source."""
+        if _debug:
+            BVLLServiceAccessPoint._debug(
+                "forwarded_npdu_accepted %r from %r", lpdu, lpdu.pduSource
+            )
+
+        # no policy configured, accept (legacy behavior)
+        if self.bbmd_addresses is None:
+            return True
+
+        return lpdu.pduSource in self.bbmd_addresses
 
     async def sap_indication(self, lpdu: LPDU) -> None:
         if _debug:
@@ -347,12 +369,22 @@ class BIPNormal(BVLLServiceAccessPoint):
             await self.response(pdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
-            # build a PDU with the source from the real source
+            # the embedded original source is only as trustworthy as the
+            # forwarder; check the transport source against policy
+            if not self.forwarded_npdu_accepted(lpdu):
+                BIPNormal._warning(
+                    "forwarded NPDU from unaccepted BBMD: %r", lpdu.pduSource
+                )
+                return
+
+            # build a PDU with the source from the real source, keep the
+            # transport source as propagation evidence
             pdu = PDU(
                 lpdu.pduData,
                 source=lpdu.bvlciAddress,
                 destination=LocalBroadcast(),
                 user_data=lpdu.pduUserData,
+                forwarded_by=lpdu.pduSource,
             )
             if _debug:
                 BIPNormal._debug("    - pdu: %r", pdu)
@@ -577,12 +609,14 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
                     BIPForeign._debug("    - packet dropped, not from the BBMD")
                 return
 
-            # build a PDU with the source from the real source
+            # build a PDU with the source from the real source, keep the
+            # BBMD transport address as propagation evidence
             pdu = PDU(
                 lpdu.pduData,
                 source=lpdu.bvlciAddress,
                 destination=LocalBroadcast(),
                 user_data=lpdu.pduUserData,
+                forwarded_by=lpdu.pduSource,
             )
             if _debug:
                 BIPForeign._debug("    - pdu: %r", pdu)
@@ -962,14 +996,27 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
+            # make sure it is from a peer; only a BDT member may vouch for
+            # the embedded original source address
+            for bdte in self.bbmdBDT:
+                if bdte == lpdu.pduSource:
+                    break
+            else:
+                BIPBBMD._warning(
+                    "forwarded NPDU not from a peer: %r", lpdu.pduSource
+                )
+                return
+
             # send it upstream if there is a network layer
             if self.serverPeer:
-                # build a PDU with a local broadcast address
+                # build a PDU with a local broadcast address, keep the
+                # peer transport address as propagation evidence
                 pdu = PDU(
                     lpdu.pduData,
                     source=lpdu.bvlciAddress,
                     destination=LocalBroadcast(),
                     user_data=lpdu.pduUserData,
+                    forwarded_by=lpdu.pduSource,
                 )
                 if _debug:
                     BIPBBMD._debug("    - upstream pdu: %r", pdu)
@@ -1066,14 +1113,37 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             await self.request(xpdu)
 
         elif isinstance(lpdu, DistributeBroadcastToNetwork):
+            # make sure it is from a registered foreign device; only an FDT
+            # member may have its broadcast distributed by this BBMD
+            for fdte in self.bbmdFDT:
+                if fdte.fdAddress == lpdu.pduSource:
+                    break
+            else:
+                BIPBBMD._warning(
+                    "distribute-broadcast-to-network not from a registered "
+                    "foreign device: %r",
+                    lpdu.pduSource,
+                )
+
+                # send a NAK downstream
+                xpdu = Result(
+                    code=0x0060,
+                    destination=lpdu.pduSource,
+                    user_data=lpdu.pduUserData,
+                )
+                await self.request(xpdu)
+                return
+
             # send it upstream if there is a network layer
             if self.serverPeer:
-                # build a PDU with a local broadcast address
+                # build a PDU with a local broadcast address; the foreign
+                # device sent this directly, this BBMD is the forwarder
                 pdu = PDU(
                     lpdu.pduData,
                     source=lpdu.pduSource,
                     destination=LocalBroadcast(),
                     user_data=lpdu.pduUserData,
+                    forwarded_by=self.bbmdAddress,
                 )
                 if _debug:
                     BIPBBMD._debug("    - upstream pdu: %r", pdu)
