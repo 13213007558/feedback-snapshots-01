@@ -92,6 +92,35 @@ True
 00000000: 01 00 00 70                                       ...p
 ```
 
+## Evaluation-stack height analysis
+
+`dncil.cil.stack_analysis` provides a bounded, height-only check of a parsed
+method body. It answers whether reachable control-flow joins agree on the
+evaluation-stack height, whether exception-handler entries are consistent with
+the CLR rules, and how the derived maximum compares with the header's declared
+`.maxstack`. It does not model runtime values or types.
+
+Call and `calli` effects come exclusively from a caller-supplied resolver, so
+an unavailable signature is reported as unknown rather than being treated as a
+zero-argument call:
+
+```Python
+from dncil.cil.stack_analysis import CallSignature, analyze_stack
+
+# token -> CallSignature(parameter_count, has_this, returns_value)
+signatures = {
+    0x0A000001: CallSignature(2, returns_value=True),
+}
+result = analyze_stack(body, lambda token: signatures.get(token.value), return_value=False)
+print(result.format_report())
+```
+
+Each finding cites the instruction chain that produced it. `ret` always rejects
+more than one value; pass `return_value` to distinguish a void method from one
+that returns a single value. Exceptional edges are not simulated; catch, filter,
+finally, and fault handlers are analyzed from their declared entry points using
+the heights required by the CLR.
+
 ## Installing
 
 To install `dncil` use `pip` to fetch the `dncil` module:

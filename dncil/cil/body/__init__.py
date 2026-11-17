@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 if TYPE_CHECKING:
     from dncil.cil.instruction import Instruction
     from dncil.cil.body.reader import CilMethodBodyReaderBase
+    from dncil.cil.stack_analysis import StackAnalysisResult, SignatureResolver
 
 from dncil.cil.enums import CorILMethod, CorILMethodSect
 from dncil.cil.error import MethodBodyFormatError
@@ -149,6 +150,21 @@ class CilMethodBody:
             self.parse_tiny_exception_handlers(reader)
 
         self.size = reader.tell() - self.offset
+
+    def analyze_stack(
+        self,
+        resolve_signature: Optional["SignatureResolver"] = None,
+        **kwargs: Any,
+    ) -> "StackAnalysisResult":
+        """analyze the evaluation-stack height of this method body
+
+        Returns a :class:`dncil.cil.stack_analysis.StackAnalysisResult`.
+        ``resolve_signature`` is the caller-provided token signature resolver;
+        see :class:`dncil.cil.stack_analysis.StackAnalyzer` for details.
+        """
+        from dncil.cil.stack_analysis import StackAnalyzer
+
+        return StackAnalyzer(self, resolve_signature, **kwargs).analyze()
 
     def parse_fat_exception_handlers(self, reader: CilMethodBodyReaderBase):
         """get exception handlers in fat format"""
