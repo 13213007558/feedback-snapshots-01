@@ -909,6 +909,21 @@ class ReadWritePropertyMultipleServices:
                         "    - propertyArrayIndex: %r", propertyArrayIndex
                     )
 
+                # the object does not exist, give each reference its own
+                # error so one bad object reference does not lose the
+                # results for the rest of the request
+                if obj is None:
+                    read_access_result_element = await read_property_to_result_element(
+                        obj, propertyIdentifier, propertyArrayIndex
+                    )
+                    if _debug:
+                        ReadWritePropertyMultipleServices._debug(
+                            "    - read_access_result_element: %r",
+                            read_access_result_element,
+                        )
+                    read_access_result_element_list.append(read_access_result_element)
+                    continue
+
                 # make a set of the required properties
                 required_properties = set()
                 for cls in reversed(obj.__class__.__mro__):
@@ -978,15 +993,11 @@ class ReadWritePropertyMultipleServices:
                                 "    - read_access_result_element: %r",
                                 read_access_result_element,
                             )
-                        if read_access_result_element.readResult.propertyAccessError:
-                            if _debug:
-                                ReadWritePropertyMultipleServices._debug(
-                                    "    - propertyAccessError: %r",
-                                    read_access_result_element.readResult.propertyAccessError,
-                                )
-                            continue
 
-                        # add it to the list
+                        # add it to the list, keeping error elements so a
+                        # property that cannot be read (such as read access
+                        # denied) keeps its identity rather than silently
+                        # disappearing like a property that does not exist
                         read_access_result_element_list.append(
                             read_access_result_element
                         )
