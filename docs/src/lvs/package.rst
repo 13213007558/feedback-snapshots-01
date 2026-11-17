@@ -7,6 +7,12 @@
 
     .. autofunction:: lvs_validator
 
+    .. autoclass:: LvsValidatorSwitch
+        :members:
+
+    .. autoclass:: ValidationGeneration
+        :members:
+
     .. autoclass:: Checker
         :members:
 

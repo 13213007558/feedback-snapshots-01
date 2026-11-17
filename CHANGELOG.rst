@@ -6,6 +6,7 @@ Next (breaking)
 * Replace the descriptor-based TLV model with dataclass models and ``tlv_encode``/``tlv_parse``.
 * Make the PIT-token-aware application API canonical at ``ndn.app`` and remove ``ndn.appv2``.
 * Remove the legacy application API and Name Tree Schema.
+* Add ``LvsValidatorSwitch`` for generation-based online switching of LVS policy and trust anchor with per-generation key caches.
 
 0.5-2 (2026-10-07)
 ++++++++++++++++++

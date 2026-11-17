@@ -33,7 +33,34 @@ from ...types import ValidResult
 from .checker import Checker
 
 
-__all__ = ['lvs_validator']
+__all__ = ['lvs_validator', 'validate_lvs_trust_anchor']
+
+
+def validate_lvs_trust_anchor(
+    checker: Checker,
+    trust_anchor: BinaryStr,
+) -> None:
+    """
+    Check that ``trust_anchor`` is compatible with the compiled LVS ``checker``.
+
+    :param checker: compiled LVS policy checker.
+    :param trust_anchor: wire-encoded trust anchor certificate.
+    :raises ValueError: if user functions are missing or the trust anchor does
+                        not match every LVS trust root.
+    """
+    if not checker.validate_user_fns():
+        raise ValueError('Missing user functions for LVS validator')
+
+    cert_name, _, _, _ = parse_data(trust_anchor)
+    ta_matches = {
+        rule_name
+        for rule_names, _ in checker.match(cert_name)
+        for rule_name in rule_names
+    }
+    if not ta_matches or not checker.root_of_trust().issubset(ta_matches):
+        raise ValueError(
+            'Trust anchor does not match all roots of trust of LVS model'
+        )
 
 
 def lvs_validator(
@@ -54,19 +81,7 @@ def lvs_validator(
                         not match every LVS trust root, or the trust anchor is
                         not properly self-signed.
     """
-    if not checker.validate_user_fns():
-        raise ValueError('Missing user functions for LVS validator')
-
-    cert_name, _, _, _ = parse_data(trust_anchor)
-    ta_matches = {
-        rule_name
-        for rule_names, _ in checker.match(cert_name)
-        for rule_name in rule_names
-    }
-    if not ta_matches or not checker.root_of_trust().issubset(ta_matches):
-        raise ValueError(
-            'Trust anchor does not match all roots of trust of LVS model'
-        )
+    validate_lvs_trust_anchor(checker, trust_anchor)
 
     cascade = CascadeChecker(
         app,
