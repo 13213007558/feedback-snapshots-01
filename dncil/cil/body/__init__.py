@@ -38,6 +38,8 @@ class CilMethodBody:
 
         self.instructions: List[Instruction] = []
         self.exception_handlers: List[ExceptionHandler] = []
+        # raw bytes of extra data sections we cannot interpret (e.g. unknown section kind)
+        self.unparsed_sections: List[bytes] = []
 
         # set method offset
         self.offset = reader.tell()
@@ -124,40 +126,85 @@ class CilMethodBody:
             self.instructions.append(insn)
 
     def parse_exception_handlers(self, reader: CilMethodBodyReaderBase):
-        """get exception handlers"""
+        """get extra data sections, which may contain one or more exception handler tables
+
+        A method body can carry multiple extra data sections chained through their MoreSects
+        flags. Each section starts on a 4-byte boundary and declares its own total size,
+        including its 4-byte header. Sections we cannot interpret are kept verbatim instead
+        of being repaired; on any failure we rewind the reader to the start of the offending
+        section so the bytes belonging to an adjacent method are not consumed.
+        """
         if not self.flags.MoreSects:
             # exception handlers are stored in extra data sections so bail if there are none
             self.size = reader.tell() - self.offset
             return
 
-        # extra data sections start at first 4-byte boundary
-        reader.seek((reader.tell() + 3) & ~3)
+        more_sections: bool = True
+        while more_sections:
+            # every extra data section starts on a 4-byte boundary
+            section_start: int = (reader.tell() + 3) & ~3
+            reader.seek(section_start)
 
-        # header byte gives us the format
-        header_byte: int = reader.read_uint8()[0]
+            try:
+                header: int = reader.read_uint8()[0]
+                section_size: int = reader.read_uint24()[0]
 
-        # unsure on this check - may be some edge case handler by dnlib
-        if header_byte & CorILMethodSect.KindMask != 1:
-            self.size = reader.tell() - self.offset
-            return
+                # the declared size covers the section header and must land on the next
+                # 4-byte boundary so it cannot overlap or underrun another section
+                if section_size < 4 or section_size % 4 != 0:
+                    raise MethodBodyFormatError(
+                        "bad extra data section size 0x%X @ offset 0x%X" % (section_size, section_start)
+                    )
 
-        if header_byte & CorILMethodSect.FatFormat:
-            # fat format
-            self.parse_fat_exception_handlers(reader)
-        else:
-            # tiny format
-            self.parse_tiny_exception_handlers(reader)
+                section_kind: int = header & CorILMethodSect.KindMask
+                more_sections = bool(header & CorILMethodSect.MoreSects)
+
+                if section_kind != CorILMethodSect.EHTable:
+                    # unknown section kind (e.g. OptILTable); keep the raw bytes and skip
+                    # exactly the declared number of bytes rather than guessing a layout
+                    self.unparsed_sections.append(reader.read_exact(section_size - 4))
+                    continue
+
+                if header & CorILMethodSect.FatFormat:
+                    self.parse_fat_exception_handlers(reader, section_size)
+                else:
+                    self.parse_tiny_exception_handlers(reader, section_size)
+            except MethodBodyFormatError:
+                # leave the reader at the first byte of the bad section so callers can
+                # continue parsing whatever follows this method body
+                reader.seek(section_start)
+                raise
 
         self.size = reader.tell() - self.offset
 
-    def parse_fat_exception_handlers(self, reader: CilMethodBodyReaderBase):
-        """get exception handlers in fat format"""
-        # fat header is 8 bits (flags) + 24 bits (size) so to get the size we rewind 8 bits, read a 32-bit integer, and shift for the 24-bit integer
-        reader.seek(reader.tell() - 1)
-        total_size: int = reader.read_uint32()[0] >> 8
+    def _validate_exception_handler(self, eh: ExceptionHandler, section_start: int):
+        """check that an exception handler only references offsets inside the method code"""
+        for name in ("try_start", "try_end", "handler_start", "handler_end"):
+            value: int = getattr(eh, name)
+            if not 0 <= value <= self.code_size:
+                raise MethodBodyFormatError(
+                    "exception handler %s offset 0x%X outside code (size 0x%X) @ section offset 0x%X"
+                    % (name, value, self.code_size, section_start)
+                )
+        if eh.is_filter() and not 0 <= eh.filter_start <= self.code_size:
+            raise MethodBodyFormatError(
+                "exception handler filter_start offset 0x%X outside code (size 0x%X) @ section offset 0x%X"
+                % (eh.filter_start, self.code_size, section_start)
+            )
 
-        # size is total bytes so we need to calc the number of exception handlers
-        num_exceptions: int = total_size // ExceptionHandler.FAT_SIZE
+    def parse_fat_exception_handlers(self, reader: CilMethodBodyReaderBase, section_size: int):
+        """get exception handlers from a fat format section of the given total size"""
+        section_start: int = reader.tell() - 4
+
+        # section_size covers the 4-byte header; each exception handler is 24 bytes
+        table_size: int = section_size - 4
+        if table_size % ExceptionHandler.FAT_SIZE != 0:
+            raise MethodBodyFormatError(
+                "fat exception handler section size 0x%X is not a whole number of handlers @ offset 0x%X"
+                % (section_size, section_start)
+            )
+        num_exceptions: int = table_size // ExceptionHandler.FAT_SIZE
+
         for _ in range(num_exceptions):
             eh: ExceptionHandler = ExceptionHandler(reader.read_uint32()[0])
 
@@ -165,7 +212,8 @@ class CilMethodBody:
             eh.try_end = eh.try_start + reader.read_uint32()[0]
 
             eh.handler_start = reader.read_uint32()[0]
-            eh.handler_end = eh.handler_start + reader.read_uint32()[0]
+            handler_length: int = reader.read_uint32()[0]
+            eh.handler_end = eh.handler_start + handler_length
 
             if eh.is_catch():
                 eh.catch_type = Token(reader.read_uint32()[0])
@@ -174,18 +222,30 @@ class CilMethodBody:
             else:
                 _ = reader.read_uint32()[0]
 
+            self._validate_exception_handler(eh, section_start)
             self.exception_handlers.append(eh)
 
-    def parse_tiny_exception_handlers(self, reader: CilMethodBodyReaderBase):
-        """get exception handlers in tiny format"""
-        # size is total bytes so we need to calc the number of exception handlers
-        num_exceptions: int = reader.read_uint8()[0] // ExceptionHandler.TINY_SIZE
+        # the section must end exactly on its declared boundary
+        if reader.tell() != section_start + section_size:
+            raise MethodBodyFormatError(
+                "fat exception handler section did not end on declared boundary @ offset 0x%X" % section_start
+            )
 
-        # skip padding (16 bits)
-        reader.seek(reader.tell() + 2)
+    def parse_tiny_exception_handlers(self, reader: CilMethodBodyReaderBase, section_size: int):
+        """get exception handlers from a tiny format section of the given total size"""
+        section_start: int = reader.tell() - 4
+
+        # section_size covers the 4-byte header; each exception handler is 12 bytes
+        table_size: int = section_size - 4
+        if table_size % ExceptionHandler.TINY_SIZE != 0:
+            raise MethodBodyFormatError(
+                "tiny exception handler section size 0x%X is not a whole number of handlers @ offset 0x%X"
+                % (section_size, section_start)
+            )
+        num_exceptions: int = table_size // ExceptionHandler.TINY_SIZE
 
         for _ in range(num_exceptions):
-            eh: ExceptionHandler = ExceptionHandler(reader.read_uint16()[0])
+            eh = ExceptionHandler(reader.read_uint16()[0])
 
             eh.try_start = reader.read_uint16()[0]
             eh.try_end = eh.try_start + reader.read_uint8()[0]
@@ -200,4 +260,11 @@ class CilMethodBody:
             else:
                 _ = reader.read_uint32()[0]
 
+            self._validate_exception_handler(eh, section_start)
             self.exception_handlers.append(eh)
+
+        # the section must end exactly on its declared boundary
+        if reader.tell() != section_start + section_size:
+            raise MethodBodyFormatError(
+                "tiny exception handler section did not end on declared boundary @ offset 0x%X" % section_start
+            )

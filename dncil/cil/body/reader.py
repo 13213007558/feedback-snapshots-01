@@ -70,9 +70,24 @@ class CilMethodBodyReaderBase(abc.ABC):
             OpCodeValue.Starg_S,
         )
 
+    def read_exact(self, n: int) -> bytes:
+        """get exactly n bytes or raise if the stream ends early"""
+        if n < 0:
+            raise MethodBodyFormatError("unable to read negative number of bytes 0x%X" % n)
+        curr_off: int = self.tell()
+        read_bytes: bytes = self.read(n)
+        if len(read_bytes) != n:
+            raise MethodBodyFormatError("not enough data while parsing method body @ offset 0x%X" % curr_off)
+        return read_bytes
+
     def read_uint8(self) -> Tuple[int, bytes]:
         """get unsigned 8-bit integer"""
         return cast(Tuple[int, bytes], self._unpack("<B"))
+
+    def read_uint24(self) -> Tuple[int, bytes]:
+        """get unsigned 24-bit little-endian integer"""
+        read_bytes: bytes = self.read_exact(3)
+        return read_bytes[0] | (read_bytes[1] << 8) | (read_bytes[2] << 16), read_bytes
 
     def read_int8(self) -> Tuple[int, bytes]:
         """get signed 8-bit integer"""
