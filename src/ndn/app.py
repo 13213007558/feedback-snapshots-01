@@ -112,6 +112,18 @@ async def pass_all(_name, _sig, _context):
     return types.ValidResult.PASS
 
 
+def _data_is_fresh(meta_info: fmt.MetaInfo | None) -> bool:
+    r"""
+    Decide whether a just-received Data can satisfy a MustBeFresh Interest.
+
+    A Data without a positive FreshnessPeriod is considered stale, mirroring the
+    NDN convention that such Data is not fresh from the receiver's point of view.
+    The consumer PIT only sees freshly arrived packets, so no cache timestamp is needed.
+    """
+    freshness_period = getattr(meta_info, 'freshness_period', None)
+    return freshness_period is not None and freshness_period > 0
+
+
 @dataclass
 class PrefixTreeNode:
     callback: IntHandler = None
@@ -141,6 +153,11 @@ class PendingIntEntry:
                 valid = await self.validator(name, sig, pkt_context)
             except (TimeoutError, aio.CancelledError):
                 valid = ValidResult.TIMEOUT
+            except Exception:
+                # Any other validator failure means the packet did NOT pass policy.
+                # Leaving the future pending would strand the caller, and treating it
+                # as success would hand out data the policy never approved.
+                valid = ValidResult.FAIL
         else:
             valid = ValidResult.FAIL
         if self.future.cancelled() or self.future.done():
@@ -163,48 +180,63 @@ class InterestTreeNode:
 
     def append_interest(self, future: aio.Future, deadline: int, param: fmt.InterestParam,
                         validator: Validator, implicit_sha256: enc.BinaryStr):
-        self.pending_list.append(
-            PendingIntEntry(future, deadline, param.can_be_prefix, param.must_be_fresh, validator, implicit_sha256))
+        entry = PendingIntEntry(future, deadline, param.can_be_prefix, param.must_be_fresh,
+                                validator, implicit_sha256)
+        self.pending_list.append(entry)
+        return entry
 
     def nack_interest(self, nack_reason: int) -> bool:
+        # A NetworkNack is keyed to the exact Interest name that was expressed, which
+        # is also this node's key, so every waiter sharing the node is Nacked.
         for entry in self.pending_list:
-            entry.future.set_exception(types.InterestNack(nack_reason))
+            if not entry.future.done():
+                entry.future.set_exception(types.InterestNack(nack_reason))
+            if entry.task is not None:
+                entry.task.cancel()
+        return not self.pending_list
+
+    def _entry_matches(self, entry: PendingIntEntry, data: types.DataTuple, is_prefix: bool) -> bool:
+        if not (entry.can_be_prefix or not is_prefix):
+            return False
+        if entry.must_be_fresh and not _data_is_fresh(data[1]):
+            return False
+        if len(entry.implicit_sha256) > 0:
+            data_sha256 = sha256(data[4]).digest()
+            if data_sha256 != entry.implicit_sha256:
+                return False
         return True
 
     def satisfy(self, data: types.DataTuple, is_prefix: bool) -> bool:
-        unsatisfied_entries = []
-        raw_packet = data[4]
         for entry in self.pending_list:
-            if entry.can_be_prefix or not is_prefix:
-                if len(entry.implicit_sha256) > 0:
-                    data_sha256 = sha256(raw_packet).digest()
-                    passed = data_sha256 == entry.implicit_sha256
-                else:
-                    passed = True
-            else:
-                passed = False
-            if passed:
-                # Try to validate the packet
-                aio.create_task(entry.satisfy(data))
-            else:
-                unsatisfied_entries.append(entry)
-        if unsatisfied_entries:
-            self.pending_list = unsatisfied_entries
-            return False
-        else:
-            return True
+            # Every waiter is evaluated against its OWN policy. A waiter that cannot
+            # accept this packet (prefix scope, MustBeFresh or implicit digest) stays
+            # pending and keeps the name node alive for a later, acceptable packet.
+            if entry.future.done() or entry.task is not None:
+                continue
+            if not self._entry_matches(entry, data, is_prefix):
+                continue
+            # Validation runs independently per waiter. Sharing a name node must never
+            # let one waiter's policy verdict be reused by another waiter.
+            entry.task = aio.create_task(entry.satisfy(data))
+        # The node is empty only once every waiter has terminated; entry removal is driven
+        # by the per-future done callback, so an in-flight or still-pending waiter keeps it.
+        return not self.pending_list
 
-    def timeout(self, future: aio.Future):
-        # Exception is raised by outside code.
-        for ele in self.pending_list:
-            if ele.future is future and ele.task is not None:
-                ele.task.cancel()
+    def remove_future(self, future: aio.Future) -> bool:
         self.pending_list = [ele for ele in self.pending_list if ele.future is not future]
         return not self.pending_list
 
+    def timeout(self, future: aio.Future):
+        # Exception is raised by outside code. Only cancel an in-flight validation here.
+        for ele in self.pending_list:
+            if ele.future is future and ele.task is not None:
+                ele.task.cancel()
+        return self.remove_future(future)
+
     def cancel(self):
         for entry in self.pending_list:
-            entry.future.cancel()
+            if not entry.future.done():
+                entry.future.cancel()
             if entry.task is not None:
                 entry.task.cancel()
 
@@ -569,8 +601,29 @@ class NDNApp:
         else:
             deadline += DEFAULT_LIFETIME
         node.append_interest(future, deadline, interest_param, validator, implicit_sha256)
+
+        def _on_waiter_done(done_future: aio.Future):
+            # Remove only this waiter. A shared name node is deleted solely when it has no
+            # pending waiters left, so cancelling or failing one request never tears out the
+            # node that another request with different conditions is still waiting on.
+            try:
+                done_node = self._pit[node_name]
+            except KeyError:
+                return
+            if done_node.remove_future(done_future):
+                self._prune_pit(node_name)
+
+        future.add_done_callback(_on_waiter_done)
         self.face.send(raw_interest)
         return self._wait_for_data(future, deadline, node_name, node)
+
+    def _prune_pit(self, node_name: enc.FormalName):
+        # Idempotent: several terminal paths (done callback, timeout, nack, shutdown) may
+        # race to remove the same name, so tolerate an already-removed node.
+        try:
+            del self._pit[node_name]
+        except KeyError:
+            pass
 
     async def _wait_for_data(self, future: aio.Future, deadline: int, node_name: enc.FormalName,
                              node: InterestTreeNode):
@@ -583,9 +636,12 @@ class NDNApp:
             data_name, content, pkt_context = await aio.wait_for(future, timeout=lifetime/1000.0)
         except TimeoutError:
             if node.timeout(future):
-                del self._pit[node_name]
+                self._prune_pit(node_name)
             raise types.InterestTimeout()
         except aio.CancelledError:
+            # The waiter itself is cancelled (e.g. face shutdown). Drop only this entry;
+            # the done callback prunes the node if no other waiter still needs it.
+            node.timeout(future)
             raise types.InterestCanceled()
         # ValidationError, InterestNack are passed to the parent caller
         return data_name, content, pkt_context
@@ -593,12 +649,11 @@ class NDNApp:
     async def _on_data(self, name: enc.FormalName, meta_info: fmt.MetaInfo,
                        content: enc.BinaryStr | None, sig: fmt.SignaturePtrs,
                        raw_packet: enc.BinaryStr):
-        clean_list = []
+        # Never delete a name node based solely on dispatch. Each entry runs its own
+        # validation asynchronously; the node stays until every waiter's future reaches a
+        # terminal state, allowing late Data to reach still-pending waiters.
         for prefix, node in self._pit.prefixes(name):
-            if node.satisfy((name, meta_info, content, sig, raw_packet), prefix != name):
-                clean_list.append(prefix)
-        for prefix in clean_list:
-            del self._pit[prefix]
+            node.satisfy((name, meta_info, content, sig, raw_packet), prefix != name)
 
     def _on_nack(self, name: enc.FormalName, nack_reason: int):
         try:
@@ -606,8 +661,9 @@ class NDNApp:
         except KeyError:
             node = None
         if node:
-            if node.nack_interest(nack_reason):
-                del self._pit[name]
+            node.nack_interest(nack_reason)
+            if not node.pending_list:
+                self._prune_pit(name)
 
     def express(self, name: enc.NonStrictName, validator: Validator,
                 app_param: enc.BinaryStr | None = None,
@@ -709,8 +765,17 @@ class NDNApp:
             return func
         return decorator
 
-    def _clean_up(self):
-        for node in self._pit.itervalues():
+    def _in_flight_tasks(self) -> list[aio.Task]:
+        return [entry.task for node in list(self._pit.itervalues())
+                for entry in node.pending_list if entry.task is not None]
+
+    async def _clean_up(self):
+        # Let validations that are already running settle their futures first. Cancelling them
+        # here would discard a verdict and strand waiters whose Data arrived just before shutdown.
+        tasks = self._in_flight_tasks()
+        if tasks:
+            await aio.gather(*tasks, return_exceptions=True)
+        for node in list(self._pit.itervalues()):
             node.cancel()
         # FIB is not cleared now
         self._pit.clear()
@@ -759,7 +824,7 @@ class NDNApp:
             ret = False
         finally:
             self.face.shutdown()
-        self._clean_up()
+        await self._clean_up()
         await task
         return ret
 
