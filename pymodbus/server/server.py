@@ -11,6 +11,7 @@ from ..pdu.device import ModbusDeviceIdentification
 from ..simulator import SimDevice
 from ..transport import CommParams, CommType
 from .base import ModbusBaseServer
+from .policy import ReadOnlyRequestPolicy
 
 
 class ModbusTcpServer(ModbusBaseServer):
@@ -33,6 +34,7 @@ class ModbusTcpServer(ModbusBaseServer):
         trace_pdu: Callable[[bool, ModbusPDU], ModbusPDU] | None = None,
         trace_connect: Callable[[bool], None] | None = None,
         custom_pdu: list[type[ModbusPDU]] | None = None,
+        request_policy: ReadOnlyRequestPolicy | None = None,
     ):
         """Initialize the socket server.
 
@@ -50,6 +52,9 @@ class ModbusTcpServer(ModbusBaseServer):
         :param trace_pdu: Called with PDU received/to be sent
         :param trace_connect: Called when connected/disconnected
         :param custom_pdu: list of ModbusPDU custom classes
+        :param request_policy: optional policy (e.g. ReadOnlyRequestPolicy)
+                        deciding which requests are allowed, denied requests
+                        are rejected before reaching the datastore
         """
         params = getattr(
             self,
@@ -74,6 +79,7 @@ class ModbusTcpServer(ModbusBaseServer):
             trace_pdu,
             trace_connect,
             custom_pdu,
+            request_policy,
         )
 
 
@@ -98,6 +104,7 @@ class ModbusTlsServer(ModbusTcpServer):
         trace_pdu: Callable[[bool, ModbusPDU], ModbusPDU] | None = None,
         trace_connect: Callable[[bool], None] | None = None,
         custom_pdu: list[type[ModbusPDU]] | None = None,
+        request_policy: ReadOnlyRequestPolicy | None = None,
     ):
         """Overloaded initializer for the socket server.
 
@@ -116,6 +123,9 @@ class ModbusTlsServer(ModbusTcpServer):
         :param trace_pdu: Called with PDU received/to be sent
         :param trace_connect: Called when connected/disconnected
         :param custom_pdu: list of ModbusPDU custom classes
+        :param request_policy: optional policy (e.g. ReadOnlyRequestPolicy)
+                        deciding which requests are allowed, denied requests
+                        are rejected before reaching the datastore
         """
         if not sslctx:
             raise TypeError(
@@ -140,6 +150,7 @@ class ModbusTlsServer(ModbusTcpServer):
             trace_pdu=trace_pdu,
             trace_connect=trace_connect,
             custom_pdu=custom_pdu,
+            request_policy=request_policy,
         )
 
 
@@ -163,6 +174,7 @@ class ModbusUdpServer(ModbusBaseServer):
         trace_pdu: Callable[[bool, ModbusPDU], ModbusPDU] | None = None,
         trace_connect: Callable[[bool], None] | None = None,
         custom_pdu: list[type[ModbusPDU]] | None = None,
+        request_policy: ReadOnlyRequestPolicy | None = None,
     ):
         """Overloaded initializer for the socket server.
 
@@ -180,6 +192,9 @@ class ModbusUdpServer(ModbusBaseServer):
         :param trace_pdu: Called with PDU received/to be sent
         :param trace_connect: Called when connected/disconnected
         :param custom_pdu: list of ModbusPDU custom classes
+        :param request_policy: optional policy (e.g. ReadOnlyRequestPolicy)
+                        deciding which requests are allowed, denied requests
+                        are rejected before reaching the datastore
         """
         # ----------------
         params = CommParams(
@@ -201,6 +216,7 @@ class ModbusUdpServer(ModbusBaseServer):
             trace_pdu,
             trace_connect,
             custom_pdu,
+            request_policy,
         )
 
 
@@ -231,6 +247,7 @@ class ModbusSerialServer(ModbusBaseServer):
         trace_pdu: Callable[[bool, ModbusPDU], ModbusPDU] | None = None,
         trace_connect: Callable[[bool], None] | None = None,
         custom_pdu: list[type[ModbusPDU]] | None = None,
+        request_policy: ReadOnlyRequestPolicy | None = None,
     ):
         """Initialize the socket server.
 
@@ -254,6 +271,9 @@ class ModbusSerialServer(ModbusBaseServer):
         :param trace_pdu: Called with PDU received/to be sent
         :param trace_connect: Called when connected/disconnected
         :param custom_pdu: list of ModbusPDU custom classes
+        :param request_policy: optional policy (e.g. ReadOnlyRequestPolicy)
+                        deciding which requests are allowed, denied requests
+                        are rejected before reaching the datastore
         """
         params = CommParams(
             comm_type=CommType.SERIAL,
@@ -279,4 +299,5 @@ class ModbusSerialServer(ModbusBaseServer):
             trace_pdu,
             trace_connect,
             custom_pdu,
+            request_policy,
         )

@@ -15,6 +15,7 @@ from ..pdu.device import ModbusControlBlock, ModbusDeviceIdentification
 from ..simulator import SimDevice
 from ..simulator.simcore import SimCore
 from ..transport import CommParams, ModbusProtocol
+from .policy import ReadOnlyRequestPolicy
 from .requesthandler import ServerRequestHandler
 
 
@@ -35,6 +36,7 @@ class ModbusBaseServer(ModbusProtocol):
         trace_pdu: Callable[[bool, ModbusPDU], ModbusPDU] | None,
         trace_connect: Callable[[bool], None] | None,
         custom_pdu: list[type[ModbusPDU]] | None,
+        request_policy: ReadOnlyRequestPolicy | None = None,
     ) -> None:
         """Initialize base server."""
         super().__init__(
@@ -58,6 +60,7 @@ class ModbusBaseServer(ModbusProtocol):
         self.control = ModbusControlBlock()
         self.ignore_missing_devices = ignore_missing_devices
         self.broadcast_enable = broadcast_enable
+        self.request_policy = request_policy
         self.trace_packet = trace_packet
         self.trace_pdu = trace_pdu
         self.trace_connect = trace_connect

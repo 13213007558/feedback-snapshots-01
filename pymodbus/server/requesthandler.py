@@ -89,8 +89,19 @@ class ServerRequestHandler(TransactionManager):
 
     async def handle_request(self, pdu: ModbusPDU) -> None:
         """Handle request."""
+        broadcast = self.server.broadcast_enable and not pdu.dev_id
+        if (policy := self.server.request_policy) and not policy.allows(pdu):
+            Log.warning("Request denied by server request policy: {}", pdu)
+            if not broadcast:
+                response = ExceptionResponse(
+                    pdu.function_code, ExcCodes.ILLEGAL_FUNCTION
+                )
+                response.transaction_id = pdu.transaction_id
+                response.dev_id = pdu.dev_id
+                self.server_send(response, self.last_addr)
+            return
         try:
-            if self.server.broadcast_enable and not pdu.dev_id:
+            if broadcast:
                 # if broadcasting then execute on all device contexts,
                 # note response will be ignored
                 for dev_id in self.server.context.device_ids():
