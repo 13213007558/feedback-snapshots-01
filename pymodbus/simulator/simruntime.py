@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import threading
 from typing import cast
 
 from ..constants import ExcCodes
+from ..datastore.snapshot import SnapshotStore
 from .simdevice import SimDevice
 from .simutils import DataType, SimUtils
 
@@ -35,6 +37,10 @@ class SimRuntime:
         self.use_bit_addressing = device.use_bit_addressing
         build = device.build_device()
         self.block: dict[str, tuple[int, int, list[int], list[int]]] = {}
+        # One re-entrant lock serializes the register copy/mutation critical
+        # sections. Snapshot readers (see get_snapshot_store) share this lock,
+        # so a multi-register threshold is never observed half-updated.
+        self._lock = threading.RLock()
         if not isinstance(build, dict):
             self.block["x"] = (
                 build[0],
@@ -45,6 +51,19 @@ class SimRuntime:
             return
         for i in ("c", "d", "h", "i"):
             self.block[i] = (build[i][0], len(build[i][1]), build[i][1], build[i][2])
+
+    def get_snapshot_store(self, block_id: str | None = None) -> SnapshotStore:
+        """Return a lock-sharing :class:`SnapshotStore` for one register block.
+
+        :param block_id: ``"x"`` for a shared device, otherwise one of
+            ``"c"``, ``"d"``, ``"h"`` or ``"i"``; defaults to the only block.
+        """
+        if block_id is None:
+            block_id = next(iter(self.block))
+        start_address, _register_count, registers, _flags = self.block[block_id]
+        return SnapshotStore(
+            registers, start_address=start_address, lock=self._lock
+        )
 
     async def __check_block(
         self,
@@ -93,12 +112,15 @@ class SimRuntime:
             func_code, block_id, address, reg_count, offset, values
         ):
             return result
-        list_bools = SimUtils.registersToBits(registers[offset : offset + reg_count])
-        if values:
-            list_bools[bit_offset : bit_offset + count] = values
-            registers[offset : offset + reg_count] = SimUtils.bitsToRegisters(
-                list_bools
+        with self._lock:
+            list_bools = SimUtils.registersToBits(
+                list(registers[offset : offset + reg_count])
             )
+            if values:
+                list_bools[bit_offset : bit_offset + count] = values
+                registers[offset : offset + reg_count] = SimUtils.bitsToRegisters(
+                    list_bools
+                )
         return list_bools[bit_offset : bit_offset + count]
 
     async def get_reg_block(
@@ -118,9 +140,11 @@ class SimRuntime:
             func_code, block_id, address, count, offset, values
         ):
             return result
-        if values:
-            registers[offset : offset + count] = values
-        return registers[offset : offset + count]
+        with self._lock:
+            if values:
+                registers[offset : offset + count] = values
+            result_registers = list(registers[offset : offset + count])
+        return result_registers
 
     async def get_block(
         self,
