@@ -62,6 +62,36 @@ IDLE command
 
 The RFC2177_ is implemented, to be able to wait for new mail messages without using CPU. The responses are pushed in an async queue, and it is possible to read them in real time. To leave the IDLE mode, it is necessary to send a "DONE" command to the server.
 
+Timeouts
+--------
+
+Two independent timers bound a command:
+
+- ``timeout`` is an *inactivity* timeout. Any progress from the server (an untagged line, a chunk
+  of literal data) resets it.
+- ``total_timeout`` is an *absolute* deadline measured from the moment the command is submitted,
+  including the time it spends queued behind other commands. Progress does not reset it.
+
+A server that keeps trickling data therefore resets the inactivity timeout forever while the
+absolute deadline still fires. ``total_timeout`` is optional and disabled by default. It can be set
+for the whole client and overridden per command::
+
+    imap_client = aioimaplib.IMAP4_SSL(host=host, timeout=30, total_timeout=120)
+
+    await imap_client.login(user, password)          # bounded by 120s in total
+    await imap_client.uid('fetch', '1:*', 'BODY[]', total_timeout=300)
+
+When the deadline expires, the pending command fails with ``CommandTotalTimeout`` (a subclass of
+``CommandTimeout``). The connection is then resynchronized before any other command may use it:
+the end of the abandoned response is drained, skipping literals by size so that their payload can
+not be mistaken for a response to the next command. If the server does not finish that response in
+time, the connection is marked unusable and later commands raise ``Abort`` instead of reading
+garbage. In both cases no unconsumed literal is left for the next command.
+
+IDLE has its own contract: it is a long-lived subscription, so it ignores the client-wide
+``total_timeout``. Its lifetime is controlled by ``idle_start(timeout=...)`` (the periodic
+keepalive/DONE cycle) and by ``wait_server_push(timeout=...)``.
+
 .. code-block:: python
 
     async def wait_for_new_message(host, user, password):

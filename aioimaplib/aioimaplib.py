@@ -37,6 +37,13 @@ TWENTY_NINE_MINUTES = 1740.0
 STOP_WAIT_SERVER_PUSH = [b'stop_wait_server_push']
 PY37_OR_LATER = sys.version_info[:2] >= (3, 7)
 
+# How long the client trusts the server to finish a response after a command total timeout
+# before declaring the connection unusable (see IMAP4ClientProtocol resynchronization).
+RESYNC_TIMEOUT_SECONDS = 5.0
+# Upper bound on bytes discarded while draining an abandoned response, so a hostile server can
+# not turn cleanup into unbounded memory/CPU use.
+RESYNC_MAX_DRAINED_BYTES = 1024 * 1024
+
 log = logging.getLogger(__name__)
 
 IMAP4_PORT = 143
@@ -148,7 +155,8 @@ CONTROL_CHARS = re.compile(r'[\x00\r\n]')
 
 class Command:
     def __init__(self, name: str, tag: str, *args, prefix: str = None, untagged_resp_name: str = None,
-                 loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None,
+                 total_timeout: float = None) -> None:
         for arg in args:
             if arg is not None and CONTROL_CHARS.search(str(arg)):
                 raise ValueError('NUL, CR and LF are not allowed in %s command arguments' % name)
@@ -162,11 +170,20 @@ class Command:
         self._loop = loop if loop is not None else get_running_loop()
         self._event = asyncio.Event()
         self._timeout = timeout
+        self._total_timeout = total_timeout
         self._timer = asyncio.Handle(lambda: None, None, self._loop)  # fake timer
+        self._total_timer = asyncio.Handle(lambda: None, None, self._loop)  # fake timer
+        self._closed = False
+        self.sent = False
+        self._abandoned = False
+        self.accepts_total_timeout = True
+        self._abandon_callback: Optional[Callable[['Command'], None]] = None
         self._set_timer()
+        self._set_total_timer()
         self._expected_size = 0
 
         self._resp_literal_data = bytearray()
+        self._discarded_literal_bytes = 0
         self._resp_result = 'Init'
         self._resp_lines: List[bytes] = list()
 
@@ -185,33 +202,73 @@ class Command:
         return Response(self._resp_result, self._resp_lines)
 
     def close(self, line: bytes, result: str) -> None:
+        if self._closed:
+            return
         self.append_to_resp(line, result=result)
+        self._closed = True
         self._timer.cancel()
+        self._total_timer.cancel()
         self._event.set()
+
+    def abandon(self, exception: 'CommandTimeout') -> None:
+        """Terminate the command without a tagged completion from the server.
+
+        The literal parser state (expected size / bytes already consumed) is kept so the protocol
+        can drain the rest of an in-flight literal instead of leaking it to the next command.
+        """
+        if self._closed:
+            return
+        self._exception = exception
+        self._abandoned = True
+        self._closed = True
+        self._resp_result = 'KO'
+        self._resp_lines.append(str(exception).encode())
+        self._timer.cancel()
+        self._total_timer.cancel()
+        self._event.set()
+        if self._abandon_callback is not None:
+            self._abandon_callback(self)
+
+    def raise_if_abandoned(self) -> None:
+        if self._exception is not None:
+            raise self._exception
 
     def begin_literal_data(self, expected_size: int, literal_data: bytes = b'') -> bytes:
         self._expected_size = expected_size
         return self.append_literal_data(literal_data)
 
+    def _literal_bytes_received(self) -> int:
+        return len(self._resp_literal_data) + self._discarded_literal_bytes
+
     def wait_literal_data(self) -> bool:
-        return self._expected_size != 0 and len(self._resp_literal_data) != self._expected_size
+        return self._expected_size != 0 and self._literal_bytes_received() != self._expected_size
 
     def wait_data(self) -> bool:
         return self.wait_literal_data()
 
     def append_literal_data(self, data: bytes) -> bytes:
-        nb_bytes_to_add = self._expected_size - len(self._resp_literal_data)
-        self._resp_literal_data.extend(data[0:nb_bytes_to_add])
+        nb_bytes_to_add = self._expected_size - self._literal_bytes_received()
+        chunk = data[0:nb_bytes_to_add]
+        if self._abandoned:
+            # don't retain attacker-controlled volume while draining an abandoned literal
+            self._discarded_literal_bytes += len(chunk)
+        else:
+            self._resp_literal_data.extend(chunk)
         if not self.wait_literal_data():
-            self.append_to_resp(self._resp_literal_data)
+            if not self._abandoned:
+                self.append_to_resp(self._resp_literal_data)
             self._end_literal_data()
-        self._reset_timer()
+        if not self._abandoned:
+            self._reset_timer()
         return data[nb_bytes_to_add:]
 
     def append_to_resp(self, line: bytes, result: str = 'Pending') -> None:
+        if self._abandoned:
+            return
         self._resp_result = result
         self._resp_lines.append(line)
-        self._reset_timer()
+        if not self._closed:
+            self._reset_timer()
 
     async def wait(self) -> None:
         await self._event.wait()
@@ -224,14 +281,31 @@ class Command:
     def _end_literal_data(self) -> None:
         self._expected_size = 0
         self._resp_literal_data = bytearray()
+        self._discarded_literal_bytes = 0
 
     def _set_timer(self) -> None:
         if self._timeout is not None:
             self._timer = self._loop.call_later(self._timeout, self._timeout_callback)
 
+    def _set_total_timer(self) -> None:
+        if self._total_timeout is not None:
+            self._total_timer = self._loop.call_later(self._total_timeout, self._total_timeout_callback)
+
+    def set_total_timeout(self, total_timeout: float) -> None:
+        if self._closed:
+            return
+        self._total_timer.cancel()
+        self._total_timeout = total_timeout
+        self._set_total_timer()
+
+    def set_abandon_callback(self, callback: Callable[['Command'], None]) -> None:
+        self._abandon_callback = callback
+
     def _timeout_callback(self) -> None:
-        self._exception = CommandTimeout(self)
-        self.close(str(self._exception).encode(), 'KO')
+        self.abandon(CommandTimeout(self))
+
+    def _total_timeout_callback(self) -> None:
+        self.abandon(CommandTotalTimeout(self))
 
     def _reset_timer(self) -> None:
         self._timer.cancel()
@@ -242,9 +316,10 @@ class FetchCommand(Command):
     FETCH_MESSAGE_DATA_RE = re.compile(rb'[0-9]+ FETCH \(')
 
     def __init__(self, tag: str, *args, prefix: str = None, untagged_resp_name: str = None,
-                 loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None,
+                 total_timeout: float = None) -> None:
         super().__init__('FETCH', tag, *args, prefix=prefix, untagged_resp_name=untagged_resp_name,
-                         loop=loop, timeout=timeout)
+                         loop=loop, timeout=timeout, total_timeout=total_timeout)
 
     def wait_data(self) -> bool:
         last_fetch_index = 0
@@ -262,8 +337,11 @@ def matched_parenthesis(fetch_response: bytes) -> bool:
 class IdleCommand(Command):
     def __init__(self, tag: str, queue: asyncio.Queue, *args, prefix: str = None, untagged_resp_name: str = None,
                  loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+        # IDLE is a long-lived subscription: it deliberately has no total timeout. Its lifetime is
+        # bounded by the idle waiter / keepalive contract handled by IMAP4.idle_start.
         super().__init__('IDLE', tag, *args, prefix=prefix, untagged_resp_name=untagged_resp_name,
-                         loop=loop, timeout=timeout)
+                         loop=loop, timeout=timeout, total_timeout=None)
+        self.accepts_total_timeout = False
         self.queue = queue
         self.buffer: List[bytes] = list()
 
@@ -295,8 +373,14 @@ class Abort(Error):
 
 
 class CommandTimeout(AioImapException):
-    def __init__(self, command: Command):
+    def __init__(self, command: Command, reason: str = 'command timeout'):
         self.command = command
+        super().__init__(reason)
+
+
+class CommandTotalTimeout(CommandTimeout):
+    def __init__(self, command: Command):
+        super().__init__(command, 'command %s exceeded its total timeout' % command.name)
 
 
 class IncompleteRead(AioImapException):
@@ -341,6 +425,19 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         self.current_command = None
         self.conn_lost_cb = conn_lost_cb
         self.tasks: set[Future] = set()
+        self.total_timeout: Optional[float] = None
+        self.resync_timeout: Optional[float] = RESYNC_TIMEOUT_SECONDS
+        self._ignored_command_tags: set[str] = set()
+        self._drained_command_tags: set[str] = set()
+        self._resynchronizing = False
+        self._resync_poisoned = False
+        self._resync_skip_literal = 0
+        self._resync_after_literal = False
+        self._resync_partial_line = b''
+        self._resync_drained_bytes = 0
+        self._resync_event = asyncio.Event()
+        self._resync_event.set()
+        self._resync_timer = asyncio.Handle(lambda: None, None, self.loop) if self.loop is not None else None
 
         self.tagnum = 0
         self.tagpre = int2ap(random.randint(4096, 65535))
@@ -352,15 +449,23 @@ class IMAP4ClientProtocol(asyncio.Protocol):
     def data_received(self, d: bytes) -> None:
         log.debug('Received : %s' % d)
         try:
-            self._handle_responses(self.incomplete_line + d, self._handle_line, self.current_command)
-            self.incomplete_line = b''
-            self.current_command = None
+            if self._resynchronizing:
+                self._handle_resync_data(d)
+            else:
+                self._handle_responses(self.incomplete_line + d, self._handle_line, self.current_command)
+                self.incomplete_line = b''
+                self.current_command = None
         except IncompleteRead as incomplete_read:
             self.current_command = incomplete_read.cmd
             self.incomplete_line = incomplete_read.data
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         log.debug('connection lost: %s', exc)
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        self._resynchronizing = False
+        self._resync_poisoned = True
+        self._resync_event.set()
         if self.conn_lost_cb is not None:
             self.conn_lost_cb(exc)
 
@@ -368,7 +473,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         if not data:
             if self.pending_sync_command is not None:
                 self.pending_sync_command.flush()
-            if current_cmd is not None and current_cmd.wait_data():
+            if current_cmd is not None and not current_cmd._abandoned and current_cmd.wait_data():
                 raise IncompleteRead(current_cmd)
             return
 
@@ -394,6 +499,116 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             self._handle_responses(tail, line_handler, current_cmd=cmd)
         else:
             self._handle_responses(tail, line_handler)
+
+    def _handle_resync_data(self, data: bytes) -> None:
+        """Drop the bytes of an abandoned response until its tagged completion is seen.
+
+        Literals are skipped by size rather than scanned for CRLF, so a hostile payload can not
+        bleed into the next command. A tagged completion for a different command that is still in
+        flight is still dispatched, so unrelated short commands stay usable during the drain.
+        """
+        data = self._resync_partial_line + data
+        self._resync_partial_line = b''
+
+        while data:
+            if self._resync_skip_literal:
+                skipped = data[:self._resync_skip_literal]
+                self._resync_skip_literal -= len(skipped)
+                self._resync_drain(skipped)
+                data = data[len(skipped):]
+                if not self._resync_skip_literal:
+                    self._resync_after_literal = True
+                continue
+
+            line, separator, tail = data.partition(CRLF)
+            if not separator:
+                self._resync_partial_line = line
+                return
+
+            self._resync_drain(line + CRLF)
+            data = tail
+
+            if self._resync_after_literal:
+                # This line is the remainder of the line that carried the literal (e.g. a closing
+                # ')'). It is protocol text, so it may itself announce another literal such as the
+                # nested literals of a BODYSTRUCTURE.
+                self._resync_after_literal = False
+                literal = literal_data_re.match(line)
+                if literal:
+                    self._resync_skip_literal = int(literal.group('size'))
+                    self._resync_after_literal = True
+                continue
+            elif line.startswith(b'+'):
+                # A continuation waiting for client data can never be satisfied here.
+                self._abort_resynchronization()
+                return
+            elif tagged_status_response_re.match(line):
+                tag_str = line.partition(b' ')[0].decode()
+                if tag_str in self._ignored_command_tags:
+                    self._ignored_command_tags.discard(tag_str)
+                    self._drained_command_tags.add(tag_str)
+                    if not self._ignored_command_tags:
+                        self._finish_resynchronization()
+                        if data:
+                            self._handle_responses(data, self._handle_line)
+                        return
+                if tag_str in self._drained_command_tags or \
+                        self._find_pending_async_cmd_by_tag(tag_str) or \
+                        (self.pending_sync_command is not None and self.pending_sync_command.tag == tag_str):
+                    # A response for another command that is still in flight.
+                    self._response_done(line)
+                else:
+                    log.debug('dropping late tagged line during resynchronization: %s', line)
+            elif line.startswith(b'*'):
+                # Untagged data for the abandoned response is dropped so it is not attributed to
+                # an unrelated command that may still be in flight.
+                log.debug('dropping untagged line during resynchronization: %s', line)
+            else:
+                self._abort_resynchronization()
+                return
+
+            literal = literal_data_re.match(line)
+            if literal:
+                self._resync_skip_literal = int(literal.group('size'))
+                # Whatever follows belongs to the remainder of this response line; never parse it.
+                self._resync_after_literal = True
+
+            if self._resync_poisoned:
+                self._abort_resynchronization()
+                return
+
+    def _resync_drain(self, chunk: bytes) -> None:
+        self._resync_drained_bytes += len(chunk)
+        if self._resync_drained_bytes > RESYNC_MAX_DRAINED_BYTES:
+            self._resync_poisoned = True
+
+    def _finish_resynchronization(self) -> None:
+        log.debug('resynchronized after abandoned command')
+        self._resynchronizing = False
+        self._resync_poisoned = False
+        self._resync_skip_literal = 0
+        self._resync_after_literal = False
+        self._resync_partial_line = b''
+        self._ignored_command_tags.clear()
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        self.current_command = None
+        self.incomplete_line = b''
+        self._resync_event.set()
+
+    def _abort_resynchronization(self) -> None:
+        log.warning('could not resynchronize after abandoned command, connection is unusable')
+        self._resynchronizing = False
+        self._resync_poisoned = True
+        self._resync_skip_literal = 0
+        self._resync_after_literal = False
+        self._resync_partial_line = b''
+        self._ignored_command_tags.clear()
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        self.current_command = None
+        self.incomplete_line = b''
+        self._resync_event.set()
 
     def _handle_line(self, line: bytes, current_cmd: Command) -> Optional[Command]:
         if not line:
@@ -427,32 +642,137 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         if self.state not in Commands.get(command.name).valid_states:
             raise Abort('command %s illegal in state %s' % (command.name, self.state))
 
+        # The total deadline covers queueing as well as the response read. It starts as soon as
+        # the caller asks for the command, not when this command finally reaches the wire.
+        # IDLE is a long-lived subscription and is deliberately exempt (see IdleCommand).
+        if command.accepts_total_timeout and command._total_timeout is None:
+            command.set_total_timeout(self.total_timeout)
+
         if self.pending_sync_command is not None:
-            await self.pending_sync_command.wait()
+            await self._wait_for_pending_commands([self.pending_sync_command], command)
 
         if Commands.get(command.name).exec == Exec.is_sync:
             if self.pending_async_commands:
-                await self.wait_async_pending_commands()
+                await self._wait_for_pending_commands(list(self.pending_async_commands.values()), command)
+        else:
+            pending = self.pending_async_commands.get(command.untagged_resp_name)
+            if pending is not None:
+                await self._wait_for_pending_commands([pending], command)
+
+        # A previous command may have left an unread response in flight. Never send a new command
+        # on top of it; wait for the drain to complete or fail the connection.
+        await self._wait_for_resynchronization(command)
+        # Queueing may have consumed most of the deadline: never send an already late command.
+        command.raise_if_abandoned()
+        if self._resync_poisoned:
+            raise Abort('connection is out of sync after an abandoned command')
+
+        if Commands.get(command.name).exec == Exec.is_sync:
             self.pending_sync_command = command
         else:
-            if self.pending_async_commands.get(command.untagged_resp_name) is not None:
-                await self.pending_async_commands[command.untagged_resp_name].wait()
             self.pending_async_commands[command.untagged_resp_name] = command
 
+        command.set_abandon_callback(self._command_abandoned)
         self.send(str(command), scrub=scrub)
+        command.sent = True
         try:
             await command.wait()
-        except CommandTimeout:
-            if Commands.get(command.name).exec == Exec.is_sync:
-                self.pending_sync_command = None
-            else:
-                self.pending_async_commands.pop(command.untagged_resp_name, None)
-            raise
         finally:
             if command.name == 'IDLE':
                 self._idle_event.clear()
 
         return command.response
+
+    async def _wait_for_pending_commands(self, commands: List[Command], waiting_command: Command) -> None:
+        """Wait until one of the queued commands finishes, the connection resynchronizes, or the
+        waiting command's own total deadline expires (in which case that command is abandoned)."""
+        pending_waiter = asyncio.ensure_future(self._wait_any_commands(commands))
+        waiters = {pending_waiter}
+        if self._resynchronizing:
+            waiters.add(asyncio.ensure_future(self._resync_event.wait()))
+        if waiting_command is not None and waiting_command.accepts_total_timeout:
+            waiters.add(asyncio.ensure_future(waiting_command._event.wait()))
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+
+    async def _wait_any_commands(self, commands: List[Command]) -> None:
+        if not commands:
+            return
+        tasks = {asyncio.ensure_future(cmd.wait()) for cmd in commands}
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()  # consume: the owner reports the timeout itself
+        finally:
+            for task in tasks:
+                task.cancel()
+
+    async def _wait_for_resynchronization(self, command: Command) -> None:
+        if not self._resynchronizing:
+            return
+        waiters = {asyncio.ensure_future(self._resync_event.wait())}
+        if command.accepts_total_timeout:
+            waiters.add(asyncio.ensure_future(command._event.wait()))
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+
+    def _forget_command(self, command: Command) -> None:
+        """Remove a *sent* command from the protocol's pending state.
+
+        A command abandoned while still queued never reached the wire: it must not remove or
+        resynchronize an unrelated command that is the one actually in flight.
+        """
+        if not command.sent:
+            return
+        if Commands.get(command.name).exec == Exec.is_sync:
+            if self.pending_sync_command is command:
+                self.pending_sync_command = None
+        elif self.pending_async_commands.get(command.untagged_resp_name) is command:
+            self.pending_async_commands.pop(command.untagged_resp_name, None)
+
+    def _command_abandoned(self, command: Command) -> None:
+        if not command.sent:
+            # Timed out while queued behind another command; nothing was written for it.
+            return
+        self._forget_command(command)
+        if len(self._ignored_command_tags) > 128:
+            self._ignored_command_tags.pop()
+        self._ignored_command_tags.add(command.tag)
+        if len(self._drained_command_tags) > 128:
+            self._drained_command_tags.pop()
+        # Whatever the command kind, the server may still be writing that response. Drain it
+        # (skipping literals by size) before another command is allowed on the wire, otherwise
+        # stale untagged data or literal bytes would be attributed to the next command.
+        self._start_resynchronization(command)
+
+    def _start_resynchronization(self, command: Command) -> None:
+        if not command.sent or self._resynchronizing:
+            return
+        log.debug('resynchronizing after abandoned command %s', command)
+        self._resynchronizing = True
+        self._resync_poisoned = False
+        self._resync_drained_bytes = 0
+        self._resync_partial_line = b''
+        self._resync_after_literal = False
+        # If the parser is blocked waiting for literal bytes, those bytes must be skipped by size.
+        if command is self.current_command and command.wait_literal_data():
+            self._resync_skip_literal = command._expected_size - command._literal_bytes_received()
+        else:
+            self._resync_skip_literal = 0
+        self.current_command = None
+        self.incomplete_line = b''
+        self._resync_event.clear()
+        if self._resync_timer is not None:
+            self._resync_timer.cancel()
+        if self.loop is not None and self.resync_timeout is not None:
+            self._resync_timer = self.loop.call_later(self.resync_timeout, self._abort_resynchronization)
 
     @change_state
     async def welcome(self, command: bytes) -> None:
@@ -541,10 +861,12 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         return await self.execute(
             Command('SEARCH', self.new_tag(), *args, prefix=prefix, loop=self.loop))
 
-    async def fetch(self, message_set: str, message_parts: str, by_uid: bool = False, timeout: float = None) -> Response:
+    async def fetch(self, message_set: str, message_parts: str, by_uid: bool = False, timeout: float = None,
+                    total_timeout: float = None) -> Response:
         return await self.execute(
             FetchCommand(self.new_tag(), message_set, message_parts,
-                         prefix='UID' if by_uid else '', loop=self.loop, timeout=timeout))
+                         prefix='UID' if by_uid else '', loop=self.loop, timeout=timeout,
+                         total_timeout=total_timeout))
 
     async def store(self, *args: str, by_uid: bool = False) -> Response:
         return await self.execute(
@@ -556,12 +878,13 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             Command('EXPUNGE', self.new_tag(), *args,
                     prefix='UID' if by_uid else '', loop=self.loop))
 
-    async def uid(self, command: str, *criteria: str, timeout: float = None) -> Response:
+    async def uid(self, command: str, *criteria: str, timeout: float = None, total_timeout: float = None) -> Response:
         if self.state not in Commands.get('UID').valid_states:
             raise Abort('command UID illegal in state %s' % self.state)
 
         if command.upper() == 'FETCH':
-            return await self.fetch(criteria[0], criteria[1], by_uid=True, timeout=timeout)
+            return await self.fetch(criteria[0], criteria[1], by_uid=True, timeout=timeout,
+                                    total_timeout=total_timeout)
         if command.upper() == 'STORE':
             return await self.store(*criteria, by_uid=True)
         if command.upper() == 'COPY':
@@ -596,7 +919,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         except IndexError:
             raise Error('server not IMAP4 compliant')
 
-    async def append(self, message_bytes: bytes, mailbox: str = 'INBOX', flags: str = None, date: Any = None, timeout: float = None) -> Response:
+    async def append(self, message_bytes: bytes, mailbox: str = 'INBOX', flags: str = None, date: Any = None,
+                     timeout: float = None, total_timeout: float = None) -> Response:
         args = [mailbox]
         if flags is not None:
             if (flags[0], flags[-1]) != ('(', ')'):
@@ -607,7 +931,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             args.append(time2internaldate(date))
         args.append('{%s}' % len(message_bytes))
         self.literal_data = message_bytes
-        return await self.execute(Command('APPEND', self.new_tag(), *args, loop=self.loop, timeout=timeout))
+        return await self.execute(Command('APPEND', self.new_tag(), *args, loop=self.loop, timeout=timeout,
+                                          total_timeout=total_timeout))
 
     async def id(self, **kwargs: Union[dict, list, str]) -> Response:
         args = arguments_rfs2971(**kwargs)
@@ -625,9 +950,6 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         if name not in self.simple_commands:
             raise NotImplementedError('simple command only available for %s' % self.simple_commands)
         return await self.execute(Command(name, self.new_tag(), *args, loop=self.loop))
-
-    async def wait_async_pending_commands(self) -> None:
-        await asyncio.wait([asyncio.ensure_future(cmd.wait()) for cmd in self.pending_async_commands.values()])
 
     async def wait(self, state_regexp: str) -> None:
         state_re = re.compile(state_regexp)
@@ -663,15 +985,22 @@ class IMAP4ClientProtocol(asyncio.Protocol):
     def _response_done(self, line: bytes) -> None:
         log.debug('tagged status %s' % line)
         tag, _, response = line.partition(b' ')
+        tag_str = tag.decode()
+        if tag_str in self._drained_command_tags or tag_str in self._ignored_command_tags:
+            # A late tagged completion for a response already drained (sync) or abandoned (async).
+            self._drained_command_tags.discard(tag_str)
+            self._ignored_command_tags.discard(tag_str)
+            log.debug('ignored late tagged response %s', line)
+            return
 
         if self.pending_sync_command is not None:
-            if self.pending_sync_command.tag != tag.decode():
+            if self.pending_sync_command.tag != tag_str:
                 raise Abort('unexpected tagged response with pending sync command (%s) response: %s' %
                             (self.pending_sync_command, response))
             command = self.pending_sync_command
             self.pending_sync_command = None
         else:
-            cmds = self._find_pending_async_cmd_by_tag(tag.decode())
+            cmds = self._find_pending_async_cmd_by_tag(tag_str)
             if len(cmds) == 0:
                 raise Abort('unexpected tagged (%s) response: %s' % (tag, response))
             elif len(cmds) > 1:
@@ -714,8 +1043,9 @@ class IMAP4:
 
     def __init__(self, host: str = '127.0.0.1', port: int = IMAP4_PORT, loop: asyncio.AbstractEventLoop = None,
                  timeout: float = TIMEOUT_SECONDS, conn_lost_cb: Callable[[Optional[Exception]], None] = None,
-                 ssl_context: ssl.SSLContext = None):
+                 ssl_context: ssl.SSLContext = None, total_timeout: float = None):
         self.timeout = timeout
+        self.total_timeout = total_timeout
         self.port = port
         self.host = host
         self.protocol = None
@@ -727,6 +1057,7 @@ class IMAP4:
                       conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None) -> None:
         local_loop = loop if loop is not None else get_running_loop()
         self.protocol = IMAP4ClientProtocol(local_loop, conn_lost_cb)
+        self.protocol.total_timeout = self.total_timeout
         self._client_task = local_loop.create_task(local_loop.create_connection(lambda: self.protocol, host, port, ssl=ssl_context))
 
     def get_state(self) -> str:
@@ -758,8 +1089,9 @@ class IMAP4:
     async def uid_search(self, *criteria: str, charset: Optional[str] = 'utf-8') -> Response:
         return await asyncio.wait_for(self.protocol.search(*criteria, by_uid=True, charset=charset), self.timeout)
 
-    async def uid(self, command: str, *criteria: str) -> Response:
-        return await self.protocol.uid(command, *criteria, timeout=self.timeout)
+    async def uid(self, command: str, *criteria: str, total_timeout: float = None) -> Response:
+        return await self.protocol.uid(command, *criteria, timeout=self.timeout,
+                                       total_timeout=total_timeout)
 
     async def store(self, *criteria: str) -> Response:
         return await asyncio.wait_for(self.protocol.store(*criteria), self.timeout)
@@ -884,8 +1216,9 @@ def extract_exists(response: Response) -> Optional[int]:
 
 class IMAP4_SSL(IMAP4):
     def __init__(self, host: str = '127.0.0.1', port: int = IMAP4_SSL_PORT, loop: asyncio.AbstractEventLoop = None,
-                 timeout: float = IMAP4.TIMEOUT_SECONDS, ssl_context: ssl.SSLContext = None):
-        super().__init__(host, port, loop, timeout, None, ssl_context)
+                 timeout: float = IMAP4.TIMEOUT_SECONDS, ssl_context: ssl.SSLContext = None,
+                 total_timeout: float = None):
+        super().__init__(host, port, loop, timeout, None, ssl_context, total_timeout)
 
     def create_client(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
                       conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None) -> None:

@@ -1,6 +1,15 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- feat: optional absolute command deadline (``total_timeout``, ``CommandTotalTimeout``) so a
+  server that makes constant small progress can not keep an unfinished command alive forever
+- fix: after an absolute deadline, drain the abandoned response (literals skipped by size) or
+  poison the connection, so stale literal bytes are never handed to the next command
+- IDLE remains exempt from the client-wide deadline and keeps its own keepalive contract
+
 V2.0.3
 ------
 
