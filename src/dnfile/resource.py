@@ -315,6 +315,9 @@ class ResourceEntry(object):
         self.value: Optional[Any] = None
         self.data: Optional[bytes] = None
         self.name: Optional[str] = None
+        # Inherited from the parent resource; a serialized type tag inside a
+        # candidate resource does not make the type confirmed.
+        self.evidence: str = "candidate"
 
 
 class ResourceSetStruct(object):
@@ -393,6 +396,7 @@ class ResourceSet(object):
             offset += 8 - over
         for i in range(self.struct.NumberOfResources):
             e = ResourceEntry()
+            e.evidence = self.parent.evidence if self.parent is not None else "candidate"
             e.struct.Hash = int.from_bytes(self._data[offset:offset + 4], byteorder="little")
             self.entries.append(e)
             # next

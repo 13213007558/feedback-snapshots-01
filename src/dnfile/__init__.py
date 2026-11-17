@@ -25,26 +25,11 @@ from typing import Dict, List, Optional
 from pefile import PE as _PE
 from pefile import DIRECTORY_ENTRY, MAX_SYMBOL_EXPORT_COUNT, Dump, Structure, DataContainer, PEFormatError
 
-from . import base, enums, errors, stream, resource
+from . import base, enums, errors, stream, resource, streamtable
+from .streamtable import StreamPolicy, StreamStatus, StreamTableEntry, StreamTableReport
 
 logger = logging.getLogger(__name__)
 CLR_METADATA_SIGNATURE = 0x424A5342
-
-
-def _recover_stream_entry_rva(pe: "dnPE", candidate_rva: int, metadata_end_rva: int):
-    known_names = (b"#~", b"#-", b"#Strings", b"#US", b"#GUID", b"#Blob")
-
-    probe_rva = candidate_rva
-    while probe_rva + 8 < metadata_end_rva:
-        name = pe.get_string_at_rva(probe_rva + 8)
-        # Keep this a strict check for known stream names since we don't
-        # want to accidentally recover a random pointer that happens to
-        # point at something that looks like a stream entry.
-        if name in known_names:
-            return probe_rva
-        probe_rva += 4
-
-    return None
 
 
 # These come from the great article[1] which contains great insights on
@@ -74,9 +59,11 @@ class dnPE(_PE):
         fast_load=None,
         max_symbol_exports=MAX_SYMBOL_EXPORT_COUNT,
         clr_lazy_load=False,
+        stream_policy=None,
     ):
         self._warnings = list()
         self.clr_lazy_load = clr_lazy_load
+        self.stream_policy = streamtable.normalize_policy(stream_policy)
         super().__init__(name, data, fast_load)
 
     def dump_info(self, dump=None, encoding="utf-8"):
@@ -234,7 +221,7 @@ class dnPE(_PE):
 
     def parse_clr_structure(self, rva, size) -> Optional["ClrData"]:
         try:
-            return ClrData(self, rva, size, self.clr_lazy_load)
+            return ClrData(self, rva, size, self.clr_lazy_load, self.stream_policy)
         except errors.dnFormatError as e:
             logger.warning("failed to parse CLR data: %s",  e)
             return None
@@ -255,14 +242,16 @@ class ClrMetaData(DataContainer):
     """Holds CLR (.NET) MetaData.
 
     struct:         IMAGE_CLR_METADATA structure
-    streams:        Dictionary to access streams by name (bytes)
+    streams:        Dictionary to access the selected stream for each name (bytes)
     streams_list:   List of streams in order of entry in header
+    stream_report:  StreamTableReport that records every header, range, and verdict
     """
 
     rva: int
     struct: ClrMetaDataStruct
     streams: Dict[bytes, base.ClrStream]
     streams_list: List[base.ClrStream]
+    stream_report: streamtable.StreamTableReport
 
     _format = (
         "IMAGE_CLR_METADATA",
@@ -289,15 +278,24 @@ class ClrMetaData(DataContainer):
     # dw    NumberOfStreams
     # var   StreamHeaders
 
-    def __init__(self, pe: dnPE, rva: int, size: int, lazy_load=False):
+    def __init__(
+        self,
+        pe: dnPE,
+        rva: int,
+        size: int,
+        lazy_load=False,
+        stream_policy=None,
+    ):
         """
         Given a dnPE object, MetaData RVA and MetaData Size.
         Raises dnFormatError if encounter problems parsing.
         """
         metadata_rva = rva
+        policy = streamtable.normalize_policy(stream_policy)
 
         # The metadata RVA, used for stream offsets
         self.rva = rva
+        self.stream_policy = policy
 
         # dynamically create metadata header structure
         struct_format = _copymod.deepcopy(self.__class__._format)
@@ -322,9 +320,6 @@ class ClrMetaData(DataContainer):
             file_offset=pe.get_offset_from_rva(metadata_rva)
         )
         metadata_struct.__unpack__(struct_data)
-        # metadata_struct = pe.__unpack_data__(
-        #     struct_format, struct_data, pe.get_offset_from_rva(metadata_rva)
-        # )
         # add variable-length version field
         if metadata_struct.VersionLength > 0:
             struct_format[1].append(
@@ -352,58 +347,139 @@ class ClrMetaData(DataContainer):
 
         self.struct = metadata_struct
 
+        # Keep the bytes that are really available.  Stream headers and stream
+        # bodies are both bounded by this buffer so a bad header cannot pull
+        # adjacent sections (or overlay) into a stream.
+        self._metadata_data = pe.get_data(metadata_rva, self.size)
+        self._body_end_rva = metadata_rva + self.size
+        self._declared_end_rva = metadata_rva + size
+
+        report = streamtable.StreamTableReport(
+            policy=policy,
+            metadata_rva=metadata_rva,
+            metadata_declared_size=size,
+            metadata_read_size=self.size,
+            expected_entries=metadata_struct.NumberOfStreams,
+        )
+        if self.size < size:
+            report.add_warning(
+                "CLR metadata directory is truncated: declared 0x{:x} bytes, "
+                "read 0x{:x} bytes at rva 0x{:x}".format(size, self.size, metadata_rva)
+            )
+
         if metadata_struct.NumberOfStreams > 0:
             # parse the streams table
             streams_table_rva = metadata_rva + struct_size
-            self.parse_stream_table(pe, streams_table_rva)
+            self.parse_stream_table(pe, streams_table_rva, report)
+        else:
+            self.streams_list = []
+            self.streams = {}
 
-            # parse each stream
-            for s in self.streams_list:
-                try:
-                    s.parse(self.streams_list, lazy_load=lazy_load)
-                except (errors.dnFormatError, PEFormatError) as e:
-                    # other streams may parse, so add to warnings and continue
-                    pe.add_warning("Unable to parse stream {!r}".format(s.struct.Name))
-                    pe.add_warning(str(e))
-                    logger.warning("unable to parse stream: %s: %s", s.struct.Name, e)
+        if policy is streamtable.StreamPolicy.STRICT and report.has_conflicts:
+            report.rejected = True
+            report.rejection_reason = report.strict_rejection_message()
+            for warning in report.drain_new_warnings():
+                pe.add_warning(warning)
+            pe.add_warning(report.rejection_reason)
+            logger.warning(report.rejection_reason)
+            self.stream_report = report
+            self.streams = {}
+            self.streams_list = []
+            raise errors.dnStreamTableError(report.rejection_reason, report)
 
-    def parse_stream_table(self, pe: dnPE, streams_table_rva):
-        streams_list = list()
-        streams_dict = dict()
-        # pointer to current stream's table entry
+        for warning in report.drain_new_warnings():
+            pe.add_warning(warning)
+
+        # Only selected, structurally valid streams are parsed.  A malformed
+        # stream cannot shadow another valid stream with the same name.
+        selected_streams = report.selected_streams()
+        for entry in report.parseable_entries():
+            s = entry.stream
+            assert s is not None
+            try:
+                s.parse(selected_streams, lazy_load=lazy_load)
+            except (errors.dnFormatError, PEFormatError) as e:
+                entry.statuses.add(streamtable.StreamStatus.PARSE_ERROR)
+                # other streams may parse, so add to warnings and continue
+                pe.add_warning("Unable to parse stream {!r}".format(s.struct.Name))
+                pe.add_warning(str(e))
+                logger.warning("unable to parse stream: %s: %s", s.struct.Name, e)
+
+        streamtable.apply_evidence_to_streams(report)
+        streamtable.finalize_evidence(report)
+        for warning in report.drain_new_warnings():
+            pe.add_warning(warning)
+        self.stream_report = report
+        self.streams = report.selected_stream_map()
+        self.streams_list = [e.stream for e in report.entries if e.stream is not None]
+
+    def parse_stream_table(self, pe: dnPE, streams_table_rva, report=None):
+        if report is None:
+            report = streamtable.StreamTableReport(
+                policy=streamtable.StreamPolicy.FORENSIC,
+                metadata_rva=self.rva,
+                metadata_declared_size=self.size,
+                metadata_read_size=self.size,
+                expected_entries=self.struct.NumberOfStreams,
+            )
+        elif report.entries:
+            raise ValueError("stream table report is already populated")
+
+        metadata_end_rva = self._body_end_rva
         stream_entry_rva = streams_table_rva
-        for i in range(self.struct.NumberOfStreams):
-            stream = ClrStreamFactory.createStream(pe, stream_entry_rva, self.rva)
-            if not stream:
-                logger.warning("Invalid .NET stream: {}".format(i + 1))
-                pe.add_warning("Invalid .NET stream: {}".format(i + 1))
-                recovered_rva = _recover_stream_entry_rva(
-                    pe,
+        entry_index = 0
+
+        for slot in range(self.struct.NumberOfStreams):
+            entry, failure = ClrStreamFactory.readStreamEntry(
+                pe,
+                stream_entry_rva,
+                self.rva,
+                metadata_end_rva,
+                self._declared_end_rva,
+                index=entry_index,
+                slot=slot,
+            )
+            if entry is None:
+                report.invalid_slots.append(stream_entry_rva)
+                logger.warning("Invalid .NET stream header at rva 0x%x: %s", stream_entry_rva, failure)
+                report.add_warning(
+                    "Invalid .NET stream header {} at rva 0x{:x}: {}".format(
+                        slot + 1, stream_entry_rva, failure or "unreadable"
+                    )
+                )
+                recovered_rva = streamtable.find_recovered_header(
+                    self._metadata_data,
+                    self.rva,
                     stream_entry_rva + 4,
-                    self.rva + self.size,
+                    metadata_end_rva,
                 )
                 if recovered_rva is None:
+                    report.table_truncated = True
+                    report.add_warning(
+                        "Stopped reading .NET stream table after {} of {} declared entries".format(
+                            slot, self.struct.NumberOfStreams
+                        )
+                    )
                     break
+                # Do not consume the recovered header for this slot.  Treat the
+                # bad slot as missing and resume scanning at the recovered
+                # header, so the following real headers still map to their own
+                # table slots.
+                report.add_warning(
+                    "Skipped unreadable .NET stream slot {} at rva 0x{:x}; "
+                    "resumed at header 0x{:x}".format(slot + 1, report.invalid_slots[-1], recovered_rva)
+                )
                 stream_entry_rva = recovered_rva
                 continue
 
-            streams_list.append(stream)
-            name = stream.struct.Name
-            if name in streams_dict:
-                # if a stream with this name already exists.
-                # this is not fatal, just unusual.
-                pe.add_warning("Duplicate .NET stream name '{!r}'".format(name))
-                logger.warning("Duplicate .NET stream name: %s", name)
+            report.entries.append(entry)
+            entry_index += 1
+            stream_entry_rva += entry.header_size
 
-            # dotnet uses the last encountered stream with a given name,
-            # see: https://github.com/malwarefrank/dnfile/issues/19#issuecomment-992754448
-            # and test_invalid_streams.py::test_duplicate_stream
-            streams_dict[name] = stream
-            # move to next entry in streams table
-            stream_entry_rva += stream.stream_table_entry_size()
-
-        self.streams = streams_dict
-        self.streams_list = streams_list
+        streamtable.annotate_conflicts(report)
+        streamtable.resolve_entries(report)
+        streamtable.finalize_structure(report)
+        return report
 
 
 class ClrStruct(Structure):
@@ -486,11 +562,14 @@ class ClrData(DataContainer):
         ),
     )
 
-    def __init__(self, pe: dnPE, rva: int, size: int, lazy_load: bool):
+    def __init__(self, pe: dnPE, rva: int, size: int, lazy_load: bool, stream_policy=None):
         """
         Given dnPE object, .NET header RVA and header size.
         Raises dnFormatError if problems parsing.
         """
+        self.stream_policy = streamtable.normalize_policy(
+            stream_policy if stream_policy is not None else getattr(pe, "stream_policy", None)
+        )
         data = pe.get_data(rva, size)
 
         try:
@@ -520,33 +599,50 @@ class ClrData(DataContainer):
         self.mdtables = None
         self._resources = None
         self.Flags = None
+        self.stream_report = None
+        self.type_evidence = "missing"
+        self.resource_evidence = "candidate"
 
         # Set the flags according to the Flags member
         flags_object = enums.ClrHeaderFlags(clr_struct.Flags)
         self.Flags = flags_object
 
         try:
-            self.metadata = ClrMetaData(pe, metadata_rva, metadata_size, lazy_load)
+            self.metadata = ClrMetaData(
+                pe, metadata_rva, metadata_size, lazy_load, self.stream_policy
+            )
+        except errors.dnStreamTableError as e:
+            pe.add_warning("failed to parse .NET metadata: {}".format(e))
+            logger.warning("failed to parse .NET metadata: %s", e)
+            self.stream_report = getattr(e, "report", None)
+            return
         except (errors.dnFormatError, PEFormatError) as e:
             pe.add_warning("failed to parse .NET metadata: {}".format(e))
             logger.warning("failed to parse .NET metadata: %s", e)
             return
 
-        # create shortcuts for streams
-        # dotnet runtime uses the last instance of a type,
-        # see: https://github.com/malwarefrank/dnfile/issues/19#issuecomment-992754448
-        # and test: test_invalid_streams.py::test_duplicate_stream
-        for s in self.metadata.streams_list:
-            if isinstance(s, stream.StringsHeap):
-                self.strings = s
-            elif isinstance(s, stream.UserStringHeap):
-                self.user_strings = s
-            elif isinstance(s, stream.GuidHeap):
-                self.guids = s
-            elif isinstance(s, stream.BlobHeap):
-                self.blobs = s
-            elif isinstance(s, stream.MetaDataTables):
-                self.mdtables: stream.MetaDataTables = s
+        self.stream_report = self.metadata.stream_report
+        self.type_evidence = self.stream_report.table_evidence
+        self.resource_evidence = self.stream_report.resource_evidence
+
+        # create shortcuts for the selected stream of each type.  Selection is
+        # done by the stream table report: a structurally valid entry wins over
+        # a damaged one, so a broken duplicate cannot replace a usable stream.
+        for selected_stream in self.metadata.streams.values():
+            if isinstance(selected_stream, stream.StringsHeap):
+                self.strings = selected_stream
+            elif isinstance(selected_stream, stream.UserStringHeap):
+                self.user_strings = selected_stream
+            elif isinstance(selected_stream, stream.GuidHeap):
+                self.guids = selected_stream
+            elif isinstance(selected_stream, stream.BlobHeap):
+                self.blobs = selected_stream
+            elif isinstance(selected_stream, stream.MetaDataTables):
+                self.mdtables: stream.MetaDataTables = selected_stream
+
+        if self.mdtables is not None:
+            for table in self.mdtables.tables_list:
+                table.evidence = self.type_evidence
 
         if not lazy_load:
             self._init_resources(pe)
@@ -594,6 +690,7 @@ class ClrData(DataContainer):
                     res.rva = rsrc_rva
                     res.size = size
                     res.data = rdata
+                    res.evidence = self.resource_evidence
                     self._resources.append(res)
             for rsrc in self._resources:
                 try:
@@ -625,44 +722,171 @@ class ClrStreamFactory(object):
     )
 
     @classmethod
-    def createStream(
-        cls, pe: dnPE, stream_entry_rva: int, metadata_rva: int
-    ) -> Optional[base.ClrStream]:
-        try:
-            # start with structure template
-            struct_format = _copymod.deepcopy(cls._template_format)
-            # read name
-            name = pe.get_string_at_rva(stream_entry_rva + 8)
-            if name is None:
-                logger.warning("failed to read stream name")
-                return None
+    def readStreamEntry(
+        cls,
+        pe: dnPE,
+        stream_entry_rva: int,
+        metadata_rva: int,
+        metadata_read_end_rva: int,
+        metadata_declared_end_rva: int,
+        index: int = 0,
+        slot: Optional[int] = None,
+    ):
+        """Read one stream header and its declared bytes, without reading past metadata.
 
-            # round field length up to next 4-byte boundary.  Remember the NULL byte at end.
+        Returns ``(StreamTableEntry, None)`` on success and ``(None, reason)``
+        when the header is unreadable.  The entry records the header order,
+        header location, declared range, and the bytes actually available.
+        """
+
+        entry = streamtable.StreamTableEntry(
+            index=index,
+            slot=index if slot is None else slot,
+            header_rva=stream_entry_rva,
+            header_offset=None,
+        )
+        try:
+            entry.header_offset = pe.get_offset_from_rva(stream_entry_rva)
+        except PEFormatError as e:
+            return None, "header rva cannot be mapped to a file offset: {}".format(e)
+
+        try:
+            header_format = _copymod.deepcopy(cls._template_format)
+            if stream_entry_rva < metadata_rva or stream_entry_rva + 8 > metadata_read_end_rva:
+                return None, "stream header outside readable metadata"
+            raw = pe.get_data(stream_entry_rva, 8)
+            if raw is None or len(raw) < 8:
+                return None, "truncated stream header"
+            name_limit = min(256, metadata_read_end_rva - (stream_entry_rva + 8))
+            if name_limit <= 0:
+                return None, "truncated stream name"
+            name_bytes = pe.get_data(stream_entry_rva + 8, name_limit)
+            if not name_bytes:
+                return None, "truncated stream name"
+            end = name_bytes.find(b"\x00")
+            if end < 0:
+                return None, "unterminated stream name"
+            name = name_bytes[:end]
+            if not name:
+                return None, "empty stream name"
+            # Every CLR metadata stream name is "#"-prefixed in practice.
+            # Reject garbage names early so header recovery can find the
+            # following real header instead of turning random bytes into a
+            # candidate stream.
+            if not name.startswith(b"#"):
+                return None, "unexpected stream name {!r}".format(name)
+            # Round the field length up to the next 4-byte boundary; the NUL
+            # terminator must fit inside the field.
             name_len = len(name) + (4 - (len(name) % 4))
-            # add name field to structure
-            struct_format[1].append("{0}s,Name".format(name_len))
-            # parse structure
+            header_format[1].append("{0}s,Name".format(name_len))
             stream_struct = base.StreamStruct(
-                struct_format,
-                file_offset=pe.get_offset_from_rva(stream_entry_rva)
+                header_format,
+                file_offset=entry.header_offset,
             )
             struct_size = stream_struct.sizeof()
             struct_data = pe.get_data(stream_entry_rva, struct_size)
+            if struct_data is None or len(struct_data) < struct_size:
+                return None, "truncated stream header"
             stream_struct.__unpack__(struct_data)
-            # remove trailing NULLs from name
             stream_struct.Name = stream_struct.Name.rstrip(b"\x00")
-            stream_rva = metadata_rva + stream_struct.Offset
-            stream_data = pe.get_data(
-                stream_rva, stream_struct.Size
+        except (errors.dnFormatError, PEFormatError, ValueError, _struct.error) as e:
+            return None, "unreadable stream header: {}".format(e)
+
+        entry.header_size = stream_struct.sizeof()
+        entry.name = stream_struct.Name
+        entry.offset = stream_struct.Offset
+        entry.size = stream_struct.Size
+        entry.declared_rva = metadata_rva + entry.offset
+        entry.declared_end_rva = entry.declared_rva + entry.size
+
+        stream_class = cls._name_type_map.get(entry.name, stream.GenericStream)
+        try:
+            entry.stream = cls._read_stream_body(
+                pe,
+                stream_class,
+                metadata_rva,
+                stream_struct,
+                entry,
+                metadata_read_end_rva,
+                metadata_declared_end_rva,
             )
-            name = stream_struct.Name
-            # use GenericStream for any non-standard streams
-            stream_class = cls._name_type_map.get(name, stream.GenericStream)
-            # construct stream, like stream.StreagsHeap ctor or GenericStream ctor
-            s = stream_class(metadata_rva, stream_struct, stream_data)
-            s.file_offset = pe.get_offset_from_rva(stream_rva)
         except (errors.dnFormatError, PEFormatError) as e:
-            logger.warning("failed to parse stream: %s", e)
-            return None
+            return None, "unreadable stream body: {}".format(e)
+        return entry, None
+
+    @classmethod
+    def _read_stream_body(
+        cls,
+        pe: dnPE,
+        stream_class,
+        metadata_rva: int,
+        stream_struct,
+        entry: streamtable.StreamTableEntry,
+        metadata_read_end_rva: int,
+        metadata_declared_end_rva: int,
+    ):
+        if entry.size is None or entry.declared_rva is None or entry.declared_end_rva is None:
+            raise errors.dnFormatError("missing stream range")
+        if entry.size == 0:
+            entry.statuses.add(streamtable.StreamStatus.ZERO_LENGTH)
+            data = b""
         else:
-            return s
+            # The declared metadata directory is the authority for whether a
+            # header escaped it.  A truncated file may make fewer bytes
+            # readable, which is TRUNCATED, not OUTSIDE_METADATA.
+            if (
+                entry.declared_rva < metadata_rva
+                or entry.declared_rva >= metadata_declared_end_rva
+                or entry.declared_end_rva > metadata_declared_end_rva
+            ):
+                entry.statuses.add(streamtable.StreamStatus.OUTSIDE_METADATA)
+            available = max(0, metadata_read_end_rva - entry.declared_rva)
+            read_size = min(entry.size, available)
+            data = pe.get_data(entry.declared_rva, read_size)
+            if data is None:
+                data = b""
+            if len(data) < entry.size:
+                entry.statuses.add(streamtable.StreamStatus.TRUNCATED)
+            entry.read_size = len(data)
+
+        if entry.read_size == 0 and entry.size:
+            entry.statuses.add(streamtable.StreamStatus.TRUNCATED)
+        if entry.size:
+            entry.read_end_rva = entry.declared_rva + entry.read_size
+        else:
+            entry.read_end_rva = entry.declared_rva
+
+        s = stream_class(metadata_rva, stream_struct, data)
+        try:
+            s.file_offset = pe.get_offset_from_rva(entry.declared_rva)
+        except PEFormatError:
+            s.file_offset = None
+        entry.data_file_offset = s.file_offset
+        # Size reported by the object is the bytes actually loaded, not the
+        # declared size, so table sizing checks cannot read outside the buffer.
+        return s
+
+    @classmethod
+    def createStream(
+        cls, pe: dnPE, stream_entry_rva: int, metadata_rva: int
+    ) -> Optional[base.ClrStream]:
+        """Backwards-compatible single-header reader.
+
+        New code should call :meth:`readStreamEntry`, which also returns the
+        header/range bookkeeping used by the stream policy.
+        """
+
+        metadata = getattr(getattr(pe, "net", None), "metadata", None)
+        metadata_size = getattr(metadata, "size", None) or 0
+        entry, failure = cls.readStreamEntry(
+            pe,
+            stream_entry_rva,
+            metadata_rva,
+            metadata_rva + metadata_size,
+            metadata_rva + metadata_size,
+            0,
+        )
+        if entry is None:
+            logger.warning("failed to parse stream: %s", failure)
+            return None
+        return entry.stream

@@ -2,6 +2,20 @@
 History
 =======
 
+Unreleased
+----------
+
+* FEATURE: ``stream_policy`` on ``dnPE`` with ``FORENSIC`` (default) and ``STRICT``
+  policies for conflicting metadata stream declarations
+* FEATURE: ``net.stream_report`` records header order, header location, declared
+  ranges, true read ranges, conflicts, and per-stream evidence
+* BUGFIX: a malformed or duplicate stream header no longer replaces a valid
+  stream with the same name
+* BUGFIX: stream bodies are bounded by the metadata directory, not the
+  containing PE section
+* FEATURE: candidate/confirmed evidence is exposed on streams, metadata tables,
+  and resources
+
 0.18.0 (2026)
 -------------
 

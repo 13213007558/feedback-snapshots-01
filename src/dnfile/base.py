@@ -55,6 +55,21 @@ class StreamStruct(Structure):
 
 
 class ClrStream(abc.ABC):
+    # Populated by the stream-table report; see dnfile.streamtable.
+    stream_entry_index: int
+    stream_table_entry: Any
+    header_rva: int
+    header_offset: Optional[int]
+    declared_size: Optional[int]
+    read_size: int
+    declared_range: Tuple[Optional[int], Optional[int]]
+    read_range: Tuple[Optional[int], Optional[int]]
+    statuses: Any
+    evidence: str
+    is_confirmed: bool
+    is_candidate: bool
+    is_empty: bool
+
     def __init__(
         self,
         metadata_rva: int,
@@ -101,7 +116,7 @@ class ClrStream(abc.ABC):
         return self.file_offset
 
     def get_data_at_offset(self, offset, size):
-        if size == 0 or offset >= self.sizeof():
+        if size <= 0 or offset < 0 or offset >= self.sizeof():
             return b""
         return self.__data__[offset:offset + size]
 
@@ -740,6 +755,8 @@ class ClrMetaDataTable(Generic[RowType]):
     file_offset: int
     number: int
     name: str
+    # Inherited from the metadata stream report.
+    evidence: str = "candidate"
     _row_class: Type[RowType]
 
     def __init__(
@@ -1001,6 +1018,10 @@ class ClrMetaDataTable(Generic[RowType]):
 
 
 class ClrResource(abc.ABC):
+    # "confirmed", "candidate", or "missing".  Inherited from the metadata
+    # table evidence: a resource name and offset come from ManifestResource.
+    evidence: str = "candidate"
+
     def __init__(self, name: str, public: bool = False, private: bool = False):
         self.name: str = name
         self.public: bool = public

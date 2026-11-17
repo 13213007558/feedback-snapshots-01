@@ -173,12 +173,24 @@ def render_pe(ostream: Formatter, dn):
                 if file_offset is not None:
                     file_offset = hex(file_offset)
                 ostream.writeln("File offset: " + str(file_offset))
+                entry = getattr(stream, "stream_table_entry", None)
+                if entry is not None:
+                    ostream.writeln("Evidence: {} ({})".format(entry.evidence, entry.resolution))
+                    if entry.statuses:
+                        ostream.writeln("Statuses: " + ", ".join(entry.status_values()))
+                    ostream.writeln(
+                        "Declared RVA: 0x{:x}..0x{:x}".format(entry.declared_rva or 0, entry.declared_end_rva or 0)
+                    )
+                    ostream.writeln(
+                        "Read RVA:     0x{:x}..0x{:x}".format(entry.declared_rva or 0, entry.read_end_rva or 0)
+                    )
 
                 render_pefile_struct(ostream, stream.struct)
 
                 ostream.writeln("data:")
                 with indenting(ostream):
-                    buf = stream.get_data_at_offset(0x0, stream.struct.Size)
+                    # Use the bytes actually read, not the declared size.
+                    buf = stream.get_data_at_offset(0x0, stream.sizeof())
                     # note: we display up to 0x40 bytes here.
                     # this is a random choice.
                     # if left unbounded, the output may be really long.

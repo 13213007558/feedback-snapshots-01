@@ -93,6 +93,33 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+Stream policy
+-------------
+
+When two stream headers conflict (same name, same/overlapping range, zero
+length, or a range outside the metadata directory), choose how dnfile should
+react:
+
+.. code-block:: python
+
+   import dnfile
+
+   # default: preserve all headers, parse only specific-yet-valid streams,
+   # and mark ambiguous bytes as "candidate"
+   pe = dnfile.dnPE(path, stream_policy=dnfile.StreamPolicy.FORENSIC)
+
+   # reject the whole stream table on any conflict
+   pe = dnfile.dnPE(path, stream_policy=dnfile.StreamPolicy.STRICT)
+   if pe.net is not None and pe.net.metadata is None:
+       print("stream table rejected:", pe.get_warnings())
+
+   # per-header facts, in original header order
+   for entry in pe.net.stream_report.entries:
+       print(entry.name, entry.declared_range, entry.read_range, entry.evidence)
+
+See ``docs-stream-policy.md`` and ``examples/stream-policy/demo.py`` for the
+evidence rules and a header-only comparison.
+
 TODO
 ----
 
