@@ -8,6 +8,7 @@ import pytest
 from pymodbus.exceptions import ModbusIOException, NoSuchIdException
 from pymodbus.framer import FramerType
 from pymodbus.pdu import ExceptionResponse
+from pymodbus.pdu.device import ModbusControlBlock
 from pymodbus.server import ModbusBaseServer
 from pymodbus.simulator import DataType, SimData, SimDevice
 from pymodbus.transport import CommParams, CommType
@@ -19,6 +20,7 @@ class TestRequesthandler:
     @pytest.fixture
     async def requesthandler(self):
         """Fixture to provide base_server."""
+        ModbusControlBlock().reset_all()
         server = ModbusBaseServer(
             CommParams(
                 comm_type=CommType.TCP,

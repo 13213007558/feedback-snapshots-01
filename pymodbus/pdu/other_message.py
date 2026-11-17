@@ -37,7 +37,7 @@ class ReadExceptionStatusRequest(ModbusPDU):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        status = _MCB.Counter.summary()
+        status = _MCB.get_device(device_id).counters.summary()
         return ReadExceptionStatusResponse(
             status=status, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -88,7 +88,8 @@ class GetCommEventCounterRequest(ModbusPDU):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.Event
+        device = _MCB.get_device(device_id)
+        count = device.counters.Event
         return GetCommEventCounterResponse(
             count=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -137,11 +138,12 @@ class GetCommEventLogRequest(ModbusPDU):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
+        device = _MCB.get_device(device_id)
         return GetCommEventLogResponse(
             status=True,
-            message_count=_MCB.Counter.BusMessage,
-            event_count=_MCB.Counter.Event,
-            events=list(_MCB.getEvents()),
+            message_count=device.counters.BusMessage,
+            event_count=device.counters.Event,
+            events=list(device.getEvents()),
             dev_id=device_id,
             transaction_id=self.transaction_id,
         )

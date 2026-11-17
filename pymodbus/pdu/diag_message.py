@@ -106,6 +106,18 @@ class RestartCommunicationsOptionRequest(DiagnosticBase):
 
     sub_function_code = 0x0001
 
+    async def datastore_update(
+        self, context: ModbusServerContext, device_id: int
+    ) -> ModbusPDU:
+        """Update diagnostic request on the given device."""
+        _ = context
+        device = _MCB.get_device(device_id)
+        device.listen_only = False
+        device.reset()
+        return RestartCommunicationsOptionResponse(
+            message=self.message, dev_id=device_id, transaction_id=self.transaction_id
+        )
+
 
 class RestartCommunicationsOptionResponse(DiagnosticBase):
     """RestartCommunicationsOptionResponse."""
@@ -123,7 +135,7 @@ class ReturnDiagnosticRegisterRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        register = pack_bitstring(_MCB.getDiagnosticRegister())
+        register = pack_bitstring(_MCB.get_device(device_id).getDiagnosticRegister())
         return ReturnDiagnosticRegisterResponse(
             message=register, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -168,7 +180,7 @@ class ForceListenOnlyModeRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        _MCB.ListenOnly = True
+        _MCB.get_device(device_id).listen_only = True
         return ForceListenOnlyModeResponse(
             dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -198,7 +210,7 @@ class ClearCountersRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        _MCB.reset()
+        _MCB.get_device(device_id).reset()
         return ClearCountersResponse(
             dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -220,7 +232,7 @@ class ReturnBusMessageCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.BusMessage
+        count = _MCB.get_device(device_id).counters.BusMessage
         return ReturnBusMessageCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -242,7 +254,7 @@ class ReturnBusCommunicationErrorCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.BusCommunicationError
+        count = _MCB.get_device(device_id).counters.BusCommunicationError
         return ReturnBusCommunicationErrorCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -264,7 +276,7 @@ class ReturnBusExceptionErrorCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.BusExceptionError
+        count = _MCB.get_device(device_id).counters.BusExceptionError
         return ReturnBusExceptionErrorCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -286,7 +298,7 @@ class ReturnDeviceMessageCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.DeviceMessage
+        count = _MCB.get_device(device_id).counters.DeviceMessage
         return ReturnDeviceMessageCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -308,7 +320,7 @@ class ReturnDeviceNoResponseCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.DeviceNoResponse
+        count = _MCB.get_device(device_id).counters.DeviceNoResponse
         return ReturnDeviceNoResponseCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -330,7 +342,7 @@ class ReturnDeviceNAKCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.DeviceNAK
+        count = _MCB.get_device(device_id).counters.DeviceNAK
         return ReturnDeviceNAKCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -352,7 +364,7 @@ class ReturnDeviceBusyCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.DEVICE_BUSY
+        count = _MCB.get_device(device_id).counters.DEVICE_BUSY
         return ReturnDeviceBusyCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -374,7 +386,7 @@ class ReturnDeviceBusCharacterOverrunCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.BusCharacterOverrun
+        count = _MCB.get_device(device_id).counters.BusCharacterOverrun
         return ReturnDeviceBusCharacterOverrunCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -396,7 +408,7 @@ class ReturnIopOverrunCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        count = _MCB.Counter.BusCharacterOverrun
+        count = _MCB.get_device(device_id).counters.BusCharacterOverrun
         return ReturnIopOverrunCountResponse(
             message=count, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -418,7 +430,7 @@ class ClearOverrunCountRequest(DiagnosticBase):
     ) -> ModbusPDU:
         """Update diagnostic request on the given device."""
         _ = context
-        _MCB.Counter.BusCharacterOverrun = 0x0000
+        _MCB.get_device(device_id).counters.BusCharacterOverrun = 0x0000
         return ClearOverrunCountResponse(
             dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -442,11 +454,11 @@ class GetClearModbusPlusRequest(DiagnosticBase):
         _ = context
         message: int | list | None = None  # the clear operation does not return info
         if self.message == ModbusPlusOperation.CLEAR_STATISTICS:
-            _MCB.Plus.reset()
+            _MCB.get_device(device_id).plus.reset()
             message = ModbusPlusOperation.CLEAR_STATISTICS
         else:
             message = [self.message]
-            message += _MCB.Plus.x_encode()
+            message += _MCB.get_device(device_id).plus.x_encode()
         return GetClearModbusPlusResponse(
             message=message, dev_id=device_id, transaction_id=self.transaction_id
         )

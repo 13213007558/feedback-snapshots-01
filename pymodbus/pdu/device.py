@@ -84,6 +84,7 @@ class ModbusPlusStatistics:
 
     def __init__(self) -> None:
         """Initialize the modbus plus statistics with the default information."""
+        self.stat_data = {key: list(value) for key, value in self.stat_data.items()}
         self.reset()
 
     def __iter__(self):
@@ -374,6 +375,14 @@ class ModbusCountersHandler:
         "BusCharacterOverrun",
     ]
 
+    def __init__(self) -> None:
+        """Initialize with a private counter dict.
+
+        Copy the defaults so each handler owns its counters instead of all
+        instances writing into the class-level dict.
+        """
+        self.stat_data = dict.fromkeys(range(9), 0x00)
+
     def __iter__(self):
         """Iterate over the device counters.
 
@@ -427,25 +436,121 @@ class ModbusCountersHandler:
 
 
 # ---------------------------------------------------------------------------#
+#  Per device control block
+# ---------------------------------------------------------------------------#
+class ModbusDeviceControl:
+    """Hold the diagnostic state of a single modbus device.
+
+    Counters, the diagnostic register, the event log and the listen-only
+    flag are device specific and must never leak between the device ids
+    served by the same server.
+    """
+
+    def __init__(self) -> None:
+        """Initialize a device with a clean diagnostic state."""
+        self.listen_only = False
+        self.diagnostic = [False] * 16
+        self.counters = ModbusCountersHandler()
+        self.plus = ModbusPlusStatistics()
+        self.events: list[ModbusEvent] = []
+
+    def __str__(self):
+        """Build a representation of the device control block.
+
+        :returns: A string representation of the device control block
+        """
+        return "ModbusDeviceControl"
+
+    def __iter__(self):
+        """Iterate over the device counters.
+
+        :returns: An iterator of the device counters
+        """
+        return self.counters.__iter__()
+
+    # -------------------------------------------------------------------------#
+    #  Events
+    # -------------------------------------------------------------------------#
+    def addEvent(self, event: ModbusEvent):
+        """Add a new event to the event log.
+
+        :param event: A new event to add to the log
+        """
+        self.events.insert(0, event)
+        self.events = self.events[0:64]  # chomp to 64 entries
+        self.counters.Event += 1
+
+    def getEvents(self):
+        """Return an encoded collection of the event log.
+
+        :returns: The encoded events packet
+        """
+        events = [event.x_encode() for event in self.events]
+        return b"".join(events)
+
+    def clearEvents(self):
+        """Clear the current list of events."""
+        self.events = []
+
+    # -------------------------------------------------------------------------#
+    #  Reset
+    # -------------------------------------------------------------------------#
+    def reset(self):
+        """Clear the device counters, events and diagnostic register."""
+        self.events = []
+        self.counters.reset()
+        self.diagnostic = [False] * 16
+
+    # -------------------------------------------------------------------------#
+    #  Diagnostic Properties
+    # -------------------------------------------------------------------------#
+    def setDiagnostic(self, mapping):
+        """Set the value in the diagnostic register.
+
+        :param mapping: Dictionary of key:value pairs to set
+        """
+        for entry in iter(mapping.items()):
+            self.diagnostic[entry[0]] = bool(entry[1])
+
+    def getDiagnostic(self, bit):
+        """Get the value in the diagnostic register.
+
+        :param bit: The bit to get
+        :returns: The current value of the requested bit
+        """
+        try:
+            if bit and 0 <= bit < len(self.diagnostic):
+                return self.diagnostic[bit]
+        except Exception:  # pylint: disable=broad-except
+            return None
+        return None
+
+    def getDiagnosticRegister(self):
+        """Get the entire diagnostic register.
+
+        :returns: The diagnostic register collection
+        """
+        return self.diagnostic
+
+
+# ---------------------------------------------------------------------------#
 #  Main server control block
 # ---------------------------------------------------------------------------#
 class ModbusControlBlock:
     """This is a global singleton that controls all system information.
 
-    All activity should be logged here and all diagnostic requests
-    should come from here.
+    The serial settings (mode, delimiter) and the device identification are
+    properties of the whole server, whereas the diagnostic state (counters,
+    diagnostic register, events and listen-only mode) is kept per device id
+    in :class:`ModbusDeviceControl` instances so one device can never change
+    the diagnostic state of another device.
     """
 
     _mode = "ASCII"
-    _diagnostic = [False] * 16
-    _listen_only = False
     _delimiter = b"\n"
-    _counters = ModbusCountersHandler()
-    _identity = ModbusDeviceIdentification()
-    _plus = ModbusPlusStatistics()
-    _events: list[ModbusEvent] = []
 
     _inst: ModbusControlBlock | None = None
+    _default_device_id = 1
 
     # -------------------------------------------------------------------------#
     #  Magic
@@ -457,68 +562,97 @@ class ModbusControlBlock:
         """
         return "ModbusControl"
 
-    def __iter__(self):
-        """Iterate over the device counters.
-
-        :returns: An iterator of the device counters
-        """
-        return self._counters.__iter__()
-
     def __new__(cls):
         """Create a new instance."""
         if cls._inst is None:
-            cls._inst = object.__new__(cls)
+            inst = object.__new__(cls)
+            inst._identity = ModbusDeviceIdentification()
+            inst._devices: dict[int, ModbusDeviceControl] = {}
+            cls._inst = inst
         return cls._inst
+
+    def get_device(self, device_id: int) -> ModbusDeviceControl:
+        """Return the diagnostic control block of a specific device.
+
+        A new block is created lazily the first time a device is addressed.
+
+        :param device_id: The device id to look up
+        :returns: The device specific control block
+        """
+        if device_id not in self._devices:
+            self._devices[device_id] = ModbusDeviceControl()
+        return self._devices[device_id]
+
+    def reset_device(self, device_id: int) -> None:
+        """Drop the diagnostic state of one device.
+
+        :param device_id: The device id to reset
+        """
+        if device_id in self._devices:
+            del self._devices[device_id]
+
+    def reset_all(self) -> None:
+        """Drop the diagnostic state of every device."""
+        self._devices.clear()
+
+    def __iter__(self):
+        """Iterate over the default device counters.
+
+        :returns: An iterator of the device counters
+        """
+        return self.get_device(self._default_device_id).__iter__()
 
     # -------------------------------------------------------------------------#
     #  Events
     # -------------------------------------------------------------------------#
     def addEvent(self, event: ModbusEvent):
-        """Add a new event to the event log.
+        """Add a new event to the default device event log.
 
         :param event: A new event to add to the log
         """
-        self._events.insert(0, event)
-        self._events = self._events[0:64]  # chomp to 64 entries
-        self.Counter.Event += 1
+        self.get_device(self._default_device_id).addEvent(event)
 
     def getEvents(self):
-        """Return an encoded collection of the event log.
+        """Return an encoded collection of the default device event log.
 
         :returns: The encoded events packet
         """
-        events = [event.x_encode() for event in self._events]
-        return b"".join(events)
+        return self.get_device(self._default_device_id).getEvents()
 
     def clearEvents(self):
-        """Clear the current list of events."""
-        self._events = []
+        """Clear the current list of default device events."""
+        self.get_device(self._default_device_id).clearEvents()
 
     # -------------------------------------------------------------------------#
     #  Other Properties
     # -------------------------------------------------------------------------#
     Identity = property(lambda s: s._identity)
-    Counter = property(lambda s: s._counters)
-    Events = property(lambda s: s._events)
-    Plus = property(lambda s: s._plus)
+    Counter = property(
+        lambda s: s.get_device(ModbusControlBlock._default_device_id).counters
+    )
+    Events = property(
+        lambda s: s.get_device(ModbusControlBlock._default_device_id).events
+    )
+    Plus = property(lambda s: s.get_device(ModbusControlBlock._default_device_id).plus)
 
     def reset(self):
-        """Clear all of the system counters and the diagnostic register."""
-        self._events = []
-        self._counters.reset()
-        self._diagnostic = [False] * 16
+        """Clear the default device counters and diagnostic register."""
+        self.get_device(self._default_device_id).reset()
 
     # -------------------------------------------------------------------------#
     #  Listen Properties
     # -------------------------------------------------------------------------#
     def _setListenOnly(self, value):
-        """Toggle the listen only status.
+        """Toggle the listen only status of the default device.
 
         :param value: The value to set the listen status to
         """
-        self._listen_only = bool(value)
+        self.get_device(self._default_device_id).listen_only = bool(value)
 
-    ListenOnly = property(lambda s: s._listen_only, _setListenOnly)
+    ListenOnly = property(
+        lambda s: s.get_device(ModbusControlBlock._default_device_id).listen_only,
+        _setListenOnly,
+    )
 
     # -------------------------------------------------------------------------#
     #  Mode Properties
@@ -554,29 +688,23 @@ class ModbusControlBlock:
     #  Diagnostic Properties
     # -------------------------------------------------------------------------#
     def setDiagnostic(self, mapping):
-        """Set the value in the diagnostic register.
+        """Set the value in the default device diagnostic register.
 
         :param mapping: Dictionary of key:value pairs to set
         """
-        for entry in iter(mapping.items()):
-            self._diagnostic[entry[0]] = bool(entry[1])
+        self.get_device(self._default_device_id).setDiagnostic(mapping)
 
     def getDiagnostic(self, bit):
-        """Get the value in the diagnostic register.
+        """Get the value in the default device diagnostic register.
 
         :param bit: The bit to get
         :returns: The current value of the requested bit
         """
-        try:
-            if bit and 0 <= bit < len(self._diagnostic):
-                return self._diagnostic[bit]
-        except Exception:  # pylint: disable=broad-except
-            return None
-        return None
+        return self.get_device(self._default_device_id).getDiagnostic(bit)
 
     def getDiagnosticRegister(self):
-        """Get the entire diagnostic register.
+        """Get the entire default device diagnostic register.
 
         :returns: The diagnostic register collection
         """
-        return self._diagnostic
+        return self.get_device(self._default_device_id).getDiagnosticRegister()

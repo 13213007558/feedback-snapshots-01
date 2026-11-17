@@ -10,6 +10,8 @@ from ..constants import ExcCodes
 from ..exceptions import ModbusIOException, NoSuchIdException
 from ..logging import Log
 from ..pdu import ExceptionResponse, ModbusPDU
+from ..pdu.device import ModbusControlBlock
+from ..pdu.diag_message import DiagnosticBase
 from ..transaction import TransactionManager
 from ..transport import CommParams
 
@@ -96,6 +98,20 @@ class ServerRequestHandler(TransactionManager):
                 for dev_id in self.server.context.device_ids():
                     await pdu.datastore_update(self.server.context, dev_id)
                 return
+            if (
+                not isinstance(pdu, DiagnosticBase)
+                and ModbusControlBlock().get_device(pdu.dev_id).listen_only
+            ):
+                # A device forced into listen-only mode must silently drop
+                # every non-diagnostic request until a restart communication
+                # diagnostic request takes it out of that mode.
+                Log.debug(
+                    "Device {} is in listen-only mode, dropping request", pdu.dev_id
+                )
+                return
+            device_control = ModbusControlBlock().get_device(pdu.dev_id)
+            device_control.counters.BusMessage += 1
+            device_control.counters.DeviceMessage += 1
             response = await pdu.datastore_update(self.server.context, pdu.dev_id)
 
         except NoSuchIdException:
