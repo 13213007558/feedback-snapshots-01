@@ -1,8 +1,12 @@
 """Test decoders."""
 
+import copy
+
 import pytest
 
 from pymodbus.exceptions import MessageRegisterException, ModbusIOException
+from pymodbus.pdu import ModbusPDU
+from pymodbus.pdu.bit_message import ReadCoilsResponse
 from pymodbus.pdu.decoders import DecodePDU
 
 
@@ -164,9 +168,9 @@ class TestModbusPDU:
         with pytest.raises(ModbusIOException):
             self.client.decode(b"\x08\x00\xf0\xf0\x00")
 
-    @pytest.mark.parametrize(("decoder"), [server, client])
-    def test_register_custom_request(self, decoder, mockPDU):
-        """Test server register custom request."""
+    @pytest.mark.parametrize("is_server", [True, False])
+    def test_register_custom_request(self, is_server, mockPDU):
+        """A custom PDU is decoded only by the decoder it was registered on."""
 
         class NoCustomRequestResponse:
             """Custom request."""
@@ -179,14 +183,201 @@ class TestModbusPDU:
             def x_decode(self, _data):
                 """Decode."""
 
+        decoder = DecodePDU(is_server)
+        other = DecodePDU(is_server)
         decoder.register(mockPDU)
         data = b"\x01" + mockPDU().x_encode()
-        assert decoder._lookupPduClass(data)
+        assert decoder._lookupPduClass(data) is mockPDU
+        # Isolation: another decoder keeps its own interpretation.
+        assert other._lookupPduClass(data) is None
+
         mockPDU.sub_function_code = 0xF7
         decoder.register(mockPDU)
         mockPDU.sub_function_code = 0xF4
         decoder.register(mockPDU)
         data = b"\x01" + mockPDU().x_encode()
-        assert self.server._lookupPduClass(data)
+        assert decoder._lookupPduClass(data) is mockPDU
+        assert other._lookupPduClass(data) is None
         with pytest.raises(MessageRegisterException):
             decoder.register(NoCustomRequestResponse)
+
+    def test_register_isolation_between_decoders(self):
+        """Same custom function code on two decoders maps to distinct PDUs."""
+        class VendorA(ModbusPDU):
+            """Vendor A interpretation of function code 0x65."""
+
+            function_code = 0x65
+
+            def x_encode(self):
+                """Encode."""
+                return b"\x65A"
+
+            def x_decode(self, _data):
+                """Decode."""
+
+            @classmethod
+            def x_calculateRtuFrameSize(cls, _data):
+                """Calculate frame size."""
+                return 3
+
+        class VendorB(ModbusPDU):
+            """Vendor B interpretation of the same function code."""
+
+            function_code = 0x65
+
+            def x_encode(self):
+                """Encode."""
+                return b"\x65B"
+
+            def x_decode(self, _data):
+                """Decode."""
+
+            @classmethod
+            def x_calculateRtuFrameSize(cls, _data):
+                """Calculate frame size."""
+                return 3
+
+        decoder_a = DecodePDU(False)
+        decoder_b = DecodePDU(False)
+        decoder_a.register(VendorA)
+        decoder_b.register(VendorB)
+        frame = b"\x65\x00"
+
+        assert decoder_a._lookupPduClass(b"\x01" + frame) is VendorA
+        assert decoder_b._lookupPduClass(b"\x01" + frame) is VendorB
+        assert decoder_a.decode(frame).__class__ is VendorA
+        assert decoder_b.decode(frame).__class__ is VendorB
+
+    def test_register_standard_function_protected(self):
+        """Standard function codes cannot be silently overwritten."""
+        class HijackReadCoils(ModbusPDU):
+            """Attempt to take over a standard function code."""
+
+            function_code = 0x01
+
+            def x_encode(self):
+                """Encode."""
+                return b""
+
+            def x_decode(self, _data):
+                """Decode."""
+
+        decoder = DecodePDU(False)
+        standard = decoder.pdu_table[0x01]
+        # Re-registering the already active standard class is a harmless no-op.
+        decoder.register(ReadCoilsResponse)
+        assert decoder.pdu_table[0x01] == standard
+        # A different class on a standard code is rejected, mapping unchanged.
+        with pytest.raises(MessageRegisterException):
+            decoder.register(HijackReadCoils)
+        assert decoder.pdu_table[0x01] == standard
+        assert decoder.decode(b"\x01\x01\x01").__class__ is ReadCoilsResponse
+
+    def test_failed_register_keeps_mapping(self):
+        """A rejected registration must not mutate the existing mapping."""
+        class FirstCustom(ModbusPDU):
+            """First occupant of function code 0x66."""
+
+            function_code = 0x66
+
+            def x_encode(self):
+                """Encode."""
+                return b""
+
+            def x_decode(self, _data):
+                """Decode."""
+
+        class SecondCustom(ModbusPDU):
+            """Conflicting occupant of function code 0x66."""
+
+            function_code = 0x66
+
+            def x_encode(self):
+                """Encode."""
+                return b""
+
+            def x_decode(self, _data):
+                """Decode."""
+
+        class NotAPdu:
+            """Not derived from ModbusPDU."""
+
+            function_code = 0x67
+
+        decoder = DecodePDU(False)
+        decoder.register(FirstCustom)
+        before = decoder.pdu_table[0x66]
+        with pytest.raises(MessageRegisterException):
+            decoder.register(SecondCustom)
+        with pytest.raises(MessageRegisterException):
+            decoder.register(NotAPdu)
+        assert decoder.pdu_table[0x66] == before
+        assert 0x67 not in decoder.pdu_table
+
+    def test_sub_function_dispatch_isolated(self):
+        """Custom sub function dispatch stays local to one decoder."""
+        class CustomDiag(ModbusPDU):
+            """Custom diagnostic sub function."""
+
+            function_code = 0x08
+            sub_function_code = 0xFF01
+
+            @classmethod
+            def decode_sub_function_code(cls, data):
+                """Decode sub function code (2 bytes)."""
+                return int.from_bytes(data[2:4], "big")
+
+            def x_encode(self):
+                """Encode."""
+                return b"\x08\xff\x01"
+
+            def x_decode(self, _data):
+                """Decode."""
+
+            @classmethod
+            def x_calculateRtuFrameSize(cls, _data):
+                """Calculate frame size."""
+                return 8
+
+        decoder = DecodePDU(False)
+        other = DecodePDU(False)
+        decoder.register(CustomDiag)
+        frame = b"\x00\x08\xff\x01\x00\x00"
+        assert decoder._lookupPduClass(frame) is CustomDiag
+        # The other decoder does not know this sub function and returns None.
+        assert other._lookupPduClass(frame) is None
+        # Standard sub functions remain available on both decoders.
+        standard_frame = b"\x00\x08\x00\x00\x00\x00"
+        assert decoder._lookupPduClass(standard_frame) is not None
+        assert other._lookupPduClass(standard_frame) is not None
+
+    def test_snapshot_unaffected_by_class_table_mutation(self):
+        """Existing decoders keep working when class defaults are mutated."""
+        decoder = DecodePDU(False)
+        standard_entry = decoder.pdu_table[0x03]
+        saved_table = copy.deepcopy(DecodePDU.pdu_table)
+        saved_sub_table = copy.deepcopy(DecodePDU.pdu_sub_table)
+        try:
+            DecodePDU.pdu_table.clear()
+            DecodePDU.pdu_sub_table.clear()
+            assert decoder.pdu_table[0x03] == standard_entry
+            assert decoder.decode(b"\x03\x02\x01\x01").function_code == 0x03
+            # A decoder created later would miss defaults; restore first.
+        finally:
+            DecodePDU.pdu_table.clear()
+            DecodePDU.pdu_table.update(saved_table)
+            DecodePDU.pdu_sub_table.clear()
+            DecodePDU.pdu_sub_table.update(saved_sub_table)
+        # Restored defaults remain available to new decoders.
+        assert DecodePDU(False).pdu_table[0x03] == standard_entry
+
+    def test_decoders_have_independent_table_objects(self):
+        """Each decoder owns distinct, detached mapping objects."""
+        decoder_a = DecodePDU(False)
+        decoder_b = DecodePDU(False)
+        assert decoder_a.pdu_table is not decoder_b.pdu_table
+        assert decoder_a.pdu_sub_table is not decoder_b.pdu_sub_table
+        assert decoder_a.pdu_table is not DecodePDU.pdu_table
+        decoder_a.pdu_table[0x71] = (None, None)
+        assert 0x71 not in decoder_b.pdu_table
+        assert 0x71 not in DecodePDU.pdu_table

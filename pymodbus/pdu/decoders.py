@@ -10,17 +10,53 @@ from ..logging import Log
 from .exceptionresponse import ExceptionResponse
 from .pdu import ModbusPDU
 
+_PduEntry = tuple[type[ModbusPDU] | None, type[ModbusPDU] | None]
+
 
 class DecodePDU:
-    """Decode pdu requests/responses (server/client)."""
+    """Decode pdu requests/responses (server/client).
 
-    pdu_table: dict[int, tuple[type[ModbusPDU], type[ModbusPDU]]] = {}
-    pdu_sub_table: dict[int, dict[int, tuple[type[ModbusPDU], type[ModbusPDU]]]] = {}
+    The standard function codes are registered once on the class. Every
+    instance takes its own deep copy of those tables at construction time, so
+    custom classes registered on one decoder can never change the
+    interpretation of another decoder. Registration snapshots are fully
+    detached from the class tables and from any caller supplied mapping.
+    """
+
+    pdu_table: dict[int, _PduEntry] = {}
+    pdu_sub_table: dict[int, dict[int, _PduEntry]] = {}
 
     def __init__(self, is_server: bool) -> None:
         """Initialize function_tables."""
         self.pdu_inx = 0 if is_server else 1
         self.is_server = is_server
+        # Per decoder snapshots: later changes to the class defaults or to a
+        # caller's dictionaries must not affect already created decoders.
+        self.pdu_table: dict[int, _PduEntry] = copy.deepcopy(
+            DecodePDU.pdu_table
+        )
+        self.pdu_sub_table: dict[int, dict[int, _PduEntry]] = copy.deepcopy(
+            DecodePDU.pdu_sub_table
+        )
+
+    @staticmethod
+    def _check_entry(
+        table: dict,
+        key: tuple,
+        entry: _PduEntry,
+        label: str,
+    ) -> None:
+        """Raise on a conflicting registration.
+
+        Re-registering the identical request/response pair is allowed and
+        treated as a no-op. A different entry is a conflict and must be
+        diagnosed instead of silently replacing the active mapping.
+        """
+        if key in table and table[key] != entry:
+            raise MessageRegisterException(
+                f"{label} already registered with a different PDU class: "
+                f"{table[key]!r}, cannot replace with {entry!r}"
+            )
 
     def _lookupPduClass(self, data: bytes) -> type[ModbusPDU] | None:
         """Use `function_code` to determine the class of the PDU."""
@@ -30,9 +66,9 @@ class DecodePDU:
             return None
         if (sub_func_code := pdu.decode_sub_function_code(data)) < 0:
             return pdu
-        return self.pdu_sub_table[func_code].get(sub_func_code, (None, None))[
-            self.pdu_inx
-        ]
+        return self.pdu_sub_table.get(func_code, {}).get(
+            sub_func_code, (None, None)
+        )[self.pdu_inx]
 
     def list_function_codes(self):
         """Return list of function codes."""
@@ -40,26 +76,71 @@ class DecodePDU:
 
     @classmethod
     def add_pdu(cls, req: type[ModbusPDU], resp: type[ModbusPDU]):
-        """Register request/response."""
-        cls.pdu_table[req.function_code] = (req, resp)
+        """Register a standard request/response in the class defaults."""
+        entry = (req, resp)
+        cls._check_entry(
+            cls.pdu_table, (req.function_code,), entry, "function code"
+        )
+        cls.pdu_table[req.function_code] = entry
 
     @classmethod
     def add_sub_pdu(cls, req: type[ModbusPDU], resp: type[ModbusPDU]):
-        """Register request/response."""
-        if req.function_code not in cls.pdu_sub_table:
-            cls.pdu_sub_table[req.function_code] = {}
-        cls.pdu_sub_table[req.function_code][req.sub_function_code] = (req, resp)
+        """Register a standard sub function request/response in the defaults."""
+        entry = (req, resp)
+        sub_table = cls.pdu_sub_table.setdefault(req.function_code, {})
+        cls._check_entry(
+            sub_table,
+            (req.function_code, req.sub_function_code),
+            entry,
+            "sub function code",
+        )
+        sub_table[req.sub_function_code] = entry
 
     def register(self, custom_class: type[ModbusPDU]) -> None:
-        """Register a function and sub function class with the decoder."""
+        """Register a function and sub function class with the decoder.
+
+        Only this decoder's mapping changes; other decoders keep their own
+        interpretation. Standard function codes cannot be silently
+        overwritten: re-registering the active class is a no-op, while any
+        other conflict raises :class:`MessageRegisterException`. A failed
+        registration leaves the current mapping untouched.
+        """
         if not issubclass(custom_class, ModbusPDU):
             raise MessageRegisterException(
                 f'"{custom_class.__class__.__name__}" is Not a valid Modbus Message'
                 ". Class needs to be derived from `ModbusPDU` "
             )
-        if "pdu_table" not in self.__dict__:
-            self.pdu_table = copy.deepcopy(DecodePDU.pdu_table)
-        self.pdu_table[custom_class.function_code] = (custom_class, custom_class)
+        entry = (custom_class, custom_class)
+        func_code = custom_class.function_code
+        if custom_class.sub_function_code < 0:
+            existing = self.pdu_table.get(func_code)
+            if existing:
+                if existing[self.pdu_inx] is not custom_class:
+                    raise MessageRegisterException(
+                        f"function code {func_code:#04x} is already registered "
+                        f"as {existing[self.pdu_inx].__name__}; choose a free "
+                        "function code to register a custom PDU"
+                    )
+                # The active class is already present; keep the standard
+                # request/response pair instead of flattening it.
+                return
+            self.pdu_table[func_code] = entry
+            return
+
+        sub_table = self.pdu_sub_table.setdefault(func_code, {})
+        existing = sub_table.get(custom_class.sub_function_code)
+        if existing:
+            if existing[self.pdu_inx] is not custom_class:
+                raise MessageRegisterException(
+                    f"sub function code {custom_class.sub_function_code:#06x} "
+                    f"of function code {func_code:#04x} is already registered "
+                    f"as {existing[self.pdu_inx].__name__}"
+                )
+            return
+        # A sub function still needs its base function code so the frame can
+        # be routed to the sub function dispatch.
+        self.pdu_table.setdefault(func_code, entry)
+        sub_table[custom_class.sub_function_code] = entry
 
     def decode(self, frame: bytes) -> ModbusPDU:
         """Decode a frame."""

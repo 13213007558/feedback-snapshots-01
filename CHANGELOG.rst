@@ -9,6 +9,7 @@ helps make pymodbus a better product.
 
 Version 3.16.2
 --------------
+* Isolate each DecodePDU instance with its own function/sub-function mapping snapshot, so a custom PDU registered on one client cannot change another client's interpretation; reject conflicting and standard-code registrations with MessageRegisterException while keeping failed registrations from mutating the mapping.
 * Discard the late response of a cancelled request (#3076)
 * Fix missed buffered serial replies after a delayed wakeup (#3079)
 * Test case for cancelling request. (#3077)
