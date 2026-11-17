@@ -51,40 +51,44 @@ class HTTP::CookieJar
     end
 
     def add(cookie)
-      path_cookies = ((@jar[cookie.domain] ||= {})[cookie.path] ||= {})
-      path_cookies[cookie.name] = cookie
-      cleanup if (@gc_index += 1) >= @gc_threshold
+      synchronize {
+        path_cookies = ((@jar[cookie.domain] ||= {})[cookie.path] ||= {})
+        path_cookies[cookie.name] = cookie
+        cleanup if (@gc_index += 1) >= @gc_threshold
+      }
       self
     end
 
     def delete(cookie)
-      path_cookies = ((@jar[cookie.domain] ||= {})[cookie.path] ||= {})
-      path_cookies.delete(cookie.name)
+      synchronize {
+        path_cookies = ((@jar[cookie.domain] ||= {})[cookie.path] ||= {})
+        path_cookies.delete(cookie.name)
+      }
       self
     end
 
     def each(uri = nil) # :yield: cookie
       now = Time.now
-      if uri
-        tpath = uri.path
-        @jar.each { |domain, paths|
-          paths.each { |path, hash|
-            next unless HTTP::Cookie.path_match?(path, tpath)
-            hash.delete_if { |name, cookie|
-              if cookie.expired?(now)
-                true
-              else
-                if cookie.valid_for_uri?(uri)
-                  cookie.accessed_at = now
-                  yield cookie
+      synchronize {
+        if uri
+          tpath = uri.path
+          @jar.each { |domain, paths|
+            paths.each { |path, hash|
+              next unless HTTP::Cookie.path_match?(path, tpath)
+              hash.delete_if { |name, cookie|
+                if cookie.expired?(now)
+                  true
+                else
+                  if cookie.valid_for_uri?(uri)
+                    cookie.accessed_at = now
+                    yield cookie
+                  end
+                  false
                 end
-                false
-              end
+              }
             }
           }
-        }
-      else
-        synchronize {
+        else
           @jar.each { |domain, paths|
             paths.each { |path, hash|
               hash.delete_if { |name, cookie|
@@ -97,13 +101,15 @@ class HTTP::CookieJar
               }
             }
           }
-        }
-      end
+        end
+      }
       self
     end
 
     def clear
-      @jar.clear
+      synchronize {
+        @jar.clear
+      }
       self
     end
 
