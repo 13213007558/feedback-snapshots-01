@@ -92,6 +92,44 @@ True
 00000000: 01 00 00 70                                       ...p
 ```
 
+## Control flow graph
+
+`dncil` ships a read-only control flow graph (CFG) analysis in
+[`dncil/cil/cfg.py`](dncil/cil/cfg.py). It is built purely from a parsed
+`CilMethodBody`: it never executes or emulates IL, never evaluates operands or
+the evaluation stack, and never mutates the method body.
+
+```Python
+from dncil.cil.cfg import EdgeType, build_control_flow_graph
+
+cfg = build_control_flow_graph(method_body)
+
+cfg.blocks              # BasicBlock objects, leaders from instructions + EH regions
+cfg.edges               # typed FlowEdge objects
+cfg.reachable_blocks()  # reachable through normal instruction-level transfers only
+cfg.exception_reachable_blocks()  # reachable only through exception/filter/finally edges
+```
+
+Exception handling regions are first-class graph members rather than
+annotations. Each `FlowEdge` carries an `EdgeType` that keeps the different
+transfer kinds separate so exception paths are never merged into ordinary
+reachability:
+
+- normal transfers: `FALLTHROUGH`, `BRANCH`, `CONDITIONAL_BRANCH`, `SWITCH`,
+  `METHOD_EXIT`, `UNRESOLVED`;
+- `LEAVE` for `leave`/`leave.s`, which unwind protected regions instead of
+  behaving like `br`;
+- region-derived transfers: `EXCEPTION_CATCH`, `EXCEPTION_FILTER`,
+  `EXCEPTION_FINALLY`, `EXCEPTION_FAULT`, `FILTER_DISPATCH`, `FINALLY_EXIT`.
+
+Every edge exposes the evidence behind it (`edge.evidence`): the originating
+`Instruction` for explicit edges, or the `ExceptionHandler` clause for
+region-derived edges (with `edge.handler_index`). A branch target or exception
+region boundary that lands in the middle of an instruction raises
+`ControlFlowGraphError`. Transfers whose semantics cannot be decided statically
+are recorded as `UNRESOLVED` edges and listed in `cfg.unresolved` rather than
+guessed.
+
 ## Installing
 
 To install `dncil` use `pip` to fetch the `dncil` module:
