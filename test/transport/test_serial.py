@@ -272,6 +272,8 @@ class TestTransportSerial:
             comm.poll_task = mock.Mock()
         serial_write = mock.MagicMock(side_effect=writes)
         comm.intern_write_buffer.append(b"abcd")
+        comm.intern_write_buffer_size = 4
+        comm._ensure_writer()
 
         with mock.patch.object(comm.sync_serial, "write", serial_write):
             sent = 0
@@ -283,11 +285,15 @@ class TestTransportSerial:
                     [b"abcd"[sent:]] if sent < 4 else []
                 )
         assert comm.intern_write_buffer == []
+        assert comm.intern_write_buffer_size == 0
         assert serial_write.call_count == len(writes)
         if polling:
             loop.add_writer.assert_not_called()
         else:
-            assert loop.add_writer.call_count == len(writes) - 1
+            # The writer is registered once and kept across zero/short writes,
+            # then removed only when the whole frame has drained.
+            loop.add_writer.assert_called_once()
+            assert loop.remove_writer.call_count == 1
 
     @pytest.mark.skipif(os.name == "nt", reason="Windows not supported")
     async def test_write_force(self):
