@@ -10,6 +10,7 @@ from ..pdu import ModbusPDU
 from ..pdu.device import ModbusDeviceIdentification
 from ..simulator import SimDevice
 from ..transport import CommParams, CommType
+from .authorization import TlsAccessPolicy
 from .base import ModbusBaseServer
 
 
@@ -92,6 +93,7 @@ class ModbusTlsServer(ModbusTcpServer):
         identity: ModbusDeviceIdentification | None = None,
         address: tuple[str, int] = ("", 502),
         sslctx=None,
+        access_policy: TlsAccessPolicy | None = None,
         ignore_missing_devices=False,
         broadcast_enable=False,
         trace_packet: Callable[[bool, bytes], bytes] | None = None,
@@ -109,6 +111,8 @@ class ModbusTlsServer(ModbusTcpServer):
         :param identity: An optional identify structure
         :param address: An optional (interface, port) to bind to.
         :param sslctx: The SSLContext to use for TLS
+        :param access_policy: Optional TlsAccessPolicy mapping verified client
+                        certificates to allowed device ids and function codes
         :param ignore_missing_devices: True to not send errors on a  missing device
         :param broadcast_enable: True to treat dev_id 0 as broadcast address,
                         False to treat 0 as any other dev_id
@@ -141,6 +145,7 @@ class ModbusTlsServer(ModbusTcpServer):
             trace_connect=trace_connect,
             custom_pdu=custom_pdu,
         )
+        self.access_policy = access_policy
 
 
 class ModbusUdpServer(ModbusBaseServer):

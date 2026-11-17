@@ -12,6 +12,11 @@ from ..logging import Log
 from ..pdu import ExceptionResponse, ModbusPDU
 from ..transaction import TransactionManager
 from ..transport import CommParams
+from .authorization import (
+    AuthorizationException,
+    TlsIdentity,
+    identity_from_transport,
+)
 
 
 class ServerRequestHandler(TransactionManager):
@@ -31,6 +36,7 @@ class ServerRequestHandler(TransactionManager):
         )
         self.server = owner
         self.running = False
+        self.identity: TlsIdentity = TlsIdentity.unverified()
         framer = owner.framer(owner.decoder)
         super().__init__(
             params,
@@ -56,6 +62,12 @@ class ServerRequestHandler(TransactionManager):
                 exc,
             )
         self.running = False
+
+    def callback_connected(self) -> None:
+        """Derive the verified identity from the TLS context on connect."""
+        super().callback_connected()
+        if getattr(self.server, "access_policy", None) is not None:
+            self.identity = identity_from_transport(self.transport)
 
     def callback_data(self, data: bytes, addr: tuple | None = None) -> int:
         """Handle received data."""
@@ -90,6 +102,10 @@ class ServerRequestHandler(TransactionManager):
     async def handle_request(self, pdu: ModbusPDU) -> None:
         """Handle request."""
         try:
+            if (
+                access_policy := getattr(self.server, "access_policy", None)
+            ) is not None:
+                access_policy.authorize(self.identity, pdu)
             if self.server.broadcast_enable and not pdu.dev_id:
                 # if broadcasting then execute on all device contexts,
                 # note response will be ignored
@@ -98,6 +114,9 @@ class ServerRequestHandler(TransactionManager):
                 return
             response = await pdu.datastore_update(self.server.context, pdu.dev_id)
 
+        except AuthorizationException as exc:
+            Log.error("TLS authorization rejected request: {}", exc)
+            response = ExceptionResponse(pdu.function_code, exc.exception_code)
         except NoSuchIdException:
             if self.server.ignore_missing_devices:
                 Log.debug("ignoring request for unknown device id: {}", pdu.dev_id)

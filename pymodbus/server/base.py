@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
+from typing import TYPE_CHECKING
 
 from ..datastore import ModbusServerContext
 from ..exceptions import ParameterException
@@ -16,6 +17,10 @@ from ..simulator import SimDevice
 from ..simulator.simcore import SimCore
 from ..transport import CommParams, ModbusProtocol
 from .requesthandler import ServerRequestHandler
+
+
+if TYPE_CHECKING:
+    from .authorization import TlsAccessPolicy
 
 
 class ModbusBaseServer(ModbusProtocol):
@@ -58,6 +63,7 @@ class ModbusBaseServer(ModbusProtocol):
         self.control = ModbusControlBlock()
         self.ignore_missing_devices = ignore_missing_devices
         self.broadcast_enable = broadcast_enable
+        self.access_policy: TlsAccessPolicy | None = None
         self.trace_packet = trace_packet
         self.trace_pdu = trace_pdu
         self.trace_connect = trace_connect

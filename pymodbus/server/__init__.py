@@ -1,6 +1,7 @@
 """**Server classes**."""
 
 __all__ = [
+    "AuthorizationException",
     "ModbusBaseServer",
     "ModbusSerialServer",
     "ModbusSimulatorServer",
@@ -17,9 +18,20 @@ __all__ = [
     "StartTcpServer",
     "StartTlsServer",
     "StartUdpServer",
+    "TlsAccessPolicy",
+    "TlsAccessRule",
+    "TlsIdentity",
     "get_simulator_commandline",
+    "identity_from_transport",
 ]
 
+from .authorization import (
+    AuthorizationException,
+    TlsAccessPolicy,
+    TlsAccessRule,
+    TlsIdentity,
+    identity_from_transport,
+)
 from .base import ModbusBaseServer
 from .server import (
     ModbusSerialServer,
