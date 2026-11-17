@@ -22,7 +22,7 @@ import logging
 from hashlib import sha256
 from dataclasses import dataclass
 from .transport.face import Face
-from .transport.prefix_registerer import PrefixRegisterer
+from .transport.prefix_registerer import PrefixRegisterer, ManagementResult
 from . import security as sec
 from . import encoding as enc
 from . import name_tree
@@ -513,7 +513,8 @@ class NDNApp:
         """
         del self._fib[enc.Name.normalize(name)]
 
-    async def register(self, name: enc.NonStrictName) -> bool:
+    async def register(self, name: enc.NonStrictName,
+                       validator: Validator | None = None) -> ManagementResult:
         """
         Register a prefix in the forwarder.
 
@@ -523,22 +524,35 @@ class NDNApp:
 
         :param name: name prefix.
         :type name: :any:`NonStrictName`
+        :param validator: policy used to validate the management response. The response must
+                          also name this exact command and echo this request's parameters.
+                          When omitted, responses are accepted without a signature policy,
+                          matching the historical behavior.
+        :type validator: :any:`Validator` | None
+        :return: a :any:`ManagementResult` whose truth value is true only for a confirmed
+                 registration. A failed command is never remembered as registered.
+        :rtype: :any:`ManagementResult`
 
-        :raises ValueError: the prefix is already registered.
         :raises NetworkError: the face to NFD is down now.
         """
         name = enc.Name.normalize(name)
-        return await self.registerer.register(name)
+        return await self.registerer.register(name, validator)
 
-    async def unregister(self, name: enc.NonStrictName) -> bool:
+    async def unregister(self, name: enc.NonStrictName,
+                         validator: Validator | None = None) -> ManagementResult:
         """
         Unregister a prefix in the forwarder.
 
         :param name: name prefix.
         :type name: :any:`NonStrictName`
+        :param validator: policy used to validate the management response. See :any:`register`.
+        :type validator: :any:`Validator` | None
+        :return: a :any:`ManagementResult` whose truth value is true only for a confirmed
+                 unregistration. A failed command is never remembered as unregistered.
+        :rtype: :any:`ManagementResult`
         """
         name = enc.Name.normalize(name)
-        return await self.registerer.unregister(name)
+        return await self.registerer.unregister(name, validator)
 
     def express_raw_interest(self,
                              final_name: enc.NonStrictName,
@@ -601,13 +615,21 @@ class NDNApp:
             del self._pit[prefix]
 
     def _on_nack(self, name: enc.FormalName, nack_reason: int):
+        # A Nack echoes the Interest name. Match the exact node first, then the
+        # longest watched prefix, since a CanBePrefix watcher may have expressed
+        # the Interest under a prefix of the delivered name.
         try:
             node = self._pit[name]
+            node_name = name
         except KeyError:
             node = None
+            node_name = None
+            for prefix, candidate in reversed(list(self._pit.prefixes(name))):
+                node, node_name = candidate, prefix
+                break
         if node:
             if node.nack_interest(nack_reason):
-                del self._pit[name]
+                del self._pit[node_name]
 
     def express(self, name: enc.NonStrictName, validator: Validator,
                 app_param: enc.BinaryStr | None = None,

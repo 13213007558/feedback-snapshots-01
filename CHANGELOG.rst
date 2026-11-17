@@ -3,6 +3,9 @@ Changelog
 
 Next (breaking)
 +++++++++++++++
+* Prefix registration returns a per-command confirmation result: the response must
+  match the exact command name, carry a success status, echo the request parameters,
+  and pass the caller's validator. Failures are reported as distinct outcomes.
 * Replace the descriptor-based TLV model with dataclass models and ``tlv_encode``/``tlv_parse``.
 * Make the PIT-token-aware application API canonical at ``ndn.app`` and remove ``ndn.appv2``.
 * Remove the legacy application API and Name Tree Schema.

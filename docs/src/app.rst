@@ -12,6 +12,17 @@ application API. It connects to an NDN forwarder and provides:
 * Prefix registration and unregistration.
 * Signed NFD management commands.
 
+Prefix registration is confirmed only when a response names that exact signed
+command Interest, carries a success ``ControlResponse`` status, echoes the
+request's control parameters, and passes the validator supplied by the caller.
+:meth:`NDNApp.register` and :meth:`NDNApp.unregister` return a
+:class:`~ndn.transport.prefix_registerer.ManagementResult`; its truth value is
+true only for a confirmed operation.  Timeouts, NetworkNacks, forwarder
+rejections, unknown statuses, name/parameter mismatches, malformed responses
+and validation failures are reported as distinct outcomes and are never
+remembered as a successful registration.  A later retry is an independent
+command.
+
 Consumer code calls :meth:`NDNApp.express` and receives ``(name, content,
 context)``. The context contains parsed metadata, signature pointers, the raw
 packet, and the deadline. Producer handlers receive ``(name, app_param, reply,

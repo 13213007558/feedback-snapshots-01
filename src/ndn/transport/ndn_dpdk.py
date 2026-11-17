@@ -184,7 +184,7 @@ class DpdkRegisterer(PrefixRegisterer):
         self.face = dpdk_face
         self.fib_entries = {}
 
-    async def register(self, name: enc.FormalName) -> bool:
+    async def register(self, name: enc.FormalName, validator=None) -> bool:
         if not self.face.running:
             raise RuntimeError('Cannot register prefix when face is not running')
         client = self.face.client
@@ -196,7 +196,7 @@ class DpdkRegisterer(PrefixRegisterer):
             return False
         return True
 
-    async def unregister(self, name: enc.FormalName) -> bool:
+    async def unregister(self, name: enc.FormalName, validator=None) -> bool:
         if not self.face.running:
             raise RuntimeError('Cannot unregister prefix when face is not running')
         client = self.face.client
