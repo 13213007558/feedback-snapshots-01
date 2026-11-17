@@ -93,6 +93,45 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+Signatures
+----------
+
+Method, field, and local variable signatures live in the ``#Blob`` heap and are
+interpreted read-only by ``dnfile.signature``.  No CLR is loaded and the
+inspected assembly is never executed.
+
+.. code-block:: python
+
+    import dnfile
+    from dnfile import signature
+
+    pe = dnfile.dnPE(FILEPATH)
+    method = pe.net.mdtables.MethodDef[0]
+
+    parsed = method.ParsedSignature
+    parsed.kind                      # "method", "field", or "locals"
+    parsed.to_programmer_string()    # e.g. "void Main(string[])"
+
+    method.SignatureEvidence         # raw token, blob index, blob bytes, RVA
+    method.SignatureSummary          # evidence plus the structured result
+
+    # Parse a raw blob without a PE file.
+    signature.parse_method_signature(bytes.fromhex("0001011d0e"))
+    signature.parse_field_signature(bytes.fromhex("061110"), mdtables=pe.net.mdtables)
+    signature.parse_local_signature(bytes.fromhex("070108"))
+
+Type references (``CLASS``/``VALUETYPE`` and generic instances) keep the raw
+TypeDefOrRef coded index and resolve to a ``TypeDef``, ``TypeRef`` or
+``TypeSpec`` row when metadata tables are available.  Truncated or unsupported
+elements become ``UnsupportedType`` nodes that carry the element path, the
+recognised prefix, and the remaining raw bytes; no default type is substituted.
+
+Rows in the ``MethodDef``, ``MemberRef``, ``Field`` and ``StandAloneSig`` tables
+expose ``ParsedSignature``, ``ParsedMethodSignature``, ``ParsedFieldSignature``,
+``ParsedLocalSignature``, ``SignatureToken``, ``SignatureEvidence`` and
+``SignatureSummary``.
+
+
 TODO
 ----
 

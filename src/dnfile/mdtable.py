@@ -14,7 +14,7 @@ Copyright (c) 2020-2022 MalwareFrank
 """
 from typing import TYPE_CHECKING, Dict, List, Type, Optional
 
-from . import enums, utils, errors, codedindex
+from . import enums, utils, errors, signature, codedindex
 from .base import RowStruct, MDTableRow, MDTableIndex, ClrMetaDataTable
 
 if TYPE_CHECKING:
@@ -34,6 +34,77 @@ def checked_offset_format(offset: int):
     if format is None:
         raise errors.dnFormatError("invalid offset: value too large")
     return format
+
+
+####
+# Shared read-only signature access for tables in scope:
+# method, field, and local variable signatures.
+
+
+class _SignatureRowMixin(object):
+    @property
+    def ParsedSignature(self):
+        """Interpret this row's Signature blob (method, field, or locals).
+
+        Parsing is read-only and cached on the row.  The result retains the
+        row's raw blob and may contain UnsupportedType nodes for truncation.
+        """
+        if "ParsedSignature" not in self.__dict__:
+            self.__dict__["ParsedSignature"] = signature.parse_row_signature(self)
+        return self.__dict__["ParsedSignature"]
+
+    @property
+    def ParsedMethodSignature(self):
+        """Interpret this row's blob as a method signature explicitly."""
+        if "ParsedMethodSignature" not in self.__dict__:
+            table = getattr(self, "_table", None)
+            mdtables = getattr(table, "_mdtables", None) if table is not None else None
+            self.__dict__["ParsedMethodSignature"] = signature.parse_method_signature(
+                getattr(self, "Signature", None), mdtables
+            )
+        return self.__dict__["ParsedMethodSignature"]
+
+    @property
+    def ParsedFieldSignature(self):
+        """Interpret this row's blob as a field signature explicitly."""
+        if "ParsedFieldSignature" not in self.__dict__:
+            table = getattr(self, "_table", None)
+            mdtables = getattr(table, "_mdtables", None) if table is not None else None
+            self.__dict__["ParsedFieldSignature"] = signature.parse_field_signature(
+                getattr(self, "Signature", None), mdtables
+            )
+        return self.__dict__["ParsedFieldSignature"]
+
+    @property
+    def ParsedLocalSignature(self):
+        """Interpret this row's blob as a local variable signature explicitly."""
+        if "ParsedLocalSignature" not in self.__dict__:
+            table = getattr(self, "_table", None)
+            mdtables = getattr(table, "_mdtables", None) if table is not None else None
+            self.__dict__["ParsedLocalSignature"] = signature.parse_local_signature(
+                getattr(self, "Signature", None), mdtables
+            )
+        return self.__dict__["ParsedLocalSignature"]
+
+    @property
+    def SignatureEvidence(self):
+        """Raw evidence: metadata token, blob index, blob bytes, and RVA."""
+        return signature.row_signature_evidence(self)
+
+    @property
+    def SignatureToken(self):
+        """The raw 32-bit metadata token for this row (table number + RID)."""
+        table = getattr(self, "_table", None)
+        row_index = getattr(self, "_row_index", None)
+        table_number = getattr(table, "number", None)
+        if table_number is None or row_index is None:
+            return None
+        return (table_number << 24) | row_index
+
+    @property
+    def SignatureSummary(self):
+        """Raw evidence plus the structured ParsedSignature."""
+        return signature.signature_summary(self)
 
 
 #### Module Table
@@ -257,7 +328,7 @@ class FieldRowStruct(RowStruct):
     Signature_BlobIndex: int
 
 
-class FieldRow(MDTableRow):
+class FieldRow(_SignatureRowMixin, MDTableRow):
     Flags: enums.ClrFieldAttr
     Name: str
     Signature: bytes
@@ -339,7 +410,7 @@ class MethodDefRowStruct(RowStruct):
     ParamList_Index: int
 
 
-class MethodDefRow(MDTableRow):
+class MethodDefRow(_SignatureRowMixin, MDTableRow):
     Rva: int
     ImplFlags: enums.ClrMethodImpl
     Flags: enums.ClrMethodAttr
@@ -519,7 +590,7 @@ class MemberRefRowStruct(RowStruct):
     Signature_BlobIndex: int
 
 
-class MemberRefRow(MDTableRow):
+class MemberRefRow(_SignatureRowMixin, MDTableRow):
     Class: codedindex.MemberRefParent
     Name: str
     Signature: bytes
@@ -857,7 +928,7 @@ class StandAloneSigRowStruct(RowStruct):
     Signature_BlobIndex: int
 
 
-class StandAloneSigRow(MDTableRow):
+class StandAloneSigRow(_SignatureRowMixin, MDTableRow):
     Signature: bytes
 
     _struct_class = StandAloneSigRowStruct

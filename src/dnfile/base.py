@@ -770,6 +770,10 @@ class ClrMetaDataTable(Generic[RowType]):
 
         self._loaded = LoadState.Unloaded
 
+        # keep a back-reference so rows can resolve signature blobs and
+        # report their metadata table/token without needing a PE object.
+        self._mdtables = mdtables
+
         # default value
         self.rva: int = 0
         self.file_offset = 0
@@ -783,7 +787,7 @@ class ClrMetaDataTable(Generic[RowType]):
         self.num_rows: int = num_rows
 
         def init_row():
-            return self._row_class(
+            row = self._row_class(
                 tables_rowcounts,
                 strings_offset_size,
                 guid_offset_size,
@@ -792,6 +796,8 @@ class ClrMetaDataTable(Generic[RowType]):
                 guid_heap,
                 blob_heap,
             )
+            setattr(row, "_table", self)
+            return row
 
         self.rows: List[Optional[RowType]] = []
         # initialized table data to an empty byte sequence
@@ -825,6 +831,7 @@ class ClrMetaDataTable(Generic[RowType]):
             try:
                 # `_get_row_size` uses the size of the first row.
                 self.rows[0] = init_row()
+                setattr(self.rows[0], "_row_index", 1)
             except errors.dnFormatError:
                 logger.warning("failed to construct %s row %d", self.name, 0)
                 # "truncate" the list since the following data is assumed invalid.
@@ -833,7 +840,9 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows = []
             for e in range(num_rows):
                 try:
-                    self.rows.append(init_row())
+                    row = init_row()
+                    setattr(row, "_row_index", e + 1)
+                    self.rows.append(row)
                 except errors.dnFormatError:
                     # this may occur when the offset to a stream is too large.
                     # this probably means invalid data.
@@ -894,6 +903,8 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows.truncate(idx)
             return None
 
+        setattr(row, "_table", self)
+        setattr(row, "_row_index", idx + 1)
         row.setup_lazy_load(self._full_loader)
         offset = self.row_size * idx
         if len(self._table_data) < offset + self.row_size:
