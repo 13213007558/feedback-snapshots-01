@@ -93,6 +93,33 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+Security declarations
+--------------------
+
+``DeclSecurity`` metadata rows record requests or annotations; they do not
+prove that a runtime enforced anything.  The read-only analysis keeps each
+row's raw action, permission-set blob and ``HasDeclSecurity`` target together,
+so a declaration on one type or method is never spread across the file:
+
+.. code-block:: python
+
+    import dnfile
+    from dnfile import security
+
+    pe = dnfile.dnPE(FILEPATH)
+    analysis = security.analyze(pe)          # or pe.analyze_security_declarations()
+
+    for declaration in analysis.declarations:
+        print(declaration.action_name, declaration.owner_display)
+        print(declaration.permission_set_decoded.display())
+
+    print(analysis.format_report())
+
+Unknown actions, dangling parent indexes and legacy XML permission sets are
+reported as unknown or unsupported.  Named arguments are decoded only for an
+explicitly listed subset of permission attributes; every payload's raw bytes
+are retained either way.
+
 TODO
 ----
 

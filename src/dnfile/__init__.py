@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 from pefile import PE as _PE
 from pefile import DIRECTORY_ENTRY, MAX_SYMBOL_EXPORT_COUNT, Dump, Structure, DataContainer, PEFormatError
 
-from . import base, enums, errors, stream, resource
+from . import base, enums, errors, stream, resource, security
 
 logger = logging.getLogger(__name__)
 CLR_METADATA_SIGNATURE = 0x424A5342
@@ -78,6 +78,19 @@ class dnPE(_PE):
         self._warnings = list()
         self.clr_lazy_load = clr_lazy_load
         super().__init__(name, data, fast_load)
+
+    def analyze_security_declarations(self):
+        """
+        Read-only analysis of the ``DeclSecurity`` metadata table.
+
+        Returns a :class:`dnfile.security.SecurityAnalysis`, or ``None`` when
+        this file has no CLR metadata to inspect.  The analysis reports storage
+        facts, ownership, decoded permission attributes for a limited subset,
+        and explicit unknowns; it never claims a runtime enforced a declaration.
+        """
+        if not getattr(self, "net", None):
+            return None
+        return security.analyze(self.net)
 
     def dump_info(self, dump=None, encoding="utf-8"):
         """

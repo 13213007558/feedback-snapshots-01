@@ -478,6 +478,17 @@ class MetaDataTables(base.ClrStream):
         self.GenericParamConstraint: Optional[mdtable.GenericParamConstraint] = None
         self.Unused: Optional[mdtable.Unused] = None
 
+    def analyze_security_declarations(self):
+        """
+        Read-only analysis of this stream's ``DeclSecurity`` table.
+
+        Returns a :class:`dnfile.security.SecurityAnalysis`, even when the
+        table is absent (in which case ``table_present`` is False).
+        """
+        from . import security
+
+        return security.analyze(self)
+
     def parse(self, streams: List[base.ClrStream], lazy_load=False):
         """
         this may raise an exception if the data cannot be parsed correctly.

@@ -2,6 +2,16 @@
 History
 =======
 
+Unreleased
+----------
+
+* FEATURE: read-only DeclSecurity analysis (``dnfile.security.analyze``,
+  ``dnPE.analyze_security_declarations()``).  Reports each declaration's
+  Assembly/TypeDef/MethodDef owner, raw action and raw permission-set blob,
+  and decodes named arguments for an explicit permission-attribute subset.
+  Unknown actions, dangling indexes and unrecognized payloads are reported as
+  unknown/unsupported, never as "no security requirements".
+
 0.18.0 (2026)
 -------------
 

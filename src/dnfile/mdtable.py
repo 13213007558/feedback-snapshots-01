@@ -731,6 +731,33 @@ class DeclSecurityRow(MDTableRow):
 
     _struct_class = DeclSecurityRowStruct
 
+    @property
+    def ActionEnum(self):
+        """
+        The ``Action`` value as :class:`dnfile.security.DeclSecurityAction`, or
+        ``None`` when it is not a known action.  ``Action`` itself, and the raw
+        struct, always keep the original value.
+        """
+        from . import security
+
+        try:
+            return security.DeclSecurityAction(getattr(self, "Action", None))
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def PermissionSetData(self):
+        """
+        Read-only decode of ``PermissionSet`` for the supported attribute
+        subset.  The original blob remains available as ``PermissionSet``.
+        """
+        from . import security
+
+        permission_set = getattr(self, "PermissionSet", None)
+        if permission_set is None:
+            return security.decode_permission_set(None)
+        return security.decode_permission_set(permission_set.value_bytes())
+
     _struct_asis = {
         "Action": "Action",
     }
@@ -762,6 +789,18 @@ class DeclSecurity(ClrMetaDataTable[DeclSecurityRow]):
     number = 14
 
     _row_class = DeclSecurityRow
+
+    def analyze(self):
+        """
+        Read-only analysis of this ``DeclSecurity`` table.
+
+        The returned :class:`dnfile.security.SecurityAnalysis` keeps per-row
+        storage facts, ownership, decoded permissions for a limited subset,
+        and explicit unknowns.  It does not infer runtime enforcement.
+        """
+        from . import security
+
+        return security.analyze(self._mdtables)
 
 
 #### ClassLayout Table

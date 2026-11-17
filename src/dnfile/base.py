@@ -805,6 +805,7 @@ class ClrMetaDataTable(Generic[RowType]):
         self._guid_offset_size = guid_offset_size
         self._blob_offset_size = blob_offset_size
         self._tables_rowcounts = tables_rowcounts
+        self._mdtables = mdtables
 
         # calculate the row size and table size in bytes
         fake_row = init_row()
