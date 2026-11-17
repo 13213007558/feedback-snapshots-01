@@ -105,6 +105,16 @@ Or in a more event based style (the IDLE command is closed at each message from 
          imap_client.idle_done()
          await asyncio.wait_for(idle, 30)
 
+Sequence numbers and EXPUNGE
+----------------------------
+
+Message sequence numbers are positions in the selected mailbox, not stable
+identities: an ``EXPUNGE`` shifts every following number.  Keep persistent
+state (for example alert caches) keyed by UID, and use a sequence view only for
+display.  :code:`example/imap_sequence_view.py` shows an explicit view that
+applies unsolicited ``EXPUNGE``/``FETCH`` lines, rejects ambiguous or missing
+UID evidence, and invalidates itself instead of guessing after a mailbox switch.
+
 Threading
 ---------
 .. _asyncio.Event: https://docs.python.org/3.4/library/asyncio-sync.html#event
