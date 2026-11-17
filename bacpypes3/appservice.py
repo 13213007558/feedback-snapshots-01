@@ -1615,20 +1615,20 @@ class ApplicationServiceAccessPoint(Client[PDU], ServiceAccessPoint):
             if _debug:
                 ApplicationServiceAccessPoint._debug("    - communications enabled")
         elif self.dccEnableDisable == "disable":
-            if (pdu.apduType == 0) and (pdu.apduService == 17):
+            if (apdu.apduType == 0) and (apdu.apduService == 17):
                 if _debug:
                     ApplicationServiceAccessPoint._debug(
                         "    - continue with DCC request"
                     )
-            elif (pdu.apduType == 0) and (pdu.apduService == 20):
+            elif (apdu.apduType == 0) and (apdu.apduService == 20):
                 if _debug:
                     ApplicationServiceAccessPoint._debug(
                         "    - continue with reinitialize device"
                     )
-            elif (pdu.apduType == 1) and (pdu.apduService == 7):
+            elif (apdu.apduType == 1) and (apdu.apduService == 7):
                 if _debug:
                     ApplicationServiceAccessPoint._debug("    - continue with Who-Has")
-            elif (pdu.apduType == 1) and (pdu.apduService == 8):
+            elif (apdu.apduType == 1) and (apdu.apduService == 8):
                 if _debug:
                     ApplicationServiceAccessPoint._debug("    - continue with Who-Is")
             else:

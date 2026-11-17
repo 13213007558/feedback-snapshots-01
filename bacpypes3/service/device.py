@@ -5,6 +5,7 @@ Application Module
 from __future__ import annotations
 
 import asyncio
+import hmac
 
 from typing import (
     Callable,
@@ -34,6 +35,7 @@ from ..apdu import (
     WhoHasRequest,
     IHaveRequest,
     DeviceCommunicationControlRequest,
+    ReinitializeDeviceRequest,
     SimpleAckPDU,
 )
 
@@ -658,13 +660,168 @@ class WhoHasIHaveServices:
 
 
 #
+#   Maintenance Service Access
+#
+
+
+@bacpypes_debugging
+class MaintenanceServiceContext:
+    """
+    The decision basis for admitting a sensitive maintenance service
+    request (DeviceCommunicationControl, ReinitializeDevice).  This is
+    what gets logged and what an external authorizer sees; it deliberately
+    does not carry the password value, only whether one was provided.
+    """
+
+    _debug: Callable[..., None]
+
+    service: str
+    source: Optional[Address]
+    enable_disable: Optional[str]
+    time_duration: Optional[int]
+    reinitialized_state: Optional[str]
+    password_provided: bool
+
+    def __init__(
+        self,
+        service: str,
+        source: Optional[Address],
+        *,
+        enable_disable: Optional[str] = None,
+        time_duration: Optional[int] = None,
+        reinitialized_state: Optional[str] = None,
+        password_provided: bool = False,
+    ) -> None:
+        if _debug:
+            MaintenanceServiceContext._debug(
+                "__init__ %r %r ...", service, source
+            )
+
+        self.service = service
+        self.source = source
+        self.enable_disable = enable_disable
+        self.time_duration = time_duration
+        self.reinitialized_state = reinitialized_state
+        self.password_provided = password_provided
+
+    def __repr__(self) -> str:
+        contents = "service={!r} source={!r}".format(self.service, self.source)
+        if self.enable_disable is not None:
+            contents += " enable/disable={!r}".format(self.enable_disable)
+        if self.time_duration is not None:
+            contents += " timeDuration={!r}".format(self.time_duration)
+        if self.reinitialized_state is not None:
+            contents += " reinitializedState={!r}".format(self.reinitialized_state)
+        contents += " passwordProvided={!r}".format(self.password_provided)
+        return "<{} {}>".format(self.__class__.__name__, contents)
+
+
+@bacpypes_debugging
+class MaintenanceAccessServices:
+    """
+    Pluggable admission boundary for sensitive maintenance services.
+
+    Two independent credentials are recognized:
+
+    * an externally confirmed identity - set ``maintenance_authorizer``
+      to a callable that receives the MaintenanceServiceContext (service,
+      source, control mode, duration) and returns true if the identity
+      established outside of the protocol (client certificate, operator
+      session, ...) is allowed to perform the request;
+
+    * the protocol carried password - matched against the secret
+      configured as ``_dcc_password`` on the local device object.
+
+    When no secret is configured an absent or empty password is not an
+    authorization; the request is denied unless the external authorizer
+    grants it.
+    """
+
+    _debug: Callable[..., None]
+
+    # hook for an externally confirmed identity
+    maintenance_authorizer: Optional[Callable[[MaintenanceServiceContext], bool]] = (
+        None
+    )
+
+    # policy limit for DeviceCommunicationControl timeDuration (minutes),
+    # None for no limit
+    maintenance_max_time_duration: Optional[int] = None
+
+    def maintenance_password(self) -> Optional[str]:
+        """Return the configured maintenance secret, if any."""
+        if _debug:
+            MaintenanceAccessServices._debug("maintenance_password")
+
+        device_object = getattr(self, "device_object", None)
+        if device_object is None:
+            return None
+
+        password = getattr(device_object, "_dcc_password", None)
+        if not password:
+            return None
+        return str(password)
+
+    def authorize_maintenance(
+        self, context: MaintenanceServiceContext, password: Optional[str]
+    ) -> None:
+        """
+        Raise an ExecutionError if the request described by the context is
+        not admitted; returns normally when it is.  Only the decision
+        basis is logged, never the password value.
+        """
+        if _debug:
+            MaintenanceAccessServices._debug("authorize_maintenance %r", context)
+
+        # policy check on the requested duration
+        max_time_duration = self.maintenance_max_time_duration
+        if (
+            (context.time_duration is not None)
+            and (max_time_duration is not None)
+            and (context.time_duration > max_time_duration)
+        ):
+            _log.info(
+                "maintenance request denied: %r duration over limit %r",
+                context,
+                max_time_duration,
+            )
+            raise ExecutionError(
+                errorClass="services", errorCode="serviceRequestDenied"
+            )
+
+        # an externally confirmed identity can admit the request
+        authorizer = self.maintenance_authorizer
+        if (authorizer is not None) and authorizer(context):
+            _log.info("maintenance request granted: %r external identity", context)
+            return
+
+        # a protocol carried password can admit the request, but only
+        # against a configured secret
+        secret = self.maintenance_password()
+        if secret is not None:
+            if (password is not None) and hmac.compare_digest(
+                str(password), secret
+            ):
+                _log.info("maintenance request granted: %r password", context)
+                return
+            _log.info("maintenance request denied: %r password failure", context)
+            raise ExecutionError(errorClass="security", errorCode="passwordFailure")
+
+        # no secret configured, no external identity - an absent or empty
+        # password is not an authorization
+        _log.info("maintenance request denied: %r no credentials configured", context)
+        raise ExecutionError(errorClass="services", errorCode="serviceRequestDenied")
+
+
+#
 #   Device Communication Control
 #
 
 
 @bacpypes_debugging
-class DeviceCommunicationControlServices:
+class DeviceCommunicationControlServices(MaintenanceAccessServices):
     _dcc_enable_handle: Optional[asyncio.TimerHandle] = None
+    _dcc_control_epoch: int = 0
 
     async def do_DeviceCommunicationControlRequest(
         self, apdu: DeviceCommunicationControlRequest
@@ -674,36 +831,74 @@ class DeviceCommunicationControlServices:
                 "do_CommunicationControlRequest, %r", apdu
             )
 
-        if getattr(self.device_object, "_dcc_password", None):
-            if not apdu.password or apdu.password != getattr(
-                self.device_object, "_dcc_password"
-            ):
-                raise ExecutionError(errorClass="security", errorCode="passwordFailure")
+        # the control mode is required to interpret the request
+        if apdu.enableDisable is None:
+            raise MissingRequiredParameter("enableDisable required")
+        enable_disable = apdu.enableDisable.attr
+        if enable_disable not in ("enable", "disable", "disableInitiation"):
+            raise ParameterOutOfRange("enableDisable out of range")
 
-        if apdu.enableDisable == "enable":
+        # a time duration is only meaningful when communications are
+        # being disabled
+        if (enable_disable == "enable") and (apdu.timeDuration is not None):
+            raise InconsistentParameters("timeDuration only when disabling")
+
+        # check the admission boundary before any state change
+        context = MaintenanceServiceContext(
+            "deviceCommunicationControl",
+            apdu.pduSource,
+            enable_disable=enable_disable,
+            time_duration=apdu.timeDuration,
+            password_provided=apdu.password is not None,
+        )
+        self.authorize_maintenance(context, apdu.password)
+
+        if enable_disable == "enable":
             self.enable_communications()
 
         else:
             # disable or disableInitiation
-            self.disable_communications(apdu.enableDisable)
+            self.disable_communications(enable_disable)
 
             # if there is a time duration, it's in minutes
             if apdu.timeDuration:
+                epoch = self._dcc_control_epoch
                 self._dcc_enable_handle = asyncio.get_event_loop().call_later(
-                    apdu.timeDuration * 60, self.enable_communications
+                    apdu.timeDuration * 60, self._dcc_enable_expired, epoch
                 )
                 if _debug:
-                    DeviceCommunicationControlServices._debug("    - enable scheduled")
+                    DeviceCommunicationControlServices._debug(
+                        "    - enable scheduled, epoch %r", epoch
+                    )
 
         # respond with a simple ack
         await self.response(SimpleAckPDU(context=apdu))
+
+    def _dcc_enable_expired(self, epoch: int) -> None:
+        """A scheduled re-enable fired; ignore it if a newer control has
+        been authorized since it was scheduled."""
+        if _debug:
+            DeviceCommunicationControlServices._debug(
+                "_dcc_enable_expired %r (current %r)", epoch, self._dcc_control_epoch
+            )
+
+        if epoch != self._dcc_control_epoch:
+            if _debug:
+                DeviceCommunicationControlServices._debug("    - superseded")
+            return
+
+        self._dcc_enable_handle = None
+        self.enable_communications()
 
     def enable_communications(self):
         if _debug:
             DeviceCommunicationControlServices._debug("enable_communications")
 
+        # a new control supersedes any previously scheduled re-enable
+        self._dcc_control_epoch += 1
+
         # tell the State Machine Access Point
-        self.smap.dccEnableDisable = "enable"
+        self.asap.dccEnableDisable = "enable"
 
         # if an enable task was scheduled, cancel it
         if self._dcc_enable_handle:
@@ -716,10 +911,57 @@ class DeviceCommunicationControlServices:
                 "disable_communications %r", enable_disable
             )
 
+        # a new control supersedes any previously scheduled re-enable
+        self._dcc_control_epoch += 1
+
         # tell the State Machine Access Point
-        self.smap.dccEnableDisable = enable_disable
+        self.asap.dccEnableDisable = enable_disable
 
         # if an enable task was scheduled, cancel it
         if self._dcc_enable_handle:
             self._dcc_enable_handle.cancel()
             self._dcc_enable_handle = None
+
+
+#
+#   Reinitialize Device
+#
+
+
+@bacpypes_debugging
+class ReinitializeDeviceServices(MaintenanceAccessServices):
+    async def do_ReinitializeDeviceRequest(
+        self, apdu: ReinitializeDeviceRequest
+    ) -> None:
+        if _debug:
+            ReinitializeDeviceServices._debug("do_ReinitializeDeviceRequest %r", apdu)
+
+        if apdu.reinitializedStateOfDevice is None:
+            raise MissingRequiredParameter("reinitializedStateOfDevice required")
+
+        # check the admission boundary before any state change
+        context = MaintenanceServiceContext(
+            "reinitializeDevice",
+            apdu.pduSource,
+            reinitialized_state=apdu.reinitializedStateOfDevice.attr,
+            password_provided=apdu.password is not None,
+        )
+        self.authorize_maintenance(context, apdu.password)
+
+        # respond with a simple ack first, the reinitialization follows
+        await self.response(SimpleAckPDU(context=apdu))
+
+        # controlled callback, the default only simulates the request
+        self.reinitialize_device(apdu.reinitializedStateOfDevice.attr)
+
+    def reinitialize_device(self, reinitialized_state: str) -> None:
+        """
+        Controlled reinitialization callback.  The default implementation
+        only simulates the request by logging the decision basis; override
+        this to hook a supervised reinitialization of the application.
+        """
+        if _debug:
+            ReinitializeDeviceServices._debug(
+                "reinitialize_device %r", reinitialized_state
+            )
+        _log.info("reinitialize device simulated: %r", reinitialized_state)

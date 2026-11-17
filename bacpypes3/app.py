@@ -69,7 +69,12 @@ from .primitivedata import ObjectIdentifier, ObjectType
 from .service.cov import ChangeOfValueServices
 
 # basic services
-from .service.device import WhoHasIHaveServices, WhoIsIAmServices
+from .service.device import (
+    DeviceCommunicationControlServices,
+    ReinitializeDeviceServices,
+    WhoHasIHaveServices,
+    WhoIsIAmServices,
+)
 from .service.object import (
     ReadRangeServices,
     ReadWritePropertyMultipleServices,
@@ -284,6 +289,8 @@ class Application(
     ApplicationServiceElement,
     WhoIsIAmServices,
     WhoHasIHaveServices,
+    DeviceCommunicationControlServices,
+    ReinitializeDeviceServices,
     ReadWritePropertyServices,
     ReadWritePropertyMultipleServices,
     ReadRangeServices,
