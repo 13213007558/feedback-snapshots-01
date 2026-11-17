@@ -258,6 +258,11 @@ class Answer:
 
     Note that CNAMEs or DNAMEs in the response may mean that answer
     RRset's name might not be the query name.
+
+    If the response's alias chain could not be completed with the evidence it
+    supplies, ``complete`` is ``False``, ``rrset`` is ``None``, and
+    ``failure`` is a :py:class:`dns.message.ChainIncomplete` describing the
+    missing relationship.  The ``AD`` bit does not make a chain complete.
     """
 
     def __init__(
@@ -280,7 +285,17 @@ class Answer:
         # compatibility and convenience.
         self.canonical_name = self.chaining_result.canonical_name
         self.rrset = self.chaining_result.answer
+        self.failure = self.chaining_result.failure
         self.expiration = time.time() + self.chaining_result.minimum_ttl
+
+    @property
+    def complete(self) -> bool:
+        """Was the response's alias chain complete and unambiguous?
+
+        If this is ``False``, ``failure`` describes the alias relationship for
+        which the response did not provide evidence, and ``rrset`` is ``None``.
+        """
+        return self.failure is None
 
     def __getattr__(self, attr):  # pragma: no cover
         if attr != "rrset" and self.rrset is not None:
@@ -827,6 +842,25 @@ class _Resolution:
                     self.nameserver.answer_nameserver(),
                     self.nameserver.answer_port(),
                 )
+            except dns.message.ChainTruncated as e:
+                # The transport did not hand us a Truncated exception, but the
+                # chain interpreter found the TC flag.  Retry over TCP just as
+                # for any other truncated response rather than treating the
+                # nameserver as broken.
+                self.errors.append(
+                    (
+                        str(self.nameserver),
+                        self.tcp_attempt,
+                        self.nameserver.answer_port(),
+                        e,
+                        response,
+                    )
+                )
+                if self.tcp_attempt:
+                    self.nameservers.remove(self.nameserver)
+                else:
+                    self.retry_with_tcp = True
+                return (None, False)
             except Exception as e:
                 self.errors.append(
                     (

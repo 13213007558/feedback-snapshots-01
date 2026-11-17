@@ -559,6 +559,49 @@ www.example. IN A
             self.assertEqual(stats.hits, 0)
             self.assertEqual(stats.misses, 0)
 
+    def testAnswerUsesChainAndReportsDecoys(self):
+        message = dns.message.from_text("""id 1
+flags QR AA AD
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 200 IN A 192.0.2.1
+;ADDITIONAL
+www.example. 300 IN A 203.0.113.66
+""")
+        name = dns.name.from_text("www.example.")
+        answer = dns.resolver.Answer(name, dns.rdatatype.A, dns.rdataclass.IN, message)
+        self.assertTrue(answer.complete)
+        self.assertIsNone(answer.failure)
+        self.assertEqual(answer.canonical_name, dns.name.from_text("web.example."))
+        self.assertEqual(answer.rrset.name, dns.name.from_text("web.example."))
+        self.assertEqual([rd.address for rd in answer], ["192.0.2.1"])
+        self.assertEqual(
+            [rrset.name for rrset in answer.chaining_result.unused_additional],
+            [dns.name.from_text("www.example.")],
+        )
+        # The AD bit is not what made the answer usable.
+        message.flags &= ~dns.flags.AD
+        no_ad = dns.resolver.Answer(name, dns.rdatatype.A, dns.rdataclass.IN, message)
+        self.assertEqual(no_ad.canonical_name, answer.canonical_name)
+        self.assertEqual(no_ad.rrset, answer.rrset)
+
+    def testAnswerReportsIncompleteChain(self):
+        message = dns.message.from_text("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+""")
+        name = dns.name.from_text("www.example.")
+        answer = dns.resolver.Answer(name, dns.rdatatype.A, dns.rdataclass.IN, message)
+        self.assertFalse(answer.complete)
+        self.assertIsNone(answer.rrset)
+        self.assertIsInstance(answer.failure, dns.message.ChainIncomplete)
+        self.assertEqual(answer.failure.qname, dns.name.from_text("web.example."))
+
     def testEmptyAnswerSection(self):
         # TODO: dangling_cname_0_message_text was the only sample message
         #       with an empty answer section. Other than that it doesn't

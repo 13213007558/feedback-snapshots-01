@@ -6,6 +6,27 @@ What's New in dnspython
 2.10.0 (in development)
 -----------------------
 
+* ``dns.message.QueryMessage.resolve_chaining()`` now interprets the alias
+  chain from the relationships which the response actually supplies.  A
+  CNAME or DNAME is only followed from the RRset owner at the current name,
+  CNAME and DNAME rdata must have one unambiguous target, and a DNAME
+  substitution is checked against any CNAME synthesized from it.  An address
+  in the additional section, or an RRset of another type at the same owner,
+  is never used as the terminal answer; the RRsets that were not used are
+  available in the new ``unused`` and ``unused_additional`` attributes.
+
+  A truncated response raises the new ``dns.message.ChainTruncated`` instead
+  of returning a possibly-wrong answer, contradictory evidence raises
+  ``dns.message.ChainConflict``, and a loop raises the new
+  ``dns.message.ChainLoop`` (a subclass of ``ChainTooLong`` for backwards
+  compatibility).  When the chain has no terminal answer and no
+  denial-of-existence evidence, the result's new ``failure`` attribute is a
+  ``dns.message.ChainIncomplete`` describing the missing relationship, and
+  ``dns.resolver.Answer`` exposes the same thing as ``failure`` and
+  ``complete``.  Each hop is described by a ``dns.message.ChainLink`` with
+  the actual owner, rdata target, and next name followed.  The ``AD`` bit is
+  not treated as evidence that any link is authentic.
+
 * The text form of an IPSECKEY record may now omit the public key, which RFC
   4025 section 3.1 makes optional, e.g. ``10 1 0 192.0.2.38`` with algorithm
   0, which means that no key is present.  Such a record could not be read from

@@ -375,6 +375,23 @@ class ResolutionTestCase(unittest.TestCase):
         # test_next_nameserver_retry_with_tcp(), so we do not repeat
         # it.
 
+    def test_query_result_chain_truncated_retries_with_tcp(self):
+        # A response with TC set is a truncation even if the transport did not
+        # raise Truncated, and must be retried over TCP rather than discarding
+        # the nameserver or returning a chain result.
+        q = dns.message.make_query(self.qname, dns.rdatatype.A)
+        r = self.make_address_response(q)
+        r.flags |= dns.flags.TC
+        _, _ = self.resn.next_request()
+        nameserver, _, _ = self.resn.next_nameserver()
+        answer, done = self.resn.query_result(r, None)
+        self.assertIsNone(answer)
+        self.assertFalse(done)
+        self.assertTrue(self.resn.retry_with_tcp)
+        self.assertIn(nameserver, self.resn.nameservers)
+        self.assertEqual(len(self.resn.errors), 1)
+        self.assertIsInstance(self.resn.errors[0][3], dns.message.ChainTruncated)
+
     def test_query_result_no_error_with_data(self):
         q = dns.message.make_query(self.qname, dns.rdatatype.A)
         r = self.make_address_response(q)

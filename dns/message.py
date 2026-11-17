@@ -97,12 +97,95 @@ class NotQueryResponse(dns.exception.DNSException):
     """Message is not a response to a query."""
 
 
+class ChainError(dns.exception.DNSException):
+    """The alias chain in a response cannot be interpreted unambiguously.
+
+    The exception's *qname* attribute is the name at which the problem was
+    found, and *reason* describes the missing or contradictory evidence.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        qname: dns.name.Name | None = None,
+        owner: dns.name.Name | None = None,
+        target: dns.name.Name | None = None,
+    ):
+        super().__init__(reason)
+        self.reason = reason
+        self.qname = qname
+        self.owner = owner
+        self.target = target
+
+
+class ChainConflict(ChainError):
+    """The response contains contradictory alias chain evidence."""
+
+
+class ChainIncomplete(ChainError):
+    """The response does not contain enough evidence to complete the chain."""
+
+
 class ChainTooLong(dns.exception.DNSException):
     """The CNAME chain is too long."""
 
 
 class AnswerForNXDOMAIN(dns.exception.DNSException):
     """The rcode is NXDOMAIN but an answer was found."""
+
+
+class ChainLoop(ChainTooLong, ChainError):
+    """The alias chain loops.
+
+    The *qname* attribute is the name where the loop was detected, and
+    *path* is the sequence of names visited before the loop was found.
+    """
+
+    def __init__(self, qname: dns.name.Name, path: list[dns.name.Name]):
+        message = f"The alias chain loops at {qname.to_text()}"
+        super().__init__(message)
+        self.qname = qname
+        self.path = path
+        self.reason = message
+        self.owner = None
+        self.target = None
+
+
+class ChainTruncated(Truncated, ChainIncomplete):
+    """The alias chain cannot be interpreted because the response is truncated.
+
+    No answer RRset is available from a truncated response, as the missing
+    records might have changed which RRset is the answer.  The ``response``
+    attribute is the message which was being interpreted.
+
+    It is also a :py:exc:`dns.message.Truncated`, so resolver code which retries
+    truncated responses over TCP handles it the same way as any other
+    truncation.
+    """
+
+    supp_kwargs = {"message"}
+    fmt = None
+
+    def __init__(
+        self,
+        response: "Message",
+        *,
+        qname: dns.name.Name | None = None,
+        reason: str | None = None,
+    ):
+        self.qname = qname
+        self.owner = None
+        self.target = None
+        self.reason = (
+            reason
+            or "The response has the TC flag set, so the alias chain is incomplete."
+        )
+        self.response = response
+        dns.exception.DNSException.__init__(self, message=response)
+
+    def __str__(self) -> str:
+        return self.reason
 
 
 class NoPreviousName(dns.exception.SyntaxError):
@@ -1079,6 +1162,30 @@ class Message:
         return (rdclass, rdtype, None, False)
 
 
+@dataclasses.dataclass(frozen=True)
+class ChainLink:
+    """One hop in an interpreted alias chain.
+
+    ``kind`` is ``"CNAME"``, ``"DNAME"``, or ``"answer"``.  ``source`` is the
+    name being followed, ``owner`` is the owner name of the RRset which
+    supplied the evidence, and ``target`` is the target from the RRset's rdata.
+    ``destination`` is the next name followed (for a DNAME this is the name
+    synthesized by the substitution, which may differ from ``target``).
+
+    ``synthesized`` is true for a DNAME hop whose destination was computed by
+    this implementation, whether or not the response also contained the
+    corresponding synthesized CNAME.
+    """
+
+    kind: str
+    source: dns.name.Name
+    owner: dns.name.Name
+    target: dns.name.Name | None
+    destination: dns.name.Name | None
+    rrset: dns.rrset.RRset | None
+    synthesized: bool = False
+
+
 class ChainingResult:
     """The result of a call to dns.message.QueryMessage.resolve_chaining().
 
@@ -1087,17 +1194,29 @@ class ChainingResult:
 
     The ``canonical_name`` attribute is the canonical name after all
     chaining has been applied (this is the same name as ``rrset.name`` in cases
-    where rrset is not ``None``).
+    where rrset is not ``None``).  It is only meaningful when ``failure`` is
+    ``None``; when the chain could not be completed, ``failure`` describes the
+    relationship for which the response did not provide evidence.
 
     The ``minimum_ttl`` attribute is the minimum TTL, i.e. the TTL to
-    use if caching the data.  It is the smallest of all the CNAME TTLs
-    and either the answer TTL if it exists or the SOA TTL and SOA
+    use if caching the data.  It is the smallest of all the CNAME and DNAME
+    TTLs and either the answer TTL if it exists or the SOA TTL and SOA
     minimum values for negative answers.  For a negative answer with no
     SOA record, ``NEGATIVE_TTL_WITHOUT_SOA`` is used in place of the SOA
     values.
 
     The ``cnames`` attribute is a list of all the CNAME RRSets followed to
-    get to the canonical name.
+    get to the canonical name.  The ``dnames`` attribute lists the DNAME
+    RRSets which redirected the chain.  ``links`` describes every hop,
+    including the actual owner and target names.  ``unused`` lists RRsets in
+    the answer section which were not part of the chain, and
+    ``unused_additional`` lists additional-section RRsets which were not used.
+    The answer section is authoritative for chaining; an address which appears
+    only in the additional section is never used as the terminal answer.
+
+    The AD bit is not considered evidence that any link of the chain is
+    authentic; callers which need authenticated data must validate the
+    relevant signatures themselves.
     """
 
     def __init__(
@@ -1106,20 +1225,210 @@ class ChainingResult:
         answer: dns.rrset.RRset | None,
         minimum_ttl: int,
         cnames: list[dns.rrset.RRset],
+        dnames: list[dns.rrset.RRset] | None = None,
+        links: list[ChainLink] | None = None,
+        unused: list[dns.rrset.RRset] | None = None,
+        unused_additional: list[dns.rrset.RRset] | None = None,
+        failure: ChainError | None = None,
     ):
         self.canonical_name = canonical_name
         self.answer = answer
         self.minimum_ttl = minimum_ttl
         self.cnames = cnames
+        self.dnames = dnames or []
+        self.links = links or []
+        self.unused = unused or []
+        self.unused_additional = unused_additional or []
+        self.failure = failure
+
+    @property
+    def rrset(self) -> dns.rrset.RRset | None:
+        """An alias for ``answer``, for backwards compatibility."""
+        return self.answer
+
+    @property
+    def complete(self) -> bool:
+        """Was the chain interpreted without missing or contradictory evidence?"""
+        return self.failure is None
 
 
 class QueryMessage(Message):
+    def _normalize_chain_name(self, name: dns.name.Name) -> dns.name.Name:
+        # Relativized messages are compared in their absolute form when the
+        # message has an origin.  The name stored in the message is retained
+        # for lookups and for the returned canonical name.
+        if self.origin is not None and not name.is_absolute():
+            return name.derelativize(self.origin)
+        return name
+
+    def _chain_rrsets(
+        self,
+        section: list[dns.rrset.RRset],
+        name: dns.name.Name,
+        rdclass: dns.rdataclass.RdataClass,
+        rdtype: dns.rdatatype.RdataType,
+    ) -> list[dns.rrset.RRset]:
+        wanted = self._normalize_chain_name(name)
+        rrsets = []
+        for rrset in section:
+            if (
+                rrset.rdclass == rdclass
+                and rrset.rdtype == rdtype
+                and rrset.covers == dns.rdatatype.NONE
+                and rrset.deleting is None
+                and self._normalize_chain_name(rrset.name) == wanted
+            ):
+                rrsets.append(rrset)
+        return rrsets
+
+    @staticmethod
+    def _merge_chain_rrsets(rrsets: list[dns.rrset.RRset]) -> dns.rrset.RRset:
+        # A message read with one_rr_per_rrset=True may split one RRset into
+        # many.  Merge them without Rdataset.add()'s singleton replacement, so
+        # that a split cannot hide a second target.
+        if len(rrsets) == 1:
+            return rrsets[0]
+        first = rrsets[0]
+        merged = dns.rrset.RRset(
+            first.name, first.rdclass, first.rdtype, first.covers, first.deleting
+        )
+        merged.ttl = min(rrset.ttl for rrset in rrsets)
+        for rrset in rrsets:
+            for rd in rrset:
+                merged.items[rd] = None
+        return merged
+
+    def _cname_target(
+        self, rrsets: list[dns.rrset.RRset], qname: dns.name.Name
+    ) -> tuple[dns.rrset.RRset, dns.name.Name]:
+        cname = self._merge_chain_rrsets(rrsets)
+        targets: dict[dns.name.Name, dns.name.Name] = {}
+        for rd in cname:
+            target = getattr(rd, "target", None)
+            if target is None:  # pragma: no cover - malformed CNAME rdata
+                raise ChainConflict(
+                    "The CNAME RRset does not contain a target name.",
+                    qname=qname,
+                    owner=cname.name,
+                )
+            targets[self._normalize_chain_name(target)] = target
+        if len(targets) != 1:
+            raise ChainConflict(
+                "The CNAME RRset has multiple targets; the alias to follow is "
+                "ambiguous.",
+                qname=qname,
+                owner=cname.name,
+            )
+        return cname, next(iter(targets.values()))
+
+    def _applicable_dname(
+        self, qname: dns.name.Name, rdclass: dns.rdataclass.RdataClass
+    ) -> tuple[dns.rrset.RRset, dns.name.Name, dns.name.Name] | None:
+        nqname = self._normalize_chain_name(qname)
+        candidates: dict[dns.name.Name, list[dns.rrset.RRset]] = {}
+        for rrset in self.answer:
+            if (
+                rrset.rdclass != rdclass
+                or rrset.rdtype != dns.rdatatype.DNAME
+                or rrset.covers != dns.rdatatype.NONE
+                or rrset.deleting is not None
+            ):
+                continue
+            owner = self._normalize_chain_name(rrset.name)
+            if nqname.is_absolute() != owner.is_absolute():
+                # Without an origin relative and absolute names cannot be
+                # related, so this RRset is not evidence about qname.
+                continue
+            if nqname != owner and nqname.is_subdomain(owner):
+                candidates.setdefault(owner, []).append(rrset)
+        if not candidates:
+            return None
+        owner = max(candidates, key=len)
+        dname = self._merge_chain_rrsets(candidates[owner])
+        targets: dict[dns.name.Name, dns.name.Name] = {}
+        for rd in dname:
+            target = getattr(rd, "target", None)
+            if target is None:  # pragma: no cover - malformed DNAME rdata
+                raise ChainConflict(
+                    "The DNAME RRset does not contain a target name.",
+                    qname=qname,
+                    owner=dname.name,
+                )
+            targets[self._normalize_chain_name(target)] = target
+        if len(targets) != 1:
+            raise ChainConflict(
+                "The DNAME RRset has multiple targets; the rewrite is ambiguous.",
+                qname=qname,
+                owner=dname.name,
+            )
+        return dname, owner, next(iter(targets.values()))
+
+    def _synthesize_dname_target(
+        self,
+        qname: dns.name.Name,
+        owner: dns.name.Name,
+        target: dns.name.Name,
+    ) -> dns.name.Name:
+        nqname = self._normalize_chain_name(qname)
+        nowner = self._normalize_chain_name(owner)
+        ntarget = self._normalize_chain_name(target)
+        if not (
+            nqname.is_absolute() == nowner.is_absolute()
+            and nqname.is_absolute() == ntarget.is_absolute()
+        ):
+            raise ChainIncomplete(
+                "A DNAME rewrite cannot be evaluated because the owner, "
+                "target, and query name do not share an origin.",
+                qname=qname,
+                owner=owner,
+                target=target,
+            )
+        if nqname == nowner or not nqname.is_subdomain(nowner):
+            raise ChainConflict(
+                "A DNAME RRset does not cover the name it is being applied to.",
+                qname=qname,
+                owner=owner,
+                target=target,
+            )
+        prefix = nqname.relativize(nowner)
+        synthesized = prefix.concatenate(ntarget)
+        # If the message was relativized, keep the synthesized name relative
+        # when it is within the message origin, as the records for it will be.
+        if (
+            self.origin is not None
+            and not qname.is_absolute()
+            and synthesized.is_absolute()
+            and synthesized.is_subdomain(self.origin)
+        ):
+            return synthesized.relativize(self.origin)
+        return synthesized
+
     def resolve_chaining(self) -> ChainingResult:
-        """Follow the CNAME chain in the response to determine the answer
-        RRset.
+        """Follow the CNAME and DNAME chain in the response to determine the
+        answer RRset.
+
+        Only names which are the owner of the alias RRset at the current point
+        in the chain are followed.  A terminal RRset must have the current
+        name as its owner, the question's class and type, and must be in the
+        answer section; similarly named records in the additional section are
+        not used.  CNAME and DNAME rdata are checked for a single unambiguous
+        target, and DNAME rewrites are validated against any synthesized CNAME
+        present in the response.
+
+        If the response is truncated, the chain is not interpreted at all.
+        Contradictory evidence raises :py:exc:`dns.message.ChainConflict`, a
+        loop raises :py:exc:`dns.message.ChainLoop`, and a chain which cannot
+        be completed returns a result whose ``failure`` attribute is a
+        :py:exc:`dns.message.ChainIncomplete` describing the missing evidence.
+
+        The AD bit is not treated as independent evidence of authentication.
 
         :raises dns.message.NotQueryResponse: If the message is not a response.
-        :raises dns.message.ChainTooLong: If the CNAME chain is too long.
+        :raises dns.message.ChainTruncated: If the response has the TC flag set.
+        :raises dns.message.ChainConflict: If the response contains
+            contradictory alias evidence.
+        :raises dns.message.ChainLoop: If the alias chain loops.
+        :raises dns.message.ChainTooLong: If the alias chain is too long.
         :raises dns.message.AnswerForNXDOMAIN: If the rcode is NXDOMAIN but
             an answer was found.
         :raises dns.exception.FormError: If the question count is not 1.
@@ -1131,52 +1440,174 @@ class QueryMessage(Message):
             raise dns.exception.FormError
         question = self.question[0]
         qname = question.name
+        qclass = question.rdclass
+        qtype = question.rdtype
+        if self.flags & dns.flags.TC:
+            raise ChainTruncated(self, qname=qname)
         min_ttl = dns.ttl.MAX_TTL
         answer = None
         count = 0
-        cnames = []
-        while count < MAX_CHAIN:
-            try:
-                answer = self.find_rrset(
-                    self.answer, qname, question.rdclass, question.rdtype
+        cnames: list[dns.rrset.RRset] = []
+        dnames: list[dns.rrset.RRset] = []
+        links: list[ChainLink] = []
+        consumed: set[int] = set()
+        current = qname
+        path = [self._normalize_chain_name(current)]
+        visited = {path[0]}
+        failure: ChainError | None = None
+        while True:
+            if count >= MAX_CHAIN:
+                raise ChainTooLong
+            # The requested type at the current name terminates the chain.
+            requested = self._chain_rrsets(self.answer, current, qclass, qtype)
+            cname_rrsets = (
+                []
+                if qtype == dns.rdatatype.CNAME
+                else self._chain_rrsets(
+                    self.answer, current, qclass, dns.rdatatype.CNAME
                 )
-                min_ttl = min(min_ttl, answer.ttl)
-                break
-            except KeyError:
-                if question.rdtype != dns.rdatatype.CNAME:
-                    try:
-                        crrset = self.find_rrset(
-                            self.answer, qname, question.rdclass, dns.rdatatype.CNAME
+            )
+            dname_info = self._applicable_dname(current, qclass)
+            if requested:
+                if dname_info is not None:
+                    dname, dname_owner, dname_target = dname_info
+                    synthesized = self._synthesize_dname_target(
+                        current, dname_owner, dname_target
+                    )
+                    if qtype == dns.rdatatype.CNAME:
+                        # The requested CNAME is the one synthesized from the
+                        # DNAME; it is only usable if it matches the rewrite.
+                        cname, cname_target = self._cname_target(requested, current)
+                        if self._normalize_chain_name(
+                            cname_target
+                        ) != self._normalize_chain_name(synthesized):
+                            raise ChainConflict(
+                                "The CNAME in the answer does not match the "
+                                "target synthesized from the DNAME; the answer "
+                                "is contradictory.",
+                                qname=current,
+                                owner=cname.name,
+                                target=cname_target,
+                            )
+                    else:
+                        raise ChainConflict(
+                            "The answer contains the requested type at a name "
+                            "which a DNAME in the same answer says should have "
+                            "been rewritten.",
+                            qname=current,
+                            owner=dname.name,
+                            target=dname_target,
                         )
-                        cnames.append(crrset)
-                        min_ttl = min(min_ttl, crrset.ttl)
-                        for rd in crrset:
-                            qname = rd.target
-                            break
-                        count += 1
-                        continue
-                    except KeyError:
-                        # Exit the chaining loop
-                        break
-                else:
-                    # Exit the chaining loop
-                    break
-        if count >= MAX_CHAIN:
-            raise ChainTooLong
+                if qtype != dns.rdatatype.CNAME:
+                    if cname_rrsets:
+                        raise ChainConflict(
+                            "The answer contains both a CNAME and the requested "
+                            "type at the same owner name; the terminal RRset is "
+                            "ambiguous.",
+                            qname=current,
+                            owner=requested[0].name,
+                        )
+                answer = self._merge_chain_rrsets(requested)
+                for rrset in requested:
+                    consumed.add(id(rrset))
+                min_ttl = min(min_ttl, answer.ttl)
+                links.append(
+                    ChainLink("answer", current, answer.name, None, None, answer)
+                )
+                break
+            if qtype == dns.rdatatype.CNAME:
+                # A CNAME query does not follow the CNAME it asks for.
+                break
+            if dname_info is not None:
+                dname, dname_owner, dname_target = dname_info
+                synthesized = self._synthesize_dname_target(
+                    current, dname_owner, dname_target
+                )
+                dnames.append(dname)
+                consumed.add(id(dname))
+                min_ttl = min(min_ttl, dname.ttl)
+                if cname_rrsets:
+                    # RFC 6672 section 3.4: the response also contains the
+                    # CNAME synthesized from the DNAME.  If it disagrees with
+                    # the rewrite, do not guess which one to follow.
+                    cname, cname_target = self._cname_target(cname_rrsets, current)
+                    if self._normalize_chain_name(
+                        cname_target
+                    ) != self._normalize_chain_name(synthesized):
+                        raise ChainConflict(
+                            "The CNAME in the answer does not match the target "
+                            "synthesized from the DNAME; the alias chain is "
+                            "contradictory.",
+                            qname=current,
+                            owner=cname.name,
+                            target=cname_target,
+                        )
+                    cnames.append(cname)
+                    consumed.update(id(rrset) for rrset in cname_rrsets)
+                    min_ttl = min(min_ttl, cname.ttl)
+                    links.append(
+                        ChainLink(
+                            "CNAME",
+                            current,
+                            cname.name,
+                            cname_target,
+                            cname_target,
+                            cname,
+                        )
+                    )
+                links.append(
+                    ChainLink(
+                        "DNAME",
+                        current,
+                        dname.name,
+                        dname_target,
+                        synthesized,
+                        dname,
+                        synthesized=True,
+                    )
+                )
+                target = synthesized
+            elif cname_rrsets:
+                cname, target = self._cname_target(cname_rrsets, current)
+                cnames.append(cname)
+                consumed.update(id(rrset) for rrset in cname_rrsets)
+                min_ttl = min(min_ttl, cname.ttl)
+                links.append(
+                    ChainLink("CNAME", current, cname.name, target, target, cname)
+                )
+            else:
+                # No alias and no terminal RRset.  This is a negative answer
+                # (or an incomplete chain); the SOA search below decides which.
+                break
+            normalized_target = self._normalize_chain_name(target)
+            if normalized_target in visited:
+                raise ChainLoop(target, path)
+            visited.add(normalized_target)
+            path.append(normalized_target)
+            current = target
+            count += 1
         if self.rcode() == dns.rcode.NXDOMAIN and answer is not None:
             raise AnswerForNXDOMAIN
+        negative_evidence = self.rcode() == dns.rcode.NXDOMAIN
         if answer is None:
             # Further minimize the TTL with NCACHE.
-            auname = qname
+            auname = self._normalize_chain_name(current)
             while True:
                 # Look for an SOA RR whose owner name is a superdomain
                 # of qname.
                 try:
-                    srrset = self.find_rrset(
-                        self.authority, auname, question.rdclass, dns.rdatatype.SOA
+                    soa_rrsets = self._chain_rrsets(
+                        self.authority,
+                        auname,
+                        qclass,
+                        dns.rdatatype.SOA,
                     )
+                    if not soa_rrsets:
+                        raise KeyError
+                    srrset = self._merge_chain_rrsets(soa_rrsets)
                     srdata = cast(dns.rdtypes.ANY.SOA.SOA, srrset[0])
                     min_ttl = min(min_ttl, srrset.ttl, srdata.minimum)
+                    negative_evidence = True
                     break
                 except KeyError:
                     try:
@@ -1187,14 +1618,54 @@ class QueryMessage(Message):
                         # default negative caching TTL.
                         min_ttl = min(min_ttl, NEGATIVE_TTL_WITHOUT_SOA)
                         break
-        return ChainingResult(qname, answer, min_ttl, cnames)
+            if not negative_evidence and (links or self.answer):
+                if links:
+                    reason = (
+                        f"No {dns.rdatatype.to_text(qtype)} RRset and no CNAME "
+                        f"or DNAME with owner {current.to_text()} was found in "
+                        "the answer, and there is no denial-of-existence "
+                        "evidence; the chain has no terminal answer."
+                    )
+                else:
+                    reason = (
+                        f"The answer contains no RRset with owner "
+                        f"{current.to_text()} and no alias from it, so it "
+                        "supplies no relationship to the question; there is "
+                        "also no denial-of-existence evidence."
+                    )
+                failure = ChainIncomplete(reason, qname=current)
+        used = consumed
+        unused = [rrset for rrset in self.answer if id(rrset) not in used]
+        unused_additional = [
+            rrset for rrset in self.additional if id(rrset) not in used
+        ]
+        return ChainingResult(
+            current,
+            answer,
+            min_ttl,
+            cnames,
+            dnames,
+            links,
+            unused,
+            unused_additional,
+            failure,
+        )
 
     def canonical_name(self) -> dns.name.Name:
         """Return the canonical name of the first name in the question
         section.
 
+        The canonical name is only meaningful if the chain was interpreted
+        without missing or contradictory evidence; use
+        :py:meth:`resolve_chaining` to inspect the result's ``failure``
+        attribute.
+
         :raises dns.message.NotQueryResponse: If the message is not a response.
-        :raises dns.message.ChainTooLong: If the CNAME chain is too long.
+        :raises dns.message.ChainTruncated: If the response has the TC flag set.
+        :raises dns.message.ChainConflict: If the response contains
+            contradictory alias evidence.
+        :raises dns.message.ChainLoop: If the alias chain loops.
+        :raises dns.message.ChainTooLong: If the alias chain is too long.
         :raises dns.message.AnswerForNXDOMAIN: If the rcode is NXDOMAIN but
             an answer was found.
         :raises dns.exception.FormError: If the question count is not 1.

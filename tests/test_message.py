@@ -1158,5 +1158,450 @@ www.dnspython.org. 300 IN A 1.2.3.4
         self.assertEqual(r.extended_errors(), options)
 
 
+def _chain_message(text: str, **kwargs) -> dns.message.QueryMessage:
+    return dns.message.from_text(text, **kwargs)
+
+
+class ChainingEvidenceTestCase(unittest.TestCase):
+    """Offline regression tests for interpreting alias chains.
+
+    The expected values are about which relationships the response actually
+    supplies.  Decoy records must be reported as unused rather than selected.
+    """
+
+    def test_valid_chain_and_decoys(self):
+        # A legitimate chain plus an otherwise plausible address in the
+        # additional section and a second address type at the canonical name.
+        r = _chain_message("""id 1
+flags QR AA AD
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 200 IN A 192.0.2.1
+www.example.net. 300 IN A 203.0.113.67
+;ADDITIONAL
+www.example. 300 IN A 203.0.113.66
+web.example. 300 IN A 203.0.113.68
+web.example. 300 IN AAAA 2001:db8::66
+""")
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertIsNone(result.failure)
+        self.assertEqual(result.canonical_name, dns.name.from_text("web.example."))
+        self.assertEqual(result.answer.name, dns.name.from_text("web.example."))
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.1"])
+        self.assertEqual(result.minimum_ttl, 200)
+        self.assertEqual(
+            [(link.kind, link.owner, link.target) for link in result.links],
+            [
+                (
+                    "CNAME",
+                    dns.name.from_text("www.example."),
+                    dns.name.from_text("web.example."),
+                ),
+                (
+                    "answer",
+                    dns.name.from_text("web.example."),
+                    None,
+                ),
+            ],
+        )
+        self.assertEqual(len(result.cnames), 1)
+        self.assertEqual(
+            [(rrset.name, rrset.rdtype) for rrset in result.unused],
+            [(dns.name.from_text("www.example.net."), dns.rdatatype.A)],
+        )
+        self.assertEqual(
+            {(rrset.name, rrset.rdtype) for rrset in result.unused_additional},
+            {
+                (dns.name.from_text("www.example."), dns.rdatatype.A),
+                (dns.name.from_text("web.example."), dns.rdatatype.A),
+                (dns.name.from_text("web.example."), dns.rdatatype.AAAA),
+            },
+        )
+        # The AD bit does not affect what the response proves.
+        with_ad = r.resolve_chaining()
+        r.flags &= ~dns.flags.AD
+        without_ad = r.resolve_chaining()
+        self.assertEqual(with_ad.canonical_name, without_ad.canonical_name)
+        self.assertEqual(with_ad.answer, without_ad.answer)
+        self.assertEqual(with_ad.failure, without_ad.failure)
+
+    def test_only_additional_address_is_not_an_answer(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ADDITIONAL
+www.example. 300 IN A 203.0.113.66
+""")
+        result = r.resolve_chaining()
+        self.assertIsNone(result.answer)
+        self.assertEqual(result.canonical_name, dns.name.from_text("www.example."))
+        self.assertTrue(result.complete)
+        self.assertEqual(len(result.unused_additional), 1)
+        self.assertEqual(result.unused_additional[0].rdtype, dns.rdatatype.A)
+
+    def test_cname_loop_is_reported_not_followed_forever(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME a.example.
+a.example. 300 IN CNAME www.example.
+""")
+        with self.assertRaises(dns.message.ChainLoop) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+        self.assertEqual(
+            cm.exception.path,
+            [
+                dns.name.from_text("www.example."),
+                dns.name.from_text("a.example."),
+            ],
+        )
+
+    def test_self_cname_is_a_loop(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME www.example.
+""")
+        with self.assertRaises(dns.message.ChainLoop):
+            r.resolve_chaining()
+
+    def test_truncated_response_yields_no_seemingly_final_answer(self):
+        r = _chain_message("""id 1
+flags QR TC
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 200 IN A 192.0.2.1
+""")
+        with self.assertRaises(dns.message.ChainTruncated) as cm:
+            r.resolve_chaining()
+        self.assertIs(cm.exception.response, r)
+        self.assertIsInstance(cm.exception, dns.message.Truncated)
+        self.assertIsInstance(cm.exception, dns.message.ChainIncomplete)
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+        self.assertIn("TC flag", str(cm.exception))
+
+    def test_dangling_chain_reports_missing_evidence(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+""")
+        result = r.resolve_chaining()
+        self.assertIsNone(result.answer)
+        self.assertFalse(result.complete)
+        self.assertIsInstance(result.failure, dns.message.ChainIncomplete)
+        self.assertEqual(result.failure.qname, dns.name.from_text("web.example."))
+        self.assertIn("web.example.", str(result.failure))
+        self.assertEqual(result.canonical_name, dns.name.from_text("web.example."))
+        self.assertEqual([link.kind for link in result.links], ["CNAME"])
+
+    def test_cross_type_answer_is_not_used(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 300 IN AAAA 2001:db8::1
+""")
+        result = r.resolve_chaining()
+        self.assertIsNone(result.answer)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.canonical_name, dns.name.from_text("web.example."))
+        self.assertEqual(
+            [rrset.rdtype for rrset in result.unused], [dns.rdatatype.AAAA]
+        )
+        self.assertEqual(
+            [rrset.name for rrset in result.unused],
+            [dns.name.from_text("web.example.")],
+        )
+
+    def test_cname_and_requested_type_at_same_owner_conflict(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN A 192.0.2.1
+www.example. 300 IN CNAME web.example.
+web.example. 300 IN A 192.0.2.2
+""")
+        with self.assertRaises(dns.message.ChainConflict) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+
+    def test_multiple_cname_targets_without_one_rr_per_rrset(self):
+        # CNAME is a singleton, so the text parser keeps only the last record
+        # unless one_rr_per_rrset is used.  The surviving record alone is
+        # valid evidence, and the address for the discarded target is not
+        # selected by accident.
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME a.example.
+www.example. 300 IN CNAME b.example.
+a.example. 300 IN A 192.0.2.1
+b.example. 300 IN A 192.0.2.2
+""")
+        result = r.resolve_chaining()
+        self.assertEqual(result.canonical_name, dns.name.from_text("b.example."))
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.2"])
+        self.assertEqual(
+            [(rrset.name, rrset.rdtype) for rrset in result.unused],
+            [(dns.name.from_text("a.example."), dns.rdatatype.A)],
+        )
+
+    def test_multiple_cname_targets_with_one_rr_per_rrset(self):
+        r = _chain_message(
+            """id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME a.example.
+www.example. 300 IN CNAME b.example.
+a.example. 300 IN A 192.0.2.1
+b.example. 300 IN A 192.0.2.2
+""",
+            one_rr_per_rrset=True,
+        )
+        with self.assertRaises(dns.message.ChainConflict) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+        self.assertEqual(cm.exception.owner, dns.name.from_text("www.example."))
+
+    def test_dname_synthesis_and_owner(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+www.example. 300 IN CNAME www.example.net.
+www.example.net. 200 IN A 192.0.2.1
+""")
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertEqual(result.canonical_name, dns.name.from_text("www.example.net."))
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.1"])
+        self.assertEqual(len(result.dnames), 1)
+        dname_link = [link for link in result.links if link.kind == "DNAME"][0]
+        self.assertEqual(dname_link.source, dns.name.from_text("www.example."))
+        self.assertEqual(dname_link.owner, dns.name.from_text("example."))
+        self.assertEqual(dname_link.target, dns.name.from_text("example.net."))
+        self.assertEqual(dname_link.destination, dns.name.from_text("www.example.net."))
+        cname_link = [link for link in result.links if link.kind == "CNAME"][0]
+        self.assertEqual(cname_link.owner, dns.name.from_text("www.example."))
+        self.assertEqual(cname_link.target, dns.name.from_text("www.example.net."))
+
+    def test_dname_synthesis_without_cname(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+www.example.net. 200 IN A 192.0.2.1
+""")
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertEqual(result.canonical_name, dns.name.from_text("www.example.net."))
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.1"])
+        self.assertEqual(len(result.cnames), 0)
+        self.assertEqual(
+            [(link.kind, link.synthesized) for link in result.links],
+            [("DNAME", True), ("answer", False)],
+        )
+
+    def test_dname_with_mismatched_cname_conflicts(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+www.example. 300 IN CNAME evil.example.
+evil.example. 200 IN A 192.0.2.66
+""")
+        with self.assertRaises(dns.message.ChainConflict) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+        self.assertEqual(cm.exception.target, dns.name.from_text("evil.example."))
+
+    def test_dname_not_at_rewritten_name(self):
+        # The answer data is at the original name; it must not become the
+        # answer just because the response also contains a DNAME.
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+www.example. 300 IN A 192.0.2.66
+""")
+        with self.assertRaises(dns.message.ChainConflict) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+
+    def test_chained_dname_synthesis(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+example.net. 300 IN DNAME example.org.
+www.example.org. 200 IN A 192.0.2.1
+""")
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertEqual(result.canonical_name, dns.name.from_text("www.example.org."))
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.1"])
+        self.assertEqual(len(result.dnames), 2)
+        self.assertEqual(
+            [
+                (link.source.derelativize(dns.name.root), link.destination)
+                for link in result.links
+                if link.kind == "DNAME"
+            ],
+            [
+                (
+                    dns.name.from_text("www.example."),
+                    dns.name.from_text("www.example.net."),
+                ),
+                (
+                    dns.name.from_text("www.example.net."),
+                    dns.name.from_text("www.example.org."),
+                ),
+            ],
+        )
+
+    def test_dname_does_not_rewrite_its_own_owner(self):
+        # RFC 6672: a DNAME at a name does not redirect that name itself.
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+example. IN A
+;ANSWER
+example. 300 IN DNAME example.net.
+example.net. 200 IN A 192.0.2.9
+""")
+        result = r.resolve_chaining()
+        self.assertIsNone(result.answer)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.canonical_name, dns.name.from_text("example."))
+        self.assertEqual(result.links, [])
+        # The DNAME at the owner is unrelated to the A query and is retained
+        # as unused evidence rather than being treated as an answer.
+        self.assertEqual(
+            [(rrset.name, rrset.rdtype) for rrset in result.unused],
+            [
+                (dns.name.from_text("example."), dns.rdatatype.DNAME),
+                (dns.name.from_text("example.net."), dns.rdatatype.A),
+            ],
+        )
+
+    def test_cname_query_below_dname_must_match_synthesis(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN CNAME
+;ANSWER
+example. 300 IN DNAME example.net.
+www.example. 300 IN CNAME evil.example.
+""")
+        with self.assertRaises(dns.message.ChainConflict) as cm:
+            r.resolve_chaining()
+        self.assertEqual(cm.exception.qname, dns.name.from_text("www.example."))
+
+    def test_relative_names_use_the_message_origin(self):
+        origin = dns.name.from_text("example.")
+        r = _chain_message(
+            """id 1
+flags QR AA
+;QUESTION
+www IN A
+;ANSWER
+www 300 IN CNAME web
+web 200 IN A 192.0.2.1
+;ADDITIONAL
+www 300 IN A 203.0.113.66
+""",
+            origin=origin,
+        )
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            result.canonical_name.derelativize(origin),
+            dns.name.from_text("web.example."),
+        )
+        self.assertEqual(
+            result.answer.name.derelativize(origin), dns.name.from_text("web.example.")
+        )
+        self.assertEqual([rd.address for rd in result.answer], ["192.0.2.1"])
+        self.assertEqual(len(result.unused_additional), 1)
+
+    def test_relative_names_do_not_match_unrelated_absolute_data(self):
+        origin = dns.name.from_text("example.")
+        r = _chain_message(
+            """id 1
+flags QR AA
+;QUESTION
+www IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 200 IN A 192.0.2.1
+""",
+            origin=origin,
+        )
+        result = r.resolve_chaining()
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            result.answer.name.derelativize(origin), dns.name.from_text("web.example.")
+        )
+
+    def test_cname_query_does_not_follow(self):
+        r = _chain_message("""id 1
+flags QR
+;QUESTION
+www.example. IN CNAME
+;ANSWER
+www.example. 300 IN CNAME web.example.
+""")
+        result = r.resolve_chaining()
+        self.assertEqual(result.answer.name, dns.name.from_text("www.example."))
+        self.assertEqual(result.answer.rdtype, dns.rdatatype.CNAME)
+        self.assertEqual(result.canonical_name, dns.name.from_text("www.example."))
+        self.assertEqual([rrset.name for rrset in result.unused], [])
+
+    def test_nxdomain_with_answer_still_invalid(self):
+        r = _chain_message("""id 1
+flags QR
+rcode NXDOMAIN
+;QUESTION
+www.example. IN A
+;ANSWER
+www.example. 300 IN CNAME web.example.
+web.example. 300 IN A 192.0.2.1
+""")
+        with self.assertRaises(dns.message.AnswerForNXDOMAIN):
+            r.resolve_chaining()
+
+
 if __name__ == "__main__":
     unittest.main()
