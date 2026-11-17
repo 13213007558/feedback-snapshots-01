@@ -102,7 +102,6 @@ Or install it yourself as:
     ########################
     # Server side example
     ########################
-
     # Generate a domain cookie
     cookie1 = HTTP::Cookie.new("uid", "u12345", domain: 'example.org',
                                                 for_domain: true,
@@ -119,6 +118,24 @@ Or install it yourself as:
 
     # Add it to the Set-Cookie response header
     header['Set-Cookie'] = cookie2.set_cookie_value
+
+
+## Snapshot ownership mode
+
+By default, a cookie jar stores and hands out the very cookie objects
+it is given, so mutating a cookie (or its domain/path, DomainName or
+origin URI object) after adding it changes what the jar stores and
+where the cookie is sent.  If you want the jar to take ownership of
+cookie contents instead, enable snapshot mode:
+
+    # Initialize a cookie jar in snapshot ownership mode
+    jar = HTTP::CookieJar.new(snapshot: true)
+
+In this mode each cookie is deeply copied when added, and enumeration
+methods like #cookies and #each hand out detached copies, so the only
+ways to change the contents of the jar are explicit #add (replace) and
+#delete, both of which work by the cookie identity (name, domain and
+path).
 
 
 ## Incompatibilities with Mechanize::Cookie/CookieJar

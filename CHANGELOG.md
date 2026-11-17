@@ -1,3 +1,16 @@
+## 1.2.0 (unreleased)
+
+- Add an optional snapshot ownership mode to HTTP::CookieJar via the
+  `:snapshot` option.  In this mode a cookie is deeply copied (see
+  HTTP::Cookie#snapshot) when added to the jar, and enumeration hands
+  out detached copies, so that mutating a cookie object, its
+  DomainName object or its origin URI object from outside can no
+  longer desynchronize the jar's storage keys from the actual sending
+  scope.  Replace and delete still work by the snapshot identity
+  (name, domain and path).  The default shared-object behavior is
+  unchanged.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

@@ -1002,4 +1002,190 @@ module TestHTTPCookieJar
     STDERR.puts 'sqlite3 missing?'
     false
   end
+
+  # Tests for the optional snapshot ownership mode, along with a
+  # record of how the legacy (default) shared-object mode behaves
+  # under the same mutations.  The scenarios interleave mutations of
+  # caller-held cookie objects and of enumerated cookie objects
+  # between two different sites, and observe the resulting Cookie
+  # header values.
+  class TestSnapshotOwnership < Test::Unit::TestCase
+    SITE_A = 'http://www.alpha-example.com/'
+    SITE_B = 'http://www.beta-example.com/'
+
+    def setup
+      @mutable_jar  = HTTP::CookieJar.new
+      @snapshot_jar = HTTP::CookieJar.new(:snapshot => true)
+    end
+
+    def make_cookie(name, value, site)
+      HTTP::Cookie.new(name, value,
+                       :domain => URI(site).host,
+                       :path   => '/',
+                       :origin => site)
+    end
+
+    def cookie_header(jar, url)
+      HTTP::Cookie.cookie_value(jar.cookies(url))
+    end
+
+    def test_snapshot_option_is_passed_to_the_store
+      assert_equal false, @mutable_jar.store.snapshot?
+      assert_equal true,  @snapshot_jar.store.snapshot?
+    end
+
+    # Records the legacy behavior: a cookie object added to the jar
+    # stays shared with the caller, so mutating its domain or path
+    # afterwards silently changes where the jar sends it.
+    def test_legacy_add_shares_the_caller_object
+      jar = @mutable_jar
+      cookie_a = make_cookie('alpha', 'A1', SITE_A)
+      jar.add(cookie_a)
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal '',         cookie_header(jar, SITE_B)
+
+      cookie_a.domain = URI(SITE_B).host
+
+      assert_equal '',         cookie_header(jar, SITE_A)
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_B)
+    end
+
+    # Records the legacy behavior: objects handed out by enumeration
+    # are the stored objects themselves.
+    def test_legacy_enumeration_yields_the_stored_objects
+      jar = @mutable_jar
+      jar.add(make_cookie('alpha', 'A1', SITE_A))
+      jar.add(make_cookie('beta', 'B1', SITE_B))
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B1',  cookie_header(jar, SITE_B)
+
+      # Interleave a mutation of a caller-held object with a mutation
+      # of an enumerated object.
+      jar.each(SITE_A).first.path = '/admin'
+      stored_b = jar.cookies(SITE_B).first
+      stored_b.domain = URI(SITE_A).host
+      stored_b.value = 'FORGED'
+
+      assert_equal 'beta=FORGED', cookie_header(jar, SITE_A)
+      assert_equal 'alpha=A1; beta=FORGED', cookie_header(jar, SITE_A + 'admin')
+      assert_equal '',            cookie_header(jar, SITE_B)
+    end
+
+    # Records the legacy behavior: the DomainName and origin URI
+    # objects reachable from an added cookie are shared as well, so
+    # mutating them from outside bypasses even the attribute setters.
+    def test_legacy_domain_name_and_origin_objects_are_shared
+      jar = @mutable_jar
+      cookie = make_cookie('alpha', 'A1', SITE_A)
+      jar.add(cookie)
+
+      cookie.domain_name.hostname.replace(URI(SITE_B).host)
+      cookie.origin.host = URI(SITE_B).host
+
+      assert_equal '',         cookie_header(jar, SITE_A)
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_B)
+      assert_equal SITE_B,     jar.cookies(SITE_B).first.origin.to_s
+    end
+
+    def test_snapshot_add_detaches_the_caller_object
+      jar = @snapshot_jar
+      cookie_a = make_cookie('alpha', 'A1', SITE_A)
+      cookie_b = make_cookie('beta', 'B1', SITE_B)
+      jar.add(cookie_a)
+      jar.add(cookie_b)
+
+      cookie_a.domain = URI(SITE_B).host
+      cookie_b.path = '/admin'
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B1',  cookie_header(jar, SITE_B)
+    end
+
+    def test_snapshot_enumeration_yields_detached_copies
+      jar = @snapshot_jar
+      jar.add(make_cookie('alpha', 'A1', SITE_A))
+      jar.add(make_cookie('beta', 'B1', SITE_B))
+
+      yielded_a = jar.cookies(SITE_A).first
+      yielded_a.domain = URI(SITE_B).host
+      yielded_a.value = 'FORGED'
+      yielded_b = jar.cookies(SITE_B).first
+      yielded_b.path = '/admin'
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B1',  cookie_header(jar, SITE_B)
+
+      # Each enumeration hands out a fresh copy.
+      assert_not_same jar.cookies(SITE_A).first, jar.cookies(SITE_A).first
+    end
+
+    def test_snapshot_domain_name_and_origin_objects_are_detached
+      jar = @snapshot_jar
+      cookie = make_cookie('alpha', 'A1', SITE_A)
+      jar.add(cookie)
+
+      cookie.domain_name.hostname.replace(URI(SITE_B).host)
+      cookie.origin.host = URI(SITE_B).host
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal '',         cookie_header(jar, SITE_B)
+
+      stored = jar.cookies(SITE_A).first
+      assert_equal 'www.alpha-example.com', stored.domain
+      assert_equal SITE_A,                  stored.origin.to_s
+    end
+
+    # Interleaves mutations of caller-held objects and enumerated
+    # objects between two sites; in snapshot mode only an explicit
+    # re-add (replace) or delete may change what the jar sends.
+    def test_snapshot_interleaved_mutations_across_two_sites
+      jar = @snapshot_jar
+      cookie_a = make_cookie('alpha', 'A1', SITE_A)
+      cookie_b = make_cookie('beta', 'B1', SITE_B)
+      jar.add(cookie_a)
+      jar.add(cookie_b)
+
+      # Round 1: mutate the caller-held originals.
+      cookie_a.value = 'A-FORGED'
+      cookie_b.domain = URI(SITE_A).host
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B1',  cookie_header(jar, SITE_B)
+
+      # Round 2: mutate objects obtained by enumeration.
+      jar.cookies(SITE_A).first.domain = URI(SITE_B).host
+      jar.cookies(SITE_B).first.value = 'B-FORGED'
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B1',  cookie_header(jar, SITE_B)
+
+      # An explicit re-add with the same identity replaces the
+      # snapshot.
+      jar.add(make_cookie('beta', 'B2', SITE_B))
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal 'beta=B2',  cookie_header(jar, SITE_B)
+
+      # A delete by snapshot identity works with a different object.
+      jar.delete(HTTP::Cookie.new('beta', 'whatever',
+                                  :domain => URI(SITE_B).host,
+                                  :path   => '/'))
+
+      assert_equal 'alpha=A1', cookie_header(jar, SITE_A)
+      assert_equal '',         cookie_header(jar, SITE_B)
+    end
+
+    def test_snapshot_replace_and_delete_by_identity
+      jar = @snapshot_jar
+      jar.add(make_cookie('alpha', 'A1', SITE_A))
+
+      jar.add(make_cookie('alpha', 'A2', SITE_A))
+      assert_equal 'alpha=A2', cookie_header(jar, SITE_A)
+
+      jar.delete(make_cookie('alpha', 'ignored', SITE_A))
+      assert_equal '', cookie_header(jar, SITE_A)
+    end
+  end
 end

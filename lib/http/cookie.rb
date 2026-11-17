@@ -543,6 +543,20 @@ class HTTP::Cookie
     self
   end
 
+  # Returns a snapshot copy of this cookie that shares no mutable
+  # state with the original.  Not only the cookie object itself but
+  # also the objects behind its security relevant attributes, such as
+  # the DomainName object and the origin URI object, are deeply
+  # copied, so that neither the copy nor the original can affect the
+  # other no matter which of them is mutated afterwards.
+  #
+  # This is used by cookie stores to implement the `:snapshot`
+  # option.  See HTTP::CookieJar::AbstractStore.
+  def snapshot
+    copy = dup
+    copy.instance_eval { deep_detach! }
+  end
+
   # The time this cookie was created at.  This value is used as a base
   # date for interpreting the Max-Age attribute value.  See #expires.
   attr_accessor :created_at
@@ -692,4 +706,30 @@ class HTTP::Cookie
     }
     self.expires = expires if self.max_age.nil?
   end
+
+  # Replaces every mutable object referenced by this cookie with a
+  # detached copy.  Called on a dup of a cookie by #snapshot.
+  def deep_detach!
+    @name   = @name.dup   if @name
+    @value  = @value.dup  if @value
+    @domain = @domain.dup if @domain
+    @path   = @path.dup   if @path
+    @domain_name = deep_copy_object(@domain_name) if @domain_name
+    @origin      = deep_copy_object(@origin)      if @origin
+    self
+  end
+  private :deep_detach!
+
+  # Deep-copies an object along with the string objects it directly
+  # holds, like a DomainName or a URI object whose component strings
+  # are shared with the original by a mere #dup.
+  def deep_copy_object(object)
+    object.dup.tap { |copy|
+      copy.instance_variables.each { |ivar|
+        value = copy.instance_variable_get(ivar)
+        copy.instance_variable_set(ivar, value.dup) if String === value
+      }
+    }
+  end
+  private :deep_copy_object
 end

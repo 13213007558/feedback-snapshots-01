@@ -51,6 +51,7 @@ class HTTP::CookieJar
     end
 
     def add(cookie)
+      cookie = cookie.snapshot if @snapshot
       path_cookies = ((@jar[cookie.domain] ||= {})[cookie.path] ||= {})
       path_cookies[cookie.name] = cookie
       cleanup if (@gc_index += 1) >= @gc_threshold
@@ -76,7 +77,7 @@ class HTTP::CookieJar
               else
                 if cookie.valid_for_uri?(uri)
                   cookie.accessed_at = now
-                  yield cookie
+                  yield @snapshot ? cookie.snapshot : cookie
                 end
                 false
               end
@@ -91,7 +92,7 @@ class HTTP::CookieJar
                 if cookie.expired?(now)
                   true
                 else
-                  yield cookie
+                  yield @snapshot ? cookie.snapshot : cookie
                   false
                 end
               }

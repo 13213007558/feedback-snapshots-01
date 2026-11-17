@@ -105,7 +105,7 @@ class HTTP::CookieJar
 
       @filename = options[:filename] or raise ArgumentError, ':filename option is missing'
 
-      @sjar = HTTP::CookieJar::HashStore.new
+      @sjar = HTTP::CookieJar::HashStore.new(:snapshot => @snapshot)
 
       @db = Database.new(@filename)
 

@@ -30,15 +30,35 @@ class HTTP::CookieJar::AbstractStore
   #   new(**options)
   #
   # Called by the constructor of each subclass using super().
+  #
+  # Available option keywords common to all store classes are as
+  # below:
+  #
+  # :snapshot
+  # : If true, the store takes a snapshot (see HTTP::Cookie#snapshot)
+  # of each cookie on #add, and hands out a snapshot of each stored
+  # cookie on #each.  In this mode, mutating a cookie object after it
+  # is added, or mutating a cookie object obtained by enumeration,
+  # never affects what is stored; only an explicit #add (replace) or
+  # #delete changes the contents of the store.  If false (default),
+  # stored cookie objects are shared with the caller for backward
+  # compatibility.
   def initialize(options = nil)
     super() # MonitorMixin
     options ||= {}
     @logger = options[:logger]
+    @snapshot = options[:snapshot] ? true : false
     # Initializes each instance variable of the same name as option
     # keyword.
     default_options.each_pair { |key, default|
       instance_variable_set("@#{key}", options.fetch(key, default))
     }
+  end
+
+  # Tests if this store is in snapshot mode.  See the `:snapshot`
+  # option of ::new.
+  def snapshot?
+    @snapshot
   end
 
   # This is an abstract method that each subclass must override.

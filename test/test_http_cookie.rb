@@ -1169,6 +1169,56 @@ class TestHTTPCookie < Test::Unit::TestCase
     assert_equal true,  HTTP::Cookie.path_match?('/admin', '/admin/index')
   end
 
+  def test_snapshot
+    name = +'session'
+    cookie = HTTP::Cookie.new(name, 'value',
+                              :domain => 'www.alpha-example.com',
+                              :path => '/',
+                              :origin => 'http://www.alpha-example.com/')
+    snapshot = cookie.snapshot
+
+    assert_not_same cookie, snapshot
+    assert_equal cookie, snapshot
+
+    # Mutating the original in every possible way must not leak into
+    # the snapshot, not even through the DomainName or origin URI
+    # objects it references.
+    name << 'X'
+    cookie.value = 'forged'
+    cookie.domain = 'www.beta-example.com'
+    cookie.path = '/admin'
+    cookie.origin.host << 'X'
+
+    assert_equal 'session', snapshot.name
+    assert_equal 'value', snapshot.value
+    assert_equal 'www.alpha-example.com', snapshot.domain
+    assert_equal '/', snapshot.path
+    assert_equal 'http://www.alpha-example.com/', snapshot.origin.to_s
+  end
+
+  def test_snapshot_detaches_domain_name_and_origin_objects
+    cookie = HTTP::Cookie.new('session', 'value',
+                              :domain => 'www.alpha-example.com',
+                              :path => '/',
+                              :origin => 'http://www.alpha-example.com/')
+    snapshot = cookie.snapshot
+
+    # A mere #dup would share the component strings of these objects.
+    cookie.domain_name.hostname.replace('www.beta-example.com')
+    cookie.origin.host = 'www.beta-example.com'
+
+    assert_equal 'www.alpha-example.com', snapshot.domain
+    assert_equal 'www.alpha-example.com', snapshot.domain_name.hostname
+    assert_equal 'http://www.alpha-example.com/', snapshot.origin.to_s
+
+    # ...and vice versa.
+    snapshot.domain_name.hostname.replace('www.gamma-example.com')
+    snapshot.origin.host = 'www.gamma-example.com'
+
+    assert_equal 'www.beta-example.com', cookie.domain
+    assert_equal 'http://www.beta-example.com/', cookie.origin.to_s
+  end
+
   def test_to_h
     now = Time.now
 

@@ -49,6 +49,26 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # An option keyword common to all store classes is as below:
+  #
+  # :snapshot
+  # : If true, the jar takes ownership of cookie contents by snapshot.
+  # (default: `false`)
+  #
+  # In snapshot mode, a cookie is deeply copied (see
+  # HTTP::Cookie#snapshot) when it is added, so that mutating the
+  # original object afterwards, including its domain, path, DomainName
+  # or origin URI object, never changes what is stored or where the
+  # stored cookie is sent.  Cookies returned by #each, #cookies and
+  # the other enumeration methods are detached snapshots as well, so
+  # the only ways to change the contents of the jar are explicit #add
+  # (replace) and #delete, both of which work by the snapshot identity
+  # (name, domain and path) of a given cookie.
+  #
+  # In the default mode, on the other hand, cookie objects are stored
+  # and yielded as they are, and mutating them from outside may affect
+  # the jar in a store dependent manner.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
@@ -135,6 +155,11 @@ class HTTP::CookieJar
   #
   # If (and only if) the `uri` option is given, last access time of
   # each cookie is updated to the current time.
+  #
+  # The mutability of yielded cookie objects depends on the
+  # `:snapshot` option (see ::new): in snapshot mode they are detached
+  # copies and mutating them does not affect the jar, whereas in the
+  # default mode they may be the very objects stored in the jar.
   def each(uri = nil, &block) # :yield: cookie
     block_given? or return enum_for(__method__, uri)
 
