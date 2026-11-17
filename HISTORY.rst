@@ -2,6 +2,12 @@
 History
 =======
 
+Unreleased
+----------
+
+* FEATURE: dnfile.identity, read-only metadata identity comparison that
+  separates confirmed mappings, identity changes, and ambiguous candidates.
+
 0.18.0 (2026)
 -------------
 

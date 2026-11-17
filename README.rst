@@ -93,6 +93,49 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+
+
+Metadata identity comparison
+----------------------------
+
+Metadata rows can be renumbered without changing a program's meaning.  Comparing
+raw metadata tokens therefore reports many false changes.  The ``dnfile.identity``
+module compares parsed identity instead:
+
+* a type is identified by its namespace, full nesting chain, and generic
+  parameters;
+* a method is identified by its owning type, name, and structured signature, so
+  same-name overloads never merge;
+* a signature's embedded ``TypeDefOrRef`` tokens are resolved to the referenced
+  type's identity before comparison.
+
+Only a unique one-to-one semantic match is reported as confirmed.  Rows that
+have more than one plausible partner are listed separately as ambiguous
+candidates.  Every result keeps the original token, table, row number, file
+offset, and SHA-256 of both inputs.  Inputs are parsed read-only; no assembly is
+loaded or executed.
+
+.. code-block:: python
+
+    import dnfile.identity
+
+    result = dnfile.identity.compare("original.exe", "modified.exe")
+    print(result.render())          # investigator-facing text
+    payload = result.to_dict()      # the same data as JSON-serializable dicts
+
+    for mapping in result.method_changes:
+        print(mapping.left.label(), "->", mapping.right.label())
+        print(mapping.left.provenance())
+
+A small command-line wrapper is included:
+
+.. code-block:: shell
+
+    python examples/dnidentity.py original.exe modified.exe
+    python examples/dnidentity.py original.exe modified.exe --json
+
+The command exits non-zero when the comparison is not clean.
+
 TODO
 ----
 
