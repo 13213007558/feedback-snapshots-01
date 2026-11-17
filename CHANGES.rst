@@ -1,6 +1,14 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- feat: bound the IDLE push queue (``idle_queue_maxsize``, 100 by default): coalesce
+  EXISTS/RECENT state hints under pressure, deliver a ``RESYNC_REQUIRED`` marker when
+  notifications had to be dropped, and tag pushes with the idle subscription generation
+  so stale content never leaks into a new subscription
+
 V2.0.3
 ------
 

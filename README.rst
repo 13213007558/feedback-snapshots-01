@@ -62,6 +62,8 @@ IDLE command
 
 The RFC2177_ is implemented, to be able to wait for new mail messages without using CPU. The responses are pushed in an async queue, and it is possible to read them in real time. To leave the IDLE mode, it is necessary to send a "DONE" command to the server.
 
+The push queue is bounded (``idle_queue_maxsize`` constructor parameter, 100 by default; 0 means unbounded) so a slow consumer cannot exhaust memory. When the queue is full, consecutive EXISTS/RECENT state hints are coalesced (only the newest values matter); notifications that carry message sequence numbers (EXPUNGE, FETCH, ...) are never merged. If such a notification has to be dropped, the queue is flagged as overflowed and a ``RESYNC_REQUIRED`` marker is delivered: the consumer must then resynchronize the mailbox (for example with a NOOP, STATUS or FETCH) instead of trusting the incomplete notification stream. Each IDLE subscription has a generation: notifications, stop signals and late pushes from a previous subscription are dropped and never leak into a new one.
+
 .. code-block:: python
 
     async def wait_for_new_message(host, user, password):

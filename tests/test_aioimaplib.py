@@ -24,8 +24,8 @@ from unittest.mock import call, MagicMock, patch
 import pytest
 from pytz import utc
 
-from aioimaplib import aioimaplib, extract_exists, STOP_WAIT_SERVER_PUSH, FetchCommand, IdleCommand
-from aioimaplib.aioimaplib import Commands, IMAP4ClientProtocol, Command, Abort
+from aioimaplib import aioimaplib, extract_exists, STOP_WAIT_SERVER_PUSH, RESYNC_REQUIRED, FetchCommand, IdleCommand
+from aioimaplib.aioimaplib import Commands, IMAP4ClientProtocol, Command, Abort, IdlePushQueue
 from aioimaplib import imap_testing_server
 from aioimaplib.imap_testing_server import Mail
 from tests.server_fixture import with_ssl_server, with_ssl, with_server, login_user_async, create_server
@@ -222,6 +222,140 @@ class TestDataReceived(unittest.TestCase):
 
         assert self.imap_protocol._idle_event.is_set()
         assert [b'1 EXISTS', b'1 RECENT'] == queue.get_nowait()
+
+
+class TestIdlePushQueue(unittest.TestCase):
+    def test_capacity_is_bounded_and_overflow_is_signalled(self):
+        queue = IdlePushQueue(maxsize=2)
+
+        assert queue.put([b'1 EXISTS'])
+        assert queue.put([b'2 FETCH (FLAGS (\\Seen))'])
+        assert not queue.put([b'3 EXPUNGE'])
+
+        assert queue.overflowed
+        assert 3 == queue.qsize()  # 2 kept notifications + RESYNC_REQUIRED marker
+        assert [b'1 EXISTS'] == queue.get_nowait()
+        assert [b'2 FETCH (FLAGS (\\Seen))'] == queue.get_nowait()
+        assert RESYNC_REQUIRED == queue.get_nowait()
+        assert queue.empty()
+
+    def test_unbounded_queue_when_maxsize_is_zero(self):
+        queue = IdlePushQueue(maxsize=0)
+        for index in range(1000):
+            assert queue.put([b'%d EXPUNGE' % index])
+        assert not queue.overflowed
+        assert 1000 == queue.qsize()
+
+    def test_state_hints_are_coalesced_when_full(self):
+        queue = IdlePushQueue(maxsize=1)
+
+        assert queue.put([b'1 EXISTS', b'1 RECENT'])
+        assert queue.put([b'2 EXISTS', b'2 RECENT'])
+
+        assert not queue.overflowed
+        assert 1 == queue.qsize()
+        assert [b'2 EXISTS', b'2 RECENT'] == queue.get_nowait()
+
+    def test_state_hints_are_not_coalesced_into_attributed_notifications(self):
+        queue = IdlePushQueue(maxsize=1)
+
+        assert queue.put([b'2 EXPUNGE'])
+        assert not queue.put([b'3 EXISTS'])
+
+        assert queue.overflowed
+        assert [b'2 EXPUNGE'] == queue.get_nowait()
+        assert RESYNC_REQUIRED == queue.get_nowait()
+
+    def test_attributed_notifications_are_not_coalesced(self):
+        queue = IdlePushQueue(maxsize=1)
+
+        assert queue.put([b'1 EXISTS'])
+        assert not queue.put([b'2 EXPUNGE'])
+
+        assert queue.overflowed
+        assert [b'1 EXISTS'] == queue.get_nowait()
+        assert RESYNC_REQUIRED == queue.get_nowait()
+
+    def test_overflow_marker_is_queued_once_until_consumed(self):
+        queue = IdlePushQueue(maxsize=1)
+
+        queue.put([b'1 EXISTS'])
+        assert not queue.put([b'2 EXPUNGE'])
+        assert not queue.put([b'3 EXPUNGE'])
+        assert 2 == queue.qsize()
+
+        queue.get_nowait()
+        assert RESYNC_REQUIRED == queue.get_nowait()
+
+        # a new overflow after draining re-arms the marker
+        assert queue.put([b'4 EXISTS'])
+        assert not queue.put([b'5 EXPUNGE'])
+        assert [b'4 EXISTS'] == queue.get_nowait()
+        assert RESYNC_REQUIRED == queue.get_nowait()
+
+    def test_control_items_bypass_capacity(self):
+        queue = IdlePushQueue(maxsize=1)
+
+        queue.put([b'1 EXISTS'])
+        assert queue.put(STOP_WAIT_SERVER_PUSH, control=True)
+
+        assert not queue.overflowed
+        assert [b'1 EXISTS'] == queue.get_nowait()
+        assert STOP_WAIT_SERVER_PUSH == queue.get_nowait()
+
+    def test_stale_generation_items_are_dropped(self):
+        queue = IdlePushQueue(maxsize=2)
+        queue.begin_subscription(1)
+        queue.put([b'1 EXISTS'], generation=1)
+
+        queue.begin_subscription(2)
+
+        assert queue.empty()
+        assert not queue.overflowed
+        assert not queue.put([b'2 EXISTS'], generation=1)  # late notification from previous subscription
+        assert not queue.put(STOP_WAIT_SERVER_PUSH, generation=1, control=True)  # stop from previous subscription
+        assert queue.empty()
+        assert queue.put([b'2 EXISTS'], generation=2)
+        assert [b'2 EXISTS'] == queue.get_nowait()
+
+    def test_subscription_view_tags_puts_with_its_generation(self):
+        queue = IdlePushQueue(maxsize=2)
+        queue.begin_subscription(1)
+        previous_subscription = queue.subscription(1)
+
+        queue.begin_subscription(2)
+
+        assert not previous_subscription.put_nowait([b'1 EXISTS'])
+        assert queue.empty()
+        assert queue.subscription(2).put_nowait([b'2 EXISTS'])
+        assert [b'2 EXISTS'] == queue.get_nowait()
+
+    def test_begin_subscription_resets_overflow(self):
+        queue = IdlePushQueue(maxsize=1)
+        queue.put([b'1 EXISTS'])
+        queue.put([b'2 EXPUNGE'])
+        assert queue.overflowed
+
+        queue.begin_subscription(2)
+
+        assert not queue.overflowed
+        assert queue.empty()
+
+
+@pytest.mark.asyncio()
+async def test_idle_push_queue_get_waits_and_preserves_order():
+    queue = IdlePushQueue(maxsize=3)
+
+    async def producer():
+        await asyncio.sleep(0.01)
+        queue.put([b'1 EXISTS'])
+        queue.put(STOP_WAIT_SERVER_PUSH, control=True)
+
+    producer_task = asyncio.ensure_future(producer())
+
+    assert [b'1 EXISTS'] == (await queue.get())
+    assert STOP_WAIT_SERVER_PUSH == (await queue.get())
+    await producer_task
 
 
 class TestFetchWaitsForAllMessageAttributes(unittest.TestCase):

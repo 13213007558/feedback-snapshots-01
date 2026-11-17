@@ -24,7 +24,7 @@ import ssl
 import sys
 import time
 from asyncio import BaseTransport, Future, Task
-from collections import namedtuple
+from collections import namedtuple, deque
 from copy import copy
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -35,6 +35,8 @@ from typing import Union, Any, Coroutine, Callable, Optional, List
 TWENTY_NINE_MINUTES = 1740.0
 
 STOP_WAIT_SERVER_PUSH = [b'stop_wait_server_push']
+RESYNC_REQUIRED = [b'resync_required']
+DEFAULT_IDLE_QUEUE_MAXSIZE = 100
 PY37_OR_LATER = sys.version_info[:2] >= (3, 7)
 
 log = logging.getLogger(__name__)
@@ -261,10 +263,11 @@ def matched_parenthesis(fetch_response: bytes) -> bool:
 
 class IdleCommand(Command):
     def __init__(self, tag: str, queue: asyncio.Queue, *args, prefix: str = None, untagged_resp_name: str = None,
-                 loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None, generation: int = 0) -> None:
         super().__init__('IDLE', tag, *args, prefix=prefix, untagged_resp_name=untagged_resp_name,
                          loop=loop, timeout=timeout)
         self.queue = queue
+        self.generation = generation
         self.buffer: List[bytes] = list()
 
     def append_to_resp(self, line: bytes, result: str = 'Pending') -> None:
@@ -323,9 +326,173 @@ literal_data_re = re.compile(rb'.*\{(?P<size>\d+)\}$')
 message_data_re = re.compile(rb'[0-9]+ ((FETCH)|(EXPUNGE))')
 tagged_status_response_re = re.compile(rb'[A-Z0-9]+ ((OK)|(NO)|(BAD))')
 
+# Untagged EXISTS/RECENT responses are absolute mailbox state hints: a newer
+# value supersedes an older one, so consecutive hints can be coalesced when the
+# push queue is full. Notifications such as EXPUNGE or FETCH carry message
+# sequence numbers (attribution) and must never be merged or silently dropped.
+state_hint_re = re.compile(rb'^\d+ (EXISTS|RECENT)$')
+
+
+def _state_hint_type(line: bytes) -> Optional[bytes]:
+    if isinstance(line, bytes):
+        match = state_hint_re.match(line)
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _is_state_hint_batch(batch: Any) -> bool:
+    return isinstance(batch, list) and len(batch) > 0 and \
+        all(_state_hint_type(line) is not None for line in batch)
+
+
+class IdlePushQueue:
+    """Bounded queue for server push notifications received while idling.
+
+    Explicit semantics for slow consumers:
+
+    - capacity: at most ``maxsize`` notification batches are kept (0 means
+      unbounded); the queue never grows past that on server pushes alone.
+    - coalescing: when full, a batch made only of EXISTS/RECENT state hints
+      may be merged into the most recent queued hint batch (newest values win).
+    - invalidation: when full and the incoming batch cannot be coalesced, the
+      batch is dropped, ``overflowed`` is set and a RESYNC_REQUIRED marker is
+      queued so the consumer knows it must resynchronize the mailbox instead
+      of trusting the (incomplete) notification stream.
+    - generations: each IDLE subscription has a generation; notifications,
+      stop signals and late flushes tagged with a stale generation are dropped
+      so content from a previous subscription never leaks into a new one.
+
+    Control items (STOP_WAIT_SERVER_PUSH, RESYNC_REQUIRED) are delivered
+    out-of-band: they do not count towards the capacity.
+    """
+
+    def __init__(self, maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE) -> None:
+        self._maxsize = max(0, maxsize or 0)
+        self._items: deque = deque()  # (item, counts_towards_capacity) pairs
+        self._not_empty = asyncio.Event()
+        self._generation = 0
+        self._overflowed = False
+        self._data_count = 0
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def overflowed(self) -> bool:
+        """True when notifications were dropped since the last (re)subscription."""
+        return self._overflowed
+
+    def qsize(self) -> int:
+        return len(self._items)
+
+    def empty(self) -> bool:
+        return not self._items
+
+    def begin_subscription(self, generation: int) -> None:
+        """Start a new IDLE subscription generation.
+
+        Drops everything left from previous subscriptions and resets the
+        overflow state, so a slow consumer never reads stale notifications
+        as if they belonged to the new subscription.
+        """
+        self._generation = generation
+        self._items.clear()
+        self._data_count = 0
+        self._overflowed = False
+        self._not_empty.clear()
+
+    def subscription(self, generation: int) -> 'IdleSubscription':
+        """Return a queue view tagging every put with the given generation."""
+        return IdleSubscription(self, generation)
+
+    def put(self, item: Any, generation: Optional[int] = None, control: bool = False) -> bool:
+        """Queue an item; returns False when the item was not kept.
+
+        Stale-generation items are dropped. Data items that would exceed the
+        capacity are either coalesced (state hints) or dropped after flagging
+        the overflow and queueing a RESYNC_REQUIRED marker.
+        """
+        if generation is None:
+            generation = self._generation
+        if generation != self._generation:
+            log.info('dropping push notification from stale idle generation %s (current: %s)',
+                     generation, self._generation)
+            return False
+        if control:
+            self._append(item, counts_towards_capacity=False)
+            return True
+        if self._maxsize and self._data_count >= self._maxsize:
+            if self._coalesce(item):
+                return True
+            self._overflowed = True
+            if not any(queued is RESYNC_REQUIRED for queued, _ in self._items):
+                self._append(RESYNC_REQUIRED, counts_towards_capacity=False)
+            log.warning('idle push queue overflow (capacity %s): notifications dropped, '
+                        'consumer must resynchronize', self._maxsize)
+            return False
+        self._append(item, counts_towards_capacity=True)
+        return True
+
+    def put_nowait(self, item: Any) -> bool:
+        return self.put(item)
+
+    async def get(self) -> Any:
+        while not self._items:
+            self._not_empty.clear()
+            await self._not_empty.wait()
+        return self._popleft()
+
+    def get_nowait(self) -> Any:
+        if not self._items:
+            raise asyncio.QueueEmpty
+        return self._popleft()
+
+    def _append(self, item: Any, counts_towards_capacity: bool) -> None:
+        self._items.append((item, counts_towards_capacity))
+        if counts_towards_capacity:
+            self._data_count += 1
+        self._not_empty.set()
+
+    def _popleft(self) -> Any:
+        item, counted = self._items.popleft()
+        if counted:
+            self._data_count -= 1
+        return item
+
+    def _coalesce(self, incoming: Any) -> bool:
+        """Merge a state-hint batch into the most recent queued hint batch."""
+        if not self._items:
+            return False
+        tail, tail_counted = self._items[-1]
+        if not tail_counted or not _is_state_hint_batch(tail) or not _is_state_hint_batch(incoming):
+            return False
+        incoming_types = {_state_hint_type(line) for line in incoming}
+        merged = [line for line in tail if _state_hint_type(line) not in incoming_types] + list(incoming)
+        self._items[-1] = (merged, True)
+        return True
+
+
+class IdleSubscription:
+    """IdlePushQueue view bound to one IDLE subscription generation.
+
+    Notifications flushed through this view are tagged with the subscription
+    generation, so late notifications from a previous IDLE command are dropped
+    instead of leaking into a new subscription.
+    """
+
+    def __init__(self, queue: IdlePushQueue, generation: int) -> None:
+        self._queue = queue
+        self._generation = generation
+
+    def put_nowait(self, item: Any) -> bool:
+        return self._queue.put(item, generation=self._generation)
+
 
 class IMAP4ClientProtocol(asyncio.Protocol):
-    def __init__(self, loop: Optional[asyncio.AbstractEventLoop], conn_lost_cb: Callable[[Optional[Exception]], None] = None):
+    def __init__(self, loop: Optional[asyncio.AbstractEventLoop], conn_lost_cb: Callable[[Optional[Exception]], None] = None,
+                 idle_queue_maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE):
         self.loop = loop
         self.transport = None
         self.state = STARTED
@@ -333,7 +500,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         self.capabilities = set()
         self.pending_async_commands = dict()
         self.pending_sync_command = None
-        self.idle_queue = asyncio.Queue()
+        self.idle_queue = IdlePushQueue(maxsize=idle_queue_maxsize)
+        self._idle_generation = 0
         self._idle_event = asyncio.Event()
         self.imap_version = None
         self.literal_data = None
@@ -526,7 +694,10 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         if 'IDLE' not in self.capabilities:
             raise Abort('server has not IDLE capability')
         self._idle_event.clear()
-        return await self.execute(IdleCommand(self.new_tag(), self.idle_queue, loop=self.loop))
+        self._idle_generation += 1
+        self.idle_queue.begin_subscription(self._idle_generation)
+        return await self.execute(IdleCommand(self.new_tag(), self.idle_queue.subscription(self._idle_generation),
+                                              loop=self.loop, generation=self._idle_generation))
 
     def has_pending_idle_command(self) -> bool:
         return self.pending_sync_command is not None and self.pending_sync_command.name == 'IDLE'
@@ -714,19 +885,20 @@ class IMAP4:
 
     def __init__(self, host: str = '127.0.0.1', port: int = IMAP4_PORT, loop: asyncio.AbstractEventLoop = None,
                  timeout: float = TIMEOUT_SECONDS, conn_lost_cb: Callable[[Optional[Exception]], None] = None,
-                 ssl_context: ssl.SSLContext = None):
+                 ssl_context: ssl.SSLContext = None, idle_queue_maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE):
         self.timeout = timeout
         self.port = port
         self.host = host
         self.protocol = None
         self._idle_waiter = None
         self.tasks: set[Future] = set()
-        self.create_client(host, port, loop, conn_lost_cb, ssl_context)
+        self.create_client(host, port, loop, conn_lost_cb, ssl_context, idle_queue_maxsize=idle_queue_maxsize)
 
     def create_client(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                      conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None) -> None:
+                      conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None,
+                      idle_queue_maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE) -> None:
         local_loop = loop if loop is not None else get_running_loop()
-        self.protocol = IMAP4ClientProtocol(local_loop, conn_lost_cb)
+        self.protocol = IMAP4ClientProtocol(local_loop, conn_lost_cb, idle_queue_maxsize=idle_queue_maxsize)
         self._client_task = local_loop.create_task(local_loop.create_connection(lambda: self.protocol, host, port, ssl=ssl_context))
 
     def get_state(self) -> str:
@@ -782,9 +954,11 @@ class IMAP4:
         self.protocol.idle_done()
 
     async def stop_wait_server_push(self) -> bool:
-        if self.protocol.has_pending_idle_command():
-            await self.protocol.idle_queue.put(STOP_WAIT_SERVER_PUSH)
-            return True
+        command = self.protocol.pending_sync_command
+        if command is not None and command.name == 'IDLE':
+            return self.protocol.idle_queue.put(STOP_WAIT_SERVER_PUSH,
+                                                generation=getattr(command, 'generation', None),
+                                                control=True)
         return False
 
     async def wait_server_push(self, timeout: float = TWENTY_NINE_MINUTES) -> Response:
@@ -884,14 +1058,16 @@ def extract_exists(response: Response) -> Optional[int]:
 
 class IMAP4_SSL(IMAP4):
     def __init__(self, host: str = '127.0.0.1', port: int = IMAP4_SSL_PORT, loop: asyncio.AbstractEventLoop = None,
-                 timeout: float = IMAP4.TIMEOUT_SECONDS, ssl_context: ssl.SSLContext = None):
-        super().__init__(host, port, loop, timeout, None, ssl_context)
+                 timeout: float = IMAP4.TIMEOUT_SECONDS, ssl_context: ssl.SSLContext = None,
+                 idle_queue_maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE):
+        super().__init__(host, port, loop, timeout, None, ssl_context, idle_queue_maxsize=idle_queue_maxsize)
 
     def create_client(self, host: str, port: int, loop: asyncio.AbstractEventLoop,
-                      conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None) -> None:
+                      conn_lost_cb: Callable[[Optional[Exception]], None] = None, ssl_context: ssl.SSLContext = None,
+                      idle_queue_maxsize: int = DEFAULT_IDLE_QUEUE_MAXSIZE) -> None:
         if ssl_context is None:
             ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        super().create_client(host, port, loop, conn_lost_cb, ssl_context)
+        super().create_client(host, port, loop, conn_lost_cb, ssl_context, idle_queue_maxsize=idle_queue_maxsize)
 
 
 # functions from imaplib
