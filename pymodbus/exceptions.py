@@ -3,8 +3,14 @@
 Custom exceptions to be used in the Modbus code.
 """
 
+from __future__ import annotations
+
+from .constants import ExcCodes
+
+
 __all__ = [
     "ConnectionException",
+    "FileRecordAccessError",
     "MessageRegisterException",
     "ModbusIOException",
     "NoSuchIdException",
@@ -120,4 +126,14 @@ class MessageRegisterException(ModbusException):
     def __init__(self, string: str = "") -> None:
         """Initialize."""
         message = f"[Error registering message] {string}"
+        ModbusException.__init__(self, message)
+
+
+class FileRecordAccessError(ModbusException):
+    """A file record sub-request is outside the approved file/record intervals."""
+
+    def __init__(self, exception_code: ExcCodes, string: str = "") -> None:
+        """Initialize with the Modbus exception code the server must return."""
+        self.exception_code = exception_code
+        message = f"[File record access] {string}"
         ModbusException.__init__(self, message)

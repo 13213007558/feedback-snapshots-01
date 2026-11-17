@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from ..datastore import ModbusServerContext
-from ..exceptions import ModbusException, ModbusIOException
+from ..constants import ExcCodes
+from ..exceptions import FileRecordAccessError, ModbusException, ModbusIOException
 from .decoders import DecodePDU
+from .exceptionresponse import ExceptionResponse
 from .pdu import ModbusPDU
+
+
+if TYPE_CHECKING:
+    from ..datastore.context import ModbusServerContext
 
 
 @dataclass
@@ -19,6 +25,7 @@ class FileRecord:
     record_number: int = 0
     record_data: bytes = b""
     record_length: int = 0
+    reference_type: int = 0x06
 
     def __post_init__(self) -> None:
         """Initialize a new instance."""
@@ -57,7 +64,7 @@ class ReadFileRecordRequest(ModbusPDU):
         for record in self.records:
             packet += struct.pack(
                 ">BHHH",
-                0x06,
+                record.reference_type,
                 record.file_number,
                 record.record_number,
                 record.record_length,
@@ -76,18 +83,24 @@ class ReadFileRecordRequest(ModbusPDU):
             record = FileRecord(
                 file_number=decoded[1],
                 record_number=decoded[2],
-                record_length=decoded[3],
+                reference_type=decoded[0],
             )
+            # on the wire record_length counts 16-bit registers, keep it
+            record.record_length = decoded[3]
             self.records.append(record)
 
     async def datastore_update(
         self, context: ModbusServerContext, device_id: int
     ) -> ModbusPDU:
-        """Update diagnostic request on the given device."""
-        _ = context
-        for record in self.records:
-            record.record_data = b"SERVER DUMMY RECORD."
-            record.record_length = len(record.record_data) // 2
+        """Validate all sub-requests, then read them from the file store."""
+        if (store := context.file_store) is None:
+            return ExceptionResponse(self.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        try:
+            record_data = store.read_records(self.records)
+        except FileRecordAccessError as exc:
+            return ExceptionResponse(self.function_code, exc.exception_code)
+        for record, data in zip(self.records, record_data):
+            record.record_data = data
         return ReadFileRecordResponse(
             records=self.records, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -167,7 +180,7 @@ class WriteFileRecordRequest(ModbusPDU):
         for record in self.records:
             packet += struct.pack(
                 ">BHHH",
-                0x06,
+                record.reference_type,
                 record.file_number,
                 record.record_number,
                 record.record_length,
@@ -190,6 +203,7 @@ class WriteFileRecordRequest(ModbusPDU):
             record = FileRecord(
                 file_number=decoded[1],
                 record_number=decoded[2],
+                reference_type=decoded[0],
                 record_data=data[count - calc_length : count],
             )
             record.record_length = decoded[3]
@@ -198,8 +212,13 @@ class WriteFileRecordRequest(ModbusPDU):
     async def datastore_update(
         self, context: ModbusServerContext, device_id: int
     ) -> ModbusPDU:
-        """Update diagnostic request on the given device."""
-        _ = context
+        """Validate all sub-requests before writing a single register."""
+        if (store := context.file_store) is None:
+            return ExceptionResponse(self.function_code, ExcCodes.ILLEGAL_ADDRESS)
+        try:
+            store.write_records(self.records)
+        except FileRecordAccessError as exc:
+            return ExceptionResponse(self.function_code, exc.exception_code)
         return WriteFileRecordResponse(
             records=self.records, dev_id=device_id, transaction_id=self.transaction_id
         )
@@ -232,7 +251,7 @@ class WriteFileRecordResponse(ModbusPDU):
         for record in self.records:
             packet += struct.pack(
                 ">BHHH",
-                0x06,
+                record.reference_type,
                 record.file_number,
                 record.record_number,
                 record.record_length,
@@ -252,6 +271,7 @@ class WriteFileRecordResponse(ModbusPDU):
             record = FileRecord(
                 file_number=decoded[1],
                 record_number=decoded[2],
+                reference_type=decoded[0],
                 record_data=data[count - calc_length : count],
             )
             record.record_length = decoded[3]

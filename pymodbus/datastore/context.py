@@ -10,6 +10,7 @@ from ..exceptions import NoSuchIdException
 from ..logging import Log
 from ..simulator.simdata import DataType
 from ..simulator.simdevice import SimDevice
+from .file_record import FileRecordStore
 from .sequential import ModbusSequentialDataBlock
 from .simulator import ModbusSimulatorContext
 from .sparse import ModbusSparseDataBlock
@@ -88,11 +89,15 @@ class ModbusServerContext:
         | ModbusSimulatorContext
         | None = None,
         single=True,
+        file_store: FileRecordStore | None = None,
     ) -> None:
         """Initialize a new instance of a modbus server context.
 
         :param devices: A dictionary of client contexts
         :param single: Deprecated
+        :param file_store: Approved file record storage used by function
+            codes 0x14/0x15. When it is not given, file record requests are
+            rejected with ILLEGAL_ADDRESS (no approved files to access).
 
         dev_id=0 is automatically used when devices= is a ModbusDeviceContext
         and not a dict.
@@ -101,6 +106,7 @@ class ModbusServerContext:
         if not devices:
             raise TypeError("devices= cannot be None")
         self.old_simulator = False
+        self.file_store: FileRecordStore | None = file_store
         self._devices: dict[int, ModbusDeviceContext | ModbusSimulatorContext]
         self.simdevices: list[SimDevice] = []
         if isinstance(devices, dict):
