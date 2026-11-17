@@ -300,9 +300,10 @@ class CommandTimeout(AioImapException):
 
 
 class IncompleteRead(AioImapException):
-    def __init__(self, cmd: Command, data: bytes = b''):
+    def __init__(self, cmd: Command, data: bytes = b'', after_literal: bool = False):
         self.cmd = cmd
         self.data = data
+        self.after_literal = after_literal
 
 
 def change_state(coro: Callable[..., Coroutine[Any, Any, Optional[Response]]]):
@@ -339,6 +340,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         self.literal_data = None
         self.incomplete_line = b''
         self.current_command = None
+        self.literal_continuation = False
+        self.parsing_literal_continuation = False
         self.conn_lost_cb = conn_lost_cb
         self.tasks: set[Future] = set()
 
@@ -352,36 +355,50 @@ class IMAP4ClientProtocol(asyncio.Protocol):
     def data_received(self, d: bytes) -> None:
         log.debug('Received : %s' % d)
         try:
-            self._handle_responses(self.incomplete_line + d, self._handle_line, self.current_command)
+            self._handle_responses(self.incomplete_line + d, self._handle_line,
+                                   self.current_command, self.literal_continuation)
             self.incomplete_line = b''
             self.current_command = None
+            self.literal_continuation = False
         except IncompleteRead as incomplete_read:
             self.current_command = incomplete_read.cmd
             self.incomplete_line = incomplete_read.data
+            self.literal_continuation = incomplete_read.after_literal
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         log.debug('connection lost: %s', exc)
         if self.conn_lost_cb is not None:
             self.conn_lost_cb(exc)
 
-    def _handle_responses(self, data: bytes, line_handler: Callable[[bytes, Command], Optional[Command]], current_cmd: Command = None) -> None:
+    def _handle_responses(self, data: bytes, line_handler: Callable[[bytes, Command], Optional[Command]],
+                          current_cmd: Command = None, after_literal: bool = False) -> None:
         if not data:
             if self.pending_sync_command is not None:
                 self.pending_sync_command.flush()
-            if current_cmd is not None and current_cmd.wait_data():
-                raise IncompleteRead(current_cmd)
+            if current_cmd is not None and (after_literal or current_cmd.wait_data()):
+                raise IncompleteRead(current_cmd, b'', after_literal)
             return
 
         if current_cmd is not None and current_cmd.wait_literal_data():
             data = current_cmd.append_literal_data(data)
             if current_cmd.wait_literal_data():
                 raise IncompleteRead(current_cmd)
+            # The literal is complete. Bytes that follow are the continuation of
+            # the response line carrying the literal, not a new control line.
+            after_literal = True
 
         line, separator, tail = data.partition(CRLF)
         if not separator:
-            raise IncompleteRead(current_cmd, data)
+            raise IncompleteRead(current_cmd, data, after_literal)
 
-        cmd = line_handler(line, current_cmd)
+        # After a literal the rest of the same response line is continuation
+        # text, even if it looks like ``* BYE`` or a tagged completion. Line
+        # matching may only resume on the next full line.
+        self.parsing_literal_continuation = after_literal and current_cmd is not None
+        try:
+            cmd = line_handler(line, current_cmd)
+        finally:
+            self.parsing_literal_continuation = False
 
         begin_literal = literal_data_re.match(line)
         if begin_literal:
@@ -389,7 +406,13 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             if cmd is None:
                 cmd = Command('NIL', 'unused')
             cmd.begin_literal_data(size)
-            self._handle_responses(tail, line_handler, current_cmd=cmd)
+            self._handle_responses(tail, line_handler, current_cmd=cmd,
+                                   after_literal=(size == 0))
+        elif after_literal:
+            if cmd is not None and cmd.wait_data():
+                self._handle_responses(tail, line_handler, current_cmd=cmd, after_literal=False)
+            else:
+                self._handle_responses(tail, line_handler)
         elif cmd is not None and cmd.wait_data():
             self._handle_responses(tail, line_handler, current_cmd=cmd)
         else:
@@ -398,6 +421,10 @@ class IMAP4ClientProtocol(asyncio.Protocol):
     def _handle_line(self, line: bytes, current_cmd: Command) -> Optional[Command]:
         if not line:
             return
+
+        if self.parsing_literal_continuation and current_cmd is not None:
+            current_cmd.append_to_resp(line)
+            return current_cmd
 
         if self.state == CONNECTED:
             task = asyncio.ensure_future(self.welcome(line))
