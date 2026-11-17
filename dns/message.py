@@ -75,6 +75,10 @@ class UnknownTSIGKey(dns.exception.DNSException):
     """A TSIG with an unknown key was received."""
 
 
+class MissingTSIG(dns.exception.FormError):
+    """A response to a TSIG-signed request has no TSIG."""
+
+
 class Truncated(dns.exception.DNSException):
     """The truncated flag is set."""
 
@@ -179,6 +183,10 @@ class Message:
         self.tsig: dns.rrset.RRset | None = None
         self.want_tsig_sign = False
         self.request_mac = b""
+        self.tsig_time: int | None = None
+        self.tsig_start: int | None = None
+        self.tsig_wire: bytes | None = None
+        self.tsig_time_offset: int = 0
         self.xfr = False
         self.origin: dns.name.Name | None = None
         self.tsig_ctx: Any | None = None
@@ -752,7 +760,7 @@ class Message:
                     r.get_wire(),
                     self.keyring,
                     self.tsig[0],
-                    int(time.time()),
+                    int(time.time()) + self.tsig_time_offset,
                     self.request_mac,
                     tsig_ctx,
                     multi,
@@ -1349,14 +1357,17 @@ class _WireReader:
                         key = self.keyring
                     if key is None:
                         raise UnknownTSIGKey(f"key '{name}' unknown")
+                    self.message.tsig_start = rr_start
+                    self.message.tsig_wire = self.parser.wire
                     if key:
                         self.message.keyring = key
+                        self.message.tsig_time = int(time.time())
                         self.message.tsig_ctx = dns.tsig.validate(
                             self.parser.wire,
                             key,
                             absolute_name,
                             rd,
-                            int(time.time()),
+                            self.message.tsig_time,
                             self.message.request_mac,
                             rr_start,
                             self.message.tsig_ctx,
@@ -1422,9 +1433,7 @@ class _WireReader:
                 and not self.message.had_tsig
             ):
                 # A TSIG is required but not present.
-                raise dns.exception.FormError(
-                    "response requires a TSIG but does not have one"
-                )
+                raise MissingTSIG("response requires a TSIG but does not have one")
         except Exception as e:
             if self.continue_on_error:
                 self._add_error(e)
@@ -1517,7 +1526,9 @@ def from_wire(
     )
     try:
         m = reader.read()
-    except dns.exception.FormError:
+    except dns.exception.FormError as e:
+        if getattr(e, "message", None) is None and reader.message is not None:
+            e.message = reader.message  # type: ignore[attr-defined]
         if (
             reader.message
             and (reader.message.flags & dns.flags.TC)
@@ -1526,6 +1537,10 @@ def from_wire(
             raise Truncated(message=reader.message)
         else:
             raise
+    except Exception as e:
+        if getattr(e, "message", None) is None and reader.message is not None:
+            e.message = reader.message  # type: ignore[attr-defined]
+        raise
     # Reading a truncated message might not have any errors, so we
     # have to do this check here too.
     if m.flags & dns.flags.TC and raise_on_truncation:

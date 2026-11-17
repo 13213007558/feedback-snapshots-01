@@ -21,6 +21,7 @@ dns.message Exceptions
 
 .. autoexception:: dns.message.BadEDNS
 .. autoexception:: dns.message.BadTSIG
+.. autoexception:: dns.message.MissingTSIG
 .. autoexception:: dns.message.ShortHeader
 .. autoexception:: dns.message.TrailingJunk
 .. autoexception:: dns.message.UnknownHeaderField

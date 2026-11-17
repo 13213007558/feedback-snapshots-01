@@ -104,6 +104,15 @@ indexed lookups.  Serializing a message with
       A ``bytes``, the TSIG MAC of the request message associated with
       this message; used when validating TSIG signatures.
 
+   .. attribute:: tsig_time_offset
+
+      An ``int``, the number of seconds added to the local clock when
+      signing this message with TSIG.  The default is 0.  This changes
+      only the Time Signed of the message being sent; it does not change
+      the system clock or the TSIG fudge.  It is intended for a single
+      retry after an authenticated BADTIME, as decided by
+      :py:func:`dns.tsig.decide_tsig_retry`.
+
    .. attribute:: fudge
 
       An ``int``, the TSIG time fudge.  The default is 300 seconds.

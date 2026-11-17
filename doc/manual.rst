@@ -13,6 +13,7 @@ Dnspython Manual
    zone
    zonefile
    dnssec
+   tsig
    async
    exceptions
    utilities

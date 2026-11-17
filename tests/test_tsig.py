@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import dns.exception
 import dns.message
 import dns.rcode
+import dns.rrset
 import dns.rdtypes.ANY.TKEY
 import dns.rdtypes.ANY.TSIG
 import dns.tsig
@@ -289,6 +290,55 @@ class TSIGTestCase(unittest.TestCase):
                 dns.message.from_wire(w, keyring=keyring, request_mac=q.mac)
 
             self.assertRaises(ex, bad)
+
+    def test_peer_errors_with_verified_macs_are_authenticated(self):
+        for err, ex in (
+            (dns.rcode.BADSIG, dns.tsig.PeerBadSignature),
+            (dns.rcode.BADKEY, dns.tsig.PeerBadKey),
+            (dns.rcode.BADTIME, dns.tsig.PeerBadTime),
+            (dns.rcode.BADTRUNC, dns.tsig.PeerBadTruncation),
+            (99, dns.tsig.PeerError),
+        ):
+            with self.subTest(error=err):
+                q, r = self.make_message_pair(tsig_error=err)
+                # make_response() signs the response with the query's key,
+                # so its MAC covers the error code.
+                with self.assertRaises(ex) as cm:
+                    dns.message.from_wire(
+                        r.to_wire(), keyring=keyring, request_mac=q.mac
+                    )
+                self.assertTrue(cm.exception.authenticated)
+                self.assertIsNone(cm.exception.evidence.server_time)
+
+    def test_peer_badtime_with_empty_mac_is_a_signature_failure(self):
+        q, r = self.make_message_pair(tsig_error=dns.rcode.BADTIME)
+        tsig = r.tsig[0].replace(mac=b"", other=b"\x00\x00\x00\x00\x00\x01")
+        r.tsig = dns.rrset.from_rdata(keyname, 0, tsig)
+        r.want_tsig_sign = False
+        with self.assertRaises(dns.tsig.BadSignature) as cm:
+            dns.message.from_wire(r.to_wire(), keyring=keyring, request_mac=q.mac)
+        self.assertFalse(cm.exception.authenticated)
+        self.assertIsNotNone(cm.exception.evidence)
+        self.assertIsNone(cm.exception.evidence.server_time)
+        self.assertNotIn(
+            base64.b64encode(keyring[keyname]), repr(cm.exception).encode()
+        )
+
+    def test_peer_badtime_with_verified_mac_is_authenticated(self):
+        q, r = self.make_message_pair(tsig_error=dns.rcode.BADTIME)
+        server_time = int(time.time()) + 3600
+        r.use_tsig(
+            keyring,
+            keyname,
+            tsig_error=dns.rcode.BADTIME,
+            other_data=server_time.to_bytes(6, "big"),
+        )
+        r.request_mac = q.mac
+        with self.assertRaises(dns.tsig.PeerBadTime) as cm:
+            dns.message.from_wire(r.to_wire(), keyring=keyring, request_mac=q.mac)
+        self.assertTrue(cm.exception.authenticated)
+        self.assertEqual(cm.exception.server_time, server_time)
+        self.assertEqual(cm.exception.evidence.fudge, 300)
 
     def _test_truncated_algorithm(self, alg, length):
         key = dns.tsig.Key("foo", b"abcdefg", algorithm=alg)

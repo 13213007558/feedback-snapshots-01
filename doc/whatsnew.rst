@@ -6,6 +6,24 @@ What's New in dnspython
 2.10.0 (in development)
 -----------------------
 
+* TSIG error responses are now authenticated before their error code is
+  interpreted.  ``dns.tsig.validate()`` previously raised ``PeerBadTime``
+  for any response whose TSIG Error field was BADTIME, without first
+  verifying the MAC, so a forged BADTIME was indistinguishable from a
+  genuine one.  A non-empty MAC must now verify, and BADTIME's server time
+  in Other Data is reported only when it does.  BADSIG, BADKEY, and
+  BADTRUNC, which RFC 8945 defines as carrying an empty MAC, are reported
+  as unauthenticated peer errors.  ``PeerError``, ``PeerBadTime``, and
+  ``BadTime`` now expose ``authenticated`` and ``evidence``, and
+  ``dns.message.from_wire()`` attaches the decoded message to TSIG
+  exceptions.  New ``dns.tsig.assess_tsig_response()``,
+  ``dns.tsig.assess_tsig_error()``, and ``dns.tsig.decide_tsig_retry()``
+  provide a request-bound assessment and a bounded retry policy.
+  ``Message.tsig_time_offset`` adds an offset to the signing time of one
+  message without changing the system clock or the TSIG fudge.  A response
+  with no TSIG to a signed query now raises ``dns.message.MissingTSIG``
+  (a ``FormError`` subclass) rather than a bare ``FormError``.
+
 * The text form of an IPSECKEY record may now omit the public key, which RFC
   4025 section 3.1 makes optional, e.g. ``10 1 0 192.0.2.38`` with algorithm
   0, which means that no key is present.  Such a record could not be read from
