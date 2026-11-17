@@ -104,6 +104,37 @@ To execute the example scripts be sure to install [`dnfile`](https://github.com/
 
 See [print_cil_from_bytes.py](scripts/print_cil_from_bytes.py) for a quick example of using `dncil`to print the `CIL` instructions found in a byte stream containing a `.NET` managed method.
 
+## Entry-Point Review
+
+`dncil.analysis` adds a bounded, metadata-driven review for managed plugin entry points. It disassembles only the method bodies it can reach from a given entry point and never loads, reflects over, or executes the assembly.
+
+The review follows calls whose target is determinable from this assembly's metadata:
+
+- `call` / `newobj` into a `MethodDef` row in the same module, including helper methods several calls deep.
+- `MemberRef` rows whose parent is a `ModuleRef`, which is how P/Invoke declarations are referenced. A reachable P/Invoke is reported as a rejecting finding with every caller token, call offset, and operand token on the path.
+
+It deliberately stops and records an unresolved call site instead of guessing when the target is a `callvirt` (an override may change the target), a `calli` or a function pointer (`ldftn` / `ldvirtftn`), a generic `MethodSpec` or generic method body, an abstract method, or a target in another assembly. Reachable pointer-memory instructions (`ldind.*`, `stind.*`, `localloc`, `cpblk`, `initblk`, `mkrefany`, `refanyval`) are reported for manual review.
+
+The result is one of `reject`, `manual_review`, or `no_reachable_finding`. A method that is never reached from the entry point is not reported: static reachability is not the same as proving the entry point reaches it. A clean result is also not proof that the CLR sandbox or the plugin is safe; it only means this bounded review found no reachable signal.
+
+```Python
+import dnfile
+from dncil.analysis.dnfile_adapter import DnfileMetadataView
+from dncil.analysis.review import review_entry_points
+
+pe = dnfile.dnPE("plugin.dll")
+report = review_entry_points(DnfileMetadataView(pe))
+print(report.format_text())
+```
+
+Use `scripts/review_dotnet_entry.py` for the same review from the command line. It exits `0` for no reachable finding, `1` for manual review, and `2` for reject, and accepts repeated `--entry 0x06000001` tokens to review specific methods instead of the declared entry point.
+
+```bash
+$ python scripts/review_dotnet_entry.py plugin.dll
+```
+
+`dncil.analysis.metadata.SyntheticMetadata` implements the same `MetadataView` interface for callers that already hold IL bytes and metadata facts, so the walker can be used without a PE.
+
 ## Development
 
 If you'd like to review and modify `dncil` source code, you'll need to download it from GitHub and install it locally. 
