@@ -357,7 +357,8 @@ class HTTP::CookieJar
 
     def db_add(cookie)
       @stmt[:add].execute({
-          :baseDomain => cookie.domain_name.domain || cookie.domain,
+          :baseDomain => cookie.domain_name ?
+            (cookie.domain_name.domain || cookie.domain) : cookie.domain,
           :originAttributes => @origin_attributes,
           :name => cookie.name, :value => cookie.value,
           :host => cookie.dot_domain,
@@ -464,10 +465,18 @@ class HTTP::CookieJar
     def each(uri = nil, &block) # :yield: cookie
       now = Time.now
       if uri
-        thost = DomainName.new(uri.host)
+        thost = HTTP::Cookie::URIParser.host_identity_of(uri) or
+          return self
+        base_domain =
+          if thost.kind == :name
+            dn = HTTP::Cookie::URIParser.domain_name_for(thost)
+            dn && (dn.domain || dn.hostname)
+          else
+            thost.name
+          end
 
         @stmt[:cookies_for_domain].execute({
-            :baseDomain => thost.domain || thost.hostname,
+            :baseDomain => base_domain,
             :appId => @app_id,
             :inBrowserElement => @in_browser_element ? 1 : 0,
             :expiry => now.to_i,

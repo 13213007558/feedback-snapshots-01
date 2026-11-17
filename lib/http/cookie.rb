@@ -278,7 +278,20 @@ class HTTP::Cookie
         logger = options[:logger]
         created_at = options[:created_at]
       end
-      origin = HTTP::Cookie::URIParser.parse(origin)
+      begin
+        origin = HTTP::Cookie::URIParser.parse(origin)
+      rescue URI::InvalidURIError
+        logger.warn("Cookie source rejected: invalid_source_uri") if logger
+        return []
+      end
+      host, reason = HTTP::Cookie::URIParser.host_identity_of_with_reason(origin)
+      unless host
+        # An incomplete, relative, opaque or non-HTTP source has no host
+        # identity to authorize a cookie with.  Never fall back to the
+        # Domain the cookie claims for itself.
+        logger.warn("Cookie source rejected: #{reason}") if logger
+        return []
+      end
 
       [].tap { |cookies|
         Scanner.new(set_cookie, logger).scan_set_cookie { |name, value, attrs|
@@ -320,7 +333,10 @@ class HTTP::Cookie
 
           cookie.origin = origin
 
-          cookie.acceptable? or next
+          if reason = cookie.acceptance_failure_reason(origin)
+            logger.warn("Cookie rejected: #{reason}") if logger
+            next
+          end
 
           yield cookie if block_given?
 
@@ -391,8 +407,7 @@ class HTTP::Cookie
     when nil
       @for_domain = false
       if @origin
-        @domain_name = DomainName.new(@origin.host)
-        @domain = @domain_name.hostname
+        set_host_only_domain(HTTP::Cookie::URIParser.host_identity_of(@origin))
       else
         @domain_name = @domain = nil
       end
@@ -413,7 +428,20 @@ class HTTP::Cookie
       if domain.match(/\A([^:]+):[0-9]+\z/)
         domain = $1
       end
-      @domain_name = DomainName.new(domain)
+      host = HTTP::Cookie::URIParser.host_identity(domain)
+      if host.nil?
+        raise ArgumentError, "invalid cookie domain"
+      elsif host.exact_only?
+        # The cookie self-reports a Domain value that is not a canonical
+        # host name or IP address.  Keep it as an exact literal instead
+        # of deriving a wider parent domain from its display text.
+        @domain_name = nil
+        @domain = host.name
+        @for_domain = false
+        return @domain
+      end
+      @domain_name = HTTP::Cookie::URIParser.domain_name_for(host) or
+        raise ArgumentError, "invalid cookie domain"
     end
     # RFC 6265 5.3 5.
     if domain_name.domain.nil? # a public suffix or IP address
@@ -429,6 +457,23 @@ class HTTP::Cookie
   def dot_domain
     @for_domain ? (+'.') << @domain : @domain
   end
+
+  # Sets a host-only domain from a host identity.  Ambiguous literals
+  # keep their exact text and get no DomainName, so no parent domain can
+  # ever be derived from them.
+  def set_host_only_domain(host)
+    if host.nil?
+      @domain_name = @domain = nil
+    elsif host.exact_only?
+      @domain_name = nil
+      @domain = host.name
+    else
+      @domain_name = HTTP::Cookie::URIParser.domain_name_for(host)
+      @domain = @domain_name && @domain_name.hostname
+    end
+    @for_domain = false
+  end
+  private :set_host_only_domain
 
   # Returns the domain attribute value as a DomainName object.
   attr_reader :domain_name
@@ -460,8 +505,11 @@ class HTTP::Cookie
     # Delay setting @origin because #domain= or #path= may fail
     origin = HTTP::Cookie::URIParser.parse(origin)
     if URI::HTTP === origin
-      self.domain ||= origin.host
-      self.path   ||= (origin + './').path
+      host = HTTP::Cookie::URIParser.host_identity(origin.host)
+      if host
+        self.domain ||= origin.host
+        self.path   ||= (origin + './').path
+      end
     end
     @origin = origin
   end
@@ -553,20 +601,52 @@ class HTTP::Cookie
   # Tests if it is OK to accept this cookie if it is sent from a given
   # URI/URL, `uri`.
   def acceptable_from_uri?(uri)
-    uri = HTTP::Cookie::URIParser.parse(uri)
-    return false unless URI::HTTP === uri && uri.host
-    host = DomainName.new(uri.host)
-
-    # RFC 6265 5.3
-    case
-    when host.hostname == @domain
-      true
-    when @for_domain  # !host-only-flag
-      host.cookie_domain?(@domain_name)
-    else
-      @domain.nil?
-    end
+    acceptance_failure_reason(uri).nil?
   end
+
+  # Returns nil if this cookie may be accepted if it is sent from
+  # `uri`, or a Symbol naming the reason for rejection.  Reasons are
+  # one of :invalid_source_uri, :non_http_source, :missing_source_host,
+  # :ambiguous_source_host, :domain_missing and :domain_mismatch.
+  #
+  # The reason never contains the URI, its host or the cookie value, so
+  # it is safe to log.
+  def acceptance_failure_reason(uri)
+    host, reason = HTTP::Cookie::URIParser.host_identity_of_with_reason(uri)
+    return reason unless host
+    return :domain_missing if @domain.nil?
+    if host.exact_only?
+      # An ambiguous source host is not a canonical identity.  Only an
+      # exact literal comparison is meaningful; never widen it.
+      return host.name == @domain ? nil : :ambiguous_source_host
+    end
+    return nil if domain_matches_host?(host)
+    :domain_mismatch
+  end
+
+  # Returns nil if this cookie may be received from `host`, or a Symbol
+  # naming the reason for rejection.  This is the single place where
+  # the cookie's declared domain is compared with the actual source
+  # host identity.
+  def domain_matches_host?(host)
+    if @domain_name.nil?
+      # The cookie's Domain is an exact literal (or an IP address); it
+      # may only be compared verbatim.  In particular, no wider parent
+      # domain may be inferred from its display text.
+      return host.name == @domain
+    end
+
+    case host.kind
+    when :exact, :ip
+      host.name == @domain
+    else
+      host.name == @domain ||
+        (@for_domain && DomainName.new(host.name).cookie_domain?(@domain_name))
+    end
+  rescue ArgumentError, TypeError
+    false
+  end
+  private :domain_matches_host?
 
   # Tests if it is OK to accept this cookie considering its origin.
   # If either domain or path is missing, raises ArgumentError.  If
@@ -584,16 +664,41 @@ class HTTP::Cookie
     end
   end
 
+  # Returns nil if this cookie may be sent to `uri`, or a Symbol naming
+  # the reason for rejection.  Convenience wrapper around
+  # acceptance_failure_reason for callers that want a reason.
+  def valid_for_uri_failure_reason(uri)
+    parsed = HTTP::Cookie::URIParser.parse(uri)
+    if @origin && acceptance_failure_reason(@origin)
+      return :untrusted_origin
+    end
+    if reason = acceptance_failure_reason(parsed)
+      return reason
+    end
+    return :secure_only if secure? && !(URI::HTTPS === parsed)
+    return :path_mismatch unless HTTP::Cookie.path_match?(@path, parsed.path)
+    nil
+  rescue URI::InvalidURIError, ArgumentError, TypeError
+    :invalid_source_uri
+  end
+
   # Tests if it is OK to send this cookie to a given `uri`.  A
   # RuntimeError is raised if the cookie's domain is unknown.
   def valid_for_uri?(uri)
     if @domain.nil?
       raise "cannot tell if this cookie is valid because the domain is unknown"
     end
+    # A cookie whose recorded source is not trustworthy may not be sent
+    # anywhere, even to a host that matches its self-declared Domain.
+    return false if @origin && acceptance_failure_reason(@origin)
     uri = HTTP::Cookie::URIParser.parse(uri)
     # RFC 6265 5.4
     return false if secure? && !(URI::HTTPS === uri)
-    acceptable_from_uri?(uri) && HTTP::Cookie.path_match?(@path, uri.path)
+    host = HTTP::Cookie::URIParser.host_identity_of(uri) or return false
+    return false unless domain_matches_host?(host)
+    HTTP::Cookie.path_match?(@path, uri.path)
+  rescue URI::InvalidURIError, ArgumentError, TypeError
+    false
   end
 
   # Returns a string for use in the Cookie header, i.e. `name=value`

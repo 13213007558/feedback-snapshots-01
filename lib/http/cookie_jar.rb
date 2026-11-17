@@ -140,7 +140,7 @@ class HTTP::CookieJar
 
     if uri
       uri = HTTP::Cookie::URIParser.parse(uri)
-      return self unless URI::HTTP === uri && uri.host
+      return self unless HTTP::Cookie::URIParser.host_identity_of(uri)
     end
 
     @store.each(uri, &block)

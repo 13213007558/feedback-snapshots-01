@@ -1,3 +1,17 @@
+## Unreleased
+
+- Authorize cookies against the canonical host identity of the source
+  URI.  Incomplete, relative, opaque or non-HTTP sources are now
+  rejected instead of falling back to the Domain claimed by the cookie.
+- Do not derive a parent domain from a percent-encoded host, a
+  trailing-dot or otherwise non-canonical IP spelling, or an
+  IPv4-mapped IPv6 address.  Such hosts compare by exact identity only.
+- Accept Unicode URI hosts by IDNA-normalizing them; only the ASCII
+  form is used for authorization.
+- Add `HTTP::Cookie#acceptance_failure_reason` and
+  `#valid_for_uri_failure_reason` so rejections can be logged by reason
+  without exposing hosts or cookie values.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)
