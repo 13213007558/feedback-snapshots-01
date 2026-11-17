@@ -9,12 +9,12 @@ import ipaddress
 import random
 from copy import deepcopy
 
-from typing import Any, List, Optional, Callable, TypeVar, Generic
+from typing import Any, Dict, List, Optional, Callable, TypeVar, Generic  # noqa: F401
 
 from ..errors import ConfigurationError
 from ..debugging import ModuleLogger, bacpypes_debugging
 
-from ..pdu import LocalStation, LocalBroadcast, IPv4Address, PDU
+from ..pdu import LocalStation, LocalBroadcast, IPv4Address, IPv6Address, PDU
 from ..comm import Client, Server, bind
 
 AddrType = TypeVar("AddrType")
@@ -219,7 +219,6 @@ class Node(Generic[AddrType], Server[PDU]):
 
 @bacpypes_debugging
 class IPv4Network(Network[IPv4Address]):
-
     """
     IPNetwork instances are Network objects where the addresses on the
     network are instances of an IPv4Address.
@@ -260,7 +259,6 @@ class IPv4Network(Network[IPv4Address]):
 
 @bacpypes_debugging
 class IPv4Node(Node[IPv4Address]):
-
     """
     An IPNode is a Node where the address is an Address that has an address
     tuple and a broadcast tuple that would be used for socket communications.
@@ -386,7 +384,6 @@ class IPv4Router:
 
 @bacpypes_debugging
 class VirtualNetwork(Network[LocalStation]):
-
     """
     VirtualNetwork instances are Network objects where the addresses on the
     network are instances of a generic local station.
@@ -415,7 +412,6 @@ class VirtualNetwork(Network[LocalStation]):
 
 @bacpypes_debugging
 class VirtualNode(Node[LocalStation]):
-
     """
     An VirtualNode is a Node where the address is a generic local station.
     """
@@ -442,4 +438,65 @@ class VirtualNode(Node[LocalStation]):
             self,
             addr,
             lan=lan,
+        )
+
+
+#
+#   IPv6Network
+#
+
+
+@bacpypes_debugging
+class IPv6Network(Network[IPv6Address]):
+    """
+    IPv6Network instances are Network objects where the node addresses are
+    instances of an IPv6Address.  It is an in-memory stand-in for a BACnet
+    virtual link layer running over IPv6 so whole BIP stacks can be exercised
+    without sockets.
+    """
+
+    _debug: Callable[..., None]
+
+    def __init__(self, name: str = "") -> None:
+        if _debug:
+            IPv6Network._debug("__init__ name=%r", name)
+        Network.__init__(self, name=name, broadcast_address=LocalBroadcast())
+
+
+#
+#   IPv6Node
+#
+
+
+@bacpypes_debugging
+class IPv6Node(Node[IPv6Address]):
+    """
+    An IPv6Node is a Node where the address is an IPv6Address.
+    """
+
+    _debug: Callable[..., None]
+
+    def __init__(
+        self,
+        addr: IPv6Address,
+        lan: Optional[IPv6Network] = None,
+        promiscuous: bool = False,
+        spoofing: bool = False,
+        sid: Optional[str] = None,
+    ) -> None:
+        if _debug:
+            IPv6Node._debug("__init__ %r lan=%r", addr, lan)
+
+        # make sure it's the correct kind of address
+        if not isinstance(addr, IPv6Address):
+            raise ValueError("malformed address")
+
+        # continue initializing
+        Node.__init__(
+            self,
+            addr,
+            lan=lan,
+            promiscuous=promiscuous,
+            spoofing=spoofing,
+            sid=sid,
         )

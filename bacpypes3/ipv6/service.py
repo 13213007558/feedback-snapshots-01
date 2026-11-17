@@ -5,7 +5,9 @@ BACnet IPv6 Virtual Link Layer Service
 from __future__ import annotations
 
 import asyncio
-from functools import partial
+import enum
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
 
 from ..debugging import ModuleLogger, DebugContents, bacpypes_debugging
@@ -44,6 +46,107 @@ _debug = 0
 _log = ModuleLogger(globals())
 
 #
+#   VMAC admission policy
+#
+
+
+class VMACConflictError(RuntimeError):
+    """
+    Raised when two different IPv6 addresses claim the same virtual MAC
+    address and the conflict has not been resolved by a fresh, on-link
+    confirmation.  The stack never picks a winner on its own.
+    """
+
+    def __init__(
+        self,
+        vmac: VirtualAddress,
+        incumbent: IPv6Address,
+        challenger: IPv6Address,
+    ) -> None:
+        self.vmac = vmac
+        self.incumbent = incumbent
+        self.challenger = challenger
+        super().__init__(
+            f"VMAC {vmac!r} conflict: incumbent {incumbent!r} vs challenger"
+            f" {challenger!r}"
+        )
+
+
+class MappingSource(enum.Enum):
+    """
+    How a VMAC -> IPv6 binding was learned, ordered by evidential weight.
+
+    query_response
+        An Address-Resolution-ACK received while a local resolution for the
+        VMAC was outstanding — a direct answer to our own query.
+    proactive_advertisement
+        An Original-Unicast/Broadcast-NPDU or a Forwarded-NPDU that carries
+        a source binding nobody asked for.
+    existing_update
+        Another observation of a binding that was already installed; used to
+        refresh its validity period.
+    """
+
+    query_response = "query_response"
+    proactive_advertisement = "proactive_advertisement"
+    existing_update = "existing_update"
+
+
+class AdmissionResult(enum.Enum):
+    """Outcome of running the admission policy on a claimed binding."""
+
+    admitted = "admitted"
+    refreshed = "refreshed"
+    migration = "migration"
+    conflict = "conflict"
+
+
+# default validity period for an installed binding, in seconds; repeated
+# observations of the same binding refresh the deadline
+DEFAULT_VMAC_TTL = 300.0
+
+# how long the service element collects answers to one resolution query
+# before deciding whether the answers agree
+RESOLUTION_GUARD_TIME = 0.25
+
+# how long a foreign device waits for an in-progress registration answer
+REGISTRATION_TIMEOUT = 5.0
+
+
+@dataclass
+class VMACMappingRecord:
+    """
+    One side of a VMAC <-> IPv6 binding with everything needed to audit why
+    the local stack believes it.
+    """
+
+    vmac: VirtualAddress
+    ipv6: IPv6Address
+    source: MappingSource
+    accepted_basis: str
+    observed_source: Optional[IPv6Address]
+    ttl: float
+    expires_at: float
+    candidate: Optional[IPv6Address] = None
+    candidate_basis: Optional[str] = None
+    candidate_observed_source: Optional[IPv6Address] = None
+    candidate_expires_at: float = 0.0
+
+    def is_expired(self, now: Optional[float] = None) -> bool:
+        if now is None:
+            now = time.monotonic()
+        return now >= self.expires_at
+
+    def debug_contents(
+        self,
+        indent: int = 1,
+        file=None,
+        _ids: Optional[List[object]] = None,
+    ) -> None:
+        print(f"{'    ' * indent}{self!r}", file=file)
+
+
+#
 #   VirtualMACAddressTable
 #
 
@@ -56,75 +159,246 @@ class VirtualMACAddressTable(DebugContents):
     at most 6-octet Ethernet or IPv4 addresses.
 
     See Clause U.5.
+
+    Every binding is admitted through :meth:`admit` which applies a
+    conflict-visible policy: a claim that disagrees with the installed
+    binding never silently overwrites it.  Query responses, proactive
+    advertisements and refreshes of an existing mapping are kept apart via
+    the :class:`MappingSource` on the stored record, together with the
+    observed source of the claim, its validity period and the local reason
+    the binding was accepted.
     """
 
     _debug: Callable[..., None]
     _debug_contents = ("vmac_to_ipv6+", "ipv6_to_vmac+")
 
-    vmac_to_ipv6: Dict[VirtualAddress, IPv6Address]
-    ipv6_to_vmac: Dict[IPv6Address, VirtualAddress]
+    vmac_to_ipv6: Dict[VirtualAddress, VMACMappingRecord]
+    ipv6_to_vmac: Dict[IPv6Address, VMACMappingRecord]
 
-    def __init__(self):
+    def __init__(
+        self,
+        default_ttl: float = DEFAULT_VMAC_TTL,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if default_ttl <= 0:
+            raise ValueError("default_ttl must be greater than zero")
+        self.default_ttl = default_ttl
+        self.clock = clock
         self.vmac_to_ipv6 = {}
         self.ipv6_to_vmac = {}
 
     def __getitem__(
         self, item: Union[VirtualAddress, IPv6Address]
     ) -> Union[VirtualAddress, IPv6Address, None]:
+        now = self.clock()
         if isinstance(item, VirtualAddress):
-            return self.vmac_to_ipv6.get(item, None)
+            record = self.vmac_to_ipv6.get(item, None)
+            if record is None:
+                return None
+            if record.is_expired(now):
+                self._remove_record(record)
+                return None
+            return record.ipv6
         elif isinstance(item, IPv6Address):
-            return self.ipv6_to_vmac.get(item, None)
+            record = self.ipv6_to_vmac.get(item, None)
+            if record is None:
+                return None
+            if record.is_expired(now):
+                self._remove_record(record)
+                return None
+            return record.vmac
         else:
             raise TypeError(f"item: {item!r}")
 
-    def __setitem__(
+    def get_record(self, vmac: VirtualAddress) -> Optional[VMACMappingRecord]:
+        """Return the full audit record for a VMAC, or None."""
+        record = self.vmac_to_ipv6.get(vmac, None)
+        if record is None:
+            return None
+        if record.is_expired(self.clock()):
+            self._remove_record(record)
+            return None
+        return record
+
+    def admit(
         self,
-        item: Union[VirtualAddress, IPv6Address],
-        addr: Union[VirtualAddress, IPv6Address],
-    ) -> None:
-        if isinstance(item, VirtualAddress):
-            if item in self.vmac_to_ipv6:
-                old_addr = self.vmac_to_ipv6[item]
-                if addr == old_addr:
-                    return
-                if old_addr not in self.ipv6_to_vmac:
-                    raise RuntimeError("inconsistent")
-                del self.ipv6_to_vmac[old_addr]
+        vmac: VirtualAddress,
+        ipv6: IPv6Address,
+        source: MappingSource,
+        *,
+        observed_source: Optional[IPv6Address] = None,
+        ttl: Optional[float] = None,
+        basis: Optional[str] = None,
+        now: Optional[float] = None,
+    ) -> AdmissionResult:
+        """
+        Run the admission policy for a claim that ``vmac`` lives at ``ipv6``.
 
-            if addr in self.ipv6_to_vmac:
-                old_item = self.ipv6_to_vmac[addr]
-                if item == old_item:
-                    return
-                if old_item not in self.vmac_to_ipv6:
-                    raise RuntimeError("inconsistent")
-                del self.vmac_to_ipv6[old_item]
+        Returns the :class:`AdmissionResult`; conflicting claims return
+        :attr:`AdmissionResult.conflict` and leave the incumbent binding in
+        place, with the challenger parked on the record as a candidate
+        instead of overwriting it.
+        """
+        if _debug:
+            VirtualMACAddressTable._debug(
+                "admit %r %r %r observed=%r ttl=%r",
+                vmac,
+                ipv6,
+                source,
+                observed_source,
+                ttl,
+            )
 
-            self.vmac_to_ipv6[item] = addr
-            self.ipv6_to_vmac[addr] = item
+        if not isinstance(vmac, VirtualAddress):
+            raise TypeError("vmac must be a VirtualAddress")
+        if not isinstance(ipv6, IPv6Address):
+            raise TypeError("ipv6 must be an IPv6Address")
+        if now is None:
+            now = self.clock()
+        if ttl is None:
+            ttl = self.default_ttl
+        if ttl <= 0:
+            raise ValueError("ttl must be greater than zero")
+        if basis is None:
+            basis = source.value
 
-        elif isinstance(item, IPv6Address):
-            if item in self.ipv6_to_vmac:
-                old_addr = self.ipv6_to_vmac[item]
-                if addr == old_addr:
-                    return
-                if old_addr not in self.vmac_to_ipv6:
-                    raise RuntimeError("inconsistent")
-                del self.vmac_to_ipv6[old_addr]
+        record = self.vmac_to_ipv6.get(vmac, None)
+        if (record is not None) and record.is_expired(now):
+            self._remove_record(record)
+            record = None
 
-            if addr in self.vmac_to_ipv6:
-                old_item = self.vmac_to_ipv6[addr]
-                if item == old_item:
-                    return
-                if old_item not in self.ipv6_to_vmac:
-                    raise RuntimeError("inconsistent")
-                del self.ipv6_to_vmac[old_item]
+        # brand new binding
+        if record is None:
+            # an IPv6 address cannot back two different VMACs at once
+            other = self.ipv6_to_vmac.get(ipv6, None)
+            if other is not None:
+                if other.is_expired(now):
+                    self._remove_record(other)
+                else:
+                    raise VMACConflictError(other.vmac, other.ipv6, ipv6)
 
-            self.ipv6_to_vmac[item] = addr
-            self.vmac_to_ipv6[addr] = item
+            record = VMACMappingRecord(
+                vmac=vmac,
+                ipv6=ipv6,
+                source=source,
+                accepted_basis=basis,
+                observed_source=observed_source,
+                ttl=ttl,
+                expires_at=now + ttl,
+            )
+            self.vmac_to_ipv6[vmac] = record
+            self.ipv6_to_vmac[ipv6] = record
+            return AdmissionResult.admitted
 
+        # another observation of the same binding: refresh it
+        if isinstance(record.ipv6, IPv6Address) and record.ipv6 == ipv6:
+            record.source = source
+            record.accepted_basis = basis
+            record.observed_source = observed_source
+            record.ttl = ttl
+            record.expires_at = now + ttl
+            # an observation from the incumbent address clears any dispute
+            record.candidate = None
+            record.candidate_basis = None
+            record.candidate_observed_source = None
+            record.candidate_expires_at = 0.0
+            return AdmissionResult.refreshed
+
+        # a different IPv6 claims this VMAC: never overwrite silently
+        if isinstance(record.candidate, IPv6Address) and record.candidate == ipv6:
+            # repeat challenger: keep the dispute alive and refreshed
+            record.candidate_basis = basis
+            record.candidate_observed_source = observed_source
+            record.candidate_expires_at = now + ttl
         else:
-            raise TypeError(f"item: {item!r}")
+            record.candidate = ipv6
+            record.candidate_basis = basis
+            record.candidate_observed_source = observed_source
+            record.candidate_expires_at = now + ttl
+        return AdmissionResult.conflict
+
+    def confirm_migration(
+        self,
+        vmac: VirtualAddress,
+        ipv6: IPv6Address,
+        *,
+        observed_source: Optional[IPv6Address] = None,
+        ttl: Optional[float] = None,
+        basis: str = "confirmed query response after migration",
+        now: Optional[float] = None,
+    ) -> AdmissionResult:
+        """
+        Commit a migration that a fresh on-link query response has
+        corroborated.  Only the parked candidate can move the binding, so a
+        single stray answer can never hijack traffic.
+        """
+        if _debug:
+            VirtualMACAddressTable._debug("confirm_migration %r %r", vmac, ipv6)
+
+        record = self.vmac_to_ipv6.get(vmac, None)
+        if record is None:
+            return self.admit(
+                vmac,
+                ipv6,
+                MappingSource.query_response,
+                observed_source=observed_source,
+                ttl=ttl,
+                basis=basis,
+                now=now,
+            )
+        if now is None:
+            now = self.clock()
+        if ttl is None:
+            ttl = self.default_ttl
+
+        if isinstance(record.ipv6, IPv6Address) and record.ipv6 == ipv6:
+            return self.admit(
+                vmac,
+                ipv6,
+                MappingSource.query_response,
+                observed_source=observed_source,
+                ttl=ttl,
+                basis=basis,
+                now=now,
+            )
+        if not (isinstance(record.candidate, IPv6Address) and record.candidate == ipv6):
+            return AdmissionResult.conflict
+        if record.is_expired(now):
+            return AdmissionResult.conflict
+
+        old_ipv6 = record.ipv6
+        del self.vmac_to_ipv6[vmac]
+        del self.ipv6_to_vmac[old_ipv6]
+
+        migrated = VMACMappingRecord(
+            vmac=vmac,
+            ipv6=ipv6,
+            source=MappingSource.query_response,
+            accepted_basis=basis,
+            observed_source=observed_source,
+            ttl=ttl,
+            expires_at=now + ttl,
+        )
+        self.vmac_to_ipv6[vmac] = migrated
+        self.ipv6_to_vmac[ipv6] = migrated
+        return AdmissionResult.migration
+
+    def expire(self, now: Optional[float] = None) -> List[VirtualAddress]:
+        """Purge every binding whose validity period has elapsed."""
+        if now is None:
+            now = self.clock()
+        expired = [
+            vmac
+            for vmac, record in list(self.vmac_to_ipv6.items())
+            if record.is_expired(now)
+        ]
+        for vmac in expired:
+            self._remove_record(self.vmac_to_ipv6[vmac])
+        return expired
+
+    def _remove_record(self, record: VMACMappingRecord) -> None:
+        self.vmac_to_ipv6.pop(record.vmac, None)
+        self.ipv6_to_vmac.pop(record.ipv6, None)
 
 
 #
@@ -153,6 +427,8 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
         sapID: Optional[str] = None,
         cid: Optional[str] = None,
         sid: Optional[str] = None,
+        vmac_ttl: float = DEFAULT_VMAC_TTL,
+        vmac_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if _debug:
             BVLLServiceAccessPoint._debug("__init__")
@@ -161,7 +437,59 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
         ServiceAccessPoint.__init__(self, sapID=sapID)
 
         self.virtual_address = virtual_address
-        self.vmac_addr_table = VirtualMACAddressTable()
+        self.vmac_addr_table = VirtualMACAddressTable(
+            default_ttl=vmac_ttl, clock=vmac_clock
+        )
+
+    def _admit_observed_binding(
+        self,
+        vmac: VirtualAddress,
+        ipv6: IPv6Address,
+        source: MappingSource,
+        basis: str,
+        observed_source: Optional[IPv6Address],
+    ) -> AdmissionResult:
+        """
+        Feed a binding learned from inbound traffic through the conflict
+        admission policy.  Conflicts are logged and made visible instead of
+        silently redirecting traffic.
+        """
+        result = self.vmac_addr_table.admit(
+            vmac,
+            ipv6,
+            source,
+            observed_source=observed_source,
+            basis=basis,
+        )
+        if result is AdmissionResult.conflict:
+            BVLLServiceAccessPoint._warning(
+                "VMAC conflict for %r: incumbent %r, challenger %r (%s)",
+                vmac,
+                self.vmac_addr_table.get_record(vmac).ipv6,
+                self.vmac_addr_table.get_record(vmac).candidate,
+                basis,
+            )
+        return result
+
+    def _admit_forwarded_binding(
+        self,
+        vmac: VirtualAddress,
+        claimed_ipv6: IPv6Address,
+        observer: IPv6Address,
+        basis: str,
+    ) -> AdmissionResult:
+        """
+        Admit a binding carried inside a forwarded message.  The observed
+        source of the frame (the BBMD/peer that forwarded it) is recorded
+        separately from the IPv6 address the originator claimed for itself.
+        """
+        return self._admit_observed_binding(
+            vmac,
+            claimed_ipv6,
+            MappingSource.proactive_advertisement,
+            basis,
+            observer,
+        )
 
     async def sap_indication(self, lpdu: LPDU) -> None:
         if _debug:
@@ -185,7 +513,6 @@ class BVLLServiceAccessPoint(Client[LPDU], Server[PDU], ServiceAccessPoint):
 
 @bacpypes_debugging
 class BIPNormal(BVLLServiceAccessPoint, DebugContents):
-
     _debug: Callable[..., None]
     _warning: Callable[..., None]
 
@@ -196,18 +523,25 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
         # check for local stations
         if pdu.pduDestination.addrType == Address.localStationAddr:
             # destination address is a VirtualAddress
-            destination_ipv6_address: IPv6Address = self.vmac_addr_table[
-                pdu.pduDestination
-            ]
+            record = self.vmac_addr_table.get_record(pdu.pduDestination)
+            destination_ipv6_address: Optional[IPv6Address] = (
+                record.ipv6 if record is not None else None
+            )
 
-            # if there is a service element, let it resolve it
-            if not destination_ipv6_address:
+            # if there is a service element, let it resolve it; a disputed
+            # binding must be re-confirmed rather than trusted blindly
+            if (not destination_ipv6_address) or (
+                record is not None and record.candidate is not None
+            ):
                 try:
                     destination_ipv6_address = await asyncio.wait_for(
                         self.serviceElement.resolve_virtual_address(pdu.pduDestination),
                         timeout=5,
                     )
                 except asyncio.TimeoutError:
+                    return
+                except VMACConflictError as err:
+                    BIPNormal._warning("resolution failed, packet dropped: %s", err)
                     return
             if _debug:
                 BIPNormal._debug(
@@ -261,8 +595,14 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
                     BIPNormal._debug("    - not for us")
                 return
 
-            # update the virtual address table
-            self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+            # admit the source binding learned from this unicast
+            self._admit_observed_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.pduSource,
+                MappingSource.proactive_advertisement,
+                "Original-Unicast-NPDU source",
+                lpdu.pduSource,
+            )
 
             # build a PDU
             pdu = PDU(
@@ -283,8 +623,14 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
                     BIPNormal._debug("    - from us")
                 return
 
-            # update the virtual address table
-            self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+            # admit the source binding learned from this broadcast
+            self._admit_observed_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.pduSource,
+                MappingSource.proactive_advertisement,
+                "Original-Broadcast-NPDU source",
+                lpdu.pduSource,
+            )
 
             # build a PDU with a local broadcast address
             pdu = PDU(
@@ -362,10 +708,14 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
-            # update the virtual address table
-            self.vmac_addr_table[
-                lpdu.bvlciSourceVirtualAddress
-            ] = lpdu.bvlciSourceIPv6Address
+            # admit the binding carried in the forwarded frame, keeping the
+            # actual frame source separate from the claimed origin address
+            self._admit_forwarded_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.bvlciSourceIPv6Address,
+                lpdu.pduSource,
+                "Forwarded-NPDU source",
+            )
 
             # build a PDU with the source from the real source
             pdu = PDU(
@@ -424,7 +774,6 @@ class BIPNormal(BVLLServiceAccessPoint, DebugContents):
 
 @bacpypes_debugging
 class BIPForeign(BVLLServiceAccessPoint, DebugContents):
-
     _debug: Callable[..., None]
     _warning: Callable[..., None]
     _debug_contents = ("bbmdAddress", "bbmdTimeToLive", "bbmdRegistrationStatus")
@@ -492,18 +841,25 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
         # check for local stations
         if pdu.pduDestination.addrType == Address.localStationAddr:
             # destination address is a VirtualAddress
-            destination_ipv6_address: IPv6Address = self.vmac_addr_table[
-                pdu.pduDestination
-            ]
+            record = self.vmac_addr_table.get_record(pdu.pduDestination)
+            destination_ipv6_address: Optional[IPv6Address] = (
+                record.ipv6 if record is not None else None
+            )
 
-            # if there is a service element, let it resolve it
-            if not destination_ipv6_address:
+            # if there is a service element, let it resolve it; a disputed
+            # binding must be re-confirmed rather than trusted blindly
+            if (not destination_ipv6_address) or (
+                record is not None and record.candidate is not None
+            ):
                 try:
                     destination_ipv6_address = await asyncio.wait_for(
                         self.serviceElement.resolve_virtual_address(pdu.pduDestination),
                         timeout=5,
                     )
                 except asyncio.TimeoutError:
+                    return
+                except VMACConflictError as err:
+                    BIPForeign._warning("resolution failed, packet dropped: %s", err)
                     return
             if _debug:
                 BIPNormal._debug(
@@ -608,8 +964,14 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
                     BIPForeign._debug("    - not for us")
                 return
 
-            # update the virtual address table
-            self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+            # admit the source binding learned from this unicast
+            self._admit_observed_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.pduSource,
+                MappingSource.proactive_advertisement,
+                "Original-Unicast-NPDU source",
+                lpdu.pduSource,
+            )
 
             # build a PDU
             pdu = PDU(
@@ -687,10 +1049,14 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
             await self.sap_response(lpdu)
 
         elif isinstance(lpdu, ForwardedNPDU):
-            # update the virtual address table
-            self.vmac_addr_table[
-                lpdu.bvlciSourceVirtualAddress
-            ] = lpdu.bvlciSourceIPv6Address
+            # admit the binding carried in the forwarded frame, keeping the
+            # BBMD's frame source separate from the claimed origin address
+            self._admit_forwarded_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.bvlciSourceIPv6Address,
+                lpdu.pduSource,
+                "Forwarded-NPDU via BBMD",
+            )
 
             # check the BBMD registration status, we may not be registered
             if not self._registration_event.is_set():
@@ -944,7 +1310,6 @@ class BIPForeign(BVLLServiceAccessPoint, DebugContents):
 
 @bacpypes_debugging
 class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
-
     _debug: Callable[..., None]
     _warning: Callable[..., None]
     _debug_contents = ("bbmdAddress", "bbmdBDT+", "bbmdFDT++")
@@ -1021,18 +1386,25 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
         # check for local stations
         if pdu.pduDestination.addrType == Address.localStationAddr:
             # destination address is a VirtualAddress
-            destination_ipv6_address: IPv6Address = self.vmac_addr_table[
-                pdu.pduDestination
-            ]
+            record = self.vmac_addr_table.get_record(pdu.pduDestination)
+            destination_ipv6_address: Optional[IPv6Address] = (
+                record.ipv6 if record is not None else None
+            )
 
-            # if there is a service element, let it resolve it
-            if not destination_ipv6_address:
+            # if there is a service element, let it resolve it; a disputed
+            # binding must be re-confirmed rather than trusted blindly
+            if (not destination_ipv6_address) or (
+                record is not None and record.candidate is not None
+            ):
                 try:
                     destination_ipv6_address = await asyncio.wait_for(
                         self.serviceElement.resolve_virtual_address(pdu.pduDestination),
                         timeout=5,
                     )
                 except asyncio.TimeoutError:
+                    return
+                except VMACConflictError as err:
+                    BIPBBMD._warning("resolution failed, packet dropped: %s", err)
                     return
             if _debug:
                 BIPBBMD._debug(
@@ -1115,8 +1487,14 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
                     BIPBBMD._debug("    - not for us")
                 return
 
-            # update the virtual address table
-            self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+            # admit the source binding learned from this unicast
+            self._admit_observed_binding(
+                lpdu.bvlciSourceVirtualAddress,
+                lpdu.pduSource,
+                MappingSource.proactive_advertisement,
+                "Original-Unicast-NPDU source",
+                lpdu.pduSource,
+            )
 
             # build a PDU
             pdu = PDU(
@@ -1139,8 +1517,14 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
 
             # send it upstream if there is a network layer
             if self.serverPeer:
-                # update the virtual address table
-                self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+                # admit the source binding learned from this broadcast
+                self._admit_observed_binding(
+                    lpdu.bvlciSourceVirtualAddress,
+                    lpdu.pduSource,
+                    MappingSource.proactive_advertisement,
+                    "Original-Broadcast-NPDU source",
+                    lpdu.pduSource,
+                )
 
                 # build a PDU with a local broadcast address
                 pdu = PDU(
@@ -1318,10 +1702,14 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
 
             # send it upstream if there is a network layer
             if self.serverPeer:
-                # update the virtual address table
-                self.vmac_addr_table[
-                    lpdu.bvlciSourceVirtualAddress
-                ] = lpdu.bvlciSourceIPv6Address
+                # admit the peer-forwarded binding, keeping the peer's frame
+                # source separate from the claimed origin address
+                self._admit_forwarded_binding(
+                    lpdu.bvlciSourceVirtualAddress,
+                    lpdu.bvlciSourceIPv6Address,
+                    lpdu.pduSource,
+                    "peer Forwarded-NPDU source",
+                )
 
                 # build a PDU with a local broadcast address
                 pdu = PDU(
@@ -1400,16 +1788,26 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
             else:
                 if _debug:
                     BIPBBMD._debug("    - not from a registered foreign device")
-                await self.request(Result(
-                    self.virtual_address, result_code=0x00C0,
-                    destination=lpdu.pduSource, user_data=lpdu.pduUserData,
-                ))
+                await self.request(
+                    Result(
+                        self.virtual_address,
+                        result_code=0x00C0,
+                        destination=lpdu.pduSource,
+                        user_data=lpdu.pduUserData,
+                    )
+                )
                 return
 
             # send it upstream if there is a network layer
             if self.serverPeer:
-                # update the virtual address table
-                self.vmac_addr_table[lpdu.bvlciSourceVirtualAddress] = lpdu.pduSource
+                # admit the binding claimed by a registered foreign device
+                self._admit_observed_binding(
+                    lpdu.bvlciSourceVirtualAddress,
+                    lpdu.pduSource,
+                    MappingSource.proactive_advertisement,
+                    "Distribute-Broadcast-to-Network source",
+                    lpdu.pduSource,
+                )
 
                 # build a PDU with a local broadcast address
                 pdu = PDU(
@@ -1540,13 +1938,30 @@ class BIPBBMD(BVLLServiceAccessPoint, DebugContents):
 #
 
 
+@dataclass
+class PendingResolution:
+    """Bookkeeping for one outstanding virtual-address resolution query."""
+
+    address: VirtualAddress
+    future: IPv6AddressFuture
+    answers: Dict[IPv6Address, int] = field(default_factory=dict)
+    answer_sources: Dict[IPv6Address, Optional[IPv6Address]] = field(
+        default_factory=dict
+    )
+    guard_handle: Optional[asyncio.TimerHandle] = None
+    finalizing: bool = False
+    # whether the table already recorded a candidate for this VMAC when the
+    # round started: only a pre-existing dispute can be confirmed as a
+    # migration, never a candidate parked by the current round itself
+    had_prior_candidate: bool = False
+
+
 @bacpypes_debugging
 class BVLLServiceElement(ApplicationServiceElement):
-
     _debug: Callable[..., None]
     _warning: Callable[..., None]
 
-    virtual_address_resolution: Dict[VirtualAddress, IPv6AddressFuture]
+    virtual_address_resolution: Dict[VirtualAddress, PendingResolution]
 
     def __init__(self, *, aseID=None) -> None:
         if _debug:
@@ -1582,19 +1997,32 @@ class BVLLServiceElement(ApplicationServiceElement):
         """
         This function returns a future which is awaitable and will be completed
         when the virtual address resolution response comes back.
+
+        Concurrent callers for the same VMAC share one query and one future;
+        the future fails with :class:`VMACConflictError` if the answers
+        collected during the resolution round disagree.
         """
         if _debug:
             BVLLServiceElement._debug("resolve_virtual_address %r", address)
 
-        if address in self.virtual_address_resolution:
-            return self.virtual_address_resolution[address]
+        pending = self.virtual_address_resolution.get(address, None)
+        if pending is not None:
+            return pending.future
 
-        # create a future
+        # create a future and the bookkeeping for this resolution round
         future = IPv6AddressFuture()
-        self.virtual_address_resolution[address] = future
-
-        # add a callback in case the request is canceled (timeout)
-        future.add_done_callback(partial(self._resolve_virtual_address_done, address))
+        future.add_done_callback(
+            lambda done_future: self._resolve_virtual_address_done(address, done_future)
+        )
+        prior_record = self.elementService.vmac_addr_table.get_record(address)
+        pending = PendingResolution(
+            address=address,
+            future=future,
+            had_prior_candidate=(
+                prior_record is not None and prior_record.candidate is not None
+            ),
+        )
+        self.virtual_address_resolution[address] = pending
 
         # create a request to resolve it and create a task to send it
         address_resolution = AddressResolution(
@@ -1615,30 +2043,148 @@ class BVLLServiceElement(ApplicationServiceElement):
                 "_resolve_virtual_address_done %r %r", address, future
             )
 
-        if address not in self.virtual_address_resolution:
+        pending = self.virtual_address_resolution.get(address, None)
+        if pending is None:
             if _debug:
                 BVLLServiceElement._debug("    - nothing pending")
             return
-        if future.done():
-            if _debug:
-                BVLLServiceElement._debug("    - note: future is done")
+
+        # the guard timer must not fire after the round is gone
+        if pending.guard_handle is not None:
+            pending.guard_handle.cancel()
         if future.cancelled():
             if _debug:
                 BVLLServiceElement._debug("    - note: future has been cancelled")
 
         # remove it from the pending dictionary
-        del self.virtual_address_resolution[address]
+        self.virtual_address_resolution.pop(address, None)
 
     async def AddressResolutionACK(self, lpdu: AddressResolutionACK) -> None:
         if _debug:
             BVLLServiceElement._debug("AddressResolutionACK %r", lpdu)
 
         address = lpdu.bvlciSourceVirtualAddress
-        if address not in self.virtual_address_resolution:
+        pending = self.virtual_address_resolution.get(address, None)
+        if pending is None:
             if _debug:
                 BVLLServiceElement._debug("    - nothing pending")
             return
+        if pending.finalizing:
+            if _debug:
+                BVLLServiceElement._debug("    - round already finalizing")
+            return
 
-        # request is no longer pending, set the value
-        future = self.virtual_address_resolution.pop(address)
-        future.set_result(lpdu.pduSource)
+        answer = lpdu.pduSource
+        pending.answers[answer] = pending.answers.get(answer, 0) + 1
+        pending.answer_sources[answer] = lpdu.pduSource
+
+        # feed the answer through the table admission policy immediately so
+        # the audit trail reflects the query-response provenance
+        table = self.elementService.vmac_addr_table
+        try:
+            result = table.admit(
+                address,
+                answer,
+                MappingSource.query_response,
+                observed_source=lpdu.pduSource,
+                basis="Address-Resolution-ACK to local query",
+            )
+        except VMACConflictError as err:
+            # the answer's IPv6 address is already bound to another VMAC:
+            # an unambiguous failure, never an arbitrary target choice
+            BVLLServiceElement._warning("resolution rejected: %s", err)
+            pending.finalizing = True
+            if pending.guard_handle is not None:
+                pending.guard_handle.cancel()
+                pending.guard_handle = None
+            if not pending.future.done():
+                pending.future.set_exception(err)
+            return
+        if _debug:
+            BVLLServiceElement._debug("    - admission result: %r", result)
+
+        # distinct answers are arriving: settle the round once the guard
+        # window has elapsed instead of letting the last writer win
+        if pending.guard_handle is None:
+            pending.guard_handle = asyncio.get_event_loop().call_later(
+                RESOLUTION_GUARD_TIME,
+                lambda: asyncio.ensure_future(self._finalize_resolution(address)),
+            )
+
+        if len(pending.answers) > 1:
+            if _debug:
+                BVLLServiceElement._debug(
+                    "    - conflicting answers so far: %r", pending.answers
+                )
+
+    async def _finalize_resolution(self, address: VirtualAddress) -> None:
+        """Decide one resolution round once the answer guard window closes."""
+        if _debug:
+            BVLLServiceElement._debug("_finalize_resolution %r", address)
+
+        pending = self.virtual_address_resolution.get(address, None)
+        if pending is None:
+            return
+        pending.finalizing = True
+        pending.guard_handle = None
+
+        table = self.elementService.vmac_addr_table
+        record = table.get_record(address)
+        answers = pending.answers
+
+        if len(answers) > 1:
+            incumbent = record.ipv6 if record is not None else next(iter(answers))
+            challengers = [a for a in answers if a != incumbent]
+            challenger = challengers[0]
+            err = VMACConflictError(address, incumbent, challenger)
+            if _debug:
+                BVLLServiceElement._warning(
+                    "unresolved VMAC conflict for %r: %r", address, answers
+                )
+            if not pending.future.done():
+                pending.future.set_exception(err)
+            return
+
+        answer = next(iter(answers))
+
+        # no incumbent: the first answer for an unknown VMAC is accepted
+        if record is None:
+            if not pending.future.done():
+                pending.future.set_result(answer)
+            return
+
+        # an answer matching the incumbent is always fine
+        if isinstance(record.ipv6, IPv6Address) and record.ipv6 == answer:
+            if not pending.future.done():
+                pending.future.set_result(answer)
+            return
+
+        # a disagreeing answer is evidence of a dispute; a single round can
+        # never move traffic.  Migration is only possible when the candidate
+        # was already parked by an earlier round and this round corroborates
+        # it with consistent answers.
+        if not (
+            pending.had_prior_candidate
+            and isinstance(record.candidate, IPv6Address)
+            and record.candidate == answer
+        ):
+            if not pending.future.done():
+                pending.future.set_exception(
+                    VMACConflictError(address, record.ipv6, answer)
+                )
+            return
+
+        # the candidate predates this round and the round is consistent:
+        # commit the migration
+        migration = table.confirm_migration(
+            address,
+            answer,
+            observed_source=pending.answer_sources.get(answer),
+        )
+        if migration is AdmissionResult.migration:
+            if not pending.future.done():
+                pending.future.set_result(answer)
+        elif not pending.future.done():
+            pending.future.set_exception(
+                VMACConflictError(address, record.ipv6, answer)
+            )
