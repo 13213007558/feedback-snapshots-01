@@ -14,6 +14,12 @@ from ..transaction import TransactionManager
 from ..transport import CommParams
 
 
+#: Modbus function codes allowed on the broadcast address (dev_id 0).
+#: Per the Modbus over serial line spec only write requests may be broadcast;
+#: read requests cannot be answered on a multi-drop line.
+BROADCAST_FUNCTION_CODES = frozenset((5, 6, 15, 16))
+
+
 class ServerRequestHandler(TransactionManager):
     """Handle client connection."""
 
@@ -91,10 +97,7 @@ class ServerRequestHandler(TransactionManager):
         """Handle request."""
         try:
             if self.server.broadcast_enable and not pdu.dev_id:
-                # if broadcasting then execute on all device contexts,
-                # note response will be ignored
-                for dev_id in self.server.context.device_ids():
-                    await pdu.datastore_update(self.server.context, dev_id)
+                await self.handle_broadcast(pdu)
                 return
             response = await pdu.datastore_update(self.server.context, pdu.dev_id)
 
@@ -116,6 +119,51 @@ class ServerRequestHandler(TransactionManager):
         response.transaction_id = pdu.transaction_id
         response.dev_id = pdu.dev_id
         self.server_send(response, self.last_addr)
+
+    async def handle_broadcast(self, pdu: ModbusPDU) -> None:
+        """Apply a broadcast write (dev_id 0) to every configured device.
+
+        The protocol defines no response for broadcast requests, so nothing
+        is sent back on the wire regardless of the outcome. Only write
+        function codes may be broadcast; reads are rejected without touching
+        the datastores. A failure on one device neither aborts the remaining
+        devices nor hides the failure: it is logged and the loop continues.
+        """
+        if pdu.function_code not in BROADCAST_FUNCTION_CODES:
+            Log.warning(
+                "Broadcast request with function code {} rejected: "
+                "only write function codes {} are allowed",
+                pdu.function_code,
+                sorted(BROADCAST_FUNCTION_CODES),
+            )
+            return
+        failed_devices: list[int] = []
+        for dev_id in self.server.context.device_ids():
+            try:
+                result = await pdu.datastore_update(self.server.context, dev_id)
+            except Exception as exc:  # pylint: disable=broad-except
+                Log.error(
+                    "Broadcast update failed on device {}: {}; {}",
+                    dev_id,
+                    exc,
+                    traceback.format_exc(),
+                )
+                failed_devices.append(dev_id)
+                continue
+            if isinstance(result, ExceptionResponse):
+                Log.error(
+                    "Broadcast update rejected on device {} with exception {}",
+                    dev_id,
+                    result.exception_code,
+                )
+                failed_devices.append(dev_id)
+        if failed_devices:
+            Log.error(
+                "Broadcast function code {} not applied to devices {}; "
+                "no response is sent for broadcast requests",
+                pdu.function_code,
+                failed_devices,
+            )
 
     def server_send(self, pdu, addr):
         """Send message."""

@@ -8,6 +8,7 @@ import pytest
 from pymodbus.exceptions import ModbusIOException, NoSuchIdException
 from pymodbus.framer import FramerType
 from pymodbus.pdu import ExceptionResponse
+from pymodbus.pdu.register_message import WriteSingleRegisterRequest
 from pymodbus.server import ModbusBaseServer
 from pymodbus.simulator import DataType, SimData, SimDevice
 from pymodbus.transport import CommParams, CommType
@@ -152,6 +153,10 @@ class TestRequesthandler:
         """Test __init__."""
         requesthandler.last_pdu = ExceptionResponse(17)
         await requesthandler.handle_request(requesthandler.last_pdu)
+        # broadcast only accepts write function codes, use a write request
+        requesthandler.last_pdu = WriteSingleRegisterRequest(
+            address=0, registers=[1], dev_id=0
+        )
         requesthandler.last_pdu.datastore_update = mock.AsyncMock()  # type: ignore[method-assign]
         requesthandler.server.broadcast_enable = True
         requesthandler.last_pdu.dev_id = 0
