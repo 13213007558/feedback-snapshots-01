@@ -87,6 +87,9 @@ source-include = [
     "tests/dnsseckeys/*.json",
     "tests/dnsseckeys/*.key",
     "tests/dnsseckeys/*.private",
+    "tests/dnsseckeys/make-keytag-collision.py",
+    "tests/dnsseckeys/keytag-collision/*.key",
+    "tests/dnsseckeys/keytag-collision/*.private",
     "util/**",
 ]
 
