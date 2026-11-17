@@ -1,0 +1,20 @@
+; High-priority exception policy zone (trusted order is fixed in
+; config.json).  PASSTHRU here overrides any lower-priority block.
+;
+; RPZ QNAME trigger owners are written relative to the policy zone origin,
+; i.e. "allowed.wild.example" denotes the data name allowed.wild.example.
+$ORIGIN exception.rpz.
+$TTL 3600
+
+@                       SOA ns1.example. hostmaster.example. (
+                                2026111800 3600 900 86400 3600 )
+@                       NS  ns1.example.
+
+; QNAME exception: exact allow for one host under a wildcard block.
+allowed.wild.example    CNAME rpz-passthru.
+
+; QNAME exception: exact allow that beats the lower-zone wildcard.
+special.evil.example    CNAME rpz-passthru.
+
+; Response-address exception for a single IPv4 address (203.0.113.254/32).
+32.254.113.0.203.rpz-ip CNAME rpz-passthru.

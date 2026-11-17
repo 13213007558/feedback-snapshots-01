@@ -1,0 +1,14 @@
+{
+  "zones": [
+    {
+      "name": "exceptions",
+      "file": "exceptions.rpz",
+      "origin": "exception.rpz."
+    },
+    {
+      "name": "threats",
+      "file": "threats.rpz",
+      "origin": "threat.rpz."
+    }
+  ]
+}

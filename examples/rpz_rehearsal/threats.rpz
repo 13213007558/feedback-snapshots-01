@@ -1,0 +1,38 @@
+; Lower-priority threat policy zone.  Only QNAME, rpz-ip and rpz-ip6
+; triggers and NXDOMAIN/NODATA/PASSTHRU actions are interpreted; anything
+; else is reported as pending by the offline rehearsal.
+;
+; QNAME trigger owners are relative to $ORIGIN; the RPZ engine strips the
+; zone origin before matching them against probe data names.
+$ORIGIN threat.rpz.
+$TTL 3600
+
+@                       SOA ns1.example. hostmaster.example. (
+                                2026111800 3600 900 86400 3600 )
+@                       NS  ns1.example.
+
+; --- QNAME triggers -------------------------------------------------------
+evil.example            CNAME .                 ; legacy NXDOMAIN form
+blocked.example         CNAME rpz-nxdomain.
+quiet.example           CNAME rpz-nodata.
+*.wild.example          CNAME rpz-nodata.
+*.evil.example          CNAME rpz-nodata.
+deep.more.evil.example  CNAME rpz-nxdomain.
+
+; --- Response address triggers -------------------------------------------
+; 192.0.2.0/32 (truncated reversed-octet owner)
+32.2.0.192.rpz-ip       CNAME rpz-nxdomain.
+; 8.8.8.0/24 and 8.8.0.0/16 exercise longest-prefix selection.
+24.8.8.8.rpz-ip         CNAME .
+16.8.8.rpz-ip           CNAME rpz-nodata.
+; 2001:db8::/32 written as reversed nibbles.
+32.8.b.d.0.1.0.0.2.rpz-ip6 CNAME rpz-nxdomain.
+
+; --- Deliberately unsupported / pending content --------------------------
+bad.ns.example.rpz-nsdname CNAME .              ; NSDNAME trigger
+8.rpz-nsip                 CNAME .              ; NSIP trigger
+*.16.10.rpz-ip             CNAME rpz-nxdomain.  ; wildcard address
+mystery.example            CNAME rpz-tarpit.    ; unknown action
+tarpit2.example            A 192.0.2.99         ; non-CNAME action RR
+24.1.2.rpz-ip              CNAME rpz-drop.      ; legacy DROP action
+99.1.2.rpz-ip              CNAME rpz-nxdomain.  ; prefix 99 > 32, malformed

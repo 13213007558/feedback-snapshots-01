@@ -1,0 +1,19 @@
+[
+  {"qname": "evil.example.", "rdtype": "A"},
+  {"qname": "blocked.example.", "rdtype": "A"},
+  {"qname": "quiet.example.", "rdtype": "AAAA"},
+  {"qname": "host.wild.example.", "rdtype": "A"},
+  {"qname": "wild.example.", "rdtype": "A"},
+  {"qname": "allowed.wild.example.", "rdtype": "A"},
+  {"qname": "special.evil.example.", "rdtype": "A"},
+  {"qname": "deep.more.evil.example.", "rdtype": "A"},
+  {"qname": "notevil.example.", "rdtype": "A"},
+  {"qname": "mystery.example.", "rdtype": "A"},
+  {"addresses": ["192.0.2.0"]},
+  {"addresses": ["198.51.100.1"]},
+  {"addresses": ["8.8.8.9"]},
+  {"addresses": ["203.0.113.254"]},
+  {"addresses": ["2001:db8::abcd"]},
+  {"addresses": ["10.0.16.5"]},
+  {"qname": "evil.example.", "rdtype": "A", "addresses": ["8.8.8.9"]}
+]

@@ -60,6 +60,7 @@ __all__ = [
     "tsigkeyring",
     "ttl",
     "rdtypes",
+    "rpz",
     "update",
     "version",
     "versioned",
