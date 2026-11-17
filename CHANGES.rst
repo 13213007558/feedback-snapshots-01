@@ -5,6 +5,9 @@ V2.0.3
 ------
 
 - fix: raise connection errors from wait_hello_from_server #141 #91
+- fix: complete the XOAUTH2 SASL exchange on a server challenge by sending the
+  empty response (RFC 4959) instead of re-sending the token; abort on unknown
+  extra challenges and never enter AUTH after a failed/cancelled/lost exchange
 
 V2.0.2
 ------

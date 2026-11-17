@@ -43,6 +43,9 @@ IMAP4_PORT = 143
 IMAP4_SSL_PORT = 993
 STARTED, CONNECTED, NONAUTH, AUTH, SELECTED, LOGOUT = 'STARTED', 'CONNECTED', 'NONAUTH', 'AUTH', 'SELECTED', 'LOGOUT'
 CRLF = b'\r\n'
+# An empty SASL response (RFC 4959): a bare CRLF line used to close an
+# authentication exchange after a server challenge. It carries no token.
+EMPTY_SASL_RESPONSE = CRLF
 
 ID_MAX_PAIRS_COUNT = 30
 ID_MAX_FIELD_LEN = 30
@@ -279,6 +282,24 @@ class IdleCommand(Command):
             self.buffer.clear()
 
 
+class AuthenticateCommand(Command):
+    """A SASL AUTHENTICATE exchange driven by server continuation requests.
+
+    XOAUTH2 sends the initial client response together with the AUTHENTICATE
+    command. A server that rejects the token does not answer the tag directly:
+    it sends a continuation challenge (RFC 4959) and waits for the client to
+    close the exchange with an empty SASL response before it emits the tagged
+    NO/BAD. We must only ever answer with that empty response: the initial
+    response (which carries the token) is never sent a second time.
+    """
+
+    def __init__(self, tag: str, mechanism: str, initial_response: str, *args,
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+        super().__init__('AUTHENTICATE', tag, mechanism, initial_response, *args,
+                         loop=loop, timeout=timeout)
+        self.continuation_received = False
+
+
 class AioImapException(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -488,10 +509,10 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth
         https://developers.google.com/gmail/imap/xoauth2-protocol
         """
-        sasl_string = b64encode(f"user={user}\1auth=Bearer {token}\1\1".encode("ascii"))
+        sasl_string = b64encode(f"user={user}\1auth=Bearer {token}\1\1".encode("ascii")).decode("ascii")
 
         response = await self.execute(
-            Command('AUTHENTICATE', self.new_tag(), 'XOAUTH2', sasl_string.decode("ascii"), loop=self.loop),
+            AuthenticateCommand(self.new_tag(), 'XOAUTH2', sasl_string, loop=self.loop),
             scrub=token,
         )
 
@@ -694,10 +715,29 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         elif self.pending_sync_command.name == 'IDLE':
             log.debug('continuation line -- assuming IDLE is active : %s', line)
             self._idle_event.set()
+        elif isinstance(self.pending_sync_command, AuthenticateCommand):
+            self._handle_authenticate_continuation(line, self.pending_sync_command)
         else:
             log.debug('continuation line appended to pending sync command %s : %s' % (self.pending_sync_command, line))
             self.pending_sync_command.append_to_resp(line)
             self.pending_sync_command.flush()
+
+    def _handle_authenticate_continuation(self, line: bytes, command: 'AuthenticateCommand') -> None:
+        """Drive a SASL AUTHENTICATE exchange from a server continuation.
+
+        The initial client response already carries the credentials, so a
+        continuation can only be a challenge. Per RFC 4959 the client closes
+        the exchange with a single empty SASL response and then waits for the
+        tagged result; the token must never be re-sent. A second continuation
+        means the peer is not speaking SASL correctly, so the exchange is
+        aborted rather than fed further data.
+        """
+        command.append_to_resp(line)
+        if command.continuation_received:
+            raise Abort('unexpected additional server challenge during %s authentication' % command.args[0])
+        command.continuation_received = True
+        log.debug('authentication challenge received for %s, sending empty SASL response', command.args[0])
+        self.transport.write(EMPTY_SASL_RESPONSE)
 
     def new_tag(self) -> str:
         tag = self.tagpre + str(self.tagnum)

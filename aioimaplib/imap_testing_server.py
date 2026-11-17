@@ -15,7 +15,7 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import argparse
 import asyncio
-from base64 import b64decode
+from base64 import b64decode, b64encode
 import email
 import email.mime.nonmultipart
 import logging
@@ -175,7 +175,12 @@ class ServerState:
 def critical_section(next_state):
     async def execute_section(self, state, critical_func, *args, **kwargs):
         async with self.state_condition:
-            critical_func(self, *args, **kwargs)
+            result = critical_func(self, *args, **kwargs)
+            # A handler may opt out of the state change by returning False
+            # (e.g. an AUTHENTICATE that issued a challenge instead of finishing).
+            if result is False:
+                self.state_condition.notify_all()
+                return
             self.state = state
             log.debug('state -> %s' % state)
             self.state_condition.notify_all()
@@ -214,6 +219,11 @@ class ImapProtocol(asyncio.Protocol):
         self.state = NONAUTH
         self.state_condition = asyncio.Condition()
         self.append_literal_command = None
+        # XOAUTH2 behaviour: None (or 'success') accepts the initial response,
+        # 'failure_challenge' sends a continuation challenge and waits for the
+        # empty SASL response before rejecting the tag.
+        self.authenticate_mode = 'success'
+        self.pending_authenticate_tag = None
 
     def connection_made(self, transport):
         self.transport = transport
@@ -224,6 +234,9 @@ class ImapProtocol(asyncio.Protocol):
             self.append_literal(data)
             return
         for cmd_line in data.splitlines():
+            if self.pending_authenticate_tag is not None:
+                self._handle_authenticate_response(cmd_line)
+                continue
             if command_re.match(cmd_line) is None:
                 self.send_untagged_line('BAD Error in IMAP command : Unknown command (%r).' % cmd_line)
             else:
@@ -233,6 +246,17 @@ class ImapProtocol(asyncio.Protocol):
                     self.exec_command(tag, command_array[1:])
                 else:
                     self.exec_command(None, command_array)
+
+    def _handle_authenticate_response(self, cmd_line: bytes):
+        # After a challenge the client must send a single empty SASL response
+        # (an empty line) to end the exchange. Anything else is treated as an
+        # invalid response, never as a fresh command.
+        tag = self.pending_authenticate_tag
+        self.pending_authenticate_tag = None
+        if cmd_line != b'':
+            self.send_tagged_line(tag, 'BAD Invalid SASL response')
+            return
+        self.send_tagged_line(tag, 'NO AUTHENTICATE failed')
 
     def connection_lost(self, error):
         if error:
@@ -284,16 +308,25 @@ class ImapProtocol(asyncio.Protocol):
         if method != "XOAUTH2":
             self.error(tag, 'Only XOAUTH2 autheticate is supported.')
             return
-        
+
         token = b64decode(sasl_string).decode('ascii')
 
         # disassemble sasl string
-        user_part, token_part = token.split('\1',1)
+        user_part, token_part = token.split('\1', 1)
 
         _, self.user_login = user_part.split("=")
 
+        if self.authenticate_mode == 'failure_challenge':
+            # Real servers reject a bad token with a continuation challenge and
+            # wait for the client's empty SASL response before the tagged NO.
+            # The connection stays in NONAUTH until authentication succeeds.
+            self.pending_authenticate_tag = tag
+            self.send_untagged_line(b64encode(b'{"status":"401","schemes":"Bearer","scope":"https://mail.google.com/"}').decode(),
+                                    continuation=True)
+            return False
+
         self.server_state.login(self.user_login, self)
-        
+
         self.send_tagged_line(tag, 'OK AUTHENTICATE completed')
 
     @critical_section(next_state=LOGOUT)
