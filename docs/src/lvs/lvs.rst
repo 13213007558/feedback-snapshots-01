@@ -410,3 +410,4 @@ References
     details
     demonstration
     binary-format
+    diff

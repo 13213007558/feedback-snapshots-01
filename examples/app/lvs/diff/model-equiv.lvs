@@ -1,0 +1,7 @@
+// Syntax differs, but the signing relation is the same as model-new.lvs:
+// the widened #post is split into two rules with explicit owner values.
+#KEY: "KEY"/"v"
+#root: "site"/"root"/#KEY
+#post_alice: "site"/"post"/owner/"post" & { owner: "alice" } <= #author
+#post_bob: "site"/"post"/owner/"post" & { owner: "bob" } <= #author
+#author: "site"/"author"/owner/#KEY & { owner: "alice"|"bob" } <= #root

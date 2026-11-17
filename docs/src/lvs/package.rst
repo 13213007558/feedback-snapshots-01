@@ -16,4 +16,12 @@
     .. autoclass:: LvsModelError
         :members:
 
+    .. autoclass:: DiffBounds
+        :members:
+
+    .. autoclass:: FnContract
+        :members:
+
+    .. autofunction:: compare_lvs_models
+
 .. autodata:: ndn.app_support.light_versec.checker.UserFn

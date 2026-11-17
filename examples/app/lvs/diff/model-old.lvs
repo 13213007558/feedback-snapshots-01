@@ -1,0 +1,5 @@
+// One user-attribution constraint: only alice's posts authorize alice's key.
+#KEY: "KEY"/"v"
+#root: "site"/"root"/#KEY
+#post: "site"/"post"/owner/"post" & { owner: "alice" } <= #author
+#author: "site"/"author"/owner/#KEY & { owner: "alice"|"bob" } <= #root

@@ -1,0 +1,5 @@
+// Same model after widening the attribution on #post from alice to alice|bob.
+#KEY: "KEY"/"v"
+#root: "site"/"root"/#KEY
+#post: "site"/"post"/owner/"post" & { owner: "alice"|"bob" } <= #author
+#author: "site"/"author"/owner/#KEY & { owner: "alice"|"bob" } <= #root

@@ -19,6 +19,7 @@ import argparse
 
 from . import (
     cmd_compile_lvs,
+    cmd_diff_lvs,
     cmd_fetch_data,
     cmd_fetch_rdrcontent,
     cmd_serve_data,
@@ -33,6 +34,7 @@ Available commands:
   Serve-RdrContent (putchunks,src)
   Fetch-RdrContent (catchunks,frc)
   Compile-Lvs (compile-lvs)
+  Diff-Lvs (diff-lvs)
 
 Try '%(prog)s COMMAND -h' for more information on each command
 """
@@ -49,6 +51,7 @@ def main():
     cmd_fetch_rdrcontent.add_parser(subparsers)
     cmd_serve_rdrcontent.add_parser(subparsers)
     cmd_compile_lvs.add_parser(subparsers)
+    cmd_diff_lvs.add_parser(subparsers)
 
     args = parser.parse_args()
     if "executor" not in args:
