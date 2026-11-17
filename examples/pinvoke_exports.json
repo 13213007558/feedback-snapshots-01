@@ -1,0 +1,18 @@
+{
+  "platform": "windows",
+  "modules": {
+    "KERNEL32.dll": {
+      "names": [
+        "GetVersion",
+        "GetVersionW",
+        "ReadFile",
+        "ReadFileA",
+        "MessageBoxW",
+        "SomeCdeclFunc"
+      ],
+      "ordinals": {
+        "123": "OrdinalOnlyFunc"
+      }
+    }
+  }
+}
