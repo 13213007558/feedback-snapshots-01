@@ -81,6 +81,14 @@ class ModbusServerContext:
     device contexts.
     """
 
+    #: Only set when the selected device offers a combined write/read view.
+    @property
+    def supports_atomic_set_and_get(self) -> bool:
+        """Return True only when every device is a batch-safe simulator."""
+        return bool(self._devices) and all(
+            isinstance(dev, ModbusSimulatorContext) for dev in self._devices.values()
+        )
+
     def __init__(
         self,
         devices: dict[int, ModbusDeviceContext | ModbusSimulatorContext]
@@ -171,6 +179,30 @@ class ModbusServerContext:
         if isinstance(dev, ModbusSimulatorContext):  # pragma: no cover
             return await dev.async_OLD_setValues(func_code, address, values)
         return ExcCodes.DEVICE_BUSY
+
+    async def async_setgetValues(
+        self,
+        device_id: int,
+        func_code: int,
+        write_address: int,
+        values: Sequence[int] | Sequence[bool],
+        read_address: int,
+        read_count: int,
+    ) -> list[int] | list[bool] | ExcCodes:
+        """Write a batch and read from the same committed view.
+
+        Both ranges are validated before the batch is applied, so a read
+        error cannot leave a successful write behind.
+        """
+        dev = self.__get_device(device_id)
+        if not isinstance(dev, ModbusSimulatorContext):
+            return ExcCodes.DEVICE_FAILURE
+        if not dev.validate(func_code, read_address, read_count):
+            return ExcCodes.ILLEGAL_ADDRESS
+        result = await dev.async_OLD_setValues(func_code, write_address, values)
+        if result:
+            return result
+        return await dev.async_OLD_getValues(func_code, read_address, read_count)
 
     def device_ids(self):
         """Get the configured device ids."""

@@ -14,6 +14,9 @@ from .simruntime import SimRuntime
 class SimCore:
     """Handler for the simulator/server."""
 
+    #: The in-memory runtime provides an atomic write/read view.
+    supports_atomic_set_and_get = True
+
     def __init__(self, devices: SimDevice | list[SimDevice]) -> None:
         """Build datastore."""
         if not isinstance(devices, list):
@@ -67,4 +70,18 @@ class SimCore:
         """Set the datastore with the supplied values."""
         return await self.__get_device(device_id).async_setValues(
             func_code, address, values
+        )
+
+    async def async_setgetValues(
+        self,
+        device_id: int,
+        func_code: int,
+        write_address: int,
+        values: list[int] | list[bool],
+        read_address: int,
+        read_count: int,
+    ) -> list[int] | list[bool] | ExcCodes:
+        """Write a batch and read from the same committed view."""
+        return await self.__get_device(device_id).async_setgetValues(
+            func_code, write_address, values, read_address, read_count
         )

@@ -622,6 +622,26 @@ class ModbusSimulatorContext:
         fx_write = func_code in self._write_func_code
         return self.loop_validate(real_address, real_address + count, fx_write)
 
+    def validate_set_values(self, func_code, address, values):
+        """Check a complete write batch before changing any register.
+
+        The whole target range is checked once, using the same typed-range
+        rules as reads. It never changes memory, so a failure returns
+        without having exposed a partly written batch.
+
+        :meta private:
+        """
+        if func_code not in self._bits_func_code:
+            real_address = self.fc_offset[func_code] + address
+            end_address = real_address + len(values)
+        else:
+            real_address = self.fc_offset[func_code] + address // WORD_SIZE
+            reg_count = (address % WORD_SIZE + len(values) + WORD_SIZE - 1) // WORD_SIZE
+            end_address = real_address + reg_count
+        if real_address < 0 or end_address > self.register_count:
+            return False
+        return self.loop_validate(real_address, end_address, True)
+
     async def async_OLD_getValues(
         self, func_code, address, count=1
     ) -> list[int] | list[bool] | ExcCodes:
@@ -661,27 +681,31 @@ class ModbusSimulatorContext:
         return result
 
     async def async_OLD_setValues(self, func_code, address, values) -> ExcCodes | None:
-        """Set the requested values of the datastore.
+        """Set the requested values of the datastore as one atomic batch.
+
+        The complete batch is validated first. Only when every register is
+        writable are the values applied, so a later invalid address cannot
+        leave the earlier values of the batch in memory.
 
         :meta private:
         """
+        if not values:
+            return ExcCodes.ILLEGAL_VALUE
+        if not self.validate_set_values(func_code, address, values):
+            return ExcCodes.ILLEGAL_ADDRESS
+
         if func_code not in self._bits_func_code:
             real_address = self.fc_offset[func_code] + address
             for value in values:
-                if not self.validate(func_code, address):
-                    return ExcCodes.ILLEGAL_ADDRESS
                 self.registers[real_address].value = value
                 self.registers[real_address].count_write += 1
                 real_address += 1
-                address += 1
             return None
 
         # bit access
         real_address = self.fc_offset[func_code] + int(address / 16)
         bit_index = address % 16
         for value in values:
-            if not self.validate(func_code, address):
-                return ExcCodes.ILLEGAL_ADDRESS
             bit_mask = 2**bit_index
             if bool(value):
                 self.registers[real_address].value |= bit_mask
@@ -692,7 +716,6 @@ class ModbusSimulatorContext:
             if bit_index == 16:
                 bit_index = 0
                 real_address += 1
-                address += 1
         return None
 
     # --------------------------------------------

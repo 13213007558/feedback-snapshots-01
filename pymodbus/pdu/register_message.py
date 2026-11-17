@@ -230,6 +230,22 @@ class ReadWriteMultipleRegistersRequest(ModbusPDU):
             and self._payload_byte_count != self.write_byte_count
         ):
             return ExceptionResponse(self.function_code, ExcCodes.ILLEGAL_VALUE)
+        if getattr(context, "supports_atomic_set_and_get", False):
+            registers = await context.async_setgetValues(
+                device_id,
+                self.function_code,
+                self.write_address,
+                self.write_registers,
+                self.read_address,
+                self.read_count,
+            )
+            if isinstance(registers, ExcCodes):
+                return ExceptionResponse(self.function_code, registers)
+            return ReadWriteMultipleRegistersResponse(
+                registers=cast(list[int], registers),
+                dev_id=device_id,
+                transaction_id=self.transaction_id,
+            )
         rc = await context.async_setValues(
             device_id, self.function_code, self.write_address, self.write_registers
         )

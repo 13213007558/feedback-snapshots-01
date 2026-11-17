@@ -164,3 +164,180 @@ class TestSimRuntime:
         assert result2 == [1]
         result3 = await rt.async_setValues(0x03, 15, [1])
         assert isinstance(result3, ExcCodes)
+
+
+class TestSimRuntimeBatchContract:
+    """Batch write contract of the in-memory datastore."""
+
+    @staticmethod
+    def make_runtime(action=None):
+        """Two safe adjacent thresholds followed by a read-only guard."""
+        return SimRuntime(
+            SimDevice(
+                1,
+                simdata=[
+                    SimData(10, values=10, datatype=DataType.REGISTERS),
+                    SimData(11, values=20, datatype=DataType.REGISTERS),
+                    SimData(12, values=30, readonly=True, datatype=DataType.REGISTERS),
+                ],
+                action=action,
+            )
+        )
+
+    async def test_batch_at_threshold_commits_both_registers(self):
+        """A batch ending at the last writable register is committed."""
+        rt = self.make_runtime()
+        assert await rt.async_setValues(0x10, 10, [11, 21]) is None
+        assert await rt.async_getValues(0x03, 10, 2) == [11, 21]
+
+    async def test_batch_crossing_threshold_leaves_original_values(self):
+        """A batch crossing into the read-only guard is rejected as a whole."""
+        rt = self.make_runtime()
+        assert await rt.async_setValues(0x10, 10, [11, 21, 31]) == (
+            ExcCodes.ILLEGAL_ADDRESS
+        )
+        assert await rt.async_getValues(0x03, 10, 3) == [10, 20, 30]
+
+    async def test_sparse_hole_rejects_whole_batch(self):
+        """A sparse gap in the middle leaves the earlier values untouched."""
+        rt = SimRuntime(
+            SimDevice(
+                1,
+                simdata=[
+                    SimData(10, values=10, datatype=DataType.REGISTERS),
+                    SimData(12, values=30, datatype=DataType.REGISTERS),
+                ],
+            )
+        )
+        assert await rt.async_setValues(0x10, 10, [11, 21, 31]) == (
+            ExcCodes.ILLEGAL_ADDRESS
+        )
+        assert await rt.async_getValues(0x03, 10, 1) == [10]
+        assert await rt.async_getValues(0x03, 12, 1) == [30]
+
+    async def test_value_count_mismatch_is_rejected(self):
+        """The payload length must match the requested write count."""
+        rt = self.make_runtime()
+        assert await rt.get_block(0x10, 10, 2, [11]) == ExcCodes.ILLEGAL_VALUE
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_empty_batch_is_invalid(self):
+        """An empty write is invalid, not a silent success."""
+        rt = self.make_runtime()
+        assert await rt.async_setValues(0x10, 10, []) == ExcCodes.ILLEGAL_VALUE
+
+    async def test_callback_error_leaves_both_values(self):
+        """A callback error after staging must not change memory."""
+
+        async def action(
+            _fc, _start, _addr, _count, registers, set_values
+        ):
+            if set_values:
+                registers[0] = 99
+                set_values[0] = 99
+                return ExcCodes.DEVICE_FAILURE
+            return None
+
+        rt = self.make_runtime(action)
+        assert await rt.async_setValues(0x10, 10, [11, 21]) == (
+            ExcCodes.DEVICE_FAILURE
+        )
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_callback_exception_leaves_original_values(self):
+        """An exception from the callback propagates and does not commit."""
+
+        async def action(
+            _fc, _start, _addr, _count, _registers, set_values
+        ):
+            if set_values:
+                raise RuntimeError("hardware fault")
+            return None
+
+        rt = self.make_runtime(action)
+        with pytest.raises(RuntimeError):
+            await rt.async_setValues(0x10, 10, [11, 21])
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_callback_can_veto_values_without_commit(self):
+        """A callback may rewrite set_values; only the staged copy commits."""
+
+        async def action(
+            _fc, _start, _addr, _count, _registers, set_values
+        ):
+            if set_values:
+                set_values[0] = 42
+            return None
+
+        rt = self.make_runtime(action)
+        assert await rt.async_setValues(0x10, 10, [11, 21]) is None
+        assert await rt.async_getValues(0x03, 10, 2) == [42, 21]
+
+    async def test_callback_value_count_change_rejected(self):
+        """A callback that changes the value count is rejected."""
+
+        async def action(
+            _fc, _start, _addr, _count, _registers, set_values
+        ):
+            if set_values:
+                set_values.pop()
+            return None
+
+        rt = self.make_runtime(action)
+        assert await rt.async_setValues(0x10, 10, [11, 21]) == (
+            ExcCodes.ILLEGAL_VALUE
+        )
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_setget_reads_committed_values(self):
+        """A combined write/read sees the committed write."""
+        rt = self.make_runtime()
+        result = await rt.async_setgetValues(0x17, 10, [11, 21], 10, 2)
+        assert result == [11, 21]
+        assert await rt.async_getValues(0x03, 10, 2) == [11, 21]
+
+    async def test_setget_read_failure_does_not_write(self):
+        """If the read half is invalid, the write half is not applied."""
+        rt = self.make_runtime()
+        assert await rt.async_setgetValues(0x17, 10, [11, 21], 11, 3) == (
+            ExcCodes.ILLEGAL_ADDRESS
+        )
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_setget_callback_failure_does_not_write(self):
+        """A callback failure in a combined request leaves memory unchanged."""
+
+        async def action(
+            _fc, _start, _addr, _count, _registers, set_values
+        ):
+            if set_values is not None:
+                return ExcCodes.DEVICE_FAILURE
+            return None
+
+        rt = self.make_runtime(action)
+        assert await rt.async_setgetValues(0x17, 10, [11, 21], 10, 2) == (
+            ExcCodes.DEVICE_FAILURE
+        )
+        assert await rt.async_getValues(0x03, 10, 2) == [10, 20]
+
+    async def test_bit_write_batch_rejects_readonly_register(self):
+        """A coil batch crossing into a read-only register writes nothing."""
+        rt = SimRuntime(
+            SimDevice(
+                1,
+                simdata=[
+                    SimData(0, values=[True] * 16, datatype=DataType.BITS),
+                    SimData(
+                        1,
+                        values=[False] * 16,
+                        readonly=True,
+                        datatype=DataType.BITS,
+                    ),
+                ],
+                use_bit_addressing=True,
+            )
+        )
+        assert await rt.async_setValues(0x0F, 14, [False] * 4) == (
+            ExcCodes.ILLEGAL_ADDRESS
+        )
+        assert await rt.async_getValues(0x01, 14, 4) == [True, True, False, False]

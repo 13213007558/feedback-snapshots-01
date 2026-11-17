@@ -6,6 +6,8 @@ from unittest import mock
 import pytest
 
 from pymodbus.constants import ExcCodes
+from pymodbus.simulator import DataType, SimData, SimDevice
+from pymodbus.simulator.simcore import SimCore
 from pymodbus.exceptions import ModbusIOException
 from pymodbus.pdu.decoders import DecodePDU
 from pymodbus.pdu.register_message import (
@@ -322,6 +324,81 @@ class TestReadRegisterMessages:
         context.async_setValues.assert_awaited_once_with(
             1, request.function_code, 2, [0x0A, 0x0B]
         )
+
+    async def test_read_write_multiple_registers_atomic_context(self):
+        """FC23 reads the value committed by its own write batch."""
+        context = SimCore(
+            SimDevice(
+                1,
+                simdata=[
+                    SimData(1, values=1, datatype=DataType.REGISTERS),
+                    SimData(2, values=2, datatype=DataType.REGISTERS),
+                ],
+            )
+        )
+        request = ReadWriteMultipleRegistersRequest(
+            read_address=1, read_count=2, write_address=1, write_registers=[0x0A, 0x0B]
+        )
+
+        result = await request.datastore_update(context, 1)
+
+        assert result.registers == [0x0A, 0x0B]
+        assert await context.async_getValues(1, 3, 1, 2) == [0x0A, 0x0B]
+
+    async def test_read_write_multiple_registers_read_error_is_reported(self):
+        """A read-side error must be an exception response, not success."""
+        context = SimCore(
+            SimDevice(
+                1,
+                simdata=[SimData(1, values=1, datatype=DataType.REGISTERS)],
+            )
+        )
+        request = ReadWriteMultipleRegistersRequest(
+            read_address=1, read_count=2, write_address=1, write_registers=[0x0A]
+        )
+
+        result = await request.datastore_update(context, 1)
+
+        assert result.exception_code == ExcCodes.ILLEGAL_ADDRESS
+        assert await context.async_getValues(1, 3, 1, 1) == [1]
+
+    async def test_read_write_multiple_registers_adapter_without_atomic_view(self):
+        """An adapter without a combined view falls back to set then get."""
+
+        class Adapter:
+            """Minimal datastore adapter."""
+
+            supports_atomic_set_and_get = False
+
+            def __init__(self):
+                """Initialize."""
+                self.set_calls = []
+                self.get_calls = []
+
+            async def async_setValues(
+                self, device_id, func_code, address, values
+            ):
+                """Record a write."""
+                self.set_calls.append((device_id, func_code, address, values))
+                return None
+
+            async def async_getValues(
+                self, device_id, func_code, address, count
+            ):
+                """Record a read."""
+                self.get_calls.append((device_id, func_code, address, count))
+                return [0x0A]
+
+        context = Adapter()
+        request = ReadWriteMultipleRegistersRequest(
+            read_address=1, read_count=1, write_address=1, write_registers=[0x0A]
+        )
+
+        result = await request.datastore_update(context, 1)
+
+        assert result.registers == [0x0A]
+        assert context.set_calls == [(1, 23, 1, [0x0A])]
+        assert context.get_calls == [(1, 23, 1, 1)]
 
     async def test_read_write_multiple_registers_verify(self, mock_server_context):
         """Test read/write multiple registers."""

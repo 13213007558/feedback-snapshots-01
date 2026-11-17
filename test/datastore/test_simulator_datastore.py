@@ -395,6 +395,41 @@ class TestDatastoreSimulator:
         assert result == [True, False, False]
         await exc_simulator.async_OLD_setValues(FX_WRITE_BIT, 80, [True] * 17)
 
+    async def test_simulator_set_values_batch_is_atomic(self, device):
+        """A batch touching an invalid later register writes none of it."""
+        simulator = ModbusSimulatorContext(device, None)
+        before = await simulator.async_OLD_getValues(FX_READ_REG, 8, 1)
+        rc = await simulator.async_OLD_setValues(FX_WRITE_REG, 8, [1234, 5678])
+        assert rc == ExcCodes.ILLEGAL_ADDRESS
+        assert await simulator.async_OLD_getValues(FX_READ_REG, 8, 1) == before
+
+    async def test_simulator_set_values_batch_at_threshold(self, device):
+        """A batch entirely inside writable registers is committed."""
+        simulator = ModbusSimulatorContext(device, None)
+        rc = await simulator.async_OLD_setValues(FX_WRITE_REG, 16, [1234, 5678])
+        assert rc is None
+        assert await simulator.async_OLD_getValues(FX_READ_REG, 16, 2) == [
+            1234,
+            5678,
+        ]
+
+    async def test_simulator_set_values_bit_batch_is_atomic(self, device):
+        """A coil batch crossing into a read-only byte writes none of it."""
+        simulator = ModbusSimulatorContext(device, None)
+        before = await simulator.async_OLD_getValues(FX_READ_BIT, 128, 16)
+        rc = await simulator.async_OLD_setValues(
+            FX_WRITE_BIT, 143, [True, True, True, True]
+        )
+        assert rc == ExcCodes.ILLEGAL_ADDRESS
+        assert await simulator.async_OLD_getValues(FX_READ_BIT, 128, 16) == before
+
+    async def test_simulator_set_values_empty_is_invalid(self, device):
+        """An empty batch is invalid and must not change memory."""
+        simulator = ModbusSimulatorContext(device, None)
+        rc = await simulator.async_OLD_setValues(FX_WRITE_REG, 16, [])
+        assert rc == ExcCodes.ILLEGAL_VALUE
+        assert await simulator.async_OLD_getValues(FX_READ_REG, 16, 1) == [3124]
+
     async def test_simulator_set_values_not(self, device):
         """Test simulator set values."""
         exc_simulator = ModbusSimulatorContext(device, None)
