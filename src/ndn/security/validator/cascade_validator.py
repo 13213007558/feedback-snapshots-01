@@ -156,6 +156,11 @@ class CascadeChecker:
     ``next_level`` controls validation of fetched certificates. It defaults to
     this checker and can be replaced with a policy-aware validator such as
     :func:`ndn.app_support.light_versec.lvs_validator`.
+
+    A fetched certificate is admitted only if it is the certificate named by
+    the KeyLocator, has a usable certificate structure, and carries a valid
+    chain. Its public key enters the cache only after the packet that caused
+    the fetch also passes signature verification with that key.
     """
 
     @staticmethod
@@ -179,6 +184,43 @@ class CascadeChecker:
         return False
 
     @staticmethod
+    def _is_certificate_name(name: FormalName) -> bool:
+        """Whether *name* has the shape of ``<identity>/KEY/<id>/<issuer>/v=<n>``."""
+        return (
+            len(name) >= 4
+            and bytes(name[-4]) == bytes(KEY_COMPONENT)
+            and Component.get_type(name[-1]) == Component.TYPE_VERSION
+        )
+
+    @staticmethod
+    def _is_key_name(name: FormalName) -> bool:
+        """Whether *name* has the shape of ``<identity>/KEY/<id>``."""
+        return len(name) >= 2 and bytes(name[-2]) == bytes(KEY_COMPONENT)
+
+    @classmethod
+    def _certificate_matches_locator(
+        cls,
+        cert_name: FormalName,
+        locator_name: FormalName,
+    ) -> bool:
+        """
+        Check that a fetched certificate is the one named by a KeyLocator.
+
+        A KeyLocator naming a complete certificate must match exactly, so a
+        certificate sharing the key name but carrying a different issuer or
+        version is rejected. A KeyLocator naming only the key accepts any
+        certificate of that key, i.e. ``<key name>/<issuer>/<version>``.
+        """
+        if cls._is_certificate_name(locator_name):
+            return Name.to_bytes(cert_name) == Name.to_bytes(locator_name)
+        if cls._is_key_name(locator_name):
+            return (
+                len(cert_name) >= 2
+                and Name.to_bytes(cert_name[:-2]) == Name.to_bytes(locator_name)
+            )
+        return False
+
+    @staticmethod
     def _parse_certificate(
         wire: BinaryStr,
         expected_name: FormalName | None = None,
@@ -190,15 +232,25 @@ class CascadeChecker:
             raise ValueError('Certificate name does not contain KEY component')
         if Component.get_type(cert.name[-1]) != Component.TYPE_VERSION:
             raise ValueError('Certificate name does not end with Version component')
-        if (
-            expected_name is not None
-            and Name.to_bytes(cert.name) != Name.to_bytes(expected_name)
-        ):
-            raise ValueError('Fetched certificate name does not match KeyLocator')
+        if expected_name is not None:
+            if not (
+                CascadeChecker._is_certificate_name(expected_name)
+                or CascadeChecker._is_key_name(expected_name)
+            ):
+                raise ValueError(
+                    'KeyLocator does not name a certificate or a key'
+                )
+            if not CascadeChecker._certificate_matches_locator(
+                cert.name,
+                expected_name,
+            ):
+                raise ValueError(
+                    'Fetched certificate name does not match KeyLocator'
+                )
         if (
             cert.meta_info is None
             or cert.meta_info.content_type != ContentType.KEY
-            or cert.content is None
+            or not cert.content
         ):
             raise ValueError('Certificate does not contain a public key')
 
@@ -281,7 +333,17 @@ class CascadeChecker:
             Name.to_str(name),
             Name.to_str(cert_name),
         )
-        if cert_data_name == self.anchor_name:
+        pending_save = None
+        if (
+            Name.to_bytes(cert_data_name) == Name.to_bytes(self.anchor_name)
+            or (
+                implicit_digest is None
+                and self._is_key_name(cert_data_name)
+                and len(self.anchor_name) >= 2
+                and Name.to_bytes(cert_data_name)
+                == Name.to_bytes(self.anchor_name[:-2])
+            )
+        ):
             if timestamp() > self.anchor_expires_at:
                 return ValidResult.FAIL
             if (
@@ -292,7 +354,29 @@ class CascadeChecker:
             self.logger.debug('Use trust anchor')
             key_bits = self.anchor_key
         else:
-            key_bits = self.storage.load(cert_name)
+            if implicit_digest is not None:
+                # An implicit digest can only name a Data packet. For a
+                # certificate fetch, the remaining name must therefore be a
+                # complete certificate name.
+                if not self._is_certificate_name(cert_data_name):
+                    self.logger.debug(
+                        'Implicit digest does not name a certificate'
+                    )
+                    return ValidResult.FAIL
+            elif not (
+                self._is_certificate_name(cert_data_name)
+                or self._is_key_name(cert_data_name)
+            ):
+                self.logger.debug(
+                    'KeyLocator does not name a certificate or a key'
+                )
+                return ValidResult.FAIL
+            cache_name = (
+                cert_name
+                if implicit_digest is not None
+                else cert_data_name
+            )
+            key_bits = self.storage.load(cache_name)
             if key_bits is not None:
                 self.logger.debug('Use cached public key')
             else:
@@ -323,7 +407,11 @@ class CascadeChecker:
 
                 kwargs = {
                     'must_be_fresh': True,
-                    'can_be_prefix': False,
+                    'can_be_prefix': (
+                        implicit_digest is None
+                        and not self._is_certificate_name(cert_data_name)
+                        and self._is_key_name(cert_data_name)
+                    ),
                 }
                 if context is not None and context.get('deadline') is not None:
                     kwargs['lifetime'] = max(1, context['deadline'] - timestamp())
@@ -353,29 +441,44 @@ class CascadeChecker:
                 if raw_packet is None:
                     self.logger.debug('Fetched certificate has no raw packet')
                     return ValidResult.FAIL
+                if (
+                    implicit_digest is not None
+                    and sha256(bytes(raw_packet)).digest() != implicit_digest
+                ):
+                    self.logger.debug(
+                        'Fetched certificate does not match the requested digest'
+                    )
+                    return ValidResult.FAIL
                 try:
-                    _, key_bits, expires_at = self._parse_certificate(
+                    parsed_name, key_bits, expires_at = self._parse_certificate(
                         raw_packet,
                         cert_data_name,
                     )
                 except (IndexError, TypeError, ValueError, struct.error):
                     self.logger.debug('Fetched certificate is malformed')
                     return ValidResult.FAIL
-                if Name.to_bytes(fetched_name) != Name.to_bytes(cert_data_name):
+                if Name.to_bytes(fetched_name) != Name.to_bytes(parsed_name):
+                    self.logger.debug(
+                        'Fetched certificate name does not match the response'
+                    )
                     return ValidResult.FAIL
-                self.storage.save_with_expiration(
-                    cert_name,
+                # Do not publish the key yet: the packet that caused this
+                # fetch must first verify with it. Only then is the fetched
+                # certificate known to be both qualified and useful here.
+                pending_save = (
+                    cert_name if implicit_digest is not None
+                    else cert_data_name,
                     key_bits,
                     expires_at,
                 )
 
         if key_bits is None:
             return ValidResult.FAIL
-        return (
-            ValidResult.PASS
-            if self._verify_sig(key_bits, sig_ptrs)
-            else ValidResult.FAIL
-        )
+        if not self._verify_sig(key_bits, sig_ptrs):
+            return ValidResult.FAIL
+        if pending_save is not None:
+            self.storage.save_with_expiration(*pending_save)
+        return ValidResult.PASS
 
     async def __call__(
         self,
