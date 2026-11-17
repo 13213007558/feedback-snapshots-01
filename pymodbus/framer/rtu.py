@@ -78,29 +78,41 @@ class FramerRTU(FramerBase):
     def decode(self, data: bytes) -> tuple[int, int, int, bytes]:
         """Decode ADU."""
         data_len = len(data)
-        for used_len in range(data_len):
+        used_len = 0
+        wait_len = None
+        while used_len < data_len:
             if data_len - used_len < self.MIN_SIZE:
                 Log.debug("Short frame: {} wait for more data", data, ":hex")
-                return 0, 0, 0, self.EMPTY
-            dev_id = int(data[used_len])
+                break
             try:
                 size = self.decoder.calculateRtuFrameSize(data[used_len:])
             except IndexError:
                 Log.debug("Frame - byte count not received, wait for more data")
-                return 0, dev_id, 0, self.EMPTY
+                if wait_len is None:
+                    wait_len = used_len
+                used_len += 1
+                continue
             if not size:
+                used_len += 1
                 continue
             if data_len < used_len + size:
                 Log.debug("Frame - not ready")
-                return 0, dev_id, 0, self.EMPTY
+                if wait_len is None:
+                    wait_len = used_len
+                used_len += 1
+                continue
             crc_start = used_len + size - 2
             crc = data[crc_start : crc_start + 2]
             crc_val = (int(crc[0]) << 8) + int(crc[1])
             if not FramerRTU.check_CRC(data[used_len:crc_start], crc_val):
                 Log.debug("Frame CRC check failed, possible garbage")
-                return data_len, 0, 0, self.EMPTY
-            return data_len, dev_id, 0, data[used_len + 1 : crc_start]
-        return 0, 0, 0, self.EMPTY
+                used_len += 1
+                continue
+            dev_id = int(data[used_len])
+            return used_len + size, dev_id, 0, data[used_len + 1 : crc_start]
+        if wait_len is not None:
+            return wait_len, 0, 0, self.EMPTY
+        return used_len, 0, 0, self.EMPTY
 
     def encode(self, payload: bytes, device_id: int, _tid: int) -> bytes:
         """Encode ADU."""

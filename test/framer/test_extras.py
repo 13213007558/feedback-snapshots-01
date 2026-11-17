@@ -123,7 +123,8 @@ class TestExtras:
             "pymodbus.pdu.ReadCoilsRequest.x_calculateRtuFrameSize", return_value=0
         ):
             used_len, pdu = self._rtu.handleFrame(msg, 0, 0)
-            assert not used_len
+            # rejected prefix is consumed, plausible tail (\x01\xfc..) waits
+            assert used_len == 5
             assert not pdu
 
     def test_rtu_wrong_fc(self):
@@ -131,7 +132,8 @@ class TestExtras:
         msg = b"\x00\x70\x00\x00\x00\x71\xfc\x1b"
         used_len, pdu = self._rtu.handleFrame(msg, 0, 0)
         assert not pdu
-        assert not used_len
+        # rejected prefix is consumed, plausible tail (\xfc..) waits
+        assert used_len == 5
 
     def test_ascii_process_incoming_packets(self):
         """Test ascii process incoming packet."""

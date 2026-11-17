@@ -83,7 +83,7 @@ class TestFramer:
         test_framer = FramerRTU(DecodePDU(True))
         msg = b"\xfe\x04\x00\x03\x00\x01\xd5\xc5\x00"
         used_len, pdu = test_framer.handleFrame(msg, 0, 0)
-        assert used_len == len(msg)
+        assert used_len == len(msg) - 1
         assert pdu
 
     def test_ascii_framer_uses_configured_delimiter_on_encode(self):
@@ -603,8 +603,6 @@ class TestFramerType:
         """Test encode method."""
         if entry == FramerType.TLS and split != "no":
             return
-        if entry == FramerType.RTU:
-            return
         if split == "no":
             used_len, res_dev_id, res_tid, res_data = test_framer.decode(data)
         elif split == "half":
@@ -712,28 +710,28 @@ class TestFramerType:
                 FramerType.RTU,
                 b"\x00\x83\x02\x91\x21",
                 [  # bad crc
-                    (5, b""),
+                    (1, b""),
                 ],
             ),
             (
                 FramerType.RTU,
                 b"\x00\x83\x02\xf0\x91\x31",
                 [  # dummy char in stream, bad crc
-                    (6, b""),
+                    (1, b""),
                 ],
             ),
             (
                 FramerType.RTU,
                 b"\x00\x83\x02\x91\x21\x00\x83\x02\x91\x31",
                 [  # bad crc + good CRC
-                    (10, b""),
+                    (10, b"\x83\x02"),
                 ],
             ),
             (
                 FramerType.RTU,
                 b"\x00\x83\x02\xf0\x91\x31\x00\x83\x02\x91\x31",
                 [  # dummy char in stream, bad crc  + good CRC
-                    (11, b""),
+                    (11, b"\x83\x02"),
                 ],
             ),
         ],
@@ -1015,3 +1013,88 @@ class TestFramerType:
         used_len, pdu = test_framer.handleFrame(msg2, 1, 0)
         assert used_len == len(msg2)
         assert not pdu
+
+
+class TestFramerRTURecovery:
+    """Test RTU framer recovery from garbage mixed with legal frames."""
+
+    @staticmethod
+    def _frame(dev_id, pdu):
+        raw = dev_id.to_bytes(1, "big") + pdu
+        return raw + FramerRTU.compute_CRC(raw).to_bytes(2, "big")
+
+    GOOD1 = _frame.__func__(0x11, b"\x03\x04\x00\x8d\x00\x8e")
+    GOOD2 = _frame.__func__(0x11, b"\x03\x02\x12\x34")
+    GOOD3 = _frame.__func__(0x11, b"\x03\x06\x00\x01\x00\x02\x00\x03")
+    BAD_CRC = GOOD1[:-1] + bytes([GOOD1[-1] ^ 0xFF])
+    WRONG_DEV = _frame.__func__(0x12, b"\x03\x04\x00\x8d\x00\x8e")
+    EXCEPTION = _frame.__func__(0x11, b"\x83\x02")
+    NOISE = b"\xaa\xbb\x00"
+    HALF = GOOD3[:5]
+    TRANSCRIPT = NOISE + BAD_CRC + EXCEPTION + WRONG_DEV + GOOD1 + GOOD2 + HALF
+
+    @staticmethod
+    def _feed(data, chunk_sizes, exp_dev_id=0x11, tail=b""):
+        """Feed data in chunks, return (consumed, [function codes], leftover)."""
+        framer = FramerRTU(DecodePDU(False))
+        chunks = (
+            [data[i : i + chunk_sizes] for i in range(0, len(data), chunk_sizes)]
+            if chunk_sizes
+            else [data]
+        )
+        buffer = b""
+        consumed = 0
+        delivered = []
+        for chunk in chunks + ([tail] if tail else []):
+            buffer += chunk
+            while True:
+                used_len, pdu = framer.handleFrame(buffer, exp_dev_id, 0)
+                consumed += used_len
+                buffer = buffer[used_len:]
+                if pdu:
+                    delivered.append(pdu.function_code)
+                if not used_len:
+                    break
+        return consumed, delivered, buffer
+
+    def test_bad_crc_frame_does_not_drop_legal_response(self):
+        """A bad CRC frame followed by a legal response must keep the response."""
+        consumed, delivered, leftover = self._feed(self.BAD_CRC + self.GOOD1, 0)
+        assert consumed == len(self.BAD_CRC) + len(self.GOOD1)
+        assert delivered == [0x03]
+        assert not leftover
+
+    def test_consecutive_legal_frames_are_all_delivered(self):
+        """Back-to-back legal frames in one buffer must all be delivered."""
+        consumed, delivered, leftover = self._feed(self.GOOD1 + self.GOOD2, 0)
+        assert consumed == len(self.GOOD1) + len(self.GOOD2)
+        assert delivered == [0x03, 0x03]
+        assert not leftover
+
+    def test_bad_frame_interior_short_bytes_not_delivered(self):
+        """Short byte patterns inside a bad frame are not confirmed responses."""
+        embed = self._frame(0x11, b"\x03\x08\x83\x02\x11\x83\x02\x00\x00\x00")[:-1]
+        embed += b"\x00"  # corrupt CRC, interior holds 0x83 0x02 twice
+        consumed, delivered, leftover = self._feed(embed + self.GOOD1, 0)
+        assert consumed == len(embed) + len(self.GOOD1)
+        assert delivered == [0x03]
+        assert not leftover
+
+    @pytest.mark.parametrize("chunk_size", [0, 1, 2, 3, 5, 7, 9])
+    def test_mixed_transcript_fragmentation_invariant(self, chunk_size):
+        """Same transcript, any fragmentation: same consumed range and PDUs."""
+        consumed, delivered, leftover = self._feed(self.TRANSCRIPT, chunk_size)
+        exp_consumed = len(self.TRANSCRIPT) - len(self.HALF)
+        assert consumed == exp_consumed
+        assert delivered == [0x83, 0x03, 0x03]
+        assert leftover == self.HALF
+
+    @pytest.mark.parametrize("chunk_size", [0, 1, 2, 3, 5, 7, 9])
+    def test_half_frame_completed_identically(self, chunk_size):
+        """A half frame completed later delivers identically for any split."""
+        consumed, delivered, leftover = self._feed(
+            self.TRANSCRIPT, chunk_size, tail=self.GOOD3[len(self.HALF) :]
+        )
+        assert consumed == len(self.TRANSCRIPT) - len(self.HALF) + len(self.GOOD3)
+        assert delivered == [0x83, 0x03, 0x03, 0x03]
+        assert not leftover
