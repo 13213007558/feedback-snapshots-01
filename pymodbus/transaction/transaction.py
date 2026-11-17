@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from threading import RLock
 from time import monotonic
@@ -12,6 +13,13 @@ from ..framer import FramerAscii, FramerBase, FramerRTU
 from ..logging import Log
 from ..pdu import ModbusPDU
 from ..transport import CommParams, CommType, ModbusProtocol
+
+
+#: Max number of abandoned transaction ids remembered to avoid reuse.
+#: Bounded on purpose: a late response older than this many abandoned
+#: transactions (and a full tid wrap) can no longer be told apart from a
+#: new transaction with the same 16-bit tid.
+STALE_TID_LIMIT = 100
 
 
 class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-attributes
@@ -51,6 +59,9 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
         self.framer = framer
         self.retries = retries
         self.next_tid: int = 0
+        self.stale_tids: deque[int] = deque(maxlen=STALE_TID_LIMIT)
+        self.connection_epoch: int = 0
+        self.request_epoch: int = 0
         self.request_dev_id: int = 0
         self.request_transaction_id: int = 0
         self.request_function_code: int = 0
@@ -137,8 +148,18 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
             dev_id=request.dev_id,
         )
 
+    def _mark_stale_tid(self, tid: int) -> None:
+        """Remember an abandoned transaction id, so it is not reused soon.
+
+        A late response to an abandoned request must never complete a new
+        transaction, so the tid is skipped until it leaves the bounded history.
+        """
+        if tid and tid not in self.stale_tids:
+            self.stale_tids.append(tid)
+
     def _no_response(self, request: ModbusPDU) -> ModbusIOException:
         """Count a request that got no response, and build the exception to raise."""
+        self._mark_stale_tid(request.transaction_id)
         if self.count_until_disconnect < 0:
             if self.comm_params.comm_type != CommType.SERIAL:
                 self.connection_lost(asyncio.TimeoutError("Server not responding"))
@@ -183,6 +204,11 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
                             f"ERROR: request uses transaction id={request.transaction_id} but received {response.transaction_id}.",
                             request,
                         )
+                    if (response.function_code & 0x7F) != request.function_code:
+                        Log.error(
+                            f"ERROR: request ask for fc={request.function_code} but got fc={response.function_code}, Skipping."
+                        )
+                        continue
                     response.retries = count_retries
                     return response
                 except asyncio.exceptions.TimeoutError:
@@ -250,6 +276,7 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
                     # waits for the response to this one. A response from
                     # another device or with another function code is skipped,
                     # so other requests are not delayed.
+                    self._mark_stale_tid(request.transaction_id)
                     if not request.transaction_id:
                         self.response_future = asyncio.Future()
                         self.cancelled_requests[cancel_key] = (
@@ -265,6 +292,7 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
             self.request_dev_id = pdu.dev_id
             self.request_transaction_id = pdu.transaction_id
             self.request_function_code = pdu.function_code
+            self.request_epoch = self.connection_epoch
         packet = self.framer.buildFrame(self.trace_pdu(True, pdu))
         if self.is_sync and self.comm_params.handle_local_echo:
             self.sent_buffer = packet
@@ -276,7 +304,10 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
     def callback_connected(self) -> None:
         """Call when connection is successful."""
         self.count_until_disconnect = self.max_until_disconnect
-        self.next_tid = 0
+        # New connection generation: transaction ids keep increasing (no
+        # reset), so a late response from a previous connection cannot alias
+        # a transaction id of this generation.
+        self.connection_epoch += 1
         self.trace_connect(True)
 
     def callback_disconnected(self, exc: Exception | None) -> None:
@@ -295,7 +326,11 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
             self.last_pdu = self.trace_pdu(False, pdu)
             self.last_addr = addr
             if not self.is_server:
-                if (
+                if self.request_epoch != self.connection_epoch:
+                    Log.warning(
+                        "ERROR: received pdu for a request sent on a previous connection, IGNORING"
+                    )
+                elif (
                     not self.response_future
                     or self.response_future.done()
                     or self.response_future.cancelled()
@@ -315,11 +350,17 @@ class TransactionManager(ModbusProtocol):  # pylint: disable=too-many-instance-a
         return used_len
 
     def getNextTID(self) -> int:
-        """Retrieve the next transaction identifier."""
+        """Retrieve the next transaction identifier.
+
+        Ids increase monotonically (across reconnects) and wrap at 65000.
+        Ids of recently abandoned transactions (stale_tids, bounded) are
+        skipped, so a late response cannot complete a new transaction.
+        """
         if isinstance(self.framer, (FramerAscii, FramerRTU)):
             self.next_tid = 0
-        elif self.next_tid >= 65000:
-            self.next_tid = 1
-        else:
-            self.next_tid += 1
-        return self.next_tid
+            return 0
+        tid = self.next_tid
+        while (tid := 1 if tid >= 65000 else tid + 1) in self.stale_tids:
+            pass
+        self.next_tid = tid
+        return tid

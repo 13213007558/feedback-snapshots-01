@@ -530,9 +530,9 @@ class TestSyncClientSerial:
             client.recv(1024)
         x = mockSocket(copy_send=False)
         x.mock_prepare_receive(b"")
-        x.mock_prepare_receive(b"\x11\x03\x06\xae")
-        x.mock_prepare_receive(b"\x41\x56\x52\x43\x40\x49")
-        x.mock_prepare_receive(b"\xad")
+        x.mock_prepare_receive(b"\x11\x04\x06\xae")
+        x.mock_prepare_receive(b"\x41\x56\x52\x43\x40\x08")
+        x.mock_prepare_receive(b"\x4b")
         client.socket = x  # type: ignore[assignment]
         reply_ok = client.read_input_registers(0x820, count=3, device_id=17)
         assert not reply_ok.isError()

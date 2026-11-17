@@ -5,6 +5,11 @@ Versions (X.Y.Z) where Z == 0 e.g. 3.0.1 do NOT have API changes!
 API changes 3.17.0
 ------------------
 - the sync client converts automatically to async, this is not a API change, but it is a major change.
+- transaction ids are no longer reset to 1 on reconnect, and ids of abandoned
+  (timed out / cancelled) requests are skipped until they leave a bounded history,
+  so a late response cannot complete a new transaction.
+- the sync transaction path now skips responses with a non-matching function code
+  (mirrors the async path).
 
 API changes 3.16.0
 ------------------

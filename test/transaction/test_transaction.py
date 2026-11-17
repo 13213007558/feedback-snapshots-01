@@ -496,6 +496,8 @@ class TestTransaction:
         response = ReadCoilsResponse(bits=[True, False, True, True, False], dev_id=0)
         transact.retries = 0
         transact.connection_made(mock.AsyncMock())
+        transact.transport.write = mock.Mock()  # type: ignore[attr-defined]
+        transact.pdu_send(ReadCoilsRequest(address=117, count=5, dev_id=0))
 
         data = b"\x00\x00\x00\x00\x00\x06\x00\x01\x01\x02\x00\x04"
         transact.data_received(data)
