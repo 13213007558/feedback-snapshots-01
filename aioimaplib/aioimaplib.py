@@ -218,6 +218,16 @@ class Command:
         if self._exception is not None:
             raise self._exception
 
+    def abort(self, exception: Exception) -> None:
+        """Fail the command with the given exception (connection lost or closed)."""
+        if self._event.is_set():
+            return
+        self._exception = exception
+        self.close(str(self._exception).encode(), 'KO')
+
+    def cancel_timer(self) -> None:
+        self._timer.cancel()
+
     def flush(self) -> None:
         pass
 
@@ -350,6 +360,12 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         self.state = CONNECTED
 
     def data_received(self, d: bytes) -> None:
+        if self.transport is not None and self.transport.is_closing():
+            # the connection was closed because the protocol boundary could not be
+            # confirmed (timed out or cancelled command): late bytes must not be
+            # delivered to pending or future commands
+            log.info('ignored data received on a closing connection: %s' % d)
+            return
         log.debug('Received : %s' % d)
         try:
             self._handle_responses(self.incomplete_line + d, self._handle_line, self.current_command)
@@ -361,8 +377,32 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         log.debug('connection lost: %s', exc)
+        self._abort_pending_commands(Abort('connection lost') if exc is None else exc)
+        self.current_command = None
+        self.incomplete_line = b''
+        self.literal_data = None
+        self.transport = None
         if self.conn_lost_cb is not None:
             self.conn_lost_cb(exc)
+
+    def _abort_pending_commands(self, exception: Exception) -> None:
+        pending_commands = list(self.pending_async_commands.values())
+        if self.pending_sync_command is not None:
+            pending_commands.append(self.pending_sync_command)
+        self.pending_async_commands.clear()
+        self.pending_sync_command = None
+        for command in pending_commands:
+            command.abort(exception)
+
+    def _remove_pending_command(self, command: Command) -> None:
+        if self.pending_sync_command is command:
+            self.pending_sync_command = None
+        elif self.pending_async_commands.get(command.untagged_resp_name) is command:
+            self.pending_async_commands.pop(command.untagged_resp_name)
+
+    def _close_connection(self) -> None:
+        if self.transport is not None and not self.transport.is_closing():
+            self.transport.close()
 
     def _handle_responses(self, data: bytes, line_handler: Callable[[bytes, Command], Optional[Command]], current_cmd: Command = None) -> None:
         if not data:
@@ -416,6 +456,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             log.info('unknown data received %s' % line)
 
     def send(self, line: str, scrub: str =None) -> None:
+        if self.transport is None:
+            raise Abort('cannot send %s command: connection is closed' % line)
         data = ('%s\r\n' % line).encode()
         if scrub:
             log.debug('Sending : %s' % data.replace(scrub.encode(), len(scrub) * b'*'))
@@ -427,26 +469,37 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         if self.state not in Commands.get(command.name).valid_states:
             raise Abort('command %s illegal in state %s' % (command.name, self.state))
 
-        if self.pending_sync_command is not None:
-            await self.pending_sync_command.wait()
-
-        if Commands.get(command.name).exec == Exec.is_sync:
-            if self.pending_async_commands:
-                await self.wait_async_pending_commands()
-            self.pending_sync_command = command
-        else:
-            if self.pending_async_commands.get(command.untagged_resp_name) is not None:
-                await self.pending_async_commands[command.untagged_resp_name].wait()
-            self.pending_async_commands[command.untagged_resp_name] = command
-
-        self.send(str(command), scrub=scrub)
+        sent = False
         try:
+            if self.pending_sync_command is not None:
+                await self.pending_sync_command.wait()
+
+            if Commands.get(command.name).exec == Exec.is_sync:
+                if self.pending_async_commands:
+                    await self.wait_async_pending_commands()
+                self.pending_sync_command = command
+            else:
+                if self.pending_async_commands.get(command.untagged_resp_name) is not None:
+                    await self.pending_async_commands[command.untagged_resp_name].wait()
+                self.pending_async_commands[command.untagged_resp_name] = command
+
+            self.send(str(command), scrub=scrub)
+            sent = True
             await command.wait()
         except CommandTimeout:
-            if Commands.get(command.name).exec == Exec.is_sync:
-                self.pending_sync_command = None
-            else:
-                self.pending_async_commands.pop(command.untagged_resp_name, None)
+            command.cancel_timer()
+            if sent:
+                # the command was sent: the server may still answer, so the protocol
+                # boundary is unknown. Drop the command and close the connection
+                # rather than risking a late response to leak into a later command.
+                self._remove_pending_command(command)
+                self._close_connection()
+            raise
+        except asyncio.CancelledError:
+            command.cancel_timer()
+            if sent:
+                self._remove_pending_command(command)
+                self._close_connection()
             raise
         finally:
             if command.name == 'IDLE':
@@ -627,7 +680,8 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         return await self.execute(Command(name, self.new_tag(), *args, loop=self.loop))
 
     async def wait_async_pending_commands(self) -> None:
-        await asyncio.wait([asyncio.ensure_future(cmd.wait()) for cmd in self.pending_async_commands.values()])
+        for command in list(self.pending_async_commands.values()):
+            await command.wait()
 
     async def wait(self, state_regexp: str) -> None:
         state_re = re.compile(state_regexp)
