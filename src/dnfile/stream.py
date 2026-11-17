@@ -649,6 +649,15 @@ class MetaDataTables(base.ClrStream):
                     )
                     table.setup_lazy_load(cur_rva, table_data, full_loader)
                     cur_rva += table.row_size * table.num_rows
+            # tables after a truncated table never received data above.
+            # give them an empty lazy-load state so their rows materialize
+            # (without data) on access, matching eager parsing where all
+            # rows are constructed up-front.
+            for table in self.tables_list:
+                if table._loaded == base.LoadState.Unloaded and table.num_rows > 0:
+                    table._table_data = b""
+                    table._full_loader = full_loader
+                    table._loaded = base.LoadState.LazyLoaded
         else:
             #### parse each table
             # here, cur_rva points to start of table rows

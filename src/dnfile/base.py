@@ -894,13 +894,18 @@ class ClrMetaDataTable(Generic[RowType]):
             self.rows.truncate(idx)
             return None
 
-        row.setup_lazy_load(self._full_loader)
         offset = self.row_size * idx
         if len(self._table_data) < offset + self.row_size:
             logger.warning("not enough data to parse row %d", idx)
             # we could truncate here as well, but regular loading would still be
             # left with a full-length list in the equivalent situation.
+            # the row can never be parsed, so mark it as Loaded instead of
+            # leaving it lazy-loadable: attribute access then raises
+            # AttributeError (as with eager parsing) instead of re-triggering
+            # the full loader or reporting fake None values.
+            row._loaded = LoadState.Loaded
             return row
+        row.setup_lazy_load(self._full_loader)
         row.set_data(self._table_data[offset:offset + self.row_size], file_offset=self.file_offset + offset)
         return row
 
