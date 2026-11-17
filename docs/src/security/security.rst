@@ -59,3 +59,14 @@ This is the default persistent keychain.
 
 .. automodule:: ndn.security.keychain.keychain_sqlite3
   :members:
+
+Keychain Recovery
+~~~~~~~~~~~~~~~~~
+
+Diagnose and recover from partial writes between the SQLite PIB and the
+file-backed TPM.  Inspection is read-only and confined to the caller-specified
+paths; repairs are explicit, evidence-backed and never change the default
+identity.
+
+.. automodule:: ndn.security.keychain.recovery
+  :members:

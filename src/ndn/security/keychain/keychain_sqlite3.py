@@ -26,6 +26,7 @@ from ...app_support.security_v2 import self_sign
 from ..signer.sha256_digest_signer import DigestSha256Signer
 from ..tpm.tpm import Tpm
 from .keychain import Keychain, AbstractCertificate, AbstractKey, AbstractIdentity
+from .recovery import KeychainRecoveryError
 
 
 INITIALIZE_SQL = """
@@ -602,6 +603,38 @@ class KeychainSqlite3(Keychain):
         self.conn.commit()
         self._signer_cache = {}
 
+    def _require_usable_default_identity(self) -> tuple[Identity, Key, Certificate]:
+        """
+        Resolve the default identity's signing chain and refuse to return it
+        unless the identity -> default key -> default certificate relationship
+        is complete and the TPM holds the matching private key.
+
+        A partial write (interrupted key creation, certificate import failure or
+        half-finished deletion) must never be promoted into a usable default
+        signer; the caller should run the recovery diagnostics instead.
+        """
+        try:
+            identity = self.default_identity()
+        except KeyError:
+            raise KeychainRecoveryError('No default identity is available')
+        try:
+            key = identity.default_key()
+        except KeyError:
+            raise KeychainRecoveryError(
+                f'Default identity {Name.to_str(identity.name)} has no default key; '
+                f'run keychain recovery diagnostics')
+        if not self.tpm.key_exist(key.name):
+            raise KeychainRecoveryError(
+                f'Default key {Name.to_str(key.name)} has no private key in the TPM; '
+                f'run keychain recovery diagnostics')
+        try:
+            cert = key.default_cert()
+        except KeyError:
+            raise KeychainRecoveryError(
+                f'Default key {Name.to_str(key.name)} has no default certificate; '
+                f'run keychain recovery diagnostics')
+        return identity, key, cert
+
     def get_signer(self, sign_args: dict[str, Any]):
         if sign_args.get('no_signature', False):
             return None
@@ -619,7 +652,7 @@ class KeychainSqlite3(Keychain):
                     else:
                         identity = self[id_name]
                 else:
-                    identity = self.default_identity()
+                    identity, _key, _cert = self._require_usable_default_identity()
                 key = identity.default_key()
                 cert_name = key.default_cert().name
                 key_name = key.name

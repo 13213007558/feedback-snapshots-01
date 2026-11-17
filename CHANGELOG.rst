@@ -1,6 +1,13 @@
 Changelog
 =========
 
+Next
+++++
+* Add read-only PIB/file-TPM consistency diagnostics (``ndn.security.check_consistency``)
+  and explicit, evidence-backed recovery actions (``ndn.security.apply_repairs``) for
+  interrupted key creation, certificate import and deletion; a partial identity
+  relationship is no longer offered as the default signer.
+
 Next (breaking)
 +++++++++++++++
 * Replace the descriptor-based TLV model with dataclass models and ``tlv_encode``/``tlv_parse``.
