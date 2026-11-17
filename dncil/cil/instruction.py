@@ -11,12 +11,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Union, Optional, cast
 
 from dncil.cil.enums import OpCodeValue, OperandType
+from dncil.clr.token import Token, TokenKind
 
 if TYPE_CHECKING:
     from dncil.clr.local import Local
-    from dncil.clr.token import Token
     from dncil.cil.opcode import OpCode
     from dncil.clr.argument import Argument
+    from dncil.clr.evidence import TokenRequest
 
 
 class Instruction:
@@ -48,6 +49,22 @@ class Instruction:
     def mnemonic(self):
         """get instruction opcode mnemonic"""
         return self.opcode.name
+
+    @property
+    def token_kind(self) -> Optional[TokenKind]:
+        """get the token use context implied by this opcode, or None"""
+        return TokenKind.from_operand_type(self.opcode.operand_type)
+
+    def get_token_request(self) -> Optional[TokenRequest]:
+        """get a token request that preserves this instruction's position and expected kind"""
+        if not isinstance(self.operand, Token):
+            return None
+        kind: Optional[TokenKind] = self.token_kind
+        if kind is None:
+            return None
+        from dncil.clr.evidence import TokenRequest
+
+        return TokenRequest(token=self.operand, kind=kind, offset=self.offset)
 
     @property
     def size(self) -> int:

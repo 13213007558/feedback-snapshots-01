@@ -92,6 +92,58 @@ True
 00000000: 01 00 00 70                                       ...p
 ```
 
+## Token evidence
+
+An integer in IL is ambiguous on its own: the opcode decides whether it names a
+string, method, field, or type. `dncil` exposes that context as a
+[`TokenRequest`](dncil/clr/evidence.py) rather than letting a metadata backend
+guess from the integer alone:
+
+```Python
+>  insn = main_method_body.instructions[2]
+>  request = insn.get_token_request()
+>  request
+InlineMethod@0x0257 token(0xA000004)
+>  request.kind
+<TokenKind.InlineMethod: 'InlineMethod'>
+>  request.offset
+599
+```
+
+The kinds are `InlineTok`, `InlineMethod`, `InlineField`, `InlineType`,
+`InlineString`, `InlineSig`, and `LocalVarSig`. Each kind declares the metadata
+tables it accepts; `#US` string tokens are kept separate from metadata table
+tokens. `CilMethodBody.get_token_requests()` returns requests for every
+instruction plus the method header's local variable signature.
+
+A [`TokenResolver`](dncil/clr/evidence.py) subclass performs lookups and returns
+a `TokenResolution` that always keeps the original token, instruction offset, and
+expected kind. Failures are structured `ResolutionIssue` values such as
+`KIND_MISMATCH`, `INVALID_TABLE`, `MISSING_TABLE`, and `MISSING_ROW`; they are
+never reported as a successfully resolved value. Cache entries are keyed by
+`(kind, token value)`, so the same integer used as `InlineTok` and `InlineType`
+gets separate lookups, and a cache hit still carries each use's own offset.
+
+Core disassembly has no dependency on `dnfile`. When metadata interpretation is
+needed, the optional [`dncil.dnfile`](dncil/dnfile/adapter.py) adapter reads a
+method body through `dnfile` and resolves those requests:
+
+```Python
+import dnfile
+from dncil.dnfile import DnfileTokenProvider, read_method_body, resolve_method_body
+
+pe = dnfile.dnPE(path)
+row = pe.net.mdtables.MethodDef.rows[0]
+body = read_method_body(pe, row)
+results = resolve_method_body(DnfileTokenProvider(pe), body)
+```
+
+`results` contains successful resolutions and unresolved references side by
+side; `DnfileTokenProvider.report(body.get_token_requests())` groups the two.
+The script [`print_cil_from_dn_file.py`](scripts/print_cil_from_dn_file.py) uses
+this path, while [`print_cil_from_bytes.py`](scripts/print_cil_from_bytes.py)
+continues to work with no metadata backend installed.
+
 ## Installing
 
 To install `dncil` use `pip` to fetch the `dncil` module:

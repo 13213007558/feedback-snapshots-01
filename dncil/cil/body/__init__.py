@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, List, Optional
 if TYPE_CHECKING:
     from dncil.cil.instruction import Instruction
     from dncil.cil.body.reader import CilMethodBodyReaderBase
+    from dncil.clr.evidence import TokenRequest
 
 from dncil.cil.enums import CorILMethod, CorILMethodSect
 from dncil.cil.error import MethodBodyFormatError
-from dncil.clr.token import Token
+from dncil.clr.token import Token, TokenKind
 from dncil.cil.exception import ExceptionHandler
 from dncil.cil.body.flags import CilMethodBodyFlags
 from dncil.cil.instruction import Instruction
@@ -74,6 +75,27 @@ class CilMethodBody:
     def get_exception_handler_bytes(self) -> bytes:
         """get method exception handler bytes"""
         return self.raw_bytes[self.header_size + self.code_size :]
+
+    def get_token_requests(self) -> List[TokenRequest]:
+        """get token requests for every instruction and the local variable signature
+
+        Each request keeps the token as written, the instruction offset (or the
+        method header offset for the local signature), and the expected kind.
+        """
+        from dncil.clr.evidence import TokenRequest
+
+        requests: List[TokenRequest] = []
+        for insn in self.instructions:
+            request: Optional[TokenRequest] = insn.get_token_request()
+            if request is not None:
+                requests.append(request)
+
+        if self.local_var_sig_tok is not None:
+            requests.append(
+                TokenRequest(token=self.local_var_sig_tok, kind=TokenKind.LocalVarSig, offset=self.offset)
+            )
+
+        return requests
 
     def parse_header(self, reader: CilMethodBodyReaderBase):
         """get method body header"""
