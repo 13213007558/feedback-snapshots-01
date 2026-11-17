@@ -121,6 +121,54 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+## HashStore capacity policy
+
+A cookie jar can be flooded with cookies from an untrusted subdomain.
+`HTTP::CookieJar::HashStore` bounds this with a per-site quota and a
+total quota, both configurable:
+
+    store = HTTP::CookieJar::HashStore.new(
+      max_cookies_per_site: 50,
+      max_cookies_total: 3000,
+      site_mode: :cookie_scope,  # :host, :site, or a callable
+      overflow: :evict,          # or :reject
+    )
+    jar = HTTP::CookieJar.new(store: store)
+
+`site_mode: :host` counts each domain attribute separately (the
+historical per-domain limit).  `:cookie_scope` counts host-only cookies
+by exact host and parent-domain cookies by registrable domain (eTLD+1),
+so rotating subdomains cannot multiply a site's quota.  `:site` groups
+everything by registrable domain.
+
+A host-only cookie can never be evicted by a flood from another host.
+A parent-domain cookie (`Domain=example.com`) is sent to every host
+under that domain by design, so those cookies share one bucket and
+compete with each other; a host-only cookie never gains priority over
+them merely because it is host-only.
+
+Eviction removes expired cookies first.  It then prefers cookies the
+jar has never sent (oldest `created_at` first), so a burst of fresh
+cookies cannot displace a session cookie that is actually in use;
+among cookies that have been sent, the least recently used goes first,
+with `created_at` as the tie-breaker.  The total quota is charged to
+the site that wrote the newest cookie, so a site that keeps adding
+cookies pays for its own growth instead of pushing out another site's
+session.  With `overflow: :reject`, a cookie that would exceed a quota
+is refused instead, and no existing cookie is evicted.
+
+Every decision is observable:
+
+    jar.cleanup
+    store.last_cleanup_report.evictions.each { |decision|
+      puts decision                    # name: reason (detail)
+      puts decision.reason             # :expired, :site_limit, ...
+      puts decision.site
+    }
+    store.capacity_report.sites        # live cookies per site
+    store.rejections                   # refused cookies (:reject)
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between

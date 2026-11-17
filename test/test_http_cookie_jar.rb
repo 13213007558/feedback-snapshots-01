@@ -899,6 +899,326 @@ module TestHTTPCookieJar
     end
   end
 
+  class TestHashStoreCapacity < Test::Unit::TestCase
+    ALPHA  = 'https://www.alpha.test/'
+    BETA   = 'https://beta.test/'
+    EVIL   = 'https://evil.alpha.test/'
+    PARENT = 'https://alpha.test/'
+
+    def setup
+      @base = Time.now - 600
+      @expires = Time.now + 3600
+    end
+
+    def new_jar(per_site: 2, total: 4, gc: 1, mode: :cookie_scope,
+                overflow: :evict)
+      store = HTTP::CookieJar::HashStore.new(
+        :gc_threshold => gc,
+        :max_cookies_per_site => per_site,
+        :max_cookies_total => total,
+        :site_mode => mode,
+        :overflow => overflow)
+      [HTTP::CookieJar.new(:store => store), store]
+    end
+
+    def add(jar, name, value, url, created, expires: @expires,
+            domain: nil, for_domain: false)
+      # accessed_at equals created_at until the jar really sends the
+      # cookie, which models a cookie that has never been used.
+      jar.add(HTTP::Cookie.new(
+        :name => name, :value => value, :origin => url, :path => '/',
+        :created_at => created, :accessed_at => created,
+        :expires => expires, :domain => domain, :for_domain => for_domain))
+    end
+
+    def values(jar, url)
+      jar.cookies(url).map(&:cookie_value)
+    end
+
+    # Capacity decisions accumulated across automatic cleanups.  Each
+    # automatic cleanup replaces #evictions with its own report, so
+    # callers append after every write they want to audit.
+    def decisions(store)
+      @decisions ||= []
+    end
+
+    def test_flooding_subdomain_does_not_evict_other_sites
+      jar, store = new_jar
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'sid', 'BETA', BETA, @base + 1)
+      # Make both sessions used, as a real client would.
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal ['sid=BETA'], values(jar, BETA)
+
+      sizes = []
+      8.times { |i|
+        add(jar, "x#{i}", "EVIL#{i}", EVIL, @base + 100 + i)
+        decisions(store).concat(store.evictions)
+        sizes << store.capacity_report.sites['evil.alpha.test']
+        assert_equal ['sid=ALPHA'], values(jar, ALPHA), 'alpha session must survive'
+        assert_equal ['sid=BETA'], values(jar, BETA), 'beta session must survive'
+      }
+
+      assert_equal [1, 2, 2, 2, 2, 2, 2, 2], sizes
+      assert_equal 2, store.capacity_report.sites['evil.alpha.test']
+
+      reasons = decisions(store).map { |decision| decision.reason }
+      assert_equal [:site_limit] * 6, reasons
+      assert decisions(store).all? { |decision| decision.site == 'evil.alpha.test' }
+      assert_match(/per-site limit of 2/, decisions(store).first.detail)
+
+      # The surviving flood cookies are the most recent pair, not the
+      # oldest ones.
+      assert_equal ['x6=EVIL6', 'x7=EVIL7'], values(jar, EVIL).sort
+    end
+
+    def test_eviction_reason_names_the_charged_site_and_order
+      jar, store = new_jar(per_site: 10, total: 4)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'sid', 'BETA', BETA, @base + 1)
+      add(jar, 'sid2', 'BETA2', BETA, @base + 2)
+      values(jar, ALPHA)
+      values(jar, BETA)
+
+      3.times { |i|
+        add(jar, "y#{i}", "EVIL#{i}", EVIL, @base + 100 + i)
+        decisions(store).concat(store.evictions)
+      }
+
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal ['sid=BETA', 'sid2=BETA2'], values(jar, BETA)
+      assert_equal ['y2=EVIL2'], values(jar, EVIL)
+
+      evicted = decisions(store)
+      assert_equal [:total_limit] * 2, evicted.map(&:reason)
+      assert evicted.all? { |d| d.site == 'evil.alpha.test' }
+      assert_match(/total 5 cookies exceeds the limit of 4/,
+                   evicted.first.detail)
+      assert_match(/charged to site "evil\.alpha\.test" whose newest cookie/,
+                   evicted.first.detail)
+      assert_match(/evicted least recently used cookie/, evicted.first.detail)
+      assert_match(/last used: never used/, evicted.first.detail)
+    end
+
+    def test_sent_cookie_ranks_above_unsent_flood
+      jar, store = new_jar(per_site: 2, total: 2)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'keep', 'ALPHA2', ALPHA, @base + 1)
+      values(jar, ALPHA) # both are now sent
+
+      3.times { |i|
+        add(jar, "z#{i}", "EVIL#{i}", EVIL, @base + 100 + i)
+        decisions(store).concat(store.evictions)
+      }
+
+      assert_equal ['keep=ALPHA2', 'sid=ALPHA'], values(jar, ALPHA).sort
+      assert_equal [:total_limit], decisions(store).map(&:reason).uniq
+      assert decisions(store).all? { |decision| decision.site == 'evil.alpha.test' }
+    end
+
+    def test_host_only_and_parent_domain_compete_only_when_shared
+      jar, store = new_jar(per_site: 3, total: 8, mode: :cookie_scope)
+
+      add(jar, 'hostonly', 'WWW', ALPHA, @base)
+      add(jar, 'parent', 'SITE', PARENT,
+          @base + 1, domain: '.alpha.test', for_domain: true)
+      values(jar, ALPHA)
+
+      # Host-only flood from the untrusted subdomain stays in its own
+      # bucket and cannot touch either cookie.
+      3.times { |i| add(jar, "h#{i}", "EVIL#{i}", EVIL, @base + 100 + i) }
+
+      assert_equal ['hostonly=WWW', 'parent=SITE'], values(jar, ALPHA).sort
+      assert_equal 1, store.capacity_report.sites['alpha.test']
+      assert_equal 1, store.capacity_report.sites['www.alpha.test']
+
+      # A parent-domain flood from the same subdomain shares the
+      # `alpha.test` bucket with the parent cookie.
+      5.times { |i|
+        add(jar, "p#{i}", "EVILP#{i}", EVIL, @base + 200 + i,
+            domain: '.alpha.test', for_domain: true)
+      }
+
+      sent = values(jar, ALPHA)
+      assert_includes sent, 'hostonly=WWW'
+      # The parent cookie was sent before the flood, so it outranks the
+      # never-sent parent-domain flood.  Only the two newest flood
+      # cookies fit in the shared bucket.
+      assert_includes sent, 'parent=SITE'
+      assert_equal ['hostonly=WWW', 'p3=EVILP3', 'p4=EVILP4', 'parent=SITE'],
+                   sent.sort
+      assert_equal 3, store.capacity_report.sites['alpha.test']
+      assert_equal 1, store.capacity_report.sites['www.alpha.test']
+    end
+
+    def test_reject_overflow_keeps_existing_sessions
+      jar, store = new_jar(per_site: 1, total: 3, overflow: :reject)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'sid', 'BETA', BETA, @base + 1)
+      values(jar, ALPHA)
+      values(jar, BETA)
+
+      6.times { |i| add(jar, "r#{i}", "EVIL#{i}", EVIL, @base + 100 + i) }
+
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal ['sid=BETA'], values(jar, BETA)
+      assert_equal ['r0=EVIL0'], values(jar, EVIL)
+      assert_equal 5, store.rejection_count
+      assert_equal 'evil.alpha.test', store.rejections.first.site
+      assert_equal :rejected, store.rejections.first.reason
+      assert_equal 5, store.rejections.size
+      assert_match(/refused without evicting existing cookies/,
+                   store.rejections.first.detail)
+      # Rejection is not an eviction.
+      assert_equal [], store.evictions
+    end
+
+    def test_reject_at_total_capacity_does_not_evict
+      jar, store = new_jar(per_site: 10, total: 2, overflow: :reject)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'sid', 'BETA', BETA, @base + 1)
+
+      add(jar, 'leak', 'EVIL', EVIL, @base + 100)
+
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal ['sid=BETA'], values(jar, BETA)
+      assert_equal [], values(jar, EVIL)
+      assert_equal 1, store.rejection_count
+      assert_equal [], store.evictions
+      assert_equal 2, store.capacity_report.total
+    end
+
+    def test_reject_reclaims_expired_cookie_instead_of_evicting
+      jar, store = new_jar(per_site: 10, total: 2, overflow: :reject)
+
+      add(jar, 'old', 'OLD', ALPHA, @base - 7200, expires: @base - 3600)
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+
+      # The expired cookie no longer occupies a slot.
+      add(jar, 'new', 'NEW', BETA, @base + 1)
+
+      assert_equal 0, store.rejection_count
+      assert_equal ['new=NEW'], values(jar, BETA)
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal 2, store.capacity_report.total
+    end
+
+    def test_changing_a_cookie_at_capacity_is_not_a_new_cookie
+      jar, store = new_jar(per_site: 1, total: 1, overflow: :reject)
+
+      add(jar, 'sid', 'OLD', ALPHA, @base)
+      add(jar, 'sid', 'NEW', ALPHA, @base + 1)
+
+      assert_equal ['sid=NEW'], values(jar, ALPHA)
+      assert_equal 0, store.rejection_count
+    end
+
+    def test_expired_cookies_are_cleaned_before_quota
+      jar, store = new_jar(per_site: 2, total: 2, overflow: :reject)
+
+      add(jar, 'gone', 'OLD', ALPHA, @base - 7200,
+          expires: @base - 3600)
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      add(jar, 'sid2', 'ALPHA2', ALPHA, @base + 1)
+
+      assert_equal 0, store.rejection_count
+      # The expired cookie was removed by the policy, not counted as a
+      # quota occupant, so the two live cookies fit.
+      assert_equal 2, store.capacity_report.total
+      assert_equal ['sid2=ALPHA2', 'sid=ALPHA'], values(jar, ALPHA).sort
+    end
+
+    def test_eviction_does_not_change_authorization_scope
+      jar, = new_jar(per_site: 2, total: 2)
+
+      secure = HTTP::Cookie.new(
+        :name => 'tok', :value => 'SECURE', :origin => ALPHA, :path => '/',
+        :expires => @expires, :created_at => @base, :secure => true)
+      jar.add(secure)
+      assert_equal [], jar.cookies(URI('http://www.alpha.test/'))
+      assert_equal ['tok=SECURE'], values(jar, 'https://www.alpha.test/')
+
+      3.times { |i| add(jar, "q#{i}", "EVIL#{i}", EVIL, @base + 100 + i) }
+
+      survivor = jar.cookies(ALPHA).first
+      assert_equal 'tok', survivor.name
+      assert_equal true, survivor.secure?
+      assert_equal false, survivor.for_domain?
+      assert_equal '/', survivor.path
+      assert_equal 0, jar.cookies(URI('http://www.alpha.test/')).size
+    end
+
+    def test_site_mode_host_keeps_host_only_buckets_separate
+      jar, store = new_jar(per_site: 1, total: 3, mode: :host)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      4.times { |i| add(jar, "s#{i}", "EVIL#{i}", EVIL, @base + 100 + i) }
+
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal ['s3=EVIL3'], values(jar, EVIL)
+      assert_equal 'www.alpha.test', store.capacity_report.sites.keys.sort[1]
+    end
+
+    def test_site_mode_site_groups_registrable_domain
+      jar, store = new_jar(per_site: 2, total: 10, mode: :site)
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      values(jar, ALPHA) # mark the session as sent
+
+      4.times { |i| add(jar, "t#{i}", "EVIL#{i}", EVIL, @base + 100 + i) }
+
+      # www.alpha.test and evil.alpha.test share one bucket, and the
+      # sent session outranks the fresh, never-sent flood.
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal 2, store.capacity_report.sites['alpha.test']
+      assert_equal ['t3=EVIL3'], values(jar, EVIL)
+    end
+
+    def test_callable_site_mode
+      jar, store = new_jar(per_site: 10, total: 10,
+                           mode: lambda { |cookie| cookie.domain })
+
+      add(jar, 'sid', 'ALPHA', ALPHA, @base)
+      assert_equal ['sid=ALPHA'], values(jar, ALPHA)
+      assert_equal 1, store.capacity_report.sites['www.alpha.test']
+    end
+
+    def test_option_validation
+      assert_raises(ArgumentError) {
+        HTTP::CookieJar::HashStore.new(:max_cookies_per_site => 0)
+      }
+      assert_raises(ArgumentError) {
+        HTTP::CookieJar::HashStore.new(:max_cookies_total => -1)
+      }
+      assert_raises(ArgumentError) {
+        HTTP::CookieJar::HashStore.new(:site_mode => :nonsense)
+      }
+      assert_raises(ArgumentError) {
+        HTTP::CookieJar::HashStore.new(:overflow => :drop)
+      }
+      assert_raises(ArgumentError) {
+        HTTP::CookieJar.new(:store => :hash, :max_cookies_total => 0)
+      }
+    end
+
+    def test_clone_copies_capacity_state
+      original, = new_jar(per_site: 5, total: 5)
+      add(original, 'sid', 'ALPHA', ALPHA, @base)
+      values(original, ALPHA)
+
+      clone = original.clone
+      assert_equal ['sid=ALPHA'], values(clone, ALPHA)
+      assert_equal 1, clone.store.capacity_report.total
+      clone.store.clear
+      assert_equal ['sid=ALPHA'], values(original, ALPHA)
+    end
+  end
+
   class WithMozillaStore < Test::Unit::TestCase
     include CommonTests
 

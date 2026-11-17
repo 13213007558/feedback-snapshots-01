@@ -1,3 +1,20 @@
+## Unreleased
+
+- `HTTP::CookieJar::HashStore` now has a configurable, explainable
+  capacity policy.  `:max_cookies_per_site` and `:max_cookies_total`
+  enforce separate quotas; `:site_mode` selects how a cookie's site is
+  derived (`:host`, `:cookie_scope`, `:site`, or a callable), and
+  `:overflow` chooses between evicting (`:evict`, default) and refusing
+  new cookies (`:reject`).  Quotas apply to live cookies only; expired
+  cookies are removed first, then never-sent cookies are evicted by
+  `created_at`, then sent cookies by least recent use.  The total quota
+  is charged to the last writer, so a subdomain flood cannot displace
+  unrelated sessions.
+  `HashStore#capacity_report`, `#last_cleanup_report`, `#evictions`,
+  `#rejections` and `#expired` expose the resulting decisions and the
+  reason for each one.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)
