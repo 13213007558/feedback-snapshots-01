@@ -1,6 +1,11 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- feat: add a backpressured streaming FETCH entry point (``IMAP4.stream_fetch`` / ``LiteralStream``) so large literals can be consumed in raw chunks without being reassembled in memory; consumer failure, cancellation, timeout and disconnect abort the stream and never leave a half literal that could be read as another response; the buffered ``fetch`` API is unchanged
+
 V2.0.3
 ------
 

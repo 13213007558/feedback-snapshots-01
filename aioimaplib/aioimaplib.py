@@ -24,11 +24,11 @@ import ssl
 import sys
 import time
 from asyncio import BaseTransport, Future, Task
-from collections import namedtuple
+from collections import namedtuple, deque
 from copy import copy
 from datetime import datetime, timezone, timedelta
 from enum import Enum
-from typing import Union, Any, Coroutine, Callable, Optional, List
+from typing import Union, Any, Coroutine, Callable, Optional, List, Deque
 
 # to avoid imap servers to kill the connection after 30mn idling
 # cf https://www.imapwiki.org/ClientImplementation/Synchronization
@@ -148,7 +148,8 @@ CONTROL_CHARS = re.compile(r'[\x00\r\n]')
 
 class Command:
     def __init__(self, name: str, tag: str, *args, prefix: str = None, untagged_resp_name: str = None,
-                 loop: asyncio.AbstractEventLoop = None, timeout: float = None) -> None:
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None,
+                 total_timeout: float = None) -> None:
         for arg in args:
             if arg is not None and CONTROL_CHARS.search(str(arg)):
                 raise ValueError('NUL, CR and LF are not allowed in %s command arguments' % name)
@@ -162,8 +163,14 @@ class Command:
         self._loop = loop if loop is not None else get_running_loop()
         self._event = asyncio.Event()
         self._timeout = timeout
+        # the total deadline keeps running while reads are paused, the (inactivity) timeout
+        # is reset each time data makes progress and is suspended while the transport is paused
+        self._total_timeout = total_timeout
+        self._total_timer = None
         self._timer = asyncio.Handle(lambda: None, None, self._loop)  # fake timer
+        self._timer_suspended = False
         self._set_timer()
+        self._set_total_timer()
         self._expected_size = 0
 
         self._resp_literal_data = bytearray()
@@ -187,6 +194,8 @@ class Command:
     def close(self, line: bytes, result: str) -> None:
         self.append_to_resp(line, result=result)
         self._timer.cancel()
+        if self._total_timer is not None:
+            self._total_timer.cancel()
         self._event.set()
 
     def begin_literal_data(self, expected_size: int, literal_data: bytes = b'') -> bytes:
@@ -225,15 +234,38 @@ class Command:
         self._expected_size = 0
         self._resp_literal_data = bytearray()
 
+    def suspend_timer(self) -> None:
+        """Suspend the inactivity timer while backpressure keeps the transport paused."""
+        if self._timer_suspended:
+            return
+        self._timer.cancel()
+        self._timer_suspended = True
+
+    def resume_timer(self) -> None:
+        if not self._timer_suspended:
+            return
+        self._timer_suspended = False
+        self._set_timer()
+
     def _set_timer(self) -> None:
-        if self._timeout is not None:
+        if self._timeout is not None and not self._timer_suspended:
             self._timer = self._loop.call_later(self._timeout, self._timeout_callback)
+
+    def _set_total_timer(self) -> None:
+        if self._total_timeout is not None:
+            self._total_timer = self._loop.call_later(self._total_timeout, self._total_timeout_callback)
 
     def _timeout_callback(self) -> None:
         self._exception = CommandTimeout(self)
         self.close(str(self._exception).encode(), 'KO')
 
+    def _total_timeout_callback(self) -> None:
+        self._exception = CommandTimeout(self)
+        self.close(('total timeout of %ss exceeded for %s' % (self._total_timeout, self)).encode(), 'KO')
+
     def _reset_timer(self) -> None:
+        if self._timer_suspended:
+            return
         self._timer.cancel()
         self._set_timer()
 
@@ -257,6 +289,317 @@ class FetchCommand(Command):
 
 def matched_parenthesis(fetch_response: bytes) -> bool:
     return fetch_response.count(b'(') == fetch_response.count(b')')
+
+
+# Events delivered by a LiteralStream. A chunk carries the raw bytes plus the command and the
+# literal they belong to; boundaries delimit each literal so a consumer knows when one literal
+# is fully received without ever having to assemble it in memory.
+LiteralChunk = namedtuple('LiteralChunk', 'command tag literal_index offset data')
+LiteralEnd = namedtuple('LiteralEnd', 'command tag literal_index size')
+LiteralStreamEnd = namedtuple('LiteralStreamEnd', 'command tag literals')
+
+
+class LiteralStreamAborted(Exception):
+    """Raised on stream consumers when the stream was aborted (consumer error, timeout or disconnect)."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class LiteralStream:
+    """Bounded, backpressured flow of raw literal bytes for a single command.
+
+    The protocol's (synchronous) data_received pushes chunks into a bounded queue. When the queue
+    is full, reading on the transport is paused and overflow bytes are retained one receive at a
+    time instead of being assembled into a single in-memory literal; the consumer drains the queue
+    and reading is resumed. A total deadline is independent of pausing, while the inactivity timer
+    is suspended for as long as reading is paused.
+    """
+
+    def __init__(self, command: 'StreamingCommand', max_queue: int = 8,
+                 loop: asyncio.AbstractEventLoop = None) -> None:
+        self.command = command
+        self.loop = loop if loop is not None else command._loop
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue)
+        self._retained: Deque[LiteralChunk] = deque()
+        self._paused = False
+        self._failed = False
+        self._abort_exception: Optional[BaseException] = None
+        self._wake_waiter: Optional[Future] = None
+        self._literal_index = -1
+        self._literal_size = 0
+        self._literal_received = 0
+        self._literal_sizes: List[int] = list()
+        self._literal_seen: List[int] = list()
+        self._emitted_ends: int = 0
+        self._literal_count = 0
+        self._total_received = 0
+        self._completed = False
+
+    @property
+    def tag(self) -> str:
+        return self.command.tag
+
+    @property
+    def command_name(self) -> str:
+        return self.command.name
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    @property
+    def total_received(self) -> int:
+        return self._total_received
+
+    @property
+    def retained_bytes(self) -> int:
+        return sum(len(event.data) for event in self._retained if isinstance(event, LiteralChunk))
+
+    @property
+    def queued_bytes(self) -> int:
+        return sum(len(event.data) for event in self._queue._queue if isinstance(event, LiteralChunk))
+
+    def begin_literal(self, expected_size: int) -> None:
+        if self._failed:
+            raise self._abort_exception
+        self._literal_index += 1
+        self._literal_count += 1
+        self._literal_size = expected_size
+        self._literal_received = 0
+        self._literal_sizes.append(expected_size)
+        self._literal_seen.append(0)
+
+    def offer_chunk(self, data: bytes) -> bytes:
+        """Offer one slice of literal bytes. Returns the bytes that do not belong to the literal."""
+        if self._failed:
+            raise self._abort_exception
+        remaining = self._literal_size - self._literal_received
+        payload = data[:remaining]
+        if payload:
+            chunk = LiteralChunk(self.command.name, self.command.tag, self._literal_index,
+                                 self._literal_received, bytes(payload))
+            self._offer_chunk(chunk)
+            self._literal_received += len(payload)
+            self._total_received += len(payload)
+        rest = data[len(payload):]
+        if self._literal_received == self._literal_size:
+            self.command.mark_literal_complete(self._literal_index, self._literal_size)
+        return rest
+
+    def _offer_chunk(self, chunk: LiteralChunk) -> None:
+        try:
+            self._queue.put_nowait(chunk)
+        except asyncio.QueueFull:
+            if not self._paused:
+                self._pause_reading()
+            self._retained.append(chunk)
+            return
+        self._wake_consumer()
+
+    def _drain_retained(self) -> None:
+        while self._retained and self._queue.qsize() < self._queue.maxsize:
+            self._queue.put_nowait(self._retained.popleft())
+        # resume only once every retained chunk has been re-queued; between a full queue and an
+        # empty one the consumer keeps draining, which calls this again, so no resume is lost
+        if not self._retained and self._paused and not self._failed:
+            self._resume_reading()
+
+    def _pause_reading(self) -> None:
+        self._paused = True
+        self.command.suspend_timer()
+        transport = self.command.protocol_transport
+        if transport is not None:
+            transport.pause_reading()
+
+    def _resume_reading(self) -> None:
+        self._paused = False
+        self.command.resume_timer()
+        transport = self.command.protocol_transport
+        if transport is not None:
+            transport.resume_reading()
+
+    def _wake_consumer(self) -> None:
+        if self._wake_waiter is not None and not self._wake_waiter.done():
+            self._wake_waiter.set_result(None)
+
+    def complete(self) -> None:
+        if self._failed or self._completed:
+            return
+        self._completed = True
+        self._wake_consumer()
+
+    def fail(self, exception: BaseException) -> None:
+        """Abort the stream: wake the consumer with an error and close the transport so the
+        remaining, now unparseable wire bytes can never be treated as another response."""
+        if self._failed or self._completed:
+            return
+        self._failed = True
+        self._abort_exception = exception
+        if self._paused:
+            self._paused = False
+            transport = self.command.protocol_transport
+            if transport is not None:
+                transport.resume_reading()
+        self._wake_consumer()
+        transport = self.command.protocol_transport
+        if transport is not None:
+            transport.close()
+        self.command.fail_stream(exception)
+
+    async def read_event(self):
+        """Read the next event: a LiteralChunk, a LiteralEnd or a LiteralStreamEnd.
+
+        Boundary events are derived from the known literal sizes and never occupy the bounded
+        queue; an abort races the read so a consumer failure, timeout or disconnect cannot hang.
+        """
+        if self._failed:
+            raise self._abort_exception
+
+        boundary = self._next_boundary_event()
+        if boundary is not None:
+            return boundary
+
+        if self._queue.empty():
+            if self._completed:
+                return LiteralStreamEnd(self.command.name, self.command.tag, self._literal_count)
+            if self._wake_waiter is None or self._wake_waiter.done():
+                self._wake_waiter = self.loop.create_future()
+            queue_get = asyncio.ensure_future(self._queue.get())
+            await asyncio.wait({queue_get, self._wake_waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if self._failed:
+                queue_get.cancel()
+                raise self._abort_exception
+            if not queue_get.done():
+                queue_get.cancel()
+                return await self.read_event()
+            chunk = queue_get.result()
+        else:
+            chunk = self._queue.get_nowait()
+
+        self._literal_seen[chunk.literal_index] += len(chunk.data)
+        self._after_consume()
+        return chunk
+
+    def _next_boundary_event(self):
+        # a LiteralEnd is due once every chunk of that literal has been handed to the consumer
+        while self._emitted_ends < len(self._literal_sizes) and \
+                self._literal_seen[self._emitted_ends] == self._literal_sizes[self._emitted_ends]:
+            index = self._emitted_ends
+            self._emitted_ends += 1
+            return LiteralEnd(self.command.name, self.command.tag, index, self._literal_sizes[index])
+        return None
+
+    def _after_consume(self) -> None:
+        if self._paused or self._retained:
+            self._drain_retained()
+
+    def __aiter__(self) -> 'LiteralStream':
+        return self
+
+    async def __anext__(self) -> LiteralChunk:
+        while True:
+            event = await self.read_event()
+            if isinstance(event, LiteralStreamEnd):
+                raise StopAsyncIteration
+            if isinstance(event, LiteralEnd):
+                continue
+            return event
+
+    async def aclose(self) -> None:
+        if not self._failed and not self._completed:
+            self.fail(LiteralStreamAborted('literal stream was closed before completion'))
+
+    async def __aenter__(self) -> 'LiteralStream':
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None and not self._failed and not self._completed:
+            self.fail(LiteralStreamAborted('literal stream consumer failed: %s' % exc))
+        return False
+
+
+class StreamingCommand(Command):
+    """A command whose response literals are streamed raw instead of being reassembled."""
+
+    def __init__(self, name: str, tag: str, *args, prefix: str = None, untagged_resp_name: str = None,
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None,
+                 total_timeout: float = None, max_queue: int = 8,
+                 transport: BaseTransport = None) -> None:
+        super().__init__(name, tag, *args, prefix=prefix, untagged_resp_name=untagged_resp_name,
+                         loop=loop, timeout=timeout, total_timeout=total_timeout)
+        self.protocol_transport = transport
+        self.owner_protocol = None
+        self.stream = LiteralStream(self, max_queue=max_queue, loop=loop)
+        self.literal_complete: List[bool] = list()
+        self.literal_sizes: List[int] = list()
+
+    def begin_literal_data(self, expected_size: int, literal_data: bytes = b'') -> bytes:
+        self._expected_size = expected_size
+        self.literal_complete.append(False)
+        self.literal_sizes.append(expected_size)
+        self.stream.begin_literal(expected_size)
+        if literal_data:
+            return self.append_literal_data(literal_data)
+        return b''
+
+    def append_literal_data(self, data: bytes) -> bytes:
+        rest = self.stream.offer_chunk(data)
+        self._reset_timer()
+        return rest
+
+    def wait_literal_data(self) -> bool:
+        return self._expected_size != 0 and \
+            self.stream._literal_received != self.stream._literal_size
+
+    def mark_literal_complete(self, literal_index: int, size: int) -> None:
+        self.literal_complete[literal_index] = True
+        self._expected_size = 0
+        # only describe the literal: the full bytes are owned by the consumer
+        self.append_to_resp(b'<literal %d: %d bytes streamed>' % (literal_index, size))
+        self._end_literal_data()
+
+    def _timeout_callback(self) -> None:
+        # a timeout while streaming aborts the stream: the remaining wire bytes must not be
+        # parsed as another response, and the consumer must observe the failure
+        self.stream.fail(CommandTimeout(self))
+
+    def _total_timeout_callback(self) -> None:
+        self.stream.fail(CommandTimeout(self))
+
+    def fail_stream(self, exception: BaseException) -> None:
+        if self._event.is_set():
+            return
+        owner = self.owner_protocol
+        if owner is not None and owner.pending_async_commands.get(self.untagged_resp_name) is self:
+            owner.pending_async_commands.pop(self.untagged_resp_name, None)
+        self._exception = exception
+        self.close(('stream aborted: %s' % exception).encode(), 'KO')
+
+
+class StreamingFetchCommand(StreamingCommand):
+    FETCH_MESSAGE_DATA_RE = re.compile(rb'[0-9]+ FETCH \(')
+
+    def __init__(self, tag: str, *args, prefix: str = None, untagged_resp_name: str = None,
+                 loop: asyncio.AbstractEventLoop = None, timeout: float = None,
+                 total_timeout: float = None, max_queue: int = 8,
+                 transport: BaseTransport = None) -> None:
+        super().__init__('FETCH', tag, *args, prefix=prefix, untagged_resp_name=untagged_resp_name,
+                         loop=loop, timeout=timeout, total_timeout=total_timeout,
+                         max_queue=max_queue, transport=transport)
+
+    def wait_data(self) -> bool:
+        last_fetch_index = 0
+        for index, line in enumerate(self._resp_lines):
+            if isinstance(line, bytes) and self.FETCH_MESSAGE_DATA_RE.match(line):
+                last_fetch_index = index
+        return not matched_parenthesis(b''.join(filter(lambda l: isinstance(l, bytes),
+                                                      self.response.lines[last_fetch_index:])))
 
 
 class IdleCommand(Command):
@@ -344,6 +687,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
         self.tagnum = 0
         self.tagpre = int2ap(random.randint(4096, 65535))
+        self._aborted_stream: Optional[LiteralStream] = None
 
     def connection_made(self, transport: BaseTransport) -> None:
         self.transport = transport
@@ -351,6 +695,11 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
     def data_received(self, d: bytes) -> None:
         log.debug('Received : %s' % d)
+        if self._aborted_stream is not None and self._aborted_stream.failed:
+            # the stream failed so the remaining bytes have no reliable framing: never interpret
+            # them as another response, and drop them while the connection is being torn down
+            log.debug('ignoring %d bytes received on aborted stream', len(d))
+            return
         try:
             self._handle_responses(self.incomplete_line + d, self._handle_line, self.current_command)
             self.incomplete_line = b''
@@ -361,6 +710,9 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         log.debug('connection lost: %s', exc)
+        stream = self._aborted_stream
+        if stream is not None and not stream.failed and not stream._completed:
+            stream.fail(Abort('connection lost before the literal was fully received: %s' % exc))
         if self.conn_lost_cb is not None:
             self.conn_lost_cb(exc)
 
@@ -376,6 +728,11 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             data = current_cmd.append_literal_data(data)
             if current_cmd.wait_literal_data():
                 raise IncompleteRead(current_cmd)
+            if isinstance(current_cmd, StreamingCommand):
+                # the whole literal was just handed to the stream consumer; if the remainder of
+                # the frame completes the response the stream itself can be closed
+                if not current_cmd.stream._completed and not current_cmd.wait_data():
+                    current_cmd.stream.complete()
 
         line, separator, tail = data.partition(CRLF)
         if not separator:
@@ -393,6 +750,11 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         elif cmd is not None and cmd.wait_data():
             self._handle_responses(tail, line_handler, current_cmd=cmd)
         else:
+            if isinstance(cmd, StreamingCommand) and not cmd.stream._completed \
+                    and cmd.stream._literal_count > 0 and not cmd.wait_literal_data():
+                # every literal of this frame has been handed to the consumer and no further
+                # data item is pending: the stream itself can now report completion
+                cmd.stream.complete()
             self._handle_responses(tail, line_handler)
 
     def _handle_line(self, line: bytes, current_cmd: Command) -> Optional[Command]:
@@ -453,6 +815,42 @@ class IMAP4ClientProtocol(asyncio.Protocol):
                 self._idle_event.clear()
 
         return command.response
+
+    def stream(self, command: StreamingCommand, scrub: str = None) -> LiteralStream:
+        """Send a command whose literals are streamed to a consumer instead of being buffered.
+
+        The stream is returned immediately, before the response is received. The caller must
+        consume it (its async iterator or :meth:`LiteralStream.read_event`) and then await
+        :meth:`LiteralStream.command.wait`; only a command whose literals were fully consumed
+        can report a complete response.
+        """
+        if self.state not in Commands.get(command.name).valid_states:
+            raise Abort('command %s illegal in state %s' % (command.name, self.state))
+        if self.pending_sync_command is not None:
+            raise Abort('cannot stream %s while sync command %s is pending'
+                        % (command.name, self.pending_sync_command.name))
+        if self.pending_async_commands.get(command.untagged_resp_name) is not None:
+            raise Abort('a %s command is already pending' % command.untagged_resp_name)
+
+        command.protocol_transport = self.transport
+        command.owner_protocol = self
+        self._aborted_stream = command.stream
+        self.pending_async_commands[command.untagged_resp_name] = command
+        self.send(str(command), scrub=scrub)
+        return command.stream
+
+    def stream_fetch(self, message_set: str, message_parts: str, by_uid: bool = False,
+                     timeout: float = None, total_timeout: float = None,
+                     max_queue: int = 8) -> LiteralStream:
+        command = StreamingFetchCommand(
+            self.new_tag(), message_set, message_parts, prefix='UID' if by_uid else '',
+            loop=self.loop, timeout=timeout, total_timeout=total_timeout,
+            max_queue=max_queue, transport=self.transport)
+        return self.stream(command)
+
+    def abort_stream(self, stream: LiteralStream, reason: str) -> None:
+        # fail() itself tears down the transport and clears the pending command
+        stream.fail(LiteralStreamAborted(reason))
 
     @change_state
     async def welcome(self, command: bytes) -> None:
@@ -772,6 +1170,27 @@ class IMAP4:
 
     async def fetch(self, message_set: str, message_parts: str) -> Response:
         return await self.protocol.fetch(message_set, message_parts, timeout=self.timeout)
+
+    def stream_fetch(self, message_set: str, message_parts: str, by_uid: bool = False,
+                     timeout: float = None, total_timeout: float = None,
+                     max_queue: int = 8) -> 'LiteralStream':
+        """Stream a FETCH response literal in raw, bounded chunks instead of buffering it whole.
+
+        ``timeout`` is the inactivity deadline (reset on progress and suspended while reading is
+        paused); ``total_timeout`` bounds the whole fetch including consumer pauses.
+
+        Typical use::
+
+            stream = imap_client.stream_fetch('1', '(BODY[])')
+            async with stream:
+                async for chunk in stream:
+                    ...  # raw bytes, backpressured through the bounded queue
+            await stream.command.wait()  # raises if the fetch did not fully complete
+        """
+        return self.protocol.stream_fetch(
+            message_set, message_parts, by_uid=by_uid,
+            timeout=timeout if timeout is not None else self.timeout,
+            total_timeout=total_timeout, max_queue=max_queue)
 
     async def idle(self) -> Response:
         return await self.protocol.idle()

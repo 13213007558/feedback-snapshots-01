@@ -56,6 +56,26 @@ Example
 **Beware** that the IMAP4.close() function is an IMAP function that is closing the selected mailbox, thus passing from SELECTED state to AUTH state. It **does not close** the TCP connection.
 The way to close TCP connection properly is to logout.
 
+Streaming a FETCH literal
+-------------------------
+
+The buffered ``fetch`` API reassembles each response literal in memory, which is unsuitable for very large messages. For those cases ``stream_fetch`` returns a :class:`aioimaplib.LiteralStream` that yields the raw literal bytes in bounded, backpressured chunks.
+
+Each :class:`aioimaplib.LiteralChunk` carries the bytes together with their command, tag, literal index and offset. When the consumer cannot keep up, reading on the transport is paused (``pause_reading``/``resume_reading``) instead of growing an in-memory buffer; the inactivity timeout is suspended while reading is paused, while ``total_timeout`` bounds the whole fetch regardless of pauses.
+
+A stream reports completion only once a literal has been fully received. If the consumer raises or cancels, or a timeout/disconnect happens mid-literal, the stream fails and the transport is closed so the remaining wire bytes can never be interpreted as another response; ``command.wait()`` then raises instead of returning a seemingly complete scan input. The buffered ``fetch`` API keeps working unchanged.
+
+.. code-block:: python
+
+    async def scan_message(imap_client, uid):
+        stream = imap_client.stream_fetch(uid, 'BODY.PEEK[]', by_uid=True,
+                                          timeout=30, total_timeout=300, max_queue=8)
+        async with stream:
+            async for chunk in stream:
+                # chunk.command, chunk.tag and chunk.literal_index identify the bytes
+                scan(chunk.data)
+        await stream.command.wait()  # raises unless the whole literal was received
+
 IDLE command
 ------------
 .. _RFC2177: https://tools.ietf.org/html/rfc2177
