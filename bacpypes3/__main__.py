@@ -301,8 +301,14 @@ class CmdShell(Cmd):
 
         parameter_list = []
         while args_list:
-            # use the vendor information to translate the object identifier
-            object_identifier = vendor_info.object_identifier(args_list.pop(0))
+            # use the vendor information to translate the object identifier,
+            # or the standard enumeration when there is no vendor context
+            objid = args_list.pop(0)
+            object_identifier = (
+                vendor_info.object_identifier(objid)
+                if vendor_info is not None
+                else ObjectIdentifier(objid)
+            )
             parameter_list.append(object_identifier)
 
             property_reference_list = []

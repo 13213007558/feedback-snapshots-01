@@ -97,6 +97,31 @@ The default vendor identifier is **999**, the vendor identifier used for
 sample applications is **888**.  Vendor identifiers are free and assigned by
 `ASHRAE <https://www.ashrae.org/file%20library/technical%20resources/standards%20and%20guidelines/procedures-vendor-id-rev3-15-2012.pdf>`_.
 
+Vendor Type Interpretations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A vendor identifier only selects proprietary object and property types when
+it comes from explicit configuration or from a device record that was marked
+as trusted.  The vendor identifier in an I-Am is self-reported: it is cached
+for discovery, but it is not authentication and does not, by itself, change
+how values are interpreted.
+
+Each registered vendor has its own object class table.  Object type 128 and
+property 512 from one vendor are unrelated to the same numbers from another
+vendor, and a failed or duplicate registration leaves the previous definition
+in place.  When there is no confirmed vendor context, proprietary numbers are
+returned as their raw encoded value; they are never forced into a standard or
+recently registered type, and a write to an unresolved proprietary property is
+rejected instead of being coerced.
+
+For compatibility, :func:`bacpypes3.vendor.get_vendor_info` still returns the
+ASHRAE tables for an unknown vendor.  New code should use
+:func:`bacpypes3.vendor.lookup_vendor_info` (or
+:meth:`Application.get_vendor_info`, which returns ``None`` without a
+confirmed context).  Standard object and property numbers keep working without
+a vendor context, and an application configured with only standard objects
+does not need a registered vendor for its device object.
+
 
 Shell Commands
 --------------

@@ -1704,7 +1704,7 @@ class PropertyReference(Sequence):
         arg: Union[int, str, tuple, None] = None,
         *,
         vendor_info: Optional[VendorInfo] = None,
-        vendor_identifier: Optional[int] = 0,
+        vendor_identifier: Optional[int] = None,
         **kwargs,
     ) -> None:
         if _debug:
@@ -1732,7 +1732,9 @@ class PropertyReference(Sequence):
             if property_identifier.isdigit():
                 property_identifier = PropertyIdentifier(int(property_identifier))
             else:
-                # look for vendor information, defaults to ASHRAE
+                # look for vendor information, falling back to the
+                # standard property enumeration only when there is no
+                # vendor context at all
                 if not vendor_info:
                     vendor_info = get_vendor_info(vendor_identifier)
                 if _debug:

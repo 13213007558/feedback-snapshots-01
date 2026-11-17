@@ -65,7 +65,7 @@ from .netservice import (
 )
 from .object import DeviceObject, Object
 from .pdu import Address
-from .primitivedata import ObjectIdentifier, ObjectType
+from .primitivedata import ObjectIdentifier, ObjectType, PropertyIdentifier
 from .service.cov import ChangeOfValueServices
 
 # basic services
@@ -75,7 +75,12 @@ from .service.object import (
     ReadWritePropertyMultipleServices,
     ReadWritePropertyServices,
 )
-from .vendor import get_vendor_info, VendorInfo
+from .vendor import (
+    VendorInfo,
+    device_vendor_info,
+    lookup_vendor_info,
+    resolve_object_class,
+)
 from .vlan.link import VirtualLinkLayer
 
 if TYPE_CHECKING:
@@ -110,6 +115,7 @@ class DeviceInfo(DebugContents):
         "max_npdu_length",
         "max_segments_accepted",
         "protocol_services_supported",
+        "vendor_identifier_trusted",
     )
 
     device_instance: int
@@ -120,6 +126,12 @@ class DeviceInfo(DebugContents):
     max_segments_accepted: Optional[int] = None
     max_npdu_length: Optional[int] = None  # See Clause 19.4
     protocol_services_supported: Optional[ServicesSupported] = None
+
+    # An I-Am carries a self-reported vendor identifier.  It is useful for
+    # discovery, but it is not an authentication of the device and must not
+    # by itself select proprietary object/property interpretations.  This
+    # field is last so the positional order of the existing fields is kept.
+    vendor_identifier_trusted: bool = False
 
 
 #
@@ -166,10 +178,18 @@ class DeviceInfoCache(DebugContents):
 
         return device_info
 
-    async def set_device_info(self, apdu: IAmRequest):
+    async def set_device_info(
+        self, apdu: IAmRequest, *, vendor_identifier_trusted: Optional[bool] = None
+    ):
         """
         Create/update a device information record based on the contents of an
         IAmRequest and put it in the cache.
+
+        The vendor identifier in an I-Am is self-reported, so a new record is
+        untrusted by default.  Set ``vendor_identifier_trusted=True`` only
+        after the vendor has been established by a trustworthy out-of-band
+        mechanism; that flag is what allows the record to select vendor
+        specific object and property interpretations.
         """
         if _debug:
             DeviceInfoCache._debug("set_device_info %r", apdu)
@@ -207,15 +227,29 @@ class DeviceInfoCache(DebugContents):
             device_info = self.device_info_class(device_instance, device_address)
             device_info.deviceIdentifier = device_instance
             device_info.address = device_address
+            device_info.vendor_identifier_trusted = False
 
             # put it in the cache, replacing possible existing instance(s)
             self.address_cache[device_address] = device_info
             self.instance_cache[device_instance] = device_info
 
-        # update record contents
+        # update record contents; the vendor identifier is kept for
+        # discovery, but the I-Am remains unauthenticated and does not
+        # become a trusted vendor context unless the caller confirmed it
+        previous_vendor_identifier = device_info.vendor_identifier
         device_info.max_apdu_length_accepted = apdu.maxAPDULengthAccepted
         device_info.segmentation_supported = apdu.segmentationSupported
         device_info.vendor_identifier = apdu.vendorID
+
+        if vendor_identifier_trusted is not None:
+            device_info.vendor_identifier_trusted = vendor_identifier_trusted
+        elif (
+            previous_vendor_identifier is not None
+            and previous_vendor_identifier != apdu.vendorID
+        ):
+            # trust was for the vendor that was confirmed earlier; a new
+            # self-reported identifier must not inherit that trust
+            device_info.vendor_identifier_trusted = False
 
         return device_info
 
@@ -440,7 +474,12 @@ class Application(
             raise RuntimeError("missing vendor identifier")
         if _debug:
             Application._debug("    - vendor_identifier: %r", vendor_identifier)
-        vendor_info = get_vendor_info(vendor_identifier)
+
+        # A configured application may list only standard objects; when the
+        # configured vendor is not registered there is still a standard
+        # interpretation, but proprietary object types will be rejected
+        # rather than borrowed from another vendor.
+        vendor_info = lookup_vendor_info(vendor_identifier)
         if _debug:
             Application._debug("    - vendor_info: %r", vendor_info)
 
@@ -458,8 +497,10 @@ class Application(
             elif object_type != implicit_type:
                 raise RuntimeError("mismatched object type")
 
-            # using vendor info get the appropriate class for this type
-            object_class = vendor_info.get_object_class(ObjectType(object_type))
+            # using vendor info get the appropriate class for this type;
+            # standard object types work without a registered vendor, but
+            # proprietary ones do not
+            object_class = resolve_object_class(vendor_info, ObjectType(object_type))
             if _debug:
                 Application._debug("    - object_class: %r", object_class)
             if not object_class:
@@ -496,9 +537,10 @@ class Application(
                 aseID,
             )
 
-        # get the vendor info for the provided identifier
-        vendor_info = get_vendor_info(args.vendoridentifier)
-        if vendor_info.vendor_identifier == 0:
+        # get the vendor info for the provided identifier; this is an
+        # explicit local configuration value, not a self-reported one
+        vendor_info = lookup_vendor_info(args.vendoridentifier)
+        if vendor_info is None:
             raise RuntimeError(f"missing vendor info: {args.vendoridentifier}")
 
         # get the device object class and make an instance
@@ -787,7 +829,7 @@ class Application(
         device_instance: Optional[int] = None,
         device_address: Optional[Address] = None,
         vendor_identifier: Optional[int] = None,
-    ) -> VendorInfo:
+    ) -> Optional[VendorInfo]:
         if _debug:
             Application._debug(
                 "get_vendor_info device_instance=%r device_address=%r vendor_identifier=%r",
@@ -796,33 +838,52 @@ class Application(
                 vendor_identifier,
             )
 
-        # vendor identifier provided
+        # an explicitly provided vendor identifier is a deliberate context
         if vendor_identifier is not None:
-            pass
+            vendor_info = lookup_vendor_info(vendor_identifier)
+            if _debug:
+                Application._debug("    - vendor_info: %r", vendor_info)
+            return vendor_info
 
-        # look for device information to get the vendor identifier
-        elif (device_address is not None) or (device_instance is not None):
+        # otherwise a device record can provide the context, but only when
+        # that record is trusted; an I-Am vendor identifier is self-reported
+        # and must not select proprietary interpretations on its own
+        if (device_address is not None) or (device_instance is not None):
             device_info = await self.device_info_cache.get_device_info(
                 device_address or device_instance
             )
             if _debug:
                 Application._debug("    - device_info: %r", device_info)
 
-            if device_info:
-                vendor_identifier = device_info.vendor_identifier
-            else:
-                # defaults to ASHRAE
-                vendor_identifier = 0
+            vendor_info = device_vendor_info(device_info)
+            if _debug:
+                Application._debug("    - vendor_info: %r", vendor_info)
+            return vendor_info
 
-        else:
-            raise RuntimeError("parameter expected")
+        raise RuntimeError("parameter expected")
 
-        # get the vendor information from the "registered" vendors
-        vendor_info = get_vendor_info(vendor_identifier)
-        if _debug:
-            Application._debug("    - vendor_info: %r", vendor_info)
+    async def _vendor_context(
+        self,
+        *,
+        device_instance: Optional[int] = None,
+        device_address: Optional[Address] = None,
+        vendor_identifier: Optional[int] = None,
+    ) -> Optional[VendorInfo]:
+        """Return a confirmed vendor context, or ``None``.
 
-        return vendor_info
+        This is the internal variant of :meth:`get_vendor_info` used by
+        reference parsing: a missing or self-reported vendor is not an
+        error, it simply means there is no vendor context and proprietary
+        numbers must be left uninterpreted.
+        """
+        try:
+            return await self.get_vendor_info(
+                device_instance=device_instance,
+                device_address=device_address,
+                vendor_identifier=vendor_identifier,
+            )
+        except RuntimeError:
+            return None
 
     async def parse_object_identifier(
         self,
@@ -830,21 +891,25 @@ class Application(
         *,
         device_instance: Optional[int] = None,
         device_address: Optional[Address] = None,
-        vendor_identifier: Optional[int] = 0,
+        vendor_identifier: Optional[int] = None,
         vendor_info: Optional[VendorInfo] = None,
     ) -> ObjectIdentifier:
         if _debug:
             Application._debug("parse_object_identifier %r", arg)
 
-        # maybe the context was provided
+        # maybe the context was provided; without one, use only the
+        # standard object type enumeration and never a proprietary one
         if not vendor_info:
-            vendor_info = await self.get_vendor_info(
+            vendor_info = await self._vendor_context(
                 device_instance=device_instance,
                 device_address=device_address,
                 vendor_identifier=vendor_identifier,
             )
         if _debug:
             Application._debug("    - vendor_info: %r", vendor_info)
+        object_type_class = (
+            vendor_info.object_type if vendor_info is not None else ObjectType
+        )
 
         if isinstance(arg, tuple):
             if len(arg) != 2:
@@ -852,7 +917,7 @@ class Application(
             obj_type, obj_instance = arg
 
             if isinstance(obj_type, (int, str)):
-                obj_type = vendor_info.object_type(obj_type)
+                obj_type = object_type_class(obj_type)
 
             if isinstance(obj_instance, str):
                 obj_instance = int(obj_instance, base=0)
@@ -867,7 +932,7 @@ class Application(
                 raise ValueError("unsigned integer expected")
 
             obj_type, obj_instance = (arg >> 22), (arg & 0x3FFFFF)
-            obj_type = vendor_info.object_type(obj_type)
+            obj_type = object_type_class(obj_type)
 
         elif isinstance(arg, str):
             if "," in arg:
@@ -878,7 +943,7 @@ class Application(
                 raise ValueError("'type,instance' or 'type:instance' expected")
             obj_type, obj_instance = arg
 
-            obj_type = vendor_info.object_type(obj_type)
+            obj_type = object_type_class(obj_type)
             obj_instance = int(obj_instance, base=0)
             if (obj_instance < 0) or (obj_instance > 4194303):
                 raise ValueError("instance out of range")
@@ -894,7 +959,7 @@ class Application(
         *,
         device_instance: Optional[int] = None,
         device_address: Optional[Address] = None,
-        vendor_identifier: Optional[int] = 0,
+        vendor_identifier: Optional[int] = None,
         vendor_info: Optional[VendorInfo] = None,
     ) -> PropertyReference:
         if _debug:
@@ -909,19 +974,25 @@ class Application(
 
         rslt = PropertyReference()
 
-        # maybe the context was provided
+        # maybe the context was provided; without one, use only the
+        # standard property enumeration and never a proprietary one
         if not vendor_info:
-            vendor_info = await self.get_vendor_info(
+            vendor_info = await self._vendor_context(
                 device_instance=device_instance,
                 device_address=device_address,
                 vendor_identifier=vendor_identifier,
             )
         if _debug:
             Application._debug("    - vendor_info: %r", vendor_info)
+        property_identifier_class = (
+            vendor_info.property_identifier
+            if vendor_info is not None
+            else PropertyIdentifier
+        )
 
         # specific property enumeration
         if isinstance(arg, int):
-            rslt.propertyIdentifier = vendor_info.property_identifier(arg)
+            rslt.propertyIdentifier = property_identifier_class(arg)
 
         # property reference by name
         elif isinstance(arg, str):
@@ -942,14 +1013,12 @@ class Application(
                 )
             # property identifier is an int or a name
             if property_identifier.isdigit():
-                rslt.propertyIdentifier = vendor_info.property_identifier(
+                rslt.propertyIdentifier = property_identifier_class(
                     int(property_identifier)
                 )
             else:
                 # translate the string
-                rslt.propertyIdentifier = vendor_info.property_identifier(
-                    property_identifier
-                )
+                rslt.propertyIdentifier = property_identifier_class(property_identifier)
 
             # array index is an int
             if property_array_index is not None:
@@ -961,15 +1030,11 @@ class Application(
             # look up the name 'some-property'
             if isinstance(property_identifier, str):
                 # translate the string
-                rslt.propertyIdentifier = vendor_info.property_identifier(
-                    property_identifier
-                )
+                rslt.propertyIdentifier = property_identifier_class(property_identifier)
 
             # build something like (12, 4)
             elif isinstance(property_identifier, int):
-                rslt.propertyIdentifier = vendor_info.property_identifier(
-                    property_identifier
-                )
+                rslt.propertyIdentifier = property_identifier_class(property_identifier)
 
             else:
                 raise TypeError(arg)
@@ -992,7 +1057,7 @@ class Application(
         *,
         device_instance: Optional[int] = None,
         device_address: Optional[Address] = None,
-        vendor_identifier: Optional[int] = 0,
+        vendor_identifier: Optional[int] = None,
         vendor_info: Optional[VendorInfo] = None,
     ) -> ObjectPropertyReference:
         if _debug:
@@ -1006,9 +1071,10 @@ class Application(
                 vendor_info,
             )
 
-        # maybe the context was provided
+        # maybe the context was provided; without one the individual
+        # parsers fall back to the standard enumerations only
         if not vendor_info:
-            vendor_info = await self.get_vendor_info(
+            vendor_info = await self._vendor_context(
                 device_instance=device_instance,
                 device_address=device_address,
                 vendor_identifier=vendor_identifier,

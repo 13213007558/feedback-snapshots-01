@@ -9,7 +9,7 @@ from ..primitivedata import Atomic, Null, Unsigned, Date, Time
 from ..basetypes import CalendarEntry, WeekNDay, Reliability
 from ..constructeddata import Array
 from ..object import ScheduleObject as _ScheduleObject
-from ..vendor import get_vendor_info
+from ..vendor import lookup_vendor_info
 
 from .object import Object as _Object
 
@@ -356,7 +356,7 @@ class ScheduleObject(_Object, _ScheduleObject):
                 vendor_identifier = self._app.device_object.vendorIdentifier
                 if vendor_identifier is None:
                     raise RuntimeError("missing vendor identifier")
-                vendor_info = get_vendor_info(vendor_identifier)
+                vendor_info = lookup_vendor_info(vendor_identifier)
                 if vendor_info is None:
                     raise RuntimeError("missing vendor information")
                 if _debug:

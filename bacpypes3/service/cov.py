@@ -19,7 +19,6 @@ from ..debugging import bacpypes_debugging, DebugContents, ModuleLogger
 from ..pdu import Address
 
 from ..errors import (
-    DecodingError,
     ExecutionError,
     ServicesError,
 )
@@ -33,7 +32,7 @@ from ..apdu import (
     ConfirmedCOVNotificationRequest,
     UnconfirmedCOVNotificationRequest,
 )
-from ..vendor import get_vendor_info
+from ..vendor import device_vendor_info, resolve_property_type
 
 # some debugging
 _debug = 0
@@ -239,38 +238,26 @@ class SubscriptionContextManager:
         if _debug:
             SubscriptionContextManager._debug("    - device_info: %r", device_info)
 
-        # using the device info, look up the vendor information
-        if device_info:
-            vendor_info = get_vendor_info(device_info.vendor_identifier)
-        else:
-            vendor_info = get_vendor_info(0)
+        # using the device info, look up the vendor information; an I-Am
+        # vendor identifier alone is not a trusted context
+        vendor_info = device_vendor_info(device_info)
         if _debug:
-            SubscriptionContextManager._debug(
-                "    - vendor_info (%d): %r", vendor_info.vendor_identifier, vendor_info
-            )
+            SubscriptionContextManager._debug("    - vendor_info: %r", vendor_info)
 
-        # using the vendor information, look up the class
-        object_class = vendor_info.get_object_class(self.monitored_object_identifier[0])
-        if not object_class:
-            return (
-                property_value_element.propertyIdentifier,
-                DecodingError(
-                    f"no object class: {self.monitored_object_identifier[0]}"
-                ),
-            )
-
-        # now get the property type from the class
-        property_type = object_class.get_property_type(
-            property_value_element.propertyIdentifier
+        # look up the property type with the same context used for reading
+        property_type = resolve_property_type(
+            vendor_info,
+            self.monitored_object_identifier[0],
+            property_value_element.propertyIdentifier,
         )
         if _debug:
             SubscriptionContextManager._debug("    - property_type: %r", property_type)
-        if not property_type:
+
+        # without a definition, keep the value raw instead of guessing
+        if property_type is None:
             return (
                 property_value_element.propertyIdentifier,
-                DecodingError(
-                    f"no property type: {property_value_element.propertyIdentifier}"
-                ),
+                property_value_element.value,
             )
 
         # filter the array index reference

@@ -188,7 +188,7 @@ from .basetypes import (
     VTSession,
     WriteStatus,
 )
-from .vendor import get_vendor_info
+from .vendor import lookup_vendor_info
 
 # some debugging
 _debug = 0
@@ -292,8 +292,11 @@ class ObjectMetaclass(SequenceMetaclass):
         # save a reference in the class
         metaclass._vendor_id = _vendor_id  # type: ignore[attr-defined]
 
-        # find the vendor information for this vendor
-        vendor_info = get_vendor_info(_vendor_id)
+        # find the vendor information for this vendor; unlike the
+        # historical default, an unregistered vendor must not fall back to
+        # the ASHRAE tables because that would publish vendor-specific
+        # object types and properties into the standard interpretation
+        vendor_info = lookup_vendor_info(_vendor_id)
         if not vendor_info:
             raise RuntimeError(
                 f"no vendor information for vendor identifier: {_vendor_id}"
@@ -305,14 +308,9 @@ class ObjectMetaclass(SequenceMetaclass):
         if not hasattr(metaclass, "objectType"):
             return metaclass
 
-        # register this class
-        vendor_info.register_object_class(metaclass.objectType, metaclass)
-
-        # the object classes are in the vendor information, pass them along
-        metaclass._object_identifier_class = vendor_info.object_identifier
-        metaclass._property_identifier_class = vendor_info.property_identifier
-
-        # find the elements that are not property identifiers
+        # find the elements that are not property identifiers before the
+        # class is registered, so a class definition that fails validation
+        # cannot leave a partial definition behind in the vendor tables
         bad_identifiers = set.difference(
             set(metaclass._elements),  # type: ignore[attr-defined]
             set(vendor_info.property_identifier._enum_map),  # type: ignore[attr-defined]
@@ -321,6 +319,13 @@ class ObjectMetaclass(SequenceMetaclass):
             raise AttributeError(
                 "not a property identifier: " + ", ".join(bad_identifiers)
             )
+
+        # register this class; an existing definition is preserved
+        vendor_info.register_object_class(metaclass.objectType, metaclass)
+
+        # the object classes are in the vendor information, pass them along
+        metaclass._object_identifier_class = vendor_info.object_identifier
+        metaclass._property_identifier_class = vendor_info.property_identifier
 
         return metaclass
 

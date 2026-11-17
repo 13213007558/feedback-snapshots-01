@@ -174,6 +174,7 @@ class CustomDeviceInfoCache(DeviceInfoCache):
         device_info.max_apdu_length_accepted = apdu.maxAPDULengthAccepted
         device_info.segmentation_supported = apdu.segmentationSupported
         device_info.vendor_identifier = apdu.vendorID
+        device_info.vendor_identifier_trusted = False
 
         # turn the apdu back into bytes
         device_info_blob = device_info.encode()

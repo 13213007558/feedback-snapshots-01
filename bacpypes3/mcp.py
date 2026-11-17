@@ -729,7 +729,11 @@ async def read_property_multiple(
 
     parameter_list: List[Any] = []
     for objid_str, prop_strs in _parse_rpm_args(vendor_info, args):
-        object_identifier = vendor_info.object_identifier(objid_str)
+        object_identifier = (
+            vendor_info.object_identifier(objid_str)
+            if vendor_info is not None
+            else ObjectIdentifier(objid_str)
+        )
         parameter_list.append(object_identifier)
         property_reference_list = []
         for prop_str in prop_strs:

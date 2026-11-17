@@ -48,11 +48,35 @@ from ..errors import (
 from ..object import DeviceObject
 from ..pdu import Address
 from ..primitivedata import Atomic, Date, Null, ObjectIdentifier, Time, Unsigned
-from ..vendor import VendorInfo, get_vendor_info
+from ..vendor import VendorInfo, device_vendor_info, resolve_property_type
 
 # some debugging
 _debug = 0
 _log = ModuleLogger(globals())
+
+
+def _property_type_for(
+    vendor_info: Optional[VendorInfo],
+    object_identifier: ObjectIdentifier,
+    property_identifier: PropertyIdentifier,
+    property_array_index: Optional[int] = None,
+) -> Optional[type]:
+    """Look up a property type using exactly the supplied context."""
+    property_type = resolve_property_type(
+        vendor_info, object_identifier[0], property_identifier
+    )
+    if property_type is None:
+        return None
+
+    if issubclass(property_type, Array):
+        if property_array_index is None:
+            pass
+        elif property_array_index == 0:
+            property_type = Unsigned
+        else:
+            property_type = property_type._subtype
+    return property_type
+
 
 #
 #   ReadProperty and WriteProperty Services
@@ -72,6 +96,8 @@ class ReadWritePropertyServices:
         objid: Union[ObjectIdentifier, str],
         prop: Union[PropertyIdentifier, str],
         array_index: Optional[int] = None,
+        *,
+        vendor_info: Optional[VendorInfo] = None,
     ) -> _Any:
         """
         Send a Read Property Request to an address and decode the response,
@@ -90,8 +116,10 @@ class ReadWritePropertyServices:
             raise TypeError("address")
 
         # get the vendor information to have a context for parsing the
-        # object identifier and property reference
-        vendor_info = await self.get_vendor_info(device_address=address)
+        # object identifier and property reference; an explicitly supplied
+        # context is used unchanged so parsing and decoding agree
+        if vendor_info is None:
+            vendor_info = await self.get_vendor_info(device_address=address)
 
         # parse the object identifier if needed
         if isinstance(objid, str):
@@ -140,30 +168,15 @@ class ReadWritePropertyServices:
                 ReadWritePropertyServices._debug("    - invalid response: %r", response)
             return None
 
-        # using the vendor information, look up the class
-        object_class = vendor_info.get_object_class(objid[0])
-        if not object_class:
-            return "-no object class-"
-
-        # now get the property type from the class
-        property_type = object_class.get_property_type(prop)
+        # using the vendor information, look up the property type
+        property_type = _property_type_for(vendor_info, objid, prop, array_index)
         if _debug:
             ReadWritePropertyServices._debug("    - property_type: %r", property_type)
-        if not property_type:
-            return "-no property type-"
 
-        # filter the array index reference
-        if issubclass(property_type, Array):
-            if array_index is None:
-                pass
-            elif array_index == 0:
-                property_type = Unsigned
-            else:
-                property_type = property_type._subtype
-            if _debug:
-                ReadWritePropertyServices._debug(
-                    "    - other property_type: %r", property_type
-                )
+        # no definition in this context: keep the wire value as-is instead
+        # of guessing a type for a proprietary number
+        if property_type is None:
+            return response.propertyValue
 
         # cast it out of the Any
         # some devices return a Null https://github.com/JoelBender/BACpypes3/pull/101
@@ -208,9 +221,12 @@ class ReadWritePropertyServices:
         elif not isinstance(address, Address):
             raise TypeError("address")
 
+        # get the vendor information to have a context for parsing and
+        # decoding, even when the identifier is already parsed
+        vendor_info = await self.get_vendor_info(device_address=address)
+
         # parse the device identifier if needed
         if isinstance(device_identifier, str):
-            vendor_info = await self.get_vendor_info(device_address=address)
             device_identifier = await self.parse_object_identifier(
                 device_identifier, vendor_info=vendor_info
             )
@@ -285,6 +301,8 @@ class ReadWritePropertyServices:
         value: _Any,
         array_index: Optional[int] = None,
         priority: Optional[int] = None,
+        *,
+        vendor_info: Optional[VendorInfo] = None,
     ) -> _Any:
         """
         Send a Write Property Request to an address and expect a simple
@@ -309,8 +327,10 @@ class ReadWritePropertyServices:
             raise TypeError("address")
 
         # get the vendor information to have a context for parsing the
-        # object identifier and property reference
-        vendor_info = await self.get_vendor_info(device_address=address)
+        # object identifier and property reference; an explicitly supplied
+        # context is used unchanged so parsing and encoding agree
+        if vendor_info is None:
+            vendor_info = await self.get_vendor_info(device_address=address)
 
         # parse the object identifier if needed
         if isinstance(objid, str):
@@ -331,29 +351,19 @@ class ReadWritePropertyServices:
         elif not isinstance(prop, PropertyIdentifier):
             raise TypeError("prop")
 
-        # using the vendor information, look up the class
-        object_class = vendor_info.get_object_class(objid[0])
-        if not object_class:
-            return "-no object class-"
-
-        # now get the property type from the class
-        property_type = object_class.get_property_type(prop)
-        if not property_type:
-            return "-no property type-"
-
-        if issubclass(property_type, Array):
-            if array_index is None:
-                pass
-            elif array_index == 0:
-                property_type = Unsigned
-            else:
-                property_type = property_type._subtype
-            if _debug:
-                ReadWritePropertyServices._debug(
-                    "    - other property_type: %r", property_type
-                )
+        # using the vendor information, look up the property type
+        property_type = _property_type_for(vendor_info, objid, prop, array_index)
         if _debug:
             ReadWritePropertyServices._debug("    - property_type: %r", property_type)
+
+        # without a definition for this vendor, do not coerce the value to
+        # some guessed type: that could silently widen or change the range
+        # of a write.  The caller has to provide the vendor context.
+        if property_type is None:
+            raise ValueError(
+                "no property type for object type "
+                f"{int(objid[0])} and property {int(prop)} in this vendor context"
+            )
 
         # cast it as the appropriate type if necessary
         if (priority is not None) and isinstance(value, Null):
@@ -742,9 +752,8 @@ class ReadWritePropertyMultipleServices:
                     "    - read_access_result: %r", read_access_result
                 )
 
-            # get the object class
+            # get the object identifier
             object_identifier = read_access_result.objectIdentifier
-            object_class = vendor_info.get_object_class(object_identifier[0])
 
             for read_access_result_element in read_access_result.listOfResults:
                 if _debug:
@@ -768,39 +777,25 @@ class ReadWritePropertyMultipleServices:
                     )
                     continue
 
-                # get the datatype
-                property_type = object_class.get_property_type(property_identifier)
+                # get the datatype in the same context used to parse the
+                # request; a proprietary number without a vendor context
+                # stays raw instead of being interpreted by another vendor
+                property_type = _property_type_for(
+                    vendor_info,
+                    object_identifier,
+                    property_identifier,
+                    property_array_index,
+                )
                 if _debug:
                     ReadWritePropertyMultipleServices._debug(
                         "    - property_type: %r", property_type
                     )
+
                 if property_type is None:
-                    ReadWritePropertyMultipleServices._warning(
-                        "%r not supported", property_identifier
-                    )
-                    result_list.append(
-                        (
-                            object_identifier,
-                            property_identifier,
-                            property_array_index,
-                            None,
-                        )
-                    )
-                    continue
+                    property_value = read_result.propertyValue
+                else:
+                    property_value = read_result.propertyValue.cast_out(property_type)
 
-                if issubclass(property_type, Array):
-                    if property_array_index is None:
-                        pass
-                    elif property_array_index == 0:
-                        property_type = Unsigned
-                    else:
-                        property_type = property_type._subtype
-                    if _debug:
-                        ReadWritePropertyMultipleServices._debug(
-                            "    - other property_type: %r", property_type
-                        )
-
-                property_value = read_result.propertyValue.cast_out(property_type)
                 if _debug:
                     ReadWritePropertyMultipleServices._debug(
                         "    - property_value: %r %r",
@@ -1215,28 +1210,23 @@ class ReadRangeServices:
         if _debug:
             ReadWritePropertyServices._debug("    - device_info: %r", device_info)
 
-        # using the device info, look up the vendor information
-        if device_info:
-            vendor_info = get_vendor_info(device_info.vendor_identifier)
-        else:
-            vendor_info = get_vendor_info(0)
-
+        # using the device info, look up the vendor information; only a
+        # trusted record provides a vendor context
+        vendor_info = device_vendor_info(device_info)
         if _debug:
-            ReadWritePropertyServices._debug(
-                "    - vendor_info (%d): %r", vendor_info.vendor_identifier, vendor_info
-            )
+            ReadWritePropertyServices._debug("    - vendor_info: %r", vendor_info)
 
-        # using the vendor information, look up the class
-        object_class = vendor_info.get_object_class(response.objectIdentifier[0])
-        if not object_class:
-            return "-no object class-"
-
-        # now get the property type from the class
-        property_type = object_class.get_property_type(response.propertyIdentifier)
+        # using the vendor information, look up the property type
+        property_type = _property_type_for(
+            vendor_info,
+            response.objectIdentifier,
+            response.propertyIdentifier,
+            response.propertyArrayIndex,
+        )
         if _debug:
             ReadRangeServices._debug("    - property_type: %r", property_type)
-        if not property_type:
-            return "-no property type-"
+        if property_type is None:
+            return response.itemData
 
         # cast it out of the Any
         property_value = response.itemData.cast_out(property_type)

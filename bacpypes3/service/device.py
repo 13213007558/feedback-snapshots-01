@@ -149,7 +149,8 @@ class WhoIsFuture:
             # add this to the dictionary that was found
             self.i_ams[device_instance] = apdu
 
-        # provide this to the application device information cache
+        # provide this to the application device information cache; the
+        # I-Am vendor identifier is self-reported and stays untrusted
         asyncio.ensure_future(self.app.device_info_cache.set_device_info(apdu))
 
     def who_is_done(self, future: asyncio.Future) -> None:
