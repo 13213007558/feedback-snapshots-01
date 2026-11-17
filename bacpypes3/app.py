@@ -61,6 +61,7 @@ from .local.schedule import ScheduleObject
 from .netservice import (
     NetworkServiceAccessPoint,
     NetworkServiceElement,
+    RouterAnnouncement,
     RouterInfoCache,
 )
 from .object import DeviceObject, Object
@@ -339,6 +340,9 @@ class Application(
         objects: List[Object],
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
+        announcement_policy: Optional[
+            Callable[[RouterAnnouncement], bool]
+        ] = None,
         aseID=None,
     ) -> Application:
         """
@@ -346,9 +350,12 @@ class Application(
         """
         if _debug:
             Application._debug(
-                "from_object_list %s device_info_cache=%r aseID=%r",
+                "from_object_list %s device_info_cache=%r"
+                " router_info_cache=%r announcement_policy=%r aseID=%r",
                 repr(objects),
                 device_info_cache,
+                router_info_cache,
+                announcement_policy,
                 aseID,
             )
 
@@ -370,7 +377,10 @@ class Application(
         app.asap = ApplicationServiceAccessPoint(device_object, app.device_info_cache)
 
         # a network service access point will be needed
-        app.nsap = NetworkServiceAccessPoint(router_info_cache=router_info_cache)
+        app.nsap = NetworkServiceAccessPoint(
+            router_info_cache=router_info_cache,
+            announcement_policy=announcement_policy,
+        )
 
         # give the NSAP a generic network layer service element
         app.nse = NetworkServiceElement()
@@ -392,6 +402,9 @@ class Application(
         objects: List[Dict[str, _Any]],
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
+        announcement_policy: Optional[
+            Callable[[RouterAnnouncement], bool]
+        ] = None,
         aseID=None,
     ) -> Application:
         """
@@ -400,9 +413,12 @@ class Application(
         """
         if _debug:
             Application._debug(
-                "from_json %s device_info_cache=%r aseID=%r",
+                "from_json %s device_info_cache=%r"
+                " router_info_cache=%r announcement_policy=%r aseID=%r",
                 repr(objects),
                 device_info_cache,
+                router_info_cache,
+                announcement_policy,
                 aseID,
             )
 
@@ -476,6 +492,7 @@ class Application(
             object_list,
             device_info_cache=device_info_cache,
             router_info_cache=router_info_cache,
+            announcement_policy=announcement_policy,
             aseID=aseID,
         )
 
@@ -485,6 +502,9 @@ class Application(
         args: argparse.Namespace,
         device_info_cache: Optional[DeviceInfoCache] = None,
         router_info_cache: Optional[RouterInfoCache] = None,
+        announcement_policy: Optional[
+            Callable[[RouterAnnouncement], bool]
+        ] = None,
         aseID=None,
     ) -> Application:
         if _debug:
@@ -568,6 +588,7 @@ class Application(
             [device_object, network_port_object],
             device_info_cache=device_info_cache,
             router_info_cache=router_info_cache,
+            announcement_policy=announcement_policy,
             aseID=aseID,
         )
 

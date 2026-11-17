@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from copy import copy as _copy, deepcopy as _deepcopy
+from dataclasses import dataclass
 
 from typing import (
     TYPE_CHECKING,
@@ -67,6 +68,73 @@ INITIALIZE_ROUTING_TABLE_TIMEOUT = 3.0
 ROUTER_AVAILABLE = RouterEntryStatus("available")
 ROUTER_BUSY = RouterEntryStatus("busy")
 ROUTER_DISCONNECTED = RouterEntryStatus("disconnected")
+
+#
+#   Router announcements
+#
+
+
+@dataclass(frozen=True)
+class RouterAnnouncement:
+    """
+    A routing claim as it was observed on a port, before local admission.
+
+    An announcement is not a route: it records what a source said and where
+    it was heard from.  ``NetworkServiceAccessPoint.announcements`` keeps
+    every observed announcement together with the local decision, while
+    ``router_info_cache`` only contains the routes that were admitted.
+    """
+
+    kind: str
+    adapter: Optional["NetworkAdapter"]
+    source: Optional[Address]
+    snet: Optional[int]
+    networks: Tuple[int, ...]
+    quality: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ObservedAnnouncement:
+    """An announcement together with the local admission decision."""
+
+    announcement: RouterAnnouncement
+    accepted: bool
+    reason: Optional[str] = None
+
+
+class RouterAnnouncementPolicy:
+    """
+    Caller-supplied source and port policy for routing announcements.
+
+    Subclasses override :meth:`accept` and return ``True`` only when the
+    source address, the arrival port, or any other local criterion allows
+    the announcement.  A plain callable with the same signature is also
+    accepted by :class:`NetworkServiceAccessPoint`.
+    """
+
+    def accept(self, announcement: RouterAnnouncement) -> bool:
+        return True
+
+
+# rejection reasons recorded with an observed announcement
+ANNOUNCEMENT_REJECTED_POLICY = "policy"
+ANNOUNCEMENT_REJECTED_PORT_DISCONNECTED = "port disconnected"
+ANNOUNCEMENT_REJECTED_NETWORK_CONFLICT = "network number conflict"
+ANNOUNCEMENT_REJECTED_DIRECTLY_CONNECTED = "directly connected network"
+ANNOUNCEMENT_REJECTED_CONFIGURED = "configured network number"
+ANNOUNCEMENT_REJECTED_CACHE_CONFLICT = "cache conflict"
+ANNOUNCEMENT_REJECTED_UNKNOWN_SOURCE = "unknown source network"
+ANNOUNCEMENT_REJECTED_INVALID_NETWORK = "invalid network number"
+
+
+class RoutingCacheConflict(RuntimeError):
+    """Raised when a routing cache update is inconsistent with its entries.
+
+    ``update_path_info`` and ``remove_path_info`` validate every network in
+    a request before changing any of them, so this exception means the
+    cache was left untouched.
+    """
+
 
 #
 #   RouterInfoCache
@@ -284,8 +352,10 @@ class RouterInfoCache(DebugContents):
                 RouterInfoCache._debug("    - router_dnets: %r", router_dnets)
                 RouterInfoCache._debug("    - new_dnets: %r", new_dnets)
 
-            # get the addresses of the routers that used to be the router to
-            # any of the dnets
+            # resolve all of the routers that used to be the path to any of
+            # the dnets before changing anything: if any entry is
+            # inconsistent the cache is left exactly as it was
+            previous_paths: Dict[int, Address] = {}
             for dnet in new_dnets:
                 path_info = await self.get_path_info(snet, dnet)
                 if not path_info:
@@ -298,12 +368,23 @@ class RouterInfoCache(DebugContents):
                     snet, old_router_address
                 )
                 if old_router_dnets is None:
-                    raise RuntimeError(
+                    raise RoutingCacheConflict(
                         f"routing cache: no router {old_router_address}"
                     )
                 if dnet not in old_router_dnets:
-                    raise RuntimeError(
+                    raise RoutingCacheConflict(
                         f"routing cache: dnet {dnet} not in {old_router_dnets}"
+                    )
+                previous_paths[dnet] = old_router_address
+
+            # everything is consistent, now retire the old paths
+            for dnet, old_router_address in previous_paths.items():
+                old_router_dnets = await self.get_router_dnets(
+                    snet, old_router_address
+                )
+                if old_router_dnets is None:
+                    raise RoutingCacheConflict(
+                        f"routing cache: no router {old_router_address}"
                     )
 
                 # no longer a path through old router
@@ -375,6 +456,8 @@ class RouterInfoCache(DebugContents):
                 if dnets is None:
                     raise RuntimeError("inconsistent parameters")
 
+                # validate every network before removing any of them
+                removals: Dict[int, Address] = {}
                 for dnet in dnets:
                     path_info = await self.get_path_info(snet, dnet)
                     if not path_info:
@@ -385,9 +468,16 @@ class RouterInfoCache(DebugContents):
                     # get the list of dnets for this router
                     router_dnets = await self.get_router_dnets(snet, router_address)
                     if router_dnets is None:
-                        raise RuntimeError("routing cache conflict")
+                        raise RoutingCacheConflict("routing cache conflict")
                     if dnet not in router_dnets:
-                        raise RuntimeError("routing cache conflict")
+                        raise RoutingCacheConflict("routing cache conflict")
+
+                    removals[dnet] = router_address
+
+                for dnet, router_address in removals.items():
+                    router_dnets = await self.get_router_dnets(snet, router_address)
+                    if router_dnets is None:
+                        raise RoutingCacheConflict("routing cache conflict")
 
                     router_dnets.remove(dnet)
                     await self.set_router_dnets(snet, router_address, router_dnets)
@@ -464,6 +554,7 @@ class NetworkAdapter(Client[PDU], DebugContents):
     adapterNet: Optional[int]
     adapterAddr: Optional[Address]
     adapterNetConfigured: int  # NetworkNumberQuality
+    adapterConnected: bool
 
     def __init__(
         self,
@@ -479,6 +570,10 @@ class NetworkAdapter(Client[PDU], DebugContents):
         self.adapterSAP = sap
         self.adapterNet = net
         self.adapterAddr = addr
+
+        # a bound adapter is connected until the service access point is
+        # told otherwise, see NetworkServiceAccessPoint.disconnect_adapter()
+        self.adapterConnected = True
 
         # record if this was configured
         if net is None:
@@ -554,15 +649,23 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
     adapters: Dict[Union[int, None], NetworkAdapter]
     local_adapter: Optional[NetworkAdapter]
     router_info_cache: RouterInfoCache
+    announcement_policy: Optional[Callable[[RouterAnnouncement], bool]]
+    announcements: List[ObservedAnnouncement]
 
     def __init__(
         self,
         router_info_cache: Optional[RouterInfoCache] = None,
+        announcement_policy: Optional[Callable[[RouterAnnouncement], bool]] = None,
         sap: Optional[str] = None,
         sid: Optional[str] = None,
     ) -> None:
         if _debug:
-            NetworkServiceAccessPoint._debug("__init__ sap=%r sid=%r", sap, sid)
+            NetworkServiceAccessPoint._debug(
+                "__init__ announcement_policy=%r sap=%r sid=%r",
+                announcement_policy,
+                sap,
+                sid,
+            )
         ServiceAccessPoint.__init__(self, sap)
         Server.__init__(self, sid)
 
@@ -571,6 +674,24 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
 
         # use the provided cache or make a default one
         self.router_info_cache = router_info_cache or RouterInfoCache()
+
+        # caller-supplied admission policy for routing announcements
+        if announcement_policy is None:
+            self.announcement_policy = None
+        elif isinstance(announcement_policy, RouterAnnouncementPolicy):
+            self.announcement_policy = announcement_policy.accept
+        elif callable(announcement_policy):
+            self.announcement_policy = announcement_policy
+        else:
+            raise TypeError("announcement policy must be callable")
+
+        # every announcement that was observed, accepted or not, for
+        # auditing: the router info cache only holds admitted routes
+        self.announcements = []
+
+        # serializes the conflict check and the cache update so two
+        # announcements cannot both pass admission for the same network
+        self._announcement_lock: Optional[asyncio.Lock] = None
 
         # set when bind() is called
         self.local_adapter = None
@@ -641,6 +762,212 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
 
     # -----
 
+    def adapter_for_network(self, net: Optional[int]) -> Optional[NetworkAdapter]:
+        """Return the adapter bound to a directly connected network."""
+        adapter = self.adapters.get(net, None)
+        if adapter is None:
+            return None
+        return adapter
+
+    def connect_adapter(self, adapter: NetworkAdapter) -> None:
+        """Mark an adapter as usable for sending and learning routes."""
+        adapter.adapterConnected = True
+
+    async def disconnect_adapter(self, adapter: NetworkAdapter) -> None:
+        """
+        Mark an adapter as disconnected and drop the routes that were
+        learned through it.  Announcements that arrive later from the same
+        port are rejected, so a late announcement cannot resurrect a path
+        through a port that is no longer connected.
+        """
+        if _debug:
+            NetworkServiceAccessPoint._debug("disconnect_adapter %r", adapter)
+
+        adapter.adapterConnected = False
+
+        if adapter.adapterNet is None:
+            return
+
+        # every path learned from this port has this source network
+        dnets: Set[int] = set()
+        for (snet, _router_address), router_dnets in list(
+            self.router_info_cache.router_dnets.items()
+        ):
+            if snet == adapter.adapterNet:
+                dnets |= router_dnets
+
+        if dnets:
+            await self.router_info_cache.remove_path_info(
+                adapter.adapterNet, dnets=dnets
+            )
+
+    # -----
+
+    def _announcement_port(
+        self, adapter: Optional[NetworkAdapter]
+    ) -> Tuple[Optional[str], Optional[int]]:
+        """Return (reason, snet) for the port an announcement arrived on."""
+        if adapter is None:
+            return ANNOUNCEMENT_REJECTED_UNKNOWN_SOURCE, None
+        if not adapter.adapterConnected:
+            return ANNOUNCEMENT_REJECTED_PORT_DISCONNECTED, None
+        if self.adapters.get(adapter.adapterNet, None) is not adapter:
+            return ANNOUNCEMENT_REJECTED_UNKNOWN_SOURCE, adapter.adapterNet
+
+        return None, adapter.adapterNet
+
+    def _policy_accepts(self, announcement: RouterAnnouncement) -> bool:
+        if self.announcement_policy is None:
+            return True
+        return bool(self.announcement_policy(announcement))
+
+    def _existing_claim(
+        self, snet: int, source: Address, dnet: int
+    ) -> Optional[Tuple[Optional[int], Address]]:
+        """Return a path to ``dnet`` that was accepted from another source.
+
+        Claims are compared across every source network so two ports that
+        can both reach the same remote network cannot silently disagree
+        about the next hop.
+        """
+        for (path_snet, path_dnet), (router_address, _status) in list(
+            self.router_info_cache.path_info.items()
+        ):
+            if path_dnet != dnet:
+                continue
+            if (path_snet == snet) and (router_address == source):
+                continue
+            return path_snet, router_address
+        return None
+
+    async def receive_router_announcement(
+        self,
+        kind: str,
+        adapter: Optional[NetworkAdapter],
+        source: Optional[Address],
+        networks: List[int],
+        quality: Optional[int] = None,
+    ) -> ObservedAnnouncement:
+        """
+        Observe a routing announcement, apply the caller-supplied source and
+        port policy, and admit it only if the whole claim is consistent.
+
+        Every announcement is recorded in ``announcements`` whether or not
+        it was admitted.  The router info cache is changed only after the
+        entire claim has passed the port, policy and conflict checks, so a
+        rejected announcement never leaves some of its networks behind.
+        """
+        announcement = RouterAnnouncement(
+            kind=kind,
+            adapter=adapter,
+            source=source,
+            snet=adapter.adapterNet if adapter is not None else None,
+            networks=tuple(networks),
+            quality=quality,
+        )
+        if _debug:
+            NetworkServiceAccessPoint._debug(
+                "receive_router_announcement %r", announcement
+            )
+
+        accepted, reason = await self._admit_announcement(announcement)
+
+        observed = ObservedAnnouncement(announcement, accepted, reason)
+        self.announcements.append(observed)
+        return observed
+
+    def _get_announcement_lock(self) -> asyncio.Lock:
+        if self._announcement_lock is None:
+            self._announcement_lock = asyncio.Lock()
+        return self._announcement_lock
+
+    async def _admit_announcement(
+        self, announcement: RouterAnnouncement
+    ) -> Tuple[bool, Optional[str]]:
+        reason, snet = self._announcement_port(announcement.adapter)
+        if reason is not None:
+            return False, reason
+        if (snet is None) and (announcement.kind != "network-number-is"):
+            return False, ANNOUNCEMENT_REJECTED_UNKNOWN_SOURCE
+        assert announcement.adapter is not None
+        assert announcement.source is not None
+
+        if not self._policy_accepts(announcement):
+            return False, ANNOUNCEMENT_REJECTED_POLICY
+
+        async with self._get_announcement_lock():
+            if announcement.kind == "network-number-is":
+                return await self._admit_network_number(announcement)
+
+            # every announced network must be valid, remote, and unused by
+            # any other accepted source before any of them are installed
+            networks = set(announcement.networks)
+            for dnet in networks:
+                if (dnet < 1) or (dnet >= 65535):
+                    return False, ANNOUNCEMENT_REJECTED_INVALID_NETWORK
+                if dnet in self.adapters:
+                    return False, ANNOUNCEMENT_REJECTED_DIRECTLY_CONNECTED
+                if dnet == snet:
+                    return False, ANNOUNCEMENT_REJECTED_DIRECTLY_CONNECTED
+
+            # a passive announcement cannot displace an accepted claim from
+            # another source; a source route, seen on live traffic, may
+            if announcement.kind != "source-route":
+                for dnet in networks:
+                    existing = self._existing_claim(snet, announcement.source, dnet)
+                    if existing is not None:
+                        if _debug:
+                            NetworkServiceAccessPoint._debug(
+                                "    - conflict for %r: %r", dnet, existing
+                            )
+                        return False, ANNOUNCEMENT_REJECTED_NETWORK_CONFLICT
+
+            try:
+                await self.router_info_cache.update_path_info(
+                    snet, announcement.source, networks
+                )
+            except RoutingCacheConflict:
+                return False, ANNOUNCEMENT_REJECTED_CACHE_CONFLICT
+
+            return True, None
+
+    async def _admit_network_number(
+        self, announcement: RouterAnnouncement
+    ) -> Tuple[bool, Optional[str]]:
+        """Admit a Network-Number-Is claim for the port it arrived on."""
+        adapter = announcement.adapter
+        assert adapter is not None
+
+        net = announcement.networks[0]
+        if (net < 1) or (net >= 65535):
+            return False, ANNOUNCEMENT_REJECTED_INVALID_NETWORK
+
+        if adapter.adapterNet == net:
+            return True, None
+
+        if adapter.adapterNetConfigured == NetworkNumberQuality.configured:
+            return False, ANNOUNCEMENT_REJECTED_CONFIGURED
+
+        other = self.adapters.get(net, None)
+        if (other is not None) and (other is not adapter):
+            return False, ANNOUNCEMENT_REJECTED_NETWORK_CONFLICT
+
+        old_snet = adapter.adapterNet
+        if old_snet is not None:
+            await self.router_info_cache.update_source_network(old_snet, net)
+            del self.adapters[old_snet]
+        else:
+            await self.router_info_cache.update_source_network(None, net)
+            del self.adapters[None]
+
+        adapter.adapterNet = net
+        adapter.adapterNetConfigured = announcement.quality  # type: ignore[assignment]
+        self.adapters[net] = adapter
+
+        return True, None
+
+    # -----
+
     async def update_router_references(
         self, snet: int, address: Address, dnets: List[int]
     ) -> None:
@@ -680,7 +1007,7 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
             raise RuntimeError("no adapter for network: %d" % (snet,))
 
         # pass this along to the cache
-        await self.router_info_cache.delete_router_info(snet, address, dnets)
+        await self.router_info_cache.remove_path_info(snet, address, dnets)
 
     # -----
 
@@ -792,6 +1119,8 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
 
         # look for a direct connection
         direct_adapter = self.adapters.get(dnet, None)
+        if (direct_adapter is not None) and (not direct_adapter.adapterConnected):
+            direct_adapter = None
         if _debug:
             NetworkServiceAccessPoint._debug("    - direct_adapter: %r", direct_adapter)
 
@@ -837,6 +1166,8 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
         # adapters to the destination network
         router_info = None
         for snet, snet_adapter in self.adapters.items():
+            if not snet_adapter.adapterConnected:
+                continue
             router_info = await self.router_info_cache.get_path_info(snet, dnet)
             if router_info:
                 break
@@ -853,6 +1184,12 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
                 NetworkServiceAccessPoint._debug(
                     "    - router_status: %r", router_status
                 )
+
+            # a route marked disconnected is not a usable next hop
+            if router_status == ROUTER_DISCONNECTED:
+                if _debug:
+                    NetworkServiceAccessPoint._debug("    - router disconnected")
+                raise UnknownRoute()
 
             # fix the destination and send it
             npdu.pduDestination = router_address
@@ -875,6 +1212,8 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
                 raise UnknownRoute()
 
             router_adapter, i_am_router_to_network = result_list[0]
+            if not router_adapter.adapterConnected:
+                raise UnknownRoute()
             if _debug:
                 NetworkServiceAccessPoint._debug(
                     "    - found path: %r, %r",
@@ -896,6 +1235,29 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
         if not self.serviceElement:
             raise ConfigurationError("no service element")
 
+        # nothing is accepted or forwarded from a disconnected port, but
+        # routing claims are still recorded as observed and rejected so a
+        # late announcement is visible in the audit trail
+        if not adapter.adapterConnected:
+            if _debug:
+                NetworkServiceAccessPoint._debug("    - adapter disconnected")
+            if isinstance(npdu, IAmRouterToNetwork):
+                await self.receive_router_announcement(
+                    "i-am-router-to-network",
+                    adapter,
+                    npdu.pduSource,
+                    npdu.iartnNetworkList,
+                )
+            elif isinstance(npdu, NetworkNumberIs):
+                await self.receive_router_announcement(
+                    "network-number-is",
+                    adapter,
+                    npdu.pduSource,
+                    [npdu.nniNet],
+                    quality=npdu.nniFlag,
+                )
+            return
+
         # reference the service element
         nse = cast(NetworkServiceElement, self.serviceElement)
         if _debug:
@@ -912,11 +1274,13 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
                 NetworkServiceAccessPoint._warning("    - path error (1)")
                 return
 
-            # pass this new path along to the cache
-            await self.router_info_cache.update_path_info(
-                adapter.adapterNet,
+            # a source route is a routing claim like any other, so it is
+            # subject to the same port, policy and conflict checks
+            await self.receive_router_announcement(
+                "source-route",
+                adapter,
                 cast(Address, npdu.pduSource),
-                set([snet]),
+                [snet],
             )
 
         # check for destination routing
@@ -1148,6 +1512,8 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
             # adapters to the destination network
             router_info = None
             for snet, snet_adapter in self.adapters.items():
+                if not snet_adapter.adapterConnected:
+                    continue
                 router_info = await self.router_info_cache.get_path_info(snet, dnet)
                 if router_info:
                     if _debug:
@@ -1157,6 +1523,12 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
                     router_adapter = snet_adapter
                     router_address, router_status = router_info
                     break
+
+            # a route marked disconnected is not a usable next hop
+            if router_info and (router_status == ROUTER_DISCONNECTED):
+                if _debug:
+                    NetworkServiceAccessPoint._debug("    - router disconnected")
+                router_info = None
 
             # no path, look for one
             if not router_info:
@@ -1173,6 +1545,8 @@ class NetworkServiceAccessPoint(ServiceAccessPoint, Server[PDU], DebugContents):
                     result_list[0],
                     result_list[0].pduSource,
                 )
+                if not router_adapter.adapterConnected:
+                    raise UnknownRoute()
 
             if _debug:
                 NetworkServiceAccessPoint._debug(
@@ -2090,10 +2464,19 @@ class NetworkServiceElement(ApplicationServiceElement, DebugContents):
         if _debug:
             NetworkServiceElement._debug("    - sap: %r", sap)
 
-        # pass along to the service access point
-        await sap.update_router_references(
-            adapter.adapterNet, npdu.pduSource, npdu.iartnNetworkList
+        # observe the announcement, decide locally, and only then install
+        observed = await sap.receive_router_announcement(
+            "i-am-router-to-network",
+            adapter,
+            npdu.pduSource,
+            npdu.iartnNetworkList,
         )
+        if not observed.accepted:
+            if _debug:
+                NetworkServiceElement._debug(
+                    "    - rejected announcement: %r", observed.reason
+                )
+            return
 
         # skip forwarding to other adpaters if this is not a router
         if len(sap.adapters) == 1:
@@ -2238,7 +2621,7 @@ class NetworkServiceElement(ApplicationServiceElement, DebugContents):
         # send out what we know
         await self.network_number_is(adapter)
 
-    def NetworkNumberIs(self, adapter, npdu):
+    async def NetworkNumberIs(self, adapter, npdu):
         if _debug:
             NetworkServiceElement._debug("NetworkNumberIs %r %r", adapter, npdu)
 
@@ -2256,56 +2639,20 @@ class NetworkServiceElement(ApplicationServiceElement, DebugContents):
             future = self.what_is_network_number_resolution[adapter]
             future.set_result(npdu.nniNet)
 
-        # check to see if the local network is known
-        if adapter.adapterNet is None:
-            if _debug:
-                NetworkServiceElement._debug(
-                    "   - local network not known: %r", list(sap.adapters.keys())
-                )
-
-            # update the routing information
-            asyncio.create_task(
-                sap.router_info_cache.update_source_network(None, npdu.nniNet)
-            )
-
-            # delete the reference from an unknown network
-            del sap.adapters[None]
-
-            adapter.adapterNet = npdu.nniNet
-            adapter.adapterNetConfigured = NetworkNumberQuality.learned
-
-            # we now know what network this is
-            sap.adapters[adapter.adapterNet] = adapter
-
+        # observe the claim and let the policy and network number rules
+        # decide whether the port adopts it
+        observed = await sap.receive_router_announcement(
+            "network-number-is",
+            adapter,
+            npdu.pduSource,
+            [npdu.nniNet],
+            quality=npdu.nniFlag,
+        )
+        if observed.accepted:
             if _debug:
                 NetworkServiceElement._debug("   - local network learned")
-            return
-
-        # check if this matches what we have
-        if adapter.adapterNet == npdu.nniNet:
+        else:
             if _debug:
-                NetworkServiceElement._debug("   - matches what we have")
-            return
-
-        # check it this matches what we know, if we know it
-        if adapter.adapterNetConfigured == NetworkNumberQuality.configured:
-            if _debug:
-                NetworkServiceElement._debug("   - doesn't match what we know")
-            return
-
-        if _debug:
-            NetworkServiceElement._debug("   - learning something new")
-
-        # update the routing information
-        asyncio.create_task(
-            sap.router_info_cache.update_source_network(adapter.adapterNet, npdu.nniNet)
-        )
-
-        # delete the reference from the old (learned) network
-        del sap.adapters[adapter.adapterNet]
-
-        adapter.adapterNet = npdu.nniNet
-        adapter.adapterNetConfigured = npdu.nniFlag
-
-        # we now know what network this is
-        sap.adapters[adapter.adapterNet] = adapter
+                NetworkServiceElement._debug(
+                    "   - network number rejected: %r", observed.reason
+                )

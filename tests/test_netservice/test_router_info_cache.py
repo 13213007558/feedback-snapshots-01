@@ -29,10 +29,12 @@ To reproduce the field failure deterministically we do two things:
 * ``BarrieredCache`` forces a two-reader rendezvous inside
   ``get_router_dnets`` so two concurrent updaters snapshot the same
   pre-write state -- exactly what happens with a real network
-  round-trip.  ``test_race_reproduces_without_lock`` shows that with
-  the class's lock replaced by a no-op, that interleave corrupts the
-  cache or raises the ``dnet X not in {...}`` error -- proving the
-  race is real (not just a story about what could happen).
+  round-trip.  ``test_conflicting_update_is_atomic_without_lock``
+  drives that interleave on a lock-disabled subclass and requires the
+  cache to stay consistent: the mutators validate every network before
+  changing any of them, and re-read the current router entries before
+  retiring them, so a stale snapshot can no longer leave a dangling
+  ``path_info`` entry even when the lock is absent.
 
 * ``test_lock_serializes_yielding_cache`` uses a plainer subclass whose
   ``get_*`` methods just yield with ``asyncio.sleep(0)``, modeling a
@@ -45,8 +47,6 @@ To reproduce the field failure deterministically we do two things:
 
 import asyncio
 from typing import Callable, Optional, Set
-
-import pytest
 
 from bacpypes3.debugging import bacpypes_debugging, ModuleLogger
 from bacpypes3.pdu import Address
@@ -155,14 +155,16 @@ def check_invariant(cache: RouterInfoCache) -> None:
 class TestRouterInfoCacheRace:
     _debug: Callable[..., None]
 
-    async def test_race_reproduces_without_lock(self) -> None:
-        """Sanity check that the barrier reproduces the field bug:
-        without the class's serialization lock (a no-op stand-in), the
-        forced interleave must either corrupt the cache or raise the
-        ``dnet X not in {...}`` error.  If this passed silently, the
-        other two tests wouldn't be proving anything about the lock."""
+    async def test_conflicting_update_is_atomic_without_lock(self) -> None:
+        """The barrier forces the interleave that used to corrupt the
+        cache.  Even with the class's serialization lock replaced by a
+        no-op, the mutator re-reads the router entries before retiring
+        them, so the final state must satisfy the path/router invariant
+        and every network must end up on one of the two new routers."""
         if _debug:
-            TestRouterInfoCacheRace._debug("test_race_reproduces_without_lock")
+            TestRouterInfoCacheRace._debug(
+                "test_conflicting_update_is_atomic_without_lock"
+            )
 
         cache = UnlockedBarrieredCache()
         snet = 1
@@ -173,20 +175,15 @@ class TestRouterInfoCacheRace:
         await cache.update_path_info(snet, r1, {10, 20})
         cache.arm_rendezvous(r1)
 
-        raised: Optional[BaseException] = None
-        try:
-            await asyncio.gather(
-                cache.update_path_info(snet, r2, {10}),
-                cache.update_path_info(snet, r3, {20}),
-            )
-        except RuntimeError as exc:
-            raised = exc
+        await asyncio.gather(
+            cache.update_path_info(snet, r2, {10}),
+            cache.update_path_info(snet, r3, {20}),
+        )
 
-        if raised is not None:
-            assert "not in" in str(raised)
-        else:
-            with pytest.raises(AssertionError):
-                check_invariant(cache)
+        check_invariant(cache)
+        assert (snet, r1) not in cache.router_dnets
+        assert cache.path_info[(snet, 10)][0] == r2
+        assert cache.path_info[(snet, 20)][0] == r3
 
     async def test_lock_serializes_yielding_cache(self) -> None:
         """A cache subclass whose ``get_*`` methods yield -- modeling a
