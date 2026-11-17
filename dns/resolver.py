@@ -228,6 +228,31 @@ class NoNameservers(dns.exception.DNSException):
         )
 
 
+class TransportPolicyViolation(dns.exception.DNSException):
+    """A query's pinned transport policy could not be satisfied.
+
+    The query was restricted by a :py:class:`dns.resolver.TransportPolicy`
+    to a fixed set of upstream nameservers and transports, and none of
+    them could answer the query.  The resolver did not fall back to
+    other nameservers or to a different transport.
+    """
+
+    msg = "The query's transport policy could not be satisfied."
+    fmt = f"{msg[:-1]} {{query}}: {{errors}}"
+    supp_kwargs = {"request", "errors"}
+
+    # We do this as otherwise mypy complains about unexpected keyword argument
+    # idna_exception
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _fmt_kwargs(self, **kwargs):
+        srv_msgs = _errors_to_text(kwargs["errors"])
+        return super()._fmt_kwargs(
+            query=kwargs["request"].question, errors="; ".join(srv_msgs)
+        )
+
+
 class NotAbsolute(dns.exception.DNSException):
     """An absolute domain name is required but a relative name was provided."""
 
@@ -634,6 +659,68 @@ class LRUCache(CacheBase):
                 self.data = {}
 
 
+class TransportPolicy:
+    """A pinned transport policy for queries to protected names.
+
+    A transport policy specifies a fixed set of upstream nameservers
+    that must be used for matching queries.  When a policy applies to
+    a query, the resolver will only query the policy's nameservers,
+    using their configured transports, and will not fall back to the
+    resolver's regular nameservers or to a different transport.  This
+    includes the retries the resolver normally makes when a candidate
+    nameserver fails or a response has the TC bit set.  If none of the
+    policy's nameservers can answer, a
+    :py:exc:`dns.resolver.TransportPolicyViolation` exception is raised.
+
+    The policy's nameserver sequence is copied when the policy is
+    created, and the set of nameservers to use is copied again when a
+    resolution starts, so subsequent external changes to the resolver's
+    policy configuration do not affect queries already in progress.
+    """
+
+    def __init__(self, nameservers: Sequence[dns.nameserver.Nameserver]) -> None:
+        """Initialize the policy.
+
+        :param nameservers: the pinned upstream nameservers.  The
+            sequence is copied; later changes to it do not affect the
+            policy.
+        :type nameservers: a sequence of :py:class:`dns.nameserver.Nameserver`
+        """
+        if len(nameservers) == 0:
+            raise ValueError("a transport policy requires at least one nameserver")
+        self.nameservers = tuple(nameservers)
+
+    @classmethod
+    def tls(
+        cls,
+        upstreams: Sequence[str],
+        port: int = 853,
+        server_hostname: str | None = None,
+        verify: bool | str | os.PathLike = True,
+    ) -> Self:
+        """Make a policy pinning queries to DNS-over-TLS upstreams.
+
+        :param upstreams: the allowed upstream IP addresses.
+        :type upstreams: a sequence of str
+        :param port: the TLS port to use.  The default is 853.
+        :type port: int
+        :param server_hostname: the expected TLS certificate server
+            name, used to verify the upstream's certificate.
+        :type server_hostname: str or ``None``
+        :param verify: the TLS verification mode; see
+            :py:func:`dns.query.tls` for details.
+        :rtype: :py:class:`dns.resolver.TransportPolicy`
+        """
+        return cls(
+            [
+                dns.nameserver.DoTNameserver(
+                    upstream, port, hostname=server_hostname, verify=verify
+                )
+                for upstream in upstreams
+            ]
+        )
+
+
 class _Resolution:
     """Helper class for dns.resolver.Resolver.resolve().
 
@@ -667,6 +754,12 @@ class _Resolution:
         self.resolver = resolver
         self.qnames_to_try = resolver._get_qnames_to_try(qname, search)
         self.qnames = self.qnames_to_try[:]
+        # Snapshot the transport policy applying to each qname now, so
+        # that external changes to the resolver's policy configuration
+        # cannot affect this resolution once it has started.
+        self.policy_matches = [
+            resolver._match_transport_policy(qname) for qname in self.qnames_to_try
+        ]
         self.rdtype = rdtype
         self.rdclass = rdclass
         self.tcp = tcp
@@ -674,6 +767,7 @@ class _Resolution:
         self.nxdomain_responses: dict[dns.name.Name, dns.message.QueryMessage] = {}
         # Initialize other things to help analysis tools
         self.qname = dns.name.empty
+        self.transport_policy: TransportPolicy | None = None
         self.nameservers: list[dns.nameserver.Nameserver] = []
         self.current_nameservers: list[dns.nameserver.Nameserver] = []
         self.errors: list[ErrorTuple] = []
@@ -697,6 +791,7 @@ class _Resolution:
 
         while len(self.qnames) > 0:
             self.qname = self.qnames.pop(0)
+            self.transport_policy = self.policy_matches.pop(0)
 
             # Do we know the answer?
             if self.resolver.cache:
@@ -734,13 +829,19 @@ class _Resolution:
             if self.resolver.flags is not None:
                 request.flags = self.resolver.flags
 
-            self.nameservers = self.resolver._enrich_nameservers(
-                self.resolver._nameservers,
-                self.resolver.nameserver_ports,
-                self.resolver.port,
-            )
-            if self.resolver.rotate:
-                random.shuffle(self.nameservers)
+            if self.transport_policy is not None:
+                # The query is pinned to the policy's nameservers; use
+                # a copy so that removing failed candidates does not
+                # alter the policy.
+                self.nameservers = list(self.transport_policy.nameservers)
+            else:
+                self.nameservers = self.resolver._enrich_nameservers(
+                    self.resolver._nameservers,
+                    self.resolver.nameserver_ports,
+                    self.resolver.port,
+                )
+                if self.resolver.rotate:
+                    random.shuffle(self.nameservers)
             self.current_nameservers = self.nameservers[:]
             self.errors = []
             self.nameserver = None
@@ -770,6 +871,13 @@ class _Resolution:
         if not self.current_nameservers:
             if len(self.nameservers) == 0:
                 # Out of things to try!
+                if self.transport_policy is not None:
+                    # The policy's nameservers are exhausted; report
+                    # that the policy could not be satisfied rather
+                    # than falling back to anything else.
+                    raise TransportPolicyViolation(
+                        request=self.request, errors=self.errors
+                    )
                 raise NoNameservers(request=self.request, errors=self.errors)
             self.current_nameservers = self.nameservers[:]
             backoff = self.backoff
@@ -930,6 +1038,7 @@ class BaseResolver:
     retry_servfail: bool
     rotate: bool
     ndots: int | None
+    transport_policies: dict[dns.name.Name, TransportPolicy]
     _nameservers: Sequence[str | dns.nameserver.Nameserver]
 
     def __init__(
@@ -982,6 +1091,7 @@ class BaseResolver:
         self.retry_servfail = False
         self.rotate = False
         self.ndots = None
+        self.transport_policies = {}
 
     def read_resolv_conf(self, f: str | os.PathLike | TextIO) -> None:
         """Process *f* as a file in the /etc/resolv.conf format.  If *f* is
@@ -1126,6 +1236,42 @@ class BaseResolver:
             else:
                 qnames_to_try.append(abs_qname)
         return qnames_to_try
+
+    def add_transport_policy(
+        self, name: dns.name.Name | str, policy: TransportPolicy
+    ) -> None:
+        """Pin queries for *name* and its subdomains to *policy*.
+
+        When a query name matches, the resolver will only use the
+        policy's nameservers and their transports, and will not fall
+        back to the resolver's regular nameservers or to a different
+        transport.  If multiple policies match a query name, the one
+        with the most specific (longest) name is used.
+
+        The association may be removed by deleting *name* from the
+        ``transport_policies`` dictionary.  Changes to the dictionary
+        only affect resolutions started after the change.
+
+        :param name: The name the policy applies to, including its
+            subdomains.
+        :type name: :py:class:`dns.name.Name` or str
+        :param policy: The transport policy to pin matching queries to.
+        :type policy: :py:class:`dns.resolver.TransportPolicy`
+        """
+        if isinstance(name, str):
+            name = dns.name.from_text(name)
+        self.transport_policies[name] = policy
+
+    def _match_transport_policy(self, qname: dns.name.Name) -> TransportPolicy | None:
+        """Return the most specific transport policy applying to *qname*,
+        or ``None`` if no policy applies."""
+        best: TransportPolicy | None = None
+        best_length = 0
+        for name, policy in self.transport_policies.items():
+            if len(name) > best_length and qname.is_subdomain(name):
+                best = policy
+                best_length = len(name)
+        return best
 
     def use_tsig(
         self,

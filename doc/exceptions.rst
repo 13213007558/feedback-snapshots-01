@@ -76,6 +76,7 @@ dns.resolver Exceptions
 .. autoexception:: dns.resolver.NoRootSOA
 .. autoexception:: dns.resolver.NotAbsolute
 .. autoexception:: dns.resolver.NXDOMAIN
+.. autoexception:: dns.resolver.TransportPolicyViolation
 .. autoexception:: dns.resolver.YXDOMAIN
 
 dns.tokenizer Exceptions

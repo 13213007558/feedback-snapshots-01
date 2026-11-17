@@ -108,6 +108,18 @@ The dns.resolver.Resolver and dns.resolver.Answer Classes
       then the default flags as set by the :py:class:`dns.message.Message`
       constructor will be used.
 
+   .. attribute:: transport_policies
+
+      A ``dict`` mapping :py:class:`dns.name.Name` to
+      :py:class:`dns.resolver.TransportPolicy`.  Queries for a name that
+      is equal to or a subdomain of a key are pinned to the associated
+      policy's nameservers and transports, and will not fall back to the
+      resolver's regular nameservers.  Changes to the dictionary only
+      affect resolutions started after the change.
+
+
+.. autoclass:: dns.resolver.TransportPolicy
+   :members:
 
 .. autoclass:: dns.resolver.HostAnswers
    :members:
