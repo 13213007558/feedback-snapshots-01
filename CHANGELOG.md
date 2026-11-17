@@ -1,3 +1,12 @@
+## Unreleased
+
+- Add an optional `overwrite_protection` policy to `HTTP::CookieJar`.
+  When enabled, cookies received over an insecure transport cannot
+  overwrite, shadow, or delete an existing Secure cookie.  Rejections
+  are reported through an audit callback or logger using scope
+  information and a reason, without exposing cookie values.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

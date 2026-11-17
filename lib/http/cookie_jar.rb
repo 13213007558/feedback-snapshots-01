@@ -49,18 +49,34 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # :overwrite_protection
+  # : An optional OverwriteProtection policy that keeps cookies received
+  # over an insecure transport from overwriting, shadowing, or deleting
+  # an existing Secure cookie.  `true` enables the policy with its
+  # defaults, and a Hash is passed to the policy constructor.  The
+  # default is `nil` (disabled).  See HTTP::CookieJar::OverwriteProtection
+  # for details.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
     }
     opthash.update(options) if options
+    @overwrite_protection = OverwriteProtection.build(
+      opthash[:overwrite_protection], :logger => opthash[:logger])
     @store = get_impl(AbstractStore, opthash[:store], opthash)
   end
 
   # The copy constructor.  Not all backend store classes support cloning.
   def initialize_copy(other)
     @store = other.instance_eval { @store.dup }
+    @overwrite_protection = other.overwrite_protection.dup if
+      other.overwrite_protection
   end
+
+  # The optional overwrite protection policy in effect, or nil if the
+  # policy is disabled.  See HTTP::CookieJar::OverwriteProtection.
+  attr_reader :overwrite_protection
 
   # Adds a cookie to the jar if it is acceptable, and returns self in
   # any case.  A given cookie must have domain and path attributes
@@ -69,6 +85,11 @@ class HTTP::CookieJar
   # Whether a cookie with the `for_domain` flag on overwrites another
   # with the flag off or vice versa depends on the store used.  See
   # individual store classes for that matter.
+  #
+  # If an overwrite protection policy is configured, a cookie that
+  # would overwrite, shadow or delete a Secure cookie received over
+  # HTTPS is rejected when it comes from an insecure or unknown origin.
+  # See HTTP::CookieJar::OverwriteProtection.
   #
   # ### Compatibility Note for Mechanize::Cookie users
   #
@@ -86,15 +107,33 @@ class HTTP::CookieJar
   #       jar.origin = origin
   #       jar.add(cookie)     # acceptance check is performed
   def add(cookie)
-    @store.add(cookie) if
-      begin
-        cookie.acceptable?
-      rescue RuntimeError => e
-        raise ArgumentError, e.message
-      end
+    add_cookie(cookie)
     self
   end
   alias << add
+
+  # Adds a cookie if it is acceptable and permitted by the overwrite
+  # protection policy, and returns true if it was stored.
+  def add_cookie(cookie)
+    acceptable = begin
+      cookie.acceptable?
+    rescue RuntimeError => e
+      raise ArgumentError, e.message
+    end
+    return false unless acceptable
+
+    if @overwrite_protection
+      event = @overwrite_protection.check(cookie, @store)
+      if event
+        @overwrite_protection.record(event)
+        return false
+      end
+    end
+
+    @store.add(cookie)
+    true
+  end
+  private :add_cookie
 
   # Deletes a cookie that has the same name, domain and path as a
   # given cookie from the jar and returns self.
@@ -153,6 +192,9 @@ class HTTP::CookieJar
   # as valid and considered acceptable to the jar.  Returns an array
   # of cookies that have been added.
   #
+  # Cookies rejected by an overwrite protection policy are not
+  # included in the returned array.
+  #
   # If a block is given, it is called for each cookie and the cookie
   # is added only if the block returns a true value.
   #
@@ -164,16 +206,13 @@ class HTTP::CookieJar
   #
   # See HTTP::Cookie.parse for available options.
   def parse(set_cookie, origin, options = nil) # :yield: cookie
+    parsed = HTTP::Cookie.parse(set_cookie, origin, options)
     if block_given?
-      HTTP::Cookie.parse(set_cookie, origin, options).tap { |cookies|
-        cookies.select! { |cookie|
-          yield(cookie) && add(cookie)
-        }
+      parsed.select { |cookie|
+        yield(cookie) && add_cookie(cookie)
       }
     else
-      HTTP::Cookie.parse(set_cookie, origin, options) { |cookie|
-        add(cookie)
-      }
+      parsed.select { |cookie| add_cookie(cookie) }
     end
   end
 
@@ -328,3 +367,4 @@ end
 
 require 'http/cookie_jar/abstract_store'
 require 'http/cookie_jar/abstract_saver'
+require 'http/cookie_jar/overwrite_protection'

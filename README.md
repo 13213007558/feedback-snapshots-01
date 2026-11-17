@@ -121,6 +121,46 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+    ########################
+    # Overwrite protection
+    ########################
+
+    # Keep responses received over HTTP from overwriting, shadowing, or
+    # deleting a Secure cookie received over HTTPS.
+    jar = HTTP::CookieJar.new(
+      overwrite_protection: {
+        audit: ->(event) { warn event[:reason] },
+      })
+
+    # Accepted: a Secure login cookie from an HTTPS origin.
+    jar.parse('sid=login; Secure; Path=/login', 'https://example.com/login')
+
+    # Rejected: the same-name value from an HTTP origin is not stored.
+    jar.parse('sid=shadow; Path=/login', 'http://example.com/login')
+
+    # Accepted: a value with another name and a disjoint path is stored.
+    jar.parse('sid=api; Path=/api', 'http://example.com/api')
+
+    HTTP::Cookie.cookie_value(jar.cookies('https://example.com/login'))
+    # => "sid=login"
+
+The policy only protects existing Secure cookies.  A rejected cookie is
+not stored and the original cookie is left untouched.  Audit events
+contain the name, domain, host-only flag, path, secure flag and origin
+of the affected cookies, plus a reason, but never a cookie value:
+
+- `:insecure_overwrite_of_secure_cookie` - the incoming cookie would
+  replace the protected cookie under the same name, domain and path.
+- `:insecure_shadowing_of_secure_cookie` - the incoming cookie shares
+  a domain scope and an overlapping path, so both would be candidates
+  for the same request.
+- `:insecure_deletion_of_secure_cookie` - the incoming cookie is an
+  expired (deletion) cookie that maps to the protected cookie.
+
+Cookies with unrelated names, domains, or paths are stored normally.
+The policy is disabled by default.
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between
