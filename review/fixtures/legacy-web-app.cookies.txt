@@ -1,0 +1,3 @@
+# HTTP Cookie File
+.web.app	TRUE	/	FALSE	1893456000	legacy_parent	from-parent-record
+web.app	FALSE	/	FALSE	1893456000	legacy_host	from-host-record

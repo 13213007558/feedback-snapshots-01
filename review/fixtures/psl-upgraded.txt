@@ -1,0 +1,27 @@
+// Fixed suffix catalog: UPGRADED side of the upgrade review.
+//
+// Verified against the installed domain_name 0.6.20240107
+// lib/domain_name/etld_data.rb (ETLD_DATA_DATE 2024-01-07).
+//
+// The only modeled delta from the baseline catalog is `web.app`, which is
+// present in the real 2024 PRIVATE section (data file line 13441).
+// All other rules are controls held constant.
+//
+// SCOPE: only rules exercised by review/domain_upgrade_review.rb.
+// Not a general-purpose PSL.
+//
+// ===BEGIN ICANN DOMAINS===
+com
+jp
+co.jp
+*.kawasaki.jp
+!city.kawasaki.jp
+app
+dev
+io
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+s3.amazonaws.com
+web.app
+// ===END PRIVATE DOMAINS===

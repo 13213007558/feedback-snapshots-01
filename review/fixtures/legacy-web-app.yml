@@ -1,0 +1,25 @@
+---
+- !ruby/object:HTTP::Cookie
+  name: legacy_parent
+  value: from-parent-record
+  domain: web.app
+  for_domain: true
+  path: "/"
+  secure: false
+  httponly: false
+  expires: 2030-01-01 00:00:00.000000000 Z
+  max_age:
+  created_at: 2020-01-01 00:00:00.000000000 Z
+  accessed_at: 2020-01-01 00:00:00.000000000 Z
+- !ruby/object:HTTP::Cookie
+  name: legacy_host
+  value: from-host-record
+  domain: web.app
+  for_domain: false
+  path: "/"
+  secure: false
+  httponly: false
+  expires: 2030-01-01 00:00:00.000000000 Z
+  max_age:
+  created_at: 2020-01-01 00:00:00.000000000 Z
+  accessed_at: 2020-01-01 00:00:00.000000000 Z

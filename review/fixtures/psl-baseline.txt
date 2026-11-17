@@ -1,0 +1,27 @@
+// Fixed suffix catalog: BASELINE side of the upgrade review.
+//
+// This is a scoped, reviewed reconstruction, NOT a byte-exact copy of a
+// published PSL snapshot. It fixes the only modeled delta to the addition
+// of `web.app`; every other rule below is a control held constant.
+//
+// `web.app` is absent here, which models the pre-change classification.
+// The upgraded catalog adds it, matching the installed domain_name
+// 0.6.20240107 data and its CHANGELOG note for issue #21.
+//
+// SCOPE: only rules exercised by review/domain_upgrade_review.rb.
+// Not a general-purpose PSL.
+//
+// ===BEGIN ICANN DOMAINS===
+com
+jp
+co.jp
+*.kawasaki.jp
+!city.kawasaki.jp
+app
+dev
+io
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+s3.amazonaws.com
+// ===END PRIVATE DOMAINS===

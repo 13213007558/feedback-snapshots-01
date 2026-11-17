@@ -1,0 +1,1058 @@
+{
+  "meta": {
+    "generated_at": "2026-11-17T17:24:30Z",
+    "http_cookie_version": "1.2.0.beta",
+    "domain_name_version": "0.6.20240107",
+    "network_used": false,
+    "cookies_read_from_disk": false,
+    "fixtures": {
+      "before": {
+        "path": "review/fixtures/psl-baseline.txt",
+        "rules": 10
+      },
+      "after": {
+        "path": "review/fixtures/psl-upgraded.txt",
+        "rules": 11
+      }
+    }
+  },
+  "catalog_diff": {
+    "added_after": [
+      {
+        "rule": "web.app",
+        "value": 0,
+        "section": "private",
+        "source_line": 26
+      }
+    ],
+    "removed_after": []
+  },
+  "classification": {
+    "web.app": {
+      "before": {
+        "hostname": "web.app",
+        "registrable_domain": "web.app",
+        "suffix_or_ip": false,
+        "canonical": true,
+        "deciding_rules": [
+          {
+            "rule": "app",
+            "value": 0,
+            "section": "icann",
+            "source_line": 20
+          }
+        ]
+      },
+      "after": {
+        "hostname": "web.app",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "web.app",
+            "value": 0,
+            "section": "private",
+            "source_line": 26
+          },
+          {
+            "rule": "app",
+            "value": 0,
+            "section": "icann",
+            "source_line": 19
+          }
+        ]
+      }
+    },
+    "example.co.jp": {
+      "before": {
+        "hostname": "example.co.jp",
+        "registrable_domain": "example.co.jp",
+        "suffix_or_ip": false,
+        "canonical": true,
+        "deciding_rules": [
+          {
+            "rule": "co.jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 17
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          }
+        ]
+      },
+      "after": {
+        "hostname": "example.co.jp",
+        "registrable_domain": "example.co.jp",
+        "suffix_or_ip": false,
+        "canonical": true,
+        "deciding_rules": [
+          {
+            "rule": "co.jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 15
+          }
+        ]
+      }
+    },
+    "co.jp": {
+      "before": {
+        "hostname": "co.jp",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "co.jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 17
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          }
+        ]
+      },
+      "after": {
+        "hostname": "co.jp",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "co.jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 15
+          }
+        ]
+      }
+    },
+    "github.io": {
+      "before": {
+        "hostname": "github.io",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "github.io",
+            "value": 0,
+            "section": "private",
+            "source_line": 25
+          },
+          {
+            "rule": "io",
+            "value": 0,
+            "section": "icann",
+            "source_line": 22
+          }
+        ]
+      },
+      "after": {
+        "hostname": "github.io",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "github.io",
+            "value": 0,
+            "section": "private",
+            "source_line": 24
+          },
+          {
+            "rule": "io",
+            "value": 0,
+            "section": "icann",
+            "source_line": 21
+          }
+        ]
+      }
+    },
+    "s3.amazonaws.com": {
+      "before": {
+        "hostname": "s3.amazonaws.com",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "s3.amazonaws.com",
+            "value": 0,
+            "section": "private",
+            "source_line": 26
+          },
+          {
+            "rule": "com",
+            "value": 0,
+            "section": "icann",
+            "source_line": 15
+          }
+        ]
+      },
+      "after": {
+        "hostname": "s3.amazonaws.com",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "s3.amazonaws.com",
+            "value": 0,
+            "section": "private",
+            "source_line": 25
+          },
+          {
+            "rule": "com",
+            "value": 0,
+            "section": "icann",
+            "source_line": 14
+          }
+        ]
+      }
+    },
+    "foo.kawasaki.jp": {
+      "before": {
+        "hostname": "foo.kawasaki.jp",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "kawasaki.jp",
+            "value": -1,
+            "section": "icann",
+            "source_line": 18
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          }
+        ]
+      },
+      "after": {
+        "hostname": "foo.kawasaki.jp",
+        "registrable_domain": null,
+        "suffix_or_ip": true,
+        "canonical": false,
+        "deciding_rules": [
+          {
+            "rule": "kawasaki.jp",
+            "value": -1,
+            "section": "icann",
+            "source_line": 17
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 15
+          }
+        ]
+      }
+    },
+    "city.kawasaki.jp": {
+      "before": {
+        "hostname": "city.kawasaki.jp",
+        "registrable_domain": "city.kawasaki.jp",
+        "suffix_or_ip": false,
+        "canonical": true,
+        "deciding_rules": [
+          {
+            "rule": "city.kawasaki.jp",
+            "value": 1,
+            "section": "icann",
+            "source_line": 19
+          },
+          {
+            "rule": "kawasaki.jp",
+            "value": -1,
+            "section": "icann",
+            "source_line": 18
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 16
+          }
+        ]
+      },
+      "after": {
+        "hostname": "city.kawasaki.jp",
+        "registrable_domain": "city.kawasaki.jp",
+        "suffix_or_ip": false,
+        "canonical": true,
+        "deciding_rules": [
+          {
+            "rule": "city.kawasaki.jp",
+            "value": 1,
+            "section": "icann",
+            "source_line": 18
+          },
+          {
+            "rule": "kawasaki.jp",
+            "value": -1,
+            "section": "icann",
+            "source_line": 17
+          },
+          {
+            "rule": "jp",
+            "value": 0,
+            "section": "icann",
+            "source_line": 15
+          }
+        ]
+      }
+    },
+    "example.local": {
+      "before": {
+        "hostname": "example.local",
+        "registrable_domain": "example.local",
+        "suffix_or_ip": false,
+        "canonical": false,
+        "deciding_rules": []
+      },
+      "after": {
+        "hostname": "example.local",
+        "registrable_domain": "example.local",
+        "suffix_or_ip": false,
+        "canonical": false,
+        "deciding_rules": []
+      }
+    },
+    "local": {
+      "before": {
+        "hostname": "local",
+        "registrable_domain": "local",
+        "suffix_or_ip": false,
+        "canonical": false,
+        "deciding_rules": []
+      },
+      "after": {
+        "hostname": "local",
+        "registrable_domain": "local",
+        "suffix_or_ip": false,
+        "canonical": false,
+        "deciding_rules": []
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "id": "web-app-parent",
+      "group": "private suffix added in 2024 data",
+      "set_cookie": "sid=parent-web-app; Domain=web.app; Path=/",
+      "origin": "http://alice.web.app/",
+      "note": "web.app is a PRIVATE suffix; Domain=web.app claims the suffix itself",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          false
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "web.app"
+        ],
+        "sent": {
+          "http://alice.web.app/": "sid=parent-web-app",
+          "http://bob.web.app/": "sid=parent-web-app",
+          "http://web.app/": "sid=parent-web-app"
+        }
+      },
+      "after": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://alice.web.app/": "",
+          "http://bob.web.app/": "",
+          "http://web.app/": ""
+        }
+      },
+      "verdict": "newly_rejected"
+    },
+    {
+      "id": "web-app-host-only",
+      "group": "host-only control for the same name",
+      "set_cookie": "sid=host-web-app; Path=/",
+      "origin": "http://web.app/",
+      "note": "no Domain attribute: host-only to the exact host",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          "web.app"
+        ],
+        "sent": {
+          "http://web.app/": "sid=host-web-app",
+          "http://alice.web.app/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          null
+        ],
+        "sent": {
+          "http://web.app/": "sid=host-web-app",
+          "http://alice.web.app/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "web-app-child-host-only",
+      "group": "host-only control for the same name",
+      "set_cookie": "sid=host-alice; Path=/",
+      "origin": "http://alice.web.app/",
+      "note": "no Domain attribute: host-only to alice.web.app",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          "web.app"
+        ],
+        "sent": {
+          "http://alice.web.app/": "sid=host-alice",
+          "http://bob.web.app/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          "alice.web.app"
+        ],
+        "sent": {
+          "http://alice.web.app/": "sid=host-alice",
+          "http://bob.web.app/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "co-jp-parent",
+      "group": "multi-level ICANN suffix",
+      "set_cookie": "sid=co-jp; Domain=example.co.jp; Path=/",
+      "origin": "http://shop.example.co.jp/",
+      "note": "example.co.jp is registrable below the co.jp rule",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "example.co.jp"
+        ],
+        "sent": {
+          "http://shop.example.co.jp/": "sid=co-jp",
+          "http://other.example.co.jp/": "sid=co-jp",
+          "http://notexample.co.jp/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "example.co.jp"
+        ],
+        "sent": {
+          "http://shop.example.co.jp/": "sid=co-jp",
+          "http://other.example.co.jp/": "sid=co-jp",
+          "http://notexample.co.jp/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "co-jp-suffix",
+      "group": "multi-level ICANN suffix",
+      "set_cookie": "sid=co-jp-suffix; Domain=co.jp; Path=/",
+      "origin": "http://shop.example.co.jp/",
+      "note": "Domain=co.jp claims a suffix; must be refused",
+      "before": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://shop.example.co.jp/": ""
+        }
+      },
+      "after": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://shop.example.co.jp/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "github-io-parent",
+      "group": "private suffix already present in both catalogs",
+      "set_cookie": "sid=github-parent; Domain=github.io; Path=/",
+      "origin": "http://alice.github.io/",
+      "note": "PRIVATE suffix in both data versions: unchanged rejection",
+      "before": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://alice.github.io/": "",
+          "http://bob.github.io/": "",
+          "http://github.io/": ""
+        }
+      },
+      "after": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://alice.github.io/": "",
+          "http://bob.github.io/": "",
+          "http://github.io/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "github-io-host-only",
+      "group": "private suffix already present in both catalogs",
+      "set_cookie": "sid=github-host; Path=/",
+      "origin": "http://alice.github.io/",
+      "note": "host-only sibling isolation is unchanged",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          "alice.github.io"
+        ],
+        "sent": {
+          "http://alice.github.io/": "sid=github-host",
+          "http://bob.github.io/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          false
+        ],
+        "registrable_domain": [
+          "alice.github.io"
+        ],
+        "sent": {
+          "http://alice.github.io/": "sid=github-host",
+          "http://bob.github.io/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "web-app-child-parent",
+      "group": "private suffix added in 2024 data",
+      "set_cookie": "sid=child; Domain=alice.web.app; Path=/",
+      "origin": "http://api.alice.web.app/",
+      "note": "registrable name BELOW the new suffix still works; only the suffix itself is refused",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "web.app"
+        ],
+        "sent": {
+          "http://api.alice.web.app/": "sid=child",
+          "http://www.alice.web.app/": "sid=child",
+          "http://bob.web.app/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "alice.web.app"
+        ],
+        "sent": {
+          "http://api.alice.web.app/": "sid=child",
+          "http://www.alice.web.app/": "sid=child",
+          "http://bob.web.app/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "github-io-child-parent",
+      "group": "private suffix already present in both catalogs",
+      "set_cookie": "sid=child; Domain=alice.github.io; Path=/",
+      "origin": "http://api.alice.github.io/",
+      "note": "control: registrable name below a private suffix, unchanged",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "alice.github.io"
+        ],
+        "sent": {
+          "http://api.alice.github.io/": "sid=child",
+          "http://www.alice.github.io/": "sid=child",
+          "http://bob.github.io/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "alice.github.io"
+        ],
+        "sent": {
+          "http://api.alice.github.io/": "sid=child",
+          "http://www.alice.github.io/": "sid=child",
+          "http://bob.github.io/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "kawasaki-wildcard",
+      "group": "wildcard ICANN rule",
+      "set_cookie": "sid=kawasaki; Domain=a.foo.kawasaki.jp; Path=/",
+      "origin": "http://www.a.foo.kawasaki.jp/",
+      "note": "*.kawasaki.jp makes a.foo.kawasaki.jp registrable; b.foo.kawasaki.jp is a different registrable domain",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "a.foo.kawasaki.jp"
+        ],
+        "sent": {
+          "http://www.a.foo.kawasaki.jp/": "sid=kawasaki",
+          "http://api.a.foo.kawasaki.jp/": "sid=kawasaki",
+          "http://www.b.foo.kawasaki.jp/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "a.foo.kawasaki.jp"
+        ],
+        "sent": {
+          "http://www.a.foo.kawasaki.jp/": "sid=kawasaki",
+          "http://api.a.foo.kawasaki.jp/": "sid=kawasaki",
+          "http://www.b.foo.kawasaki.jp/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "kawasaki-exception",
+      "group": "wildcard exception rule",
+      "set_cookie": "sid=city-kawasaki; Domain=city.kawasaki.jp; Path=/",
+      "origin": "http://www.city.kawasaki.jp/",
+      "note": "!city.kawasaki.jp re-enables the name below the wildcard",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "city.kawasaki.jp"
+        ],
+        "sent": {
+          "http://www.city.kawasaki.jp/": "sid=city-kawasaki",
+          "http://www.foo.kawasaki.jp/": ""
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "city.kawasaki.jp"
+        ],
+        "sent": {
+          "http://www.city.kawasaki.jp/": "sid=city-kawasaki",
+          "http://www.foo.kawasaki.jp/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "s3-private-parent",
+      "group": "private suffix already present in both catalogs",
+      "set_cookie": "sid=s3; Domain=s3.amazonaws.com; Path=/",
+      "origin": "http://bucket.s3.amazonaws.com/",
+      "note": "PRIVATE rule: the suffix itself is not registrable",
+      "before": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://bucket.s3.amazonaws.com/": "",
+          "http://other.s3.amazonaws.com/": ""
+        }
+      },
+      "after": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://bucket.s3.amazonaws.com/": "",
+          "http://other.s3.amazonaws.com/": ""
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "local-fallback-parent",
+      "group": "unknown/local TLD fallback",
+      "set_cookie": "sid=local; Domain=example.local; Path=/",
+      "origin": "http://www.example.local/",
+      "note": "no catalog entry for .local: two-label fallback",
+      "before": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "example.local"
+        ],
+        "sent": {
+          "http://www.example.local/": "sid=local",
+          "http://other.example.local/": "sid=local"
+        }
+      },
+      "after": {
+        "accepted": 1,
+        "acceptable": [
+          true
+        ],
+        "effective_for_domain": [
+          true
+        ],
+        "registrable_domain": [
+          "example.local"
+        ],
+        "sent": {
+          "http://www.example.local/": "sid=local",
+          "http://other.example.local/": "sid=local"
+        }
+      },
+      "verdict": "unchanged"
+    },
+    {
+      "id": "local-fallback-suffix",
+      "group": "unknown/local TLD fallback",
+      "set_cookie": "sid=local-suffix; Domain=local; Path=/",
+      "origin": "http://www.example.local/",
+      "note": "the fallback still refuses a bare single-label domain",
+      "before": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://www.example.local/": ""
+        }
+      },
+      "after": {
+        "accepted": 0,
+        "acceptable": [],
+        "effective_for_domain": [],
+        "registrable_domain": [],
+        "sent": {
+          "http://www.example.local/": ""
+        }
+      },
+      "verdict": "unchanged"
+    }
+  ],
+  "legacy": [
+    {
+      "id": "legacy-yaml-web-app",
+      "format": "yaml",
+      "note": "YAML keeps for_domain=true; parent scope is evaluated at send time",
+      "before": {
+        "stored": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": "web.app"
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": "web.app"
+          }
+        ],
+        "sent": {
+          "http://web.app/": "legacy_host=from-host-record; legacy_parent=from-parent-record",
+          "http://alice.web.app/": "legacy_parent=from-parent-record",
+          "http://bob.web.app/": "legacy_parent=from-parent-record"
+        }
+      },
+      "after": {
+        "stored": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": null
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          }
+        ],
+        "sent": {
+          "http://web.app/": "legacy_host=from-host-record; legacy_parent=from-parent-record",
+          "http://alice.web.app/": "",
+          "http://bob.web.app/": ""
+        }
+      },
+      "verdict": "scope_changed",
+      "reaudit": {
+        "display_domain_unchanged": true,
+        "sent_before": [
+          "http://web.app/",
+          "http://alice.web.app/",
+          "http://bob.web.app/"
+        ],
+        "sent_after": [
+          "http://web.app/"
+        ],
+        "recommendation": "keep_narrowed",
+        "stored_before": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": "web.app"
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": "web.app"
+          }
+        ],
+        "stored_after": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": null
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "legacy-cookiestxt-web-app",
+      "format": "cookiestxt",
+      "note": "cookies.txt recomputes for_domain on load and downgrades the suffix to host-only",
+      "before": {
+        "stored": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": "web.app"
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": "web.app"
+          }
+        ],
+        "sent": {
+          "http://web.app/": "legacy_host=from-host-record; legacy_parent=from-parent-record",
+          "http://alice.web.app/": "legacy_parent=from-parent-record",
+          "http://bob.web.app/": "legacy_parent=from-parent-record"
+        }
+      },
+      "after": {
+        "stored": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          }
+        ],
+        "sent": {
+          "http://web.app/": "legacy_host=from-host-record; legacy_parent=from-parent-record",
+          "http://alice.web.app/": "",
+          "http://bob.web.app/": ""
+        }
+      },
+      "verdict": "scope_changed",
+      "reaudit": {
+        "display_domain_unchanged": true,
+        "sent_before": [
+          "http://web.app/",
+          "http://alice.web.app/",
+          "http://bob.web.app/"
+        ],
+        "sent_after": [
+          "http://web.app/"
+        ],
+        "recommendation": "keep_narrowed",
+        "stored_before": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": true,
+            "registrable_domain": "web.app"
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": "web.app"
+          }
+        ],
+        "stored_after": [
+          {
+            "name": "legacy_parent",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          },
+          {
+            "name": "legacy_host",
+            "domain": "web.app",
+            "for_domain": false,
+            "registrable_domain": null
+          }
+        ]
+      }
+    }
+  ]
+}
