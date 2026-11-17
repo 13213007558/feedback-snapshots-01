@@ -395,8 +395,11 @@ class MetaDataTables(base.ClrStream):
     Module:                 Optional[mdtable.Module]
     TypeRef:                Optional[mdtable.TypeRef]
     TypeDef:                Optional[mdtable.TypeDef]
+    FieldPtr:               Optional[mdtable.FieldPtr]
     Field:                  Optional[mdtable.Field]
+    MethodPtr:              Optional[mdtable.MethodPtr]
     MethodDef:              Optional[mdtable.MethodDef]
+    ParamPtr:               Optional[mdtable.ParamPtr]
     Param:                  Optional[mdtable.Param]
     InterfaceImpl:          Optional[mdtable.InterfaceImpl]
     MemberRef:              Optional[mdtable.MemberRef]
@@ -408,8 +411,10 @@ class MetaDataTables(base.ClrStream):
     FieldLayout:            Optional[mdtable.FieldLayout]
     StandAloneSig:          Optional[mdtable.StandAloneSig]
     EventMap:               Optional[mdtable.EventMap]
+    EventPtr:               Optional[mdtable.EventPtr]
     Event:                  Optional[mdtable.Event]
     PropertyMap:            Optional[mdtable.PropertyMap]
+    PropertyPtr:            Optional[mdtable.PropertyPtr]
     Property:               Optional[mdtable.Property]
     MethodSemantics:        Optional[mdtable.MethodSemantics]
     MethodImpl:             Optional[mdtable.MethodImpl]
@@ -442,8 +447,11 @@ class MetaDataTables(base.ClrStream):
         self.Module: Optional[mdtable.Module] = None
         self.TypeRef: Optional[mdtable.TypeRef] = None
         self.TypeDef: Optional[mdtable.TypeDef] = None
+        self.FieldPtr: Optional[mdtable.FieldPtr] = None
         self.Field: Optional[mdtable.Field] = None
+        self.MethodPtr: Optional[mdtable.MethodPtr] = None
         self.MethodDef: Optional[mdtable.MethodDef] = None
+        self.ParamPtr: Optional[mdtable.ParamPtr] = None
         self.Param: Optional[mdtable.Param] = None
         self.InterfaceImpl: Optional[mdtable.InterfaceImpl] = None
         self.MemberRef: Optional[mdtable.MemberRef] = None
@@ -455,8 +463,10 @@ class MetaDataTables(base.ClrStream):
         self.FieldLayout: Optional[mdtable.FieldLayout] = None
         self.StandAloneSig: Optional[mdtable.StandAloneSig] = None
         self.EventMap: Optional[mdtable.EventMap] = None
+        self.EventPtr: Optional[mdtable.EventPtr] = None
         self.Event: Optional[mdtable.Event] = None
         self.PropertyMap: Optional[mdtable.PropertyMap] = None
+        self.PropertyPtr: Optional[mdtable.PropertyPtr] = None
         self.Property: Optional[mdtable.Property] = None
         self.MethodSemantics: Optional[mdtable.MethodSemantics] = None
         self.MethodImpl: Optional[mdtable.MethodImpl] = None

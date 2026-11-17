@@ -259,6 +259,11 @@ class MDTableRow(abc.ABC):
     _struct_flags: Dict[str, Tuple[str, Type[enums.ClrFlags]]]       # also ClrFlags subclass
     _struct_enums: Dict[str, Tuple[str, Type[enum.IntEnum]]]         # also enum.IntEnum subclassA
     _struct_lists: Dict[str, Tuple[str, str]]                        # also Metadata table name
+    # maps a run-list column to the indirection table that must be used when
+    # it is present, e.g. TypeDef.FieldList -> FieldPtr.  This is required for
+    # uncompressed metadata ("#-"): the list column then indexes the pointer
+    # table, and only the pointer table rows index the target table.
+    _struct_lists_pointers: Dict[str, str]
 
     def __init__(
         self,
@@ -517,53 +522,184 @@ class MDTableRow(abc.ABC):
 
     def _parse_struct_lists(self, tables, next_row):
         # if lists
-        if hasattr(self.__class__, "_struct_lists") and tables:
-            for struct_name, (attr_name, table_name) in self.__class__._struct_lists.items():
+        if not hasattr(self.__class__, "_struct_lists") or not tables:
+            return
 
-                table = None
-                for t in tables:
-                    if t.name == table_name:
-                        table = t
+        pointer_columns = getattr(self.__class__, "_struct_lists_pointers", {})
 
-                run: List[MDTableIndex] = []
-                # always define attribute, even if failed to parse
-                setattr(self, attr_name, run)
+        for struct_name, (attr_name, table_name) in self.__class__._struct_lists.items():
+            target_table = self._table_by_name(tables, table_name)
+            if target_table is None:
+                # target table is not present, such as when there is no Field
+                # table in hello-world.exe, so the references below must, by
+                # definition, be empty.
+                setattr(self, attr_name, MDTableList())
+                continue
 
-                if not table:
-                    # target table is not present,
-                    # such as is there is no Field table in hello-world.exe,
-                    # so the references below must, by defintion, be empty.
-                    continue
+            # Pointer tables (FieldPtr, MethodPtr, ParamPtr, ...) are used by
+            # uncompressed metadata ("#-"): the owner's list column then indexes
+            # the pointer table, and the pointer rows index the target table.
+            # The pointer table is authoritative whenever it is present.
+            pointer_table = None
+            pointer_table_name = pointer_columns.get(struct_name)
+            if pointer_table_name is not None:
+                pointer_table = self._table_by_name(tables, pointer_table_name)
 
-                run_start_index = getattr(self.struct, struct_name, None)
-                if run_start_index is not None:
-                    max_row = table.num_rows
-                    if next_row is not None:
-                        # then we read from the target table,
-                        # from the row referenced by this row,
-                        # until the row referenced by the next row (`next_row`),
-                        # or the end of the table.
-                        next_row_reference = getattr(next_row.struct, struct_name, None)
-                        run_end_index = max_row
-                        if next_row_reference is not None:
-                            # row end index is inclusive so row end index must equal next row index minus 1, if less than max row
-                            run_end_index = min(next_row_reference - 1, max_row)
+            if pointer_table is not None:
+                run = self._parse_struct_list_indirect(
+                    target_table, pointer_table, struct_name, next_row,
+                )
+                run.pointer_table = pointer_table_name
+            else:
+                run = self._parse_struct_list_direct(target_table, struct_name, next_row)
+                run.pointer_table = None
 
-                    else:
-                        # then we read from the target table,
-                        # from the row referenced by this row,
-                        # until the end of the table.
-                        run_end_index = max_row
+            setattr(self, attr_name, run)
 
-                    # when this run starts at the last index,
-                    # start == end and end == max_row.
-                    # otherwise, if start == end, then run is empty.
-                    if run_start_index <= run_end_index:
-                        # row indexes are inclusive, so our range goes to end+1
-                        for row_index in range(run_start_index, run_end_index + 1):
-                            run.append(MDTableIndex(table, row_index))
+    def _table_by_name(self, tables: List["ClrMetaDataTable"], table_name: str):
+        for t in tables:
+            if t.name == table_name:
+                return t
+        return None
 
-                setattr(self, attr_name, run)
+    def _list_run_bounds(
+        self,
+        struct_name: str,
+        next_row: Optional["MDTableRow"],
+        max_row: int,
+    ) -> Tuple[int, int]:
+        """
+        Compute the inclusive 1-based row bounds of a run-list, as encoded in a
+        list column.
+
+        A run is [start, next.start); the next row that owns the same list
+        column provides the exclusive end.  The final owner runs to the end of
+        the indexed table.  An empty list is encoded either as start == next
+        start, or as start == max_row + 1 for the final owner.
+
+        Invalid bounds are never coerced into a valid run; they result in an
+        empty run plus a warning, so that members are not silently attributed
+        to a different owner or table.
+        """
+        run_start_index = getattr(self.struct, struct_name, None)
+        if run_start_index is None:
+            return 1, 0
+
+        if run_start_index < 1:
+            logger.warning(
+                "invalid run list start %s.%s=%s: expected 1-based row index",
+                self.__class__.__name__, struct_name, run_start_index,
+            )
+            return run_start_index, run_start_index - 1
+
+        if next_row is None:
+            # final owner of the list
+            if run_start_index > max_row + 1:
+                logger.warning(
+                    "invalid run list start %s.%s=%s: exceeds indexed table rows %d",
+                    self.__class__.__name__, struct_name, run_start_index, max_row,
+                )
+                return run_start_index, run_start_index - 1
+            return run_start_index, max_row
+
+        next_row_reference = getattr(next_row.struct, struct_name, None)
+        if next_row_reference is None:
+            return run_start_index, max_row
+
+        if next_row_reference < 1:
+            logger.warning(
+                "invalid run list boundary %s.%s: next owner %s is not a 1-based row index",
+                self.__class__.__name__, struct_name, next_row_reference,
+            )
+            return run_start_index, run_start_index - 1
+
+        if next_row_reference == run_start_index:
+            # empty list: the next owner starts at the same row
+            return run_start_index, run_start_index - 1
+
+        if next_row_reference < run_start_index:
+            # decreasing range: cannot describe a run; do not fall back to the
+            # end of the table, since that would attribute other owners' rows
+            logger.warning(
+                "invalid decreasing run list boundary %s.%s: start %d, next owner %s",
+                self.__class__.__name__, struct_name, run_start_index, next_row_reference,
+            )
+            return run_start_index, run_start_index - 1
+
+        if next_row_reference > max_row + 1:
+            # the next owner starts beyond the indexed table; the remaining
+            # rows still belong to this owner, so clamp to the table end.  this
+            # cannot name another owner's members, but is still worth reporting.
+            logger.warning(
+                "run list boundary %s.%s: next owner %d exceeds indexed table rows %d",
+                self.__class__.__name__, struct_name, next_row_reference, max_row,
+            )
+            return run_start_index, max_row
+
+        return run_start_index, next_row_reference - 1
+
+    def _parse_struct_list_direct(self, table, struct_name: str, next_row) -> "MDTableList":
+        run: MDTableList = MDTableList(index_kind="direct")
+        run_start_index, run_end_index = self._list_run_bounds(
+            struct_name, next_row, table.num_rows,
+        )
+        for row_index in range(run_start_index, run_end_index + 1):
+            run.append(MDTableIndex(table, row_index))
+        return run
+
+    def _parse_struct_list_indirect(
+        self,
+        target_table,
+        pointer_table,
+        struct_name: str,
+        next_row,
+    ) -> "MDTableList":
+        run: MDTableList = MDTableList(index_kind="indirect")
+        run_start_index, run_end_index = self._list_run_bounds(
+            struct_name, next_row, pointer_table.num_rows,
+        )
+
+        # pointer row field that references the target table, e.g. FieldPtrRow.Field.
+        # Rows are not necessarily parsed in table order (TypeDef is parsed before
+        # FieldPtr), so read the raw struct member that parse_rows() populated.
+        pointer_struct_name = None
+        for struct_name_, (_attr_name, table_name_) in getattr(
+            pointer_table._row_class, "_struct_indexes", {}
+        ).items():
+            if table_name_ == target_table.name:
+                pointer_struct_name = struct_name_
+                break
+
+        if pointer_struct_name is None:
+            logger.warning(
+                "pointer table %s does not reference %s",
+                pointer_table.name, target_table.name,
+            )
+            return run
+
+        for pointer_row_index in range(run_start_index, run_end_index + 1):
+            pointer_row = pointer_table.get_with_row_index(pointer_row_index)
+            if pointer_row is None:
+                logger.warning(
+                    "unable to resolve %s row %d while parsing list %s.%s",
+                    pointer_table.name, pointer_row_index,
+                    self.__class__.__name__, struct_name,
+                )
+                continue
+
+            target_row_index = getattr(pointer_row.struct, pointer_struct_name, None)
+            if target_row_index is None or target_row_index < 1 or target_row_index > target_table.num_rows:
+                # an out-of-range pointer is invalid; it must not be clamped
+                # into the target table, where it would name another member.
+                logger.warning(
+                    "invalid pointer %s[%d]=%s while parsing list %s.%s",
+                    pointer_table.name, pointer_row_index, target_row_index,
+                    self.__class__.__name__, struct_name,
+                )
+                continue
+
+            run.append(MDTableIndex(target_table, target_row_index))
+        return run
 
     def _table_name2num(self, name, tables: List["ClrMetaDataTable"]):
         for t in tables:
@@ -669,6 +805,26 @@ class MDTableIndex(Generic[RowType]):
             return None
         else:
             return self.table.get_with_row_index(self.row_index)
+
+
+class MDTableList(List[MDTableIndex[RowType]], Generic[RowType]):
+    """
+    A run of metadata table references, e.g. TypeDef.FieldList.
+
+    Attributes:
+        index_kind      How the run was resolved.  "direct" when the run
+                        indexes the target table directly, "indirect" when it
+                        was resolved through a pointer table (FieldPtr,
+                        MethodPtr, ParamPtr, ...), or None when the run could
+                        not be resolved.
+        pointer_table   Name of the pointer table used for indirect runs.
+    """
+
+    def __init__(self, iterable=(), index_kind: Optional[str] = None,
+                 pointer_table: Optional[str] = None):
+        super().__init__(iterable)
+        self.index_kind: Optional[str] = index_kind
+        self.pointer_table: Optional[str] = pointer_table
 
 
 class CodedIndex(MDTableIndex[RowType]):
@@ -996,7 +1152,14 @@ class ClrMetaDataTable(Generic[RowType]):
         remember: row indices, at least those encoded within a .NET file, are 1-based.
         so, you should prefer to use this method when you get a reference to a row.
         use `__getitem__` when you want 0-based indexing.
+
+        Returns None for row indices that are not present, instead of wrapping
+        around (e.g. index 0 must not resolve to the last row).
         """
+        if row_index is None or row_index < 1 or row_index > self.num_rows:
+            return None
+        if row_index > len(self.rows):
+            return None
         return self[row_index - 1]
 
 

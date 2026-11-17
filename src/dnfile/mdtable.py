@@ -186,6 +186,11 @@ class TypeDefRow(MDTableRow):
         "FieldList_Index": ("FieldList", "Field"),
         "MethodList_Index": ("MethodList", "MethodDef"),
     }
+    # uncompressed metadata ("#-") indirection tables
+    _struct_lists_pointers = {
+        "FieldList_Index": "FieldPtr",
+        "MethodList_Index": "MethodPtr",
+    }
 
     def _compute_format(self):
         extends_size = self._clr_coded_index_struct_size(
@@ -193,8 +198,10 @@ class TypeDefRow(MDTableRow):
             codedindex.TypeDefOrRef.table_names,
         )
         str_ind_size = checked_offset_format(self._str_offsz)
-        fieldlist_size = self._clr_coded_index_struct_size(0, ("Field",))
-        methodlist_size = self._clr_coded_index_struct_size(0, ("MethodDef",))
+        # with uncompressed metadata ("#-") these columns index the pointer
+        # tables when present, so the widths must fit the larger table
+        fieldlist_size = self._clr_coded_index_struct_size(0, ("Field", "FieldPtr"))
+        methodlist_size = self._clr_coded_index_struct_size(0, ("MethodDef", "MethodPtr"))
         return (
             "CLR_METADATA_TABLE_TYPEDEF",
             (
@@ -365,11 +372,15 @@ class MethodDefRow(MDTableRow):
     _struct_lists = {
         "ParamList_Index": ("ParamList", "Param"),
     }
+    # uncompressed metadata ("#-") indirection tables
+    _struct_lists_pointers = {
+        "ParamList_Index": "ParamPtr",
+    }
 
     def _compute_format(self):
         str_ind_size = checked_offset_format(self._str_offsz)
         blob_ind_size = checked_offset_format(self._blob_offsz)
-        paramlist_size = self._clr_coded_index_struct_size(0, ("Param",))
+        paramlist_size = self._clr_coded_index_struct_size(0, ("Param", "ParamPtr"))
         return (
             "CLR_METADATA_TABLE_METHODDEF",
             (
@@ -903,10 +914,14 @@ class EventMapRow(MDTableRow):
     _struct_lists = {
         "EventList_Index": ("EventList", "Event"),
     }
+    # uncompressed metadata ("#-") indirection tables
+    _struct_lists_pointers = {
+        "EventList_Index": "EventPtr",
+    }
 
     def _compute_format(self):
         parent_size = self._clr_coded_index_struct_size(0, ("TypeDef",))
-        eventlist_size = self._clr_coded_index_struct_size(0, ("Event",))
+        eventlist_size = self._clr_coded_index_struct_size(0, ("Event", "EventPtr"))
         return (
             "CLR_METADATA_TABLE_EVENTMAP",
             (
@@ -927,10 +942,32 @@ class EventMap(ClrMetaDataTable[EventMapRow]):
 #
 
 
-class EventPtr(ClrMetaDataTable):
+class EventPtrRowStruct(RowStruct):
+    Event_Index: int
+
+
+class EventPtrRow(MDTableRow):
+    Event: MDTableIndex["EventRow"]
+
+    _struct_class = EventPtrRowStruct
+
+    _struct_indexes = {
+        "Event_Index": ("Event", "Event"),
+    }
+
+    def _compute_format(self):
+        event_size = self._clr_coded_index_struct_size(0, ("Event",))
+        return (
+            "CLR_METADATA_TABLE_EVENTPTR",
+            (event_size + ",Event_Index", ),
+        )
+
+
+class EventPtr(ClrMetaDataTable[EventPtrRow]):
     name = "EventPtr"
     number = 19
-    # TODO
+
+    _row_class = EventPtrRow
 
 
 #### Event Table
@@ -1005,10 +1042,14 @@ class PropertyMapRow(MDTableRow):
     _struct_lists = {
         "PropertyList_Index": ("PropertyList", "Property"),
     }
+    # uncompressed metadata ("#-") indirection tables
+    _struct_lists_pointers = {
+        "PropertyList_Index": "PropertyPtr",
+    }
 
     def _compute_format(self):
         parent_size = self._clr_coded_index_struct_size(0, ("TypeDef",))
-        propertylist_size = self._clr_coded_index_struct_size(0, ("Property",))
+        propertylist_size = self._clr_coded_index_struct_size(0, ("Property", "PropertyPtr"))
         return (
             "CLR_METADATA_TABLE_PROPERTYMAP",
             (
@@ -1029,10 +1070,32 @@ class PropertyMap(ClrMetaDataTable[PropertyMapRow]):
 #
 
 
-class PropertyPtr(ClrMetaDataTable):
+class PropertyPtrRowStruct(RowStruct):
+    Property_Index: int
+
+
+class PropertyPtrRow(MDTableRow):
+    Property: MDTableIndex["PropertyRow"]
+
+    _struct_class = PropertyPtrRowStruct
+
+    _struct_indexes = {
+        "Property_Index": ("Property", "Property"),
+    }
+
+    def _compute_format(self):
+        property_size = self._clr_coded_index_struct_size(0, ("Property",))
+        return (
+            "CLR_METADATA_TABLE_PROPERTYPTR",
+            (property_size + ",Property_Index", ),
+        )
+
+
+class PropertyPtr(ClrMetaDataTable[PropertyPtrRow]):
     name = "PropertyPtr"
     number = 22
-    # TODO
+
+    _row_class = PropertyPtrRow
 
 
 #### Property Table
