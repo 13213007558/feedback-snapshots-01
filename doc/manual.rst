@@ -8,6 +8,7 @@ Dnspython Manual
    name
    rdata
    message
+   cookie
    query
    resolver
    zone

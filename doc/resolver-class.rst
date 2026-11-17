@@ -61,6 +61,11 @@ The dns.resolver.Resolver and dns.resolver.Answer Classes
       :py:class:`dns.resolver.Cache` or a :py:class:`dns.resolver.LRUCache`.  The default
       is ``None``, in which case there is no local caching.
 
+   .. attribute:: cookie_policy
+
+      A :py:class:`dns.cookie.CookiePolicy` or ``None``.  If ``None``, DNS
+      Cookies are not used.  See :ref:`cookie`.
+
    .. attribute:: retry_servfail
 
       A ``bool``.  Should we retry a nameserver if it says ``SERVFAIL``?

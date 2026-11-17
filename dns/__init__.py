@@ -23,6 +23,7 @@ __all__ = [
     "asyncresolver",
     "btree",
     "btreezone",
+    "cookie",
     "dnssec",
     "dnssecalgs",
     "dnssectypes",

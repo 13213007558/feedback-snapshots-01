@@ -186,6 +186,10 @@ class Message:
         self.errors: list[MessageError] = []
         self.time = 0.0
         self.wire: bytes | None = None
+        #: The DNS Cookie validation result for this response, if a
+        #: :py:class:`dns.cookie.CookiePolicy` processed it.  Otherwise
+        #: ``None``.  See :py:mod:`dns.cookie`.
+        self.cookie_validation: Any | None = None
 
     @property
     def question(self) -> list[dns.rrset.RRset]:

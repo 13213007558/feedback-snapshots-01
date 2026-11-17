@@ -6,6 +6,14 @@ What's New in dnspython
 2.10.0 (in development)
 -----------------------
 
+* DNS Cookies (RFC 7873) can now be used explicitly through
+  :py:mod:`dns.cookie`.  A :py:class:`dns.cookie.CookiePolicy` derives a
+  client Cookie per endpoint, stores server Cookies per endpoint, follows
+  server Cookie rotation, and handles BADCOOKIE retries in
+  :py:class:`dns.nameserver.Do53Nameserver`.  Responses accepted without a
+  bound server Cookie are not placed in the resolver cache.  Cookies are
+  not a substitute for DNSSEC or a protected transport.
+
 * The text form of an IPSECKEY record may now omit the public key, which RFC
   4025 section 3.1 makes optional, e.g. ``10 1 0 192.0.2.38`` with algorithm
   0, which means that no key is present.  Such a record could not be read from

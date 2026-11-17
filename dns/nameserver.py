@@ -1,10 +1,14 @@
 import os
+import time
 from urllib.parse import urlparse
 
 import dns.asyncbackend
 import dns.asyncquery
+import dns.cookie
+import dns.exception
 import dns.message
 import dns.query
+import dns.rcode
 
 
 class Nameserver:
@@ -76,11 +80,95 @@ class AddressAndPortNameserver(Nameserver):
 
 
 class Do53Nameserver(AddressAndPortNameserver):
-    def __init__(self, address: str, port: int = 53):
+    def __init__(
+        self,
+        address: str,
+        port: int = 53,
+        cookie_policy: dns.cookie.CookiePolicy | None = None,
+    ):
+        """Initialize a Do53 nameserver.
+
+        :param address: The nameserver address.
+        :param port: The nameserver port.
+        :param cookie_policy: An optional :py:class:`dns.cookie.CookiePolicy`.
+            If ``None``, DNS Cookies are not used.  The policy is applied to
+            UDP queries only.  A policy assigned to a resolver's
+            ``cookie_policy`` attribute is propagated to its Do53 nameservers.
+        """
+
         super().__init__(address, port)
+        self.cookie_policy = cookie_policy
 
     def kind(self):
         return "Do53"
+
+    def _udp_query(
+        self,
+        request: dns.message.QueryMessage,
+        timeout: float,
+        source: str | None,
+        source_port: int,
+        one_rr_per_rrset: bool,
+        ignore_trailing: bool,
+    ) -> dns.message.Message:
+        return dns.query.udp(
+            request,
+            self.address,
+            timeout=timeout,
+            port=self.port,
+            source=source,
+            source_port=source_port,
+            raise_on_truncation=True,
+            one_rr_per_rrset=one_rr_per_rrset,
+            ignore_trailing=ignore_trailing,
+            ignore_errors=True,
+            ignore_unexpected=True,
+        )
+
+    def _udp_query_with_cookie(
+        self,
+        request: dns.message.QueryMessage,
+        timeout: float,
+        source: str | None,
+        source_port: int,
+        one_rr_per_rrset: bool,
+        ignore_trailing: bool,
+        policy: dns.cookie.CookiePolicy,
+    ) -> dns.message.Message:
+        endpoint = policy.endpoint(self.address, self.port, source)
+        client_cookie = policy.client_cookie(endpoint)
+        deadline = time.time() + timeout
+        state = dns.cookie.save_edns_state(request)
+        try:
+            for attempt in range(2):
+                attempt_timeout = deadline - time.time()
+                if attempt_timeout <= 0:
+                    raise dns.exception.Timeout(timeout=timeout)
+                used_server_cookie = len(policy.server_cookie(endpoint)) > 0
+                dns.cookie.set_cookie_option(request, policy.request_cookie(endpoint))
+                response = self._udp_query(
+                    request,
+                    attempt_timeout,
+                    source,
+                    source_port,
+                    one_rr_per_rrset,
+                    ignore_trailing,
+                )
+                validation = policy.validate_response(response, endpoint, client_cookie)
+                if response.rcode() == dns.rcode.BADCOOKIE and attempt == 0:
+                    # A BADCOOKIE response must still echo the client Cookie;
+                    # validate_response() has checked that.  We retry once
+                    # only when we actually sent a server Cookie which the
+                    # server has now replaced, and the response gave us a
+                    # fresh one.  Otherwise there is nothing to learn, so let
+                    # the resolver record BADCOOKIE.
+                    if used_server_cookie and validation.bound:
+                        continue
+                response.cookie_validation = validation
+                return response
+            raise AssertionError("unreachable")  # pragma: no cover
+        finally:
+            dns.cookie.restore_edns_state(request, state)
 
     def query(
         self,
@@ -103,21 +191,92 @@ class Do53Nameserver(AddressAndPortNameserver):
                 one_rr_per_rrset=one_rr_per_rrset,
                 ignore_trailing=ignore_trailing,
             )
-        else:
-            response = dns.query.udp(
+        elif self.cookie_policy is not None and self.cookie_policy.enabled:
+            response = self._udp_query_with_cookie(
                 request,
-                self.address,
-                timeout=timeout,
-                port=self.port,
-                source=source,
-                source_port=source_port,
-                raise_on_truncation=True,
-                one_rr_per_rrset=one_rr_per_rrset,
-                ignore_trailing=ignore_trailing,
-                ignore_errors=True,
-                ignore_unexpected=True,
+                timeout,
+                source,
+                source_port,
+                one_rr_per_rrset,
+                ignore_trailing,
+                self.cookie_policy,
+            )
+        else:
+            response = self._udp_query(
+                request,
+                timeout,
+                source,
+                source_port,
+                one_rr_per_rrset,
+                ignore_trailing,
             )
         return response
+
+    async def _async_udp_query(
+        self,
+        request: dns.message.QueryMessage,
+        timeout: float,
+        source: str | None,
+        source_port: int,
+        one_rr_per_rrset: bool,
+        ignore_trailing: bool,
+        backend: dns.asyncbackend.Backend,
+    ) -> dns.message.Message:
+        return await dns.asyncquery.udp(
+            request,
+            self.address,
+            timeout=timeout,
+            port=self.port,
+            source=source,
+            source_port=source_port,
+            raise_on_truncation=True,
+            backend=backend,
+            one_rr_per_rrset=one_rr_per_rrset,
+            ignore_trailing=ignore_trailing,
+            ignore_errors=True,
+            ignore_unexpected=True,
+        )
+
+    async def _async_udp_query_with_cookie(
+        self,
+        request: dns.message.QueryMessage,
+        timeout: float,
+        source: str | None,
+        source_port: int,
+        one_rr_per_rrset: bool,
+        ignore_trailing: bool,
+        backend: dns.asyncbackend.Backend,
+        policy: dns.cookie.CookiePolicy,
+    ) -> dns.message.Message:
+        endpoint = policy.endpoint(self.address, self.port, source)
+        client_cookie = policy.client_cookie(endpoint)
+        deadline = time.time() + timeout
+        state = dns.cookie.save_edns_state(request)
+        try:
+            for attempt in range(2):
+                attempt_timeout = deadline - time.time()
+                if attempt_timeout <= 0:
+                    raise dns.exception.Timeout(timeout=timeout)
+                used_server_cookie = len(policy.server_cookie(endpoint)) > 0
+                dns.cookie.set_cookie_option(request, policy.request_cookie(endpoint))
+                response = await self._async_udp_query(
+                    request,
+                    attempt_timeout,
+                    source,
+                    source_port,
+                    one_rr_per_rrset,
+                    ignore_trailing,
+                    backend,
+                )
+                validation = policy.validate_response(response, endpoint, client_cookie)
+                if response.rcode() == dns.rcode.BADCOOKIE and attempt == 0:
+                    if used_server_cookie and validation.bound:
+                        continue
+                response.cookie_validation = validation
+                return response
+            raise AssertionError("unreachable")  # pragma: no cover
+        finally:
+            dns.cookie.restore_edns_state(request, state)
 
     async def async_query(
         self,
@@ -142,20 +301,26 @@ class Do53Nameserver(AddressAndPortNameserver):
                 one_rr_per_rrset=one_rr_per_rrset,
                 ignore_trailing=ignore_trailing,
             )
-        else:
-            response = await dns.asyncquery.udp(
+        elif self.cookie_policy is not None and self.cookie_policy.enabled:
+            response = await self._async_udp_query_with_cookie(
                 request,
-                self.address,
-                timeout=timeout,
-                port=self.port,
-                source=source,
-                source_port=source_port,
-                raise_on_truncation=True,
-                backend=backend,
-                one_rr_per_rrset=one_rr_per_rrset,
-                ignore_trailing=ignore_trailing,
-                ignore_errors=True,
-                ignore_unexpected=True,
+                timeout,
+                source,
+                source_port,
+                one_rr_per_rrset,
+                ignore_trailing,
+                backend,
+                self.cookie_policy,
+            )
+        else:
+            response = await self._async_udp_query(
+                request,
+                timeout,
+                source,
+                source_port,
+                one_rr_per_rrset,
+                ignore_trailing,
+                backend,
             )
         return response
 

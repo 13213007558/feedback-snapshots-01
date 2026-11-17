@@ -17,6 +17,7 @@
 
 """DNS stub resolver."""
 
+import copy
 import os
 import random
 import socket
@@ -30,6 +31,7 @@ from urllib.parse import urlparse
 
 import dns._ddr
 import dns._file_util
+import dns.cookie
 import dns.edns
 import dns.exception
 import dns.inet
@@ -281,6 +283,26 @@ class Answer:
         self.canonical_name = self.chaining_result.canonical_name
         self.rrset = self.chaining_result.answer
         self.expiration = time.time() + self.chaining_result.minimum_ttl
+        self._cookie_cacheable = False
+
+    @property
+    def cookie_bound(self) -> bool | None:
+        """Whether the response completed DNS Cookie binding.
+
+        ``True`` means the response echoed the client Cookie and contained a
+        server Cookie.  ``False`` means a Cookie policy accepted the response
+        without binding it (e.g. the server sent no server Cookie).
+        ``None`` means no Cookie policy was applied to the response.
+
+        This is an anti-spoofing signal about the response path, not an
+        authentication of the DNS data.  DNSSEC or a protected transport is
+        still required for that.
+        """
+
+        validation = dns.cookie.validation_for_message(self.response)
+        if validation is None:
+            return None
+        return validation.bound
 
     def __getattr__(self, attr):  # pragma: no cover
         if attr != "rrset" and self.rrset is not None:
@@ -703,6 +725,8 @@ class _Resolution:
                 answer = self.resolver.cache.get(
                     (self.qname, self.rdtype, self.rdclass)
                 )
+                if answer is not None and not self._cache_entry_usable(answer):
+                    answer = None
                 if answer is not None:
                     if answer.rrset is None and self.raise_on_no_answer:
                         raise NoAnswer(response=answer.response)
@@ -711,6 +735,8 @@ class _Resolution:
                 answer = self.resolver.cache.get(
                     (self.qname, dns.rdatatype.ANY, self.rdclass)
                 )
+                if answer is not None and not self._cache_entry_usable(answer):
+                    answer = None
                 if answer is not None and answer.response.rcode() == dns.rcode.NXDOMAIN:
                     # cached NXDOMAIN; record it and continue to next
                     # name.
@@ -738,6 +764,7 @@ class _Resolution:
                 self.resolver._nameservers,
                 self.resolver.nameserver_ports,
                 self.resolver.port,
+                self.resolver.cookie_policy,
             )
             if self.resolver.rotate:
                 random.shuffle(self.nameservers)
@@ -757,6 +784,42 @@ class _Resolution:
         # before now.)
         #
         raise NXDOMAIN(qnames=self.qnames_to_try, responses=self.nxdomain_responses)
+
+    def _cookie_policy_active(self) -> bool:
+        policy = self.resolver.cookie_policy
+        if policy is not None and policy.enabled:
+            return True
+        # A caller may assign a policy to an individual Do53Nameserver
+        # instead of the resolver.  Cache reads happen before a nameserver is
+        # selected, so inspect the configured nameservers.
+        for nameserver in self.resolver._nameservers:
+            if isinstance(nameserver, dns.nameserver.Do53Nameserver):
+                ns_policy = nameserver.cookie_policy
+                if ns_policy is not None and ns_policy.enabled:
+                    return True
+        return False
+
+    def _cache_entry_usable(self, answer: Answer) -> bool:
+        # A cache entry is usable only if it was explicitly marked as
+        # cacheable under the Cookie policy in effect when it was stored.
+        # Entries created before a policy was configured have no marker and
+        # are treated as misses.
+        if not self._cookie_policy_active():
+            return True
+        return answer._cookie_cacheable is True
+
+    def _response_cacheable(self, response: dns.message.Message) -> bool:
+        # A Cookie policy protects unprotected Do53 UDP exchanges.  A Do53
+        # UDP response that the policy accepted without binding it must not
+        # enter the answer cache.  TCP fallback and DoT/DoH/DoQ have their
+        # own transport protection and keep their normal cache behavior.
+        if not self._cookie_policy_active():
+            return True
+        assert self.nameserver is not None
+        if self.tcp_attempt or self.nameserver.kind() != "Do53":
+            return True
+        validation = dns.cookie.validation_for_message(response)
+        return validation is not None and validation.bound
 
     def next_nameserver(self) -> tuple[dns.nameserver.Nameserver, bool, float]:
         if self.retry_with_tcp:
@@ -841,7 +904,11 @@ class _Resolution:
                 self.nameservers.remove(self.nameserver)
                 return (None, False)
             if self.resolver.cache:
-                self.resolver.cache.put((self.qname, self.rdtype, self.rdclass), answer)
+                answer._cookie_cacheable = self._response_cacheable(response)
+                if answer._cookie_cacheable:
+                    self.resolver.cache.put(
+                        (self.qname, self.rdtype, self.rdclass), answer
+                    )
             if answer.rrset is None and self.raise_on_no_answer:
                 raise NoAnswer(response=answer.response)
             return (answer, True)
@@ -867,9 +934,11 @@ class _Resolution:
                 return (None, False)
             self.nxdomain_responses[self.qname] = response
             if self.resolver.cache:
-                self.resolver.cache.put(
-                    (self.qname, dns.rdatatype.ANY, self.rdclass), answer
-                )
+                answer._cookie_cacheable = self._response_cacheable(response)
+                if answer._cookie_cacheable:
+                    self.resolver.cache.put(
+                        (self.qname, dns.rdatatype.ANY, self.rdclass), answer
+                    )
             # Make next_nameserver() return None, so caller breaks its
             # inner loop and calls next_request().
             return (None, True)
@@ -930,6 +999,7 @@ class BaseResolver:
     retry_servfail: bool
     rotate: bool
     ndots: int | None
+    cookie_policy: dns.cookie.CookiePolicy | None
     _nameservers: Sequence[str | dns.nameserver.Nameserver]
 
     def __init__(
@@ -982,6 +1052,7 @@ class BaseResolver:
         self.retry_servfail = False
         self.rotate = False
         self.ndots = None
+        self.cookie_policy = None
 
     def read_resolv_conf(self, f: str | os.PathLike | TextIO) -> None:
         """Process *f* as a file in the /etc/resolv.conf format.  If *f* is
@@ -1189,6 +1260,7 @@ class BaseResolver:
         nameservers: Sequence[str | dns.nameserver.Nameserver],
         nameserver_ports: dict[str, int],
         default_port: int,
+        cookie_policy: dns.cookie.CookiePolicy | None = None,
     ) -> list[dns.nameserver.Nameserver]:
         enriched_nameservers = []
         if isinstance(nameservers, list | tuple):
@@ -1196,10 +1268,17 @@ class BaseResolver:
                 enriched_nameserver: dns.nameserver.Nameserver
                 if isinstance(nameserver, dns.nameserver.Nameserver):
                     enriched_nameserver = nameserver
+                    if (
+                        cookie_policy is not None
+                        and isinstance(nameserver, dns.nameserver.Do53Nameserver)
+                        and nameserver.cookie_policy is None
+                    ):
+                        enriched_nameserver = copy.copy(nameserver)
+                        enriched_nameserver.cookie_policy = cookie_policy
                 elif dns.inet.is_address(nameserver):
                     port = nameserver_ports.get(nameserver, default_port)
                     enriched_nameserver = dns.nameserver.Do53Nameserver(
-                        nameserver, port
+                        nameserver, port, cookie_policy
                     )
                 else:
                     try:

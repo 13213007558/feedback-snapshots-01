@@ -42,6 +42,8 @@ will create a :py:class:`dns.edns.ECSOption` object to represent it.
 .. autoclass:: dns.edns.CookieOption
    :members:
 
+See :ref:`cookie` for the resolver's DNS Cookie policy.
+
 .. autoclass:: dns.edns.ReportChannelOption
    :members:
 
