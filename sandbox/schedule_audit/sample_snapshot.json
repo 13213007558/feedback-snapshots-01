@@ -1,0 +1,87 @@
+{
+  "evaluation-instant": "2026-12-25T10:30:00+08:00",
+  "objects": [
+    {
+      "object-identifier": "calendar,1",
+      "object-name": "Holiday-Calendar",
+      "object-type": "calendar",
+      "present-value": false,
+      "date-list": [
+        {"date": "2026-12-25"},
+        {"date-range": {"start-date": "2027-01-01", "end-date": "2027-01-03"}}
+      ]
+    },
+    {
+      "object-identifier": "schedule,1",
+      "object-name": "Office-Hours-Schedule",
+      "object-type": "schedule",
+      "present-value": 0,
+      "effective-period": {"start-date": "2026-01-01", "end-date": "2027-12-31"},
+      "weekly-schedule": [
+        {"day-schedule": [
+          {"time": "08:00:00.0", "value": 1},
+          {"time": "17:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "08:00:00.0", "value": 1},
+          {"time": "17:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "08:00:00.0", "value": 1},
+          {"time": "17:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "08:00:00.0", "value": 1},
+          {"time": "17:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "08:00:00.0", "value": 1},
+          {"time": "17:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "00:00:00.0", "value": 0}
+        ]},
+        {"day-schedule": [
+          {"time": "00:00:00.0", "value": 0}
+        ]}
+      ],
+      "exception-schedule": [
+        {
+          "period": {"calendar-reference": "calendar,1"},
+          "list-of-time-values": [
+            {"time": "00:00:00.0", "value": 0}
+          ],
+          "event-priority": 1
+        }
+      ],
+      "schedule-default": 0,
+      "list-of-object-property-references": [
+        {
+          "object-identifier": "binary-value,1",
+          "property-identifier": "presentValue"
+        }
+      ],
+      "priority-for-writing": 10,
+      "status-flags": [0, 0, 0, 0],
+      "reliability": "no-fault-detected",
+      "out-of-service": false
+    }
+  ],
+  "points": [
+    {
+      "object-identifier": "binary-value,1",
+      "object-name": "occupied-bv",
+      "out-of-service": false,
+      "present-value": "active",
+      "current-command-priority": 8,
+      "relinquish-default": "inactive",
+      "priority-array": [
+        null, null, null, null, null, null, null,
+        {"enumerated": "active"},
+        null,
+        {"enumerated": "inactive"},
+        null, null, null, null, null, null
+      ]
+    }
+  ]
+}
