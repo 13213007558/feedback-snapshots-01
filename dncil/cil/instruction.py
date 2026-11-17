@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, Any, Union, Optional, cast
 from dncil.cil.enums import OpCodeValue, OperandType
 
 if TYPE_CHECKING:
-    from dncil.clr.local import Local
     from dncil.clr.token import Token
     from dncil.cil.opcode import OpCode
-    from dncil.clr.argument import Argument
+
+from dncil.clr.local import Local
+from dncil.clr.argument import Argument
 
 
 class Instruction:
@@ -261,8 +262,8 @@ class Instruction:
         return self.opcode.value in (
             OpCodeValue.Ldloc,
             OpCodeValue.Ldloc_0,
-            OpCodeValue.Ldarg_1,
-            OpCodeValue.Ldarg_2,
+            OpCodeValue.Ldloc_1,
+            OpCodeValue.Ldloc_2,
             OpCodeValue.Ldloc_3,
             OpCodeValue.Ldloc_S,
             OpCodeValue.Ldloca,
