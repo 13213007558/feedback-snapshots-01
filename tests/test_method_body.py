@@ -14,7 +14,7 @@ from dncil.cil.body import CilMethodBody
 from dncil.cil.enums import CorILMethod, OpCodeValue
 from dncil.cil.error import MethodBodyFormatError
 from dncil.clr.token import Token
-from dncil.cil.body.reader import CilMethodBodyReaderBytes
+from dncil.cil.body.reader import CilMethodBodyReaderBytes, read_method_body_from_bytes, read_partial_method_body_from_bytes
 
 """
 .method private hidebysig static
@@ -195,3 +195,182 @@ def test_read_fat_header_exception_handlers():
     assert body.exception_handlers[0].handler_end == 0x19
     assert isinstance(body.exception_handlers[0].catch_type, Token)
     assert body.exception_handlers[1].is_finally()
+
+
+def test_partial_parses_complete_method_body():
+    body = read_partial_method_body_from_bytes(method_body_fat)
+
+    assert body.parse_mode == "partial"
+    assert body.is_complete
+    assert not body.is_partial
+    assert body.issues == []
+    assert body.size == len(method_body_fat)
+    assert body.declared_size == len(method_body_fat)
+    assert len(body.instructions) == 0xB
+    assert len(body.exception_handlers) == 0x2
+    assert body.get_bytes() == method_body_fat
+
+    report = body.get_parse_report()
+    assert report["status"] == "complete"
+    assert report["complete"] is True
+    assert report["issues"] == []
+
+
+def test_partial_truncated_fat_header_keeps_nothing_unconfirmed():
+    # the fat header declares 12 bytes; cut it off after 8
+    truncated = method_body_fat[:8]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert not body.is_complete
+    assert not body.header_parsed
+    assert body.header_size == 0
+    assert body.code_size == 0
+    assert body.instructions == []
+    assert body.exception_handlers == []
+
+    issue = body.issues[0]
+    assert issue.kind == "header"
+    assert issue.reason == "truncated_fat_header"
+    assert issue.confirmed_end == 0
+    assert issue.unconfirmed_start == 0
+    assert issue.unconfirmed_end == 0xC
+    assert issue.error_offset == 0x8
+
+    report = body.get_parse_report()
+    assert report["status"] == "partial"
+    assert report["complete"] is False
+    assert report["confirmed_end"] == 0
+
+
+def test_partial_truncated_long_operand_drops_partial_instruction():
+    # keep the ldstr opcode and 3 of its 4 operand bytes; the next instruction must not be
+    # scanned for from the trailing bytes
+    truncated = method_body_fat[:0x10]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert not body.is_complete
+    assert body.instructions == []
+
+    issue = body.issues[0]
+    assert issue.kind == "instructions"
+    assert issue.reason == "truncated_operand"
+    assert issue.confirmed_end == 0xC
+    assert issue.unconfirmed_start == 0xC
+    assert issue.unconfirmed_end == 0x31
+    assert issue.error_offset == 0xD
+    assert issue.required == 4
+    assert issue.available == 3
+
+
+def test_partial_truncated_instruction_prefix():
+    # the ldstr instruction (5 bytes at 0xC) is complete; the next opcode is missing
+    truncated = method_body_fat[:0x11]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert not body.is_complete
+    assert len(body.instructions) == 1
+    assert body.instructions[0].offset == 0xC
+    assert body.instructions[0].mnemonic == "ldstr"
+    assert body.instructions[0].get_bytes() == method_body_fat[0xC:0x11]
+
+    issue = body.issues[0]
+    assert issue.reason == "truncated_opcode"
+    assert issue.confirmed_end == 0x11
+    assert issue.error_offset == 0x11
+
+
+def test_partial_missing_exception_handler_table():
+    # keep all instructions and the alignment padding, but drop the EH table
+    truncated = method_body_fat[:0x34]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert not body.is_complete
+    assert len(body.instructions) == 0xB
+    assert body.exception_handlers == []
+
+    issue = body.issues[0]
+    assert issue.kind == "exception_handlers"
+    assert issue.reason == "missing_exception_handlers"
+    assert issue.confirmed_end == 0x31
+    assert issue.error_offset == 0x34
+
+
+def test_partial_truncated_exception_handler_table():
+    # the tiny EH header declares two 12-byte clauses. Keep the header and one clause.
+    truncated = method_body_fat[:0x34 + 4 + 12]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert not body.is_complete
+    assert len(body.exception_handlers) == 1
+    assert body.exception_handlers[0].is_catch()
+
+    issue = body.issues[0]
+    assert issue.kind == "exception_handlers"
+    assert issue.reason == "truncated_exception_handlers"
+    assert issue.confirmed_end == 0x34 + 4 + 12
+    assert issue.unconfirmed_start == issue.confirmed_end
+    assert issue.unconfirmed_end == 0x50
+
+
+def test_partial_instruction_cannot_cross_declared_code_size():
+    # shrink code_size so the final "call" operand would run into the EH section.
+    # the strict parser must reject, and the partial parser must not claim complete.
+    data = bytearray(method_body_fat)
+    data[4] = 0x22
+
+    with pytest.raises(MethodBodyFormatError):
+        _ = CilMethodBody(CilMethodBodyReaderBytes(bytes(data)))
+
+    body = read_partial_method_body_from_bytes(bytes(data))
+    assert not body.is_complete
+    assert body.code_size == 0x22
+    assert len(body.instructions) == 8
+    assert body.instructions[-1].offset + body.instructions[-1].size == 0x2A
+
+    issue = body.issues[0]
+    assert issue.reason == "instruction_exceeds_code_size"
+    assert issue.error_offset == 0x2B
+    assert issue.confirmed_end == 0x2A
+    assert issue.unconfirmed_end == 0x2E
+
+
+def test_partial_does_not_modify_declared_code_size():
+    truncated = method_body_fat[:0x11]
+    body = read_partial_method_body_from_bytes(truncated)
+
+    assert body.code_size == 0x25
+    assert body.size == len(truncated)
+    assert body.size < body.header_size + body.code_size
+    assert body.get_instruction_bytes() == truncated[body.header_size :]
+
+
+def test_strict_reader_still_rejects_truncated_methods():
+    for truncated in (
+        method_body_fat[:8],
+        method_body_fat[:0x10],
+        method_body_fat[:0x34],
+        method_body_fat[:0x34 + 4 + 12],
+    ):
+        with pytest.raises(MethodBodyFormatError):
+            _ = read_method_body_from_bytes(truncated)
+
+        with pytest.raises(MethodBodyFormatError):
+            _ = CilMethodBody(CilMethodBodyReaderBytes(truncated))
+
+
+def test_partial_reports_first_error_offset_for_each_stage():
+    cases = {
+        "header": (method_body_fat[:8], "truncated_fat_header", 0x8),
+        "operand": (method_body_fat[:0x10], "truncated_operand", 0xD),
+        "exception_table": (method_body_fat[:0x34], "missing_exception_handlers", 0x34),
+    }
+
+    for stage, (data, reason, error_offset) in cases.items():
+        body = read_partial_method_body_from_bytes(data)
+        report = body.get_parse_report()
+
+        assert report["status"] == "partial", stage
+        assert report["complete"] is False, stage
+        assert report["issues"][0]["reason"] == reason, stage
+        assert report["first_error_offset"] == error_offset, stage
+        assert body.issues[0].reason == reason, stage

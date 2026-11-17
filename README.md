@@ -92,6 +92,38 @@ True
 00000000: 01 00 00 70                                       ...p
 ```
 
+## Truncated method bodies
+
+Strict parsing remains the default. Any truncated or malformed method body raises
+`MethodBodyFormatError`, so existing callers keep rejecting bad methods.
+
+For forensic use cases where the tail of a managed method is missing, opt in to partial
+parsing. It keeps every instruction whose bytes were fully acquired and records where
+parsing stopped instead of resynchronizing on later bytes that happen to look like an
+opcode.
+
+```Python
+from dncil.cil.body.reader import read_method_body_from_bytes
+
+body = read_method_body_from_bytes(truncated_bytes, partial=True)
+
+body.is_complete        # False
+body.code_size          # unchanged declared size
+body.size               # bytes actually acquired, not the declared size
+body.instructions       # only boundary-complete instructions
+for issue in body.issues:
+    issue.kind          # "header", "instructions" or "exception_handlers"
+    issue.reason        # e.g. "truncated_operand", "truncated_fat_header"
+    issue.error_offset  # first read that failed
+    issue.confirmed_end # end of the confirmed prefix
+    issue.unconfirmed_start, issue.unconfirmed_end  # range that was not confirmed
+```
+
+`body.get_parse_report()` exports the same data as a JSON-friendly dict with an explicit
+`status` of `"complete"` or `"partial"`. Partial results always set `complete: false`, so they
+cannot be mistaken for a whole method. `scripts/print_cil_from_bytes.py` accepts `--partial`
+and `--json` to print the acquired instructions and the parse report.
+
 ## Installing
 
 To install `dncil` use `pip` to fetch the `dncil` module:

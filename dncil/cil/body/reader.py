@@ -45,6 +45,10 @@ class CilMethodBodyReaderBase(abc.ABC):
         """jump to stream to offset"""
         ...
 
+    def available(self) -> Optional[int]:
+        """get the number of bytes in the backing stream, if known"""
+        return None
+
     def _unpack(self, data_format: str) -> Tuple[Union[int, float], bytes]:
         """unpack bytes"""
         unpack_size: int = struct.calcsize(data_format)
@@ -52,10 +56,17 @@ class CilMethodBodyReaderBase(abc.ABC):
         try:
             unpack_bytes: bytes = self.read(unpack_size)
         except Exception as e:
-            raise MethodBodyFormatError("unable to read 0x%X bytes @ offset 0x%X" % (unpack_size, curr_off))
+            raise MethodBodyFormatError(
+                "unable to read 0x%X bytes @ offset 0x%X" % (unpack_size, curr_off),
+                offset=curr_off,
+                required=unpack_size,
+            ) from e
         if unpack_bytes == b"" or len(unpack_bytes) != unpack_size:
             raise MethodBodyFormatError(
-                "not enough data while parsing method body @ offset 0x%X" % (self.tell() - len(unpack_bytes))
+                "not enough data while parsing method body @ offset 0x%X" % (self.tell() - len(unpack_bytes)),
+                offset=curr_off,
+                required=unpack_size,
+                available=len(unpack_bytes),
             )
         return struct.unpack(data_format, unpack_bytes)[0], unpack_bytes
 
@@ -270,23 +281,31 @@ class CilMethodBodyReaderBase(abc.ABC):
         opcode: OpCode
         opcode_bytes: bytes
 
-        op_value_first, op_byte_first = self.read_uint8()
+        try:
+            op_value_first, op_byte_first = self.read_uint8()
+        except MethodBodyFormatError as e:
+            raise e.annotate("opcode")
 
         if op_value_first == 0xFE:
             # 2-byte opcode
-            op_value_second, op_byte_second = self.read_uint8()
+            try:
+                op_value_second, op_byte_second = self.read_uint8()
+            except MethodBodyFormatError as e:
+                raise e.annotate("opcode")
             try:
                 opcode = CIL_OPCODES.two_byte_op_codes[op_value_second]
                 opcode_bytes = op_byte_first + op_byte_second
             except IndexError:
-                raise MethodBodyFormatError("bad opcode %02X%02X" % (op_value_first, op_value_second))
+                raise MethodBodyFormatError(
+                    "bad opcode %02X%02X" % (op_value_first, op_value_second), reason="bad_opcode"
+                )
         else:
             # 1-byte opcode
             try:
                 opcode = CIL_OPCODES.one_byte_op_codes[op_value_first]
                 opcode_bytes = op_byte_first
             except IndexError:
-                raise MethodBodyFormatError("bad opcode %02X" % op_value_first)
+                raise MethodBodyFormatError("bad opcode %02X" % op_value_first, reason="bad_opcode")
 
         return opcode, opcode_bytes
 
@@ -315,15 +334,45 @@ class CilMethodBodyReaderBase(abc.ABC):
         reader: Optional[Callable] = readers.get(insn.opcode.operand_type, None)
 
         if reader is None:
-            raise MethodBodyFormatError("bad operand type 0x%02X" % insn.opcode.operand_type)
+            raise MethodBodyFormatError("bad operand type 0x%02X" % insn.opcode.operand_type, reason="bad_operand")
 
-        return reader(insn)
+        try:
+            return reader(insn)
+        except MethodBodyFormatError as e:
+            raise e.annotate("operand")
+
+
+class LimitedMethodBodyReader(CilMethodBodyReaderBase):
+    """reader that refuses to hand out bytes at or beyond a fixed offset"""
+
+    def __init__(self, reader: CilMethodBodyReaderBase, limit: int):
+        self.reader: CilMethodBodyReaderBase = reader
+        self.limit: int = limit
+
+    def read(self, n: int) -> bytes:
+        remaining: int = self.limit - self.reader.tell()
+        if remaining <= 0:
+            return b""
+        return self.reader.read(min(n, remaining))
+
+    def tell(self) -> int:
+        return self.reader.tell()
+
+    def seek(self, loc: int) -> int:
+        return self.reader.seek(loc)
+
+    def available(self) -> Optional[int]:
+        available: Optional[int] = self.reader.available()
+        if available is None:
+            return None
+        return min(available, self.limit)
 
 
 class CilMethodBodyReaderBytes(CilMethodBodyReaderBase):
     """bytestream impl for abstract CilMethodBodyReaderBase"""
 
     def __init__(self, bs: bytes):
+        self.data: bytes = bs
         self.stream: io.BytesIO = io.BytesIO(bs)
 
     def read(self, n: int) -> bytes:
@@ -335,7 +384,21 @@ class CilMethodBodyReaderBytes(CilMethodBodyReaderBase):
     def seek(self, loc: int) -> int:
         return self.stream.seek(loc)
 
+    def available(self) -> Optional[int]:
+        return len(self.data)
 
-def read_method_body_from_bytes(bio: bytes) -> CilMethodBody:
-    """read managed method body from byte stream"""
-    return CilMethodBody(CilMethodBodyReaderBytes(bio))
+
+def read_method_body_from_bytes(bio: bytes, partial: bool = False) -> CilMethodBody:
+    """read managed method body from byte stream
+
+    strict parsing is the default and raises MethodBodyFormatError for malformed or
+    truncated input. Pass partial=True to keep the confirmed prefix instead; the
+    returned method body then reports is_complete == False and describes the
+    unconfirmed remainder through its issues.
+    """
+    return CilMethodBody(CilMethodBodyReaderBytes(bio), partial=partial)
+
+
+def read_partial_method_body_from_bytes(bio: bytes) -> CilMethodBody:
+    """read a managed method body, keeping the confirmed prefix when the input is truncated"""
+    return CilMethodBody(CilMethodBodyReaderBytes(bio), partial=True)
