@@ -10,6 +10,7 @@ import argparse
 
 from dncil.cil.body import reader
 from dncil.cil.error import MethodBodyFormatError
+from dncil.cil.prefix import format_report
 
 
 def main(args):
@@ -25,9 +26,18 @@ def main(args):
     for insn in dn_body.instructions:
         print(insn)
 
+    if args.prefixes:
+        print()
+        print(format_report(dn_body.analyze_prefixes()))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Print IL from the raw bytes of a managed method")
     parser.add_argument("path", type=str, help="Full path to file containing raw bytes of managed method")
+    parser.add_argument(
+        "--prefixes",
+        action="store_true",
+        help="print structural prefix-group evidence (groups, bindings, issues)",
+    )
 
     main(parser.parse_args())

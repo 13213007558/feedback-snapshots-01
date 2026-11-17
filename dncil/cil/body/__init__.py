@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, List, Optional
 if TYPE_CHECKING:
     from dncil.cil.instruction import Instruction
     from dncil.cil.body.reader import CilMethodBodyReaderBase
+    from dncil.cil.prefix import PrefixReport
 
 from dncil.cil.enums import CorILMethod, CorILMethodSect
 from dncil.cil.error import MethodBodyFormatError
@@ -74,6 +75,18 @@ class CilMethodBody:
     def get_exception_handler_bytes(self) -> bytes:
         """get method exception handler bytes"""
         return self.raw_bytes[self.header_size + self.code_size :]
+
+    def analyze_prefixes(self) -> PrefixReport:
+        """build read-only structural evidence for CIL prefix groups.
+
+        Every instruction in ``self.instructions`` is preserved as-is; the
+        returned report only adds grouping, bindings and structural issues.
+        A structurally consistent report is not a safety proof.
+        """
+        from dncil.cil.prefix import analyze_prefix_groups
+
+        code_start = self.offset + self.header_size if self.instructions else None
+        return analyze_prefix_groups(self.instructions, self.exception_handlers, code_start)
 
     def parse_header(self, reader: CilMethodBodyReaderBase):
         """get method body header"""

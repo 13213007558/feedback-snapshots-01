@@ -92,6 +92,25 @@ True
 00000000: 01 00 00 70                                       ...p
 ```
 
+### Prefix groups
+
+CIL prefix instructions such as `constrained.` and `tail.` decode as standalone instructions, but they constrain the operation that follows them. `CilMethodBody.analyze_prefixes()` returns read-only structural evidence for these groups without changing the method body or its instructions:
+
+```Python
+>  report = main_method_body.analyze_prefixes()
+>  report.structurally_consistent
+True
+>  group = report.groups[0]
+>  group.start, group.operation.offset
+(4, 12)
+>  [binding.operation for binding in group.bindings]
+[...]
+```
+
+Each group keeps every original `Instruction` and points each prefix at the operation it constrains. The report records duplicate prefixes, canonical-order violations, trailing prefixes with no operation, prefixes applied to operations they cannot modify, and control flow (branches, `switch` targets, exception-region starts) that enters a group after its first prefix. `PrefixReport.to_dict()` and `format_report()` expose the same evidence with original offsets.
+
+This check is structural only. It does not execute IL, does not modify the method body, and a consistent report is not a claim that an assembly is safe to execute.
+
 ## Installing
 
 To install `dncil` use `pip` to fetch the `dncil` module:

@@ -162,6 +162,12 @@ class Instruction:
         """check if instruction is load string"""
         return self.opcode.value in (OpCodeValue.Ldstr,)
 
+    def is_prefix(self) -> bool:
+        """check if instruction is a CIL prefix that constrains a following operation"""
+        from dncil.cil.prefix import is_prefix
+
+        return is_prefix(self)
+
     def is_ldc(self) -> bool:
         """check if instruction is load constant"""
         return self.opcode.value in (
