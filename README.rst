@@ -75,6 +75,10 @@ attribute of a dnPE object.
     res_hash = set()
     # access the resources
     for r in pe.net.resources:
+        # external references and unreadable embedded resources have no bytes:
+        # data is None and origin/status record why
+        if not r.extracted:
+            continue
         # if resource data is a simple byte stream
         if isinstance(r.data, bytes):
             # hash it and add the hash to the set
@@ -87,7 +91,8 @@ attribute of a dnPE object.
                 continue
             # for each entry in the ResourceSet
             for entry in r.data.entries:
-                # if it has data
+                # only decoded/raw entries have bytes; failures are reported
+                # on the entry and do not make the whole set look complete
                 if entry.data:
                     # hash it and add the hash to the set
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())

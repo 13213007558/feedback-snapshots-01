@@ -875,3 +875,44 @@ class DateTimeKind(_enum.IntEnum):
     Utc = 1
     Local = 2
     LocalAmbiguousDst = 3
+
+
+class ResourceOrigin(_enum.Enum):
+    """
+    Where a ManifestResource row declares its content to live.
+
+    Internal resources are stored in this file.  File and Assembly resources
+    are external references: their bytes are not part of the current file and
+    are never fetched automatically.
+    """
+    Internal = "internal"
+    File = "file"
+    Assembly = "assembly"
+    External = "external"  # other external reference (e.g. ExportedType)
+
+
+class ResourceStatus(_enum.Enum):
+    """
+    The outcome of trying to obtain a resource's bytes.
+
+    Extracted means the bytes are present in `data`.  ExternalMissing means
+    the resource is a declared external reference and no content was supplied.
+    Unreadable means the resource is declared internal but its bytes could not
+    be read.  Partial means bytes were extracted, but at least one entry or
+    decode step failed.
+    """
+    Extracted = "extracted"
+    Partial = "partial"
+    ExternalMissing = "external-missing"
+    Unreadable = "unreadable"
+
+
+class ResourceEntryStatus(_enum.Enum):
+    """The outcome of decoding one entry within an embedded ResourceSet."""
+
+    Decoded = "decoded"          # a typed value was decoded
+    Raw = "raw"                  # raw payload bytes retained; no typed value
+    Empty = "empty"              # declared as the Null resource type
+    Unsupported = "unsupported"  # recognized type, but no decoder is available
+    Invalid = "invalid"          # type code or payload is not valid
+    Failed = "failed"            # entry metadata or payload could not be read

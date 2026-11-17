@@ -1001,14 +1001,50 @@ class ClrMetaDataTable(Generic[RowType]):
 
 
 class ClrResource(abc.ABC):
+    """
+    A .NET manifest resource.
+
+    `name` is the display name declared by the ManifestResource row.  A file
+    may declare both an embedded and an external resource with the same
+    display name, so callers must not use it as a unique key.  `origin`
+    identifies where the content is declared to live and `status` reports
+    whether this parser actually obtained it.
+
+    `data` is None whenever the bytes were not obtained.  It is never set to
+    an empty placeholder to represent an external or unreadable resource.
+    """
+
+    origin: enums.ResourceOrigin
+    status: enums.ResourceStatus
+
     def __init__(self, name: str, public: bool = False, private: bool = False):
         self.name: str = name
         self.public: bool = public
         self.private: bool = private
         self.data: Optional[bytes] = None
+        # non-fatal problems encountered while extracting or decoding
+        self.problems: List[str] = list()
+        # a single fatal reason why `data` (or part of it) is unavailable
+        self.error: Optional[str] = None
 
     def set_data(self, data: bytes):
         self.data = data
+
+    @property
+    def extracted(self) -> bool:
+        """True when bytes for this resource are present in `data`."""
+        return self.data is not None
+
+    @property
+    def complete(self) -> bool:
+        """True only when content was extracted and decoded without problems."""
+        if not self.extracted:
+            return False
+        if self.problems:
+            return False
+        if isinstance(self.data, bytes):
+            return True
+        return bool(getattr(self.data, "complete", True))
 
     @abc.abstractmethod
     def parse(self):

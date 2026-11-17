@@ -5,6 +5,11 @@ History
 0.18.0 (2026)
 -------------
 
+* FEATURE: resource provenance: every ManifestResource row now yields an InternalResource,
+  FileResource, or AssemblyResource with `origin`/`status`; external references are never
+  silently empty and their files are not opened automatically
+* FEATURE: ResourceSet entries retain type code, offsets, decode status, and source; a bad
+  entry no longer aborts the set or makes partial extraction look complete
 * BUGFIX: sanity check value of mdtable num_rows value; do not process if larger than stream size
 * FEATURE: UserString objects, add ability to set string decode error option
 * add py 3.10 and 3.11 to supported versions list

@@ -559,50 +559,79 @@ class ClrData(DataContainer):
 
         This is separate from `ClrData.__init__` to allow for mdtable lazy-loading since
         parsing `ManifestResourceRow.Implementation` requires all tables to be loaded.
+
+        Every ManifestResource row produces an object in `self.resources`,
+        including external references and embedded resources whose bytes
+        could not be read.  `origin` and `status` record which is which; the
+        external bytes are never fetched from another file.
         """
         self._resources = []
-        # parse the resources
-        if self.struct.ResourcesRva > 0 and self.mdtables and self.mdtables.ManifestResource and self.mdtables.ManifestResource.num_rows > 0:
-            # for each row
-            for row in self.mdtables.ManifestResource.rows:
-                # TODO: handle external resources
-                if row.Implementation is None:
-                    # internal resource, embedded in this file
-                    rva = self.struct.ResourcesRva + row.Offset
-                    try:
-                        buf = pe.get_data(rva, 4)
-                    except PEFormatError as e:
-                        # warn
-                        pe.add_warning("CLR resource parse error, expected more data at rva 0x{:02x}".format(rva))
-                        continue
-                    if not buf or len(buf) < 4:
-                        # warn
-                        pe.add_warning("CLR resource parse error, expected at least 4 bytes at rva 0x{:02x}".format(rva))
-                        continue
-                    size = int.from_bytes(buf, byteorder="little")
-                    rsrc_rva = rva + 4
-                    try:
-                        rdata = pe.get_data(rsrc_rva, size)
-                    except PEFormatError as e:
-                        # warn
-                        pe.add_warning("CLR resource parse error, expected more data at rva 0x{:02x}".format(rsrc_rva))
-                        continue
-                    if not rdata or len(rdata) < size:
-                        pe.add_warning("CLR resource parse error, expected more data at rva 0x{:02x}".format(rsrc_rva))
-                        continue
-                    res = resource.InternalResource(row.Name, row.Flags.mrPublic, row.Flags.mrPrivate)
-                    res.rva = rsrc_rva
-                    res.size = size
-                    res.data = rdata
-                    self._resources.append(res)
-            for rsrc in self._resources:
-                try:
-                    rsrc.parse()
-                except errors.dnFormatError as e:
-                    if isinstance(rsrc, resource.InternalResource):
-                        pe.add_warning("CLR resource parse error for '{}' at 0x{:02x}: {}".format(rsrc.name, rsrc.rva, str(e)))
-                    else:
-                        pe.add_warning("CLR resource parse error for '{}': {}".format(rsrc.name, str(e)))
+        if not (self.mdtables and self.mdtables.ManifestResource and self.mdtables.ManifestResource.num_rows > 0):
+            return
+
+        for row in self.mdtables.ManifestResource.rows:
+            if row is None:
+                continue
+            try:
+                res = resource.create_resource(row)
+            except (IndexError, TypeError, ValueError) as e:
+                pe.add_warning("CLR resource row could not be resolved: {}".format(e))
+                continue
+            self._resources.append(res)
+            if isinstance(res, resource.InternalResource):
+                self._read_internal_resource(pe, row, res)
+
+        for res in self._resources:
+            try:
+                res.parse()
+            except errors.dnFormatError as e:
+                res.status = resource.ResourceStatus.Unreadable
+                res.error = str(e)
+                pe.add_warning("CLR resource parse error for '{}' (origin: {}): {}".format(
+                    res.name, res.origin.value, str(e)))
+                continue
+            for problem in res.problems:
+                pe.add_warning("CLR resource parse warning for '{}' (origin: {}): {}".format(
+                    res.name, res.origin.value, problem))
+
+    def _read_internal_resource(self, pe, row, res):
+        """Read an embedded resource's length-prefixed bytes from this file."""
+        if not self.struct.ResourcesRva:
+            # No resource directory is declared, so there is nowhere in this
+            # file to read from.  Keep the row visible but not extracted.
+            res.error = "CLR header declares no resource directory"
+            pe.add_warning("CLR resource parse error for '{}' (origin: internal): {}".format(res.name, res.error))
+            return
+        rva = self.struct.ResourcesRva + row.Offset
+        try:
+            buf = pe.get_data(rva, 4)
+        except PEFormatError:
+            res.error = "expected resource length at rva 0x{:02x}".format(rva)
+            pe.add_warning("CLR resource parse error for '{}' (origin: internal): {}".format(res.name, res.error))
+            return
+        if not buf or len(buf) < 4:
+            res.error = "expected at least 4 bytes at rva 0x{:02x}".format(rva)
+            pe.add_warning("CLR resource parse error for '{}' (origin: internal): {}".format(res.name, res.error))
+            return
+        size = int.from_bytes(buf, byteorder="little")
+        rsrc_rva = rva + 4
+        try:
+            rdata = pe.get_data(rsrc_rva, size)
+        except PEFormatError:
+            res.error = "expected {} bytes at rva 0x{:02x}".format(size, rsrc_rva)
+            pe.add_warning("CLR resource parse error for '{}' (origin: internal): {}".format(res.name, res.error))
+            return
+        if rdata is None or len(rdata) < size:
+            res.error = "expected {} bytes at rva 0x{:02x}".format(size, rsrc_rva)
+            pe.add_warning("CLR resource parse error for '{}' (origin: internal): {}".format(res.name, res.error))
+            return
+        res.rva = rsrc_rva
+        res.size = size
+        try:
+            res.file_offset = pe.get_offset_from_rva(rsrc_rva)
+        except Exception:
+            res.file_offset = None
+        res.set_data(rdata)
 
 
 class ClrStreamFactory(object):
