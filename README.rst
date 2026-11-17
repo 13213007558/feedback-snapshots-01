@@ -93,6 +93,40 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+Custom Attributes
+-----------------
+
+Custom attribute payloads can be interpreted statically, without loading the
+assembly or instantiating the attribute class.  The decoder reads the
+constructor signature from the ``MemberRef``/``MethodDef`` ``Signature`` blob,
+then parses the fixed and named arguments from the raw ``CustomAttribute.Value``
+blob:
+
+.. code-block:: python
+
+    import dnfile
+    from dnfile import customattr
+
+    pe = dnfile.dnPE(FILEPATH)
+    tables = pe.net.mdtables
+
+    result = customattr.decode_custom_attribute(tables.CustomAttribute[0], tables)
+    print(customattr.format_interpretation(result))
+
+Every value records the signature evidence it came from in ``argument.basis``.
+Unresolved constructors, external enum types, recursive types, unknown element
+types, and extra payload bytes are reported as indeterminate rather than being
+filled in with default values.  ``result.provenance`` documents that no
+assembly was loaded, no attribute was instantiated, and no analyzed file was
+imported or executed.
+
+Supported argument types are booleans, chars, the signed/unsigned integer
+types, single/double, strings, ``System.Type`` names, ``object`` (boxed
+primitive), enums whose underlying type is declared locally, and
+single-dimensional arrays of those types.
+
+Example: ``python examples/customattr.py tests/data/hello-world/hello-world.exe``
+
 TODO
 ----
 

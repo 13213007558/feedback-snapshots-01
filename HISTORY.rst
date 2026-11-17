@@ -2,6 +2,12 @@
 History
 =======
 
+Unreleased
+----------
+
+* FEATURE: static interpretation of CustomAttribute payloads (``dnfile.customattr``)
+  with constructor-signature provenance and explicit indeterminate results
+
 0.18.0 (2026)
 -------------
 
