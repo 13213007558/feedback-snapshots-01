@@ -80,6 +80,72 @@ Or install it yourself as:
 
 
     ########################
+    # SameSite-aware example
+    ########################
+
+    # A request URL on its own cannot determine the SameSite context.
+    # When you need SameSite=Strict/Lax/None enforcement, describe the
+    # outgoing request with an HTTP::Cookie::RequestContext and select
+    # cookies with #cookies_for_request instead of #cookies.
+    context = HTTP::Cookie::RequestContext.new(
+      url: uri,                       # the request target URL
+      top_level_site: top_level_url, # the top-level document's URL/site
+      method: request.method,         # "GET", "POST", ...
+      navigation: top_level_request?, # true for a navigation, false for a subresource
+      redirected: response.redirect?,# true if reached via a redirect
+    )
+
+    header["Cookie"] = HTTP::Cookie.cookie_value(jar.cookies_for_request(context))
+
+## SameSite and request context
+
+`HTTP::Cookie` understands the `SameSite` attribute (`Strict`, `Lax`,
+`None`). Cookies that do not state one are assigned the jar's
+`:samesite_default` policy, which defaults to `:lax` to match modern
+browsers.
+
+The SameSite decision needs more than the request URL, so the library
+keeps two clearly separated interfaces:
+
+- The URL-only methods `HTTP::CookieJar#cookies`, `#each`, `#empty?`
+  and `HTTP::Cookie#valid_for_uri?` apply the RFC 6265 domain, path and
+  secure checks only. They never evaluate SameSite, because a bare URL
+  carries no site context. They remain unchanged and fully backward
+  compatible.
+- The request-aware methods `HTTP::CookieJar#cookies_for_request`,
+  `#each_for_request`, `#empty_for_request?` and
+  `HTTP::Cookie#valid_for_request?` take an
+  `HTTP::Cookie::RequestContext` and additionally enforce SameSite.
+
+The `RequestContext` requires the request target URL, the top-level
+site, the request method, whether it is a navigation or a subresource
+load, and whether it was reached by a redirect. Missing or invalid
+context raises `ArgumentError`/`TypeError`; selection never silently
+falls back to a more permissive rule.
+
+The rules implemented are the common, well-specified behavior and do
+not claim to reproduce every browser version:
+
+- `SameSite=None` cookies are sent whenever the URL-only checks pass.
+- `SameSite=Strict` cookies are sent only on schemefully same-site
+  requests.
+- `SameSite=Lax` cookies are sent on same-site requests and on
+  cross-site top-level navigations that use a safe method
+  (GET/HEAD/OPTIONS/TRACE). A cross-site request reached through a
+  redirect fails closed: only `SameSite=None` cookies are sent.
+
+"Same-site" uses the schemeful definition: identical scheme plus
+identical registrable domain (eTLD+1). Public-suffix classification is
+provided by the `domain_name` gem, the same mechanism used for cookie
+domain matching, so `https://a.example.co.uk` and
+`https://b.example.co.uk` are same-site while `example.co.uk` and
+`other.co.uk` are not. This is distinct from the stricter "same-origin"
+notion (identical scheme, full host and port), which
+`RequestContext#same_origin?` exposes separately and which the
+SameSite algorithm does not use.
+
+
+    ########################
     # Client side example 2
     ########################
 

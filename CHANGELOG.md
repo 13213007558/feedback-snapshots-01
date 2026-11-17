@@ -1,3 +1,23 @@
+## 1.2.0.beta
+
+- Add support for the `SameSite` cookie attribute (`Strict`, `Lax`,
+  `None`), including parsing, the `HTTP::Cookie#samesite` accessor,
+  serialization in `#set_cookie_value`, and YAML persistence.
+
+- Add `HTTP::Cookie::RequestContext` and the request-aware selectors
+  `HTTP::CookieJar#cookies_for_request`, `#each_for_request` and
+  `#empty_for_request?` (plus `HTTP::Cookie#valid_for_request?`).
+  They evaluate SameSite from an explicit request context: the
+  top-level site, request method, navigation/subresource nature and
+  redirect flag. Same-site uses the schemeful definition with public
+  suffix classification from the `domain_name` gem, kept distinct from
+  same-origin. The default policy for cookies without a SameSite
+  attribute is `Lax`, configurable per jar via `:samesite_default`.
+  Missing or invalid context raises instead of silently relaxing the
+  rules; the existing URL-only `#cookies`/`#each` interface is
+  unchanged and does not perform SameSite selection.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

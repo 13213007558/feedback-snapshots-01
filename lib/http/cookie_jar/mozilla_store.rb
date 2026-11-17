@@ -523,6 +523,48 @@ class HTTP::CookieJar
       self
     end
 
+    # SameSite-aware variant of #each driven by an
+    # HTTP::Cookie::RequestContext instead of a bare URI.
+    def each_for_request(request_context, &block) # :yield: cookie
+      uri = request_context.url
+      now = Time.now
+      thost = DomainName.new(uri.host)
+
+      @stmt[:cookies_for_domain].execute({
+          :baseDomain => thost.domain || thost.hostname,
+          :appId => @app_id,
+          :inBrowserElement => @in_browser_element ? 1 : 0,
+          :expiry => now.to_i,
+        }).each { |row|
+        if secure = row['isSecure'] != 0
+          next unless URI::HTTPS === uri
+        end
+
+        cookie = HTTP::Cookie.new({}.tap { |attrs|
+            attrs[:name]        = row['name']
+            attrs[:value]       = row['value']
+            attrs[:domain]      = row['host']
+            attrs[:path]        = row['path']
+            attrs[:expires_at]  = Time.at(row['expiry'])
+            attrs[:accessed_at] = deserialize_usectime(row['lastAccessed'])
+            attrs[:created_at]  = deserialize_usectime(row['creationTime'])
+            attrs[:secure]      = secure
+            attrs[:httponly]    = row['isHttpOnly'] != 0
+          })
+
+        if cookie.valid_for_request?(request_context)
+          cookie.accessed_at = now
+          @stmt[:update_lastaccessed].execute({
+              'lastAccessed' => serialize_usectime(now),
+              'id' => row['id'],
+            })
+          yield cookie
+        end
+      }
+      @sjar.each_for_request(request_context, &block)
+      self
+    end
+
     def clear
       @db.execute("DELETE FROM moz_cookies")
       @sjar.clear

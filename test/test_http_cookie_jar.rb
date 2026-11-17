@@ -864,6 +864,40 @@ module TestHTTPCookieJar
       assert_send [@jar,  :empty?]
       assert_send [@jar2, :empty?]
     end
+
+    def test_cookies_for_request_samesite
+      @jar.parse('strict=1; SameSite=Strict; Path=/', 'https://example.com/')
+      @jar.parse('lax=2; SameSite=Lax; Path=/', 'https://example.com/')
+      @jar.parse('none=3; SameSite=None; Secure; Path=/', 'https://example.com/')
+      @jar.parse('dflt=4; Path=/', 'https://example.com/')
+
+      def request_names(jar, **overrides)
+        jar.cookies_for_request(**{
+          :url => 'https://example.com/',
+          :top_level_site => 'https://example.com/',
+        }.merge(overrides)).map(&:name).sort
+      end
+
+      # same-site (cross-subdomain top-level site)
+      assert_equal %w[dflt lax none strict],
+        request_names(@jar, :top_level_site => 'https://sub.example.com/')
+
+      # cross-site top-level GET navigation
+      assert_equal %w[dflt lax none],
+        request_names(@jar,
+          :top_level_site => 'https://other.org/',
+          :method => 'GET', :navigation => true)
+
+      # cross-site POST
+      assert_equal %w[none],
+        request_names(@jar,
+          :top_level_site => 'https://other.org/',
+          :method => 'POST', :navigation => true)
+
+      # URL-only interface stays SameSite-agnostic
+      assert_equal %w[dflt lax none strict],
+        @jar.cookies('https://example.com/').map(&:name).sort
+    end
   end
 
   class WithHashStore < Test::Unit::TestCase

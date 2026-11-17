@@ -12,6 +12,11 @@ class HTTP::CookieJar
 
   attr_reader :store
 
+  # The SameSite policy applied to cookies without an explicit
+  # SameSite attribute during request-aware selection.  See
+  # HTTP::Cookie::RequestContext.
+  attr_reader :samesite_default
+
   def get_impl(base, value, *args)
     case value
     when base
@@ -49,11 +54,27 @@ class HTTP::CookieJar
   # specified store class.  For example, the `:mozilla`
   # (HTTP::CookieJar::MozillaStore) store class requires a `:filename`
   # option.  See individual store classes for details.
+  #
+  # In addition, the following option is consumed by the jar itself:
+  #
+  # :samesite_default
+  # : The SameSite policy assumed for cookies that do not carry an
+  # explicit SameSite attribute when #cookies_for_request or
+  # #each_for_request is used.  One of `:strict`, `:lax` (default,
+  # matching modern browsers) or `:none`.
   def initialize(options = nil)
     opthash = {
       :store => :hash,
+      :samesite_default => :lax,
     }
     opthash.update(options) if options
+    unless HTTP::Cookie::RequestContext::SAMESITE_POLICIES.include?(opthash[:samesite_default])
+      raise ArgumentError,
+        ':samesite_default must be one of %s: %s' %
+          [HTTP::Cookie::RequestContext::SAMESITE_POLICIES.inspect,
+           opthash[:samesite_default].inspect]
+    end
+    @samesite_default = opthash[:samesite_default]
     @store = get_impl(AbstractStore, opthash[:store], opthash)
   end
 
@@ -135,6 +156,9 @@ class HTTP::CookieJar
   #
   # If (and only if) the `uri` option is given, last access time of
   # each cookie is updated to the current time.
+  #
+  # This is the URL-only interface: it does not evaluate the SameSite
+  # attribute.  Use #each_for_request for SameSite-aware selection.
   def each(uri = nil, &block) # :yield: cookie
     block_given? or return enum_for(__method__, uri)
 
@@ -146,6 +170,70 @@ class HTTP::CookieJar
     @store.each(uri, &block)
     self
   end
+
+  # Iterates over the cookies that should be sent in the request
+  # described by `request_context` (an HTTP::Cookie::RequestContext),
+  # updating the last access time of each yielded cookie.
+  #
+  # Unlike #each, this evaluates the SameSite attribute of every
+  # cookie against the explicit request context; cookies fail closed
+  # when the context does not allow them.  The request context is
+  # mandatory and validated, so a missing top-level site or a
+  # non-HTTP(S) URL raises rather than silently relaxing the rules.
+  def each_for_request(request_context, &block) # :yield: cookie
+    request_context = build_request_context(request_context)
+    block_given? or return enum_for(__method__, request_context)
+    @store.each_for_request(request_context, &block)
+    self
+  end
+
+  # Returns an array of cookies sorted by path and creation time that
+  # should be sent in the request described by `request_context` (an
+  # HTTP::Cookie::RequestContext or a Hash of its constructor
+  # options).  SameSite is evaluated from the explicit request
+  # context; see #each_for_request.
+  def cookies_for_request(request_context)
+    request_context = build_request_context(request_context)
+    each_for_request(request_context).sort
+  end
+
+  # Tests if there is no cookie to send in the request described by
+  # `request_context` (an HTTP::Cookie::RequestContext or a Hash of
+  # its constructor options).
+  def empty_for_request?(request_context)
+    request_context = build_request_context(request_context)
+    each_for_request(request_context) { return false }
+    true
+  end
+
+  def build_request_context(request_context)
+    case request_context
+    when HTTP::Cookie::RequestContext
+      if request_context.default_samesite != @samesite_default
+        request_context = HTTP::Cookie::RequestContext.new(
+          :url => request_context.url,
+          :top_level_site => request_context.top_level_uri,
+          :method => request_context.method,
+          :navigation => request_context.navigation?,
+          :redirected => request_context.redirected?,
+          :default_samesite => @samesite_default)
+      end
+      request_context
+    when Hash
+      unless request_context.key?(:url) && request_context.key?(:top_level_site)
+        raise ArgumentError,
+          'a request context Hash needs both :url and :top_level_site'
+      end
+      HTTP::Cookie::RequestContext.new(
+        **request_context.merge(:default_samesite => @samesite_default))
+    else
+      raise TypeError,
+        'expected an HTTP::Cookie::RequestContext or a Hash: %s' %
+          request_context.class
+    end
+  end
+  private :build_request_context
+
   include Enumerable
 
   # Parses a Set-Cookie field value `set_cookie` assuming that it is

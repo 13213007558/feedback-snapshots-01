@@ -81,6 +81,19 @@ class HTTP::CookieJar::AbstractStore
     # end
     # self
   end
+
+  # Implements HTTP::CookieJar#each_for_request().
+  #
+  # Like #each, but `request_context` is a fully validated
+  # HTTP::Cookie::RequestContext and every cookie yielded must pass
+  # HTTP::Cookie#valid_for_request? against it (SameSite included).
+  # Last access time of each cookie is updated to the current time.
+  #
+  # This is an abstract method that each subclass must override.
+  def each_for_request(request_context, &block) # :yield: cookie
+    # self
+  end
+
   include Enumerable
 
   # Implements HTTP::CookieJar#empty?().

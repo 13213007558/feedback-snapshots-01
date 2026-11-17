@@ -102,6 +102,31 @@ class HTTP::CookieJar
       self
     end
 
+    # SameSite-aware variant of #each driven by an
+    # HTTP::Cookie::RequestContext instead of a bare URI.
+    def each_for_request(request_context) # :yield: cookie
+      uri = request_context.url
+      now = Time.now
+      tpath = uri.path
+      @jar.each { |domain, paths|
+        paths.each { |path, hash|
+          next unless HTTP::Cookie.path_match?(path, tpath)
+          hash.delete_if { |name, cookie|
+            if cookie.expired?(now)
+              true
+            else
+              if cookie.valid_for_request?(request_context)
+                cookie.accessed_at = now
+                yield cookie
+              end
+              false
+            end
+          }
+        }
+      }
+      self
+    end
+
     def clear
       @jar.clear
       self

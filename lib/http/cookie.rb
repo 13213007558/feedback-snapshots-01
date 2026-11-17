@@ -6,6 +6,7 @@ require 'time'
 require 'uri'
 require 'domain_name'
 require 'http/cookie/ruby_compat'
+require 'http/cookie/request_context'
 require 'cgi/escape'
 
 module HTTP
@@ -30,7 +31,7 @@ class HTTP::Cookie
   PERSISTENT_PROPERTIES = %w[
     name        value
     domain      for_domain  path
-    secure      httponly
+    secure      httponly    samesite
     expires     max_age
     created_at  accessed_at
   ]
@@ -132,7 +133,7 @@ class HTTP::Cookie
   #
   def initialize(*args)
     @name = @origin = @domain = @path =
-      @expires = @max_age = nil
+      @expires = @max_age = @samesite = nil
     @for_domain = @secure = @httponly = false
     @session = true
     @created_at = @accessed_at = Time.now
@@ -182,6 +183,8 @@ class HTTP::Cookie
         @httponly = val
       when :secure, :secure?
         @secure = val
+      when :samesite, :samesite?
+        self.samesite = val
       when Symbol
         setter = :"#{key}="
         if respond_to?(setter)
@@ -312,6 +315,8 @@ class HTTP::Cookie
                 cookie.secure = avalue
               when 'httponly'
                 cookie.httponly = avalue
+              when 'samesite'
+                cookie.samesite = avalue
               end
             rescue => e
               logger.warn("Couldn't parse #{aname} '#{avalue}': #{e}") if logger
@@ -479,6 +484,40 @@ class HTTP::Cookie
   attr_accessor :httponly
   alias httponly? httponly
 
+  # The SameSite attribute as a lower-case Symbol (+:strict+, +:lax+
+  # or +:none+), or +nil+ when the cookie does not state one.
+  #
+  # The setter accepts a Symbol or a String (case-insensitive); any
+  # other value raises ArgumentError.  Assigning +nil+ clears the
+  # attribute.
+  #
+  # Note that a +nil+ value means "unspecified"; the effective policy
+  # for such a cookie is chosen by the caller through the request
+  # context's +default_samesite+ and is not stored on the cookie.
+  attr_reader :samesite
+
+  # See #samesite.
+  def samesite=(value)
+    case value
+    when nil
+      @samesite = nil
+    when Symbol
+      samesite = value.to_s.downcase
+      return self.samesite = samesite
+    when String
+      samesite = value.downcase
+      unless HTTP::Cookie::RequestContext::SAMESITE_POLICIES.include?(samesite.to_sym)
+        raise ArgumentError,
+          'invalid SameSite value (expected Strict, Lax or None): %s' % value.inspect
+      end
+      @samesite = samesite.to_sym
+    else
+      raise TypeError, "#{value.class} is not a Symbol or String"
+    end
+  end
+
+  alias samesite? samesite
+
   # The session flag. (the opposite of persistent-flag)
   #
   # A cookie with this flag on should be hidden from a client script.
@@ -586,6 +625,11 @@ class HTTP::Cookie
 
   # Tests if it is OK to send this cookie to a given `uri`.  A
   # RuntimeError is raised if the cookie's domain is unknown.
+  #
+  # This is the URL-only test defined by RFC 6265 5.4: it checks the
+  # secure flag, domain and path but it cannot evaluate the SameSite
+  # attribute because no request context is available.  Use
+  # #valid_for_request? for SameSite-aware selection.
   def valid_for_uri?(uri)
     if @domain.nil?
       raise "cannot tell if this cookie is valid because the domain is unknown"
@@ -595,6 +639,66 @@ class HTTP::Cookie
     return false if secure? && !(URI::HTTPS === uri)
     acceptable_from_uri?(uri) && HTTP::Cookie.path_match?(@path, uri.path)
   end
+
+  # Tests if it is OK to send this cookie in the request described by
+  # `request_context` (an HTTP::Cookie::RequestContext).  A
+  # RuntimeError is raised if the cookie's domain is unknown.
+  #
+  # The URL-only checks of #valid_for_uri? are applied first against
+  # the request target URL, then the SameSite attribute is evaluated
+  # against the explicit request context.
+  #
+  # ### SameSite rules
+  #
+  # The effective policy is #samesite, or
+  # `request_context.default_samesite` when the cookie carries no
+  # SameSite attribute.
+  #
+  # - `:none` -- the cookie is sent on any request that passes the
+  #   URL-only checks.  (Authors are expected to mark such cookies
+  #   `Secure` as well; that requirement is enforced at Set-Cookie
+  #   time by browsers and is not duplicated here.)
+  # - `:strict` -- the cookie is sent only when the request is
+  #   schemefully same-site with the top-level document.
+  # - `:lax` -- the cookie is sent when the request is same-site, and
+  #   also on a cross-site request that is a top-level navigation
+  #   using a safe method (GET/HEAD/OPTIONS/TRACE).
+  #
+  # ### Redirects
+  #
+  # A cross-site request reached by following a redirect is treated
+  # conservatively: only `:none` cookies are sent on it.  A redirect
+  # does not relax `:lax` navigation handling here; this library does
+  # not reproduce browser-specific redirect mitigations.  Same-site
+  # requests are unaffected by the redirect flag.
+  #
+  # This models the common Strict/Lax/None behavior and does not claim
+  # to emulate every version of every browser.
+  def valid_for_request?(request_context)
+    return false unless valid_for_uri?(request_context.url)
+
+    policy = @samesite || request_context.default_samesite
+
+    case policy
+    when :none
+      true
+    when :strict
+      request_context.same_site?
+    when :lax
+      samesite_lax_allowed?(request_context)
+    else
+      raise ArgumentError, "unknown SameSite policy: #{policy.inspect}"
+    end
+  end
+
+  def samesite_lax_allowed?(request_context)
+    return true if request_context.same_site?
+
+    return false if request_context.redirected?
+
+    request_context.navigation? && request_context.safe_method?
+  end
+  private :samesite_lax_allowed?
 
   # Returns a string for use in the Cookie header, i.e. `name=value`
   # or `name="value"`.
@@ -633,6 +737,9 @@ class HTTP::Cookie
     end
     if @secure
       string << "; Secure"
+    end
+    if @samesite
+      string << "; SameSite=#{@samesite.to_s.capitalize}"
     end
     string
   end
