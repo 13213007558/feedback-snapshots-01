@@ -1,0 +1,16 @@
+---
+- !ruby/object:HTTP::Cookie
+  name: good1
+  value: v
+  domain: example.org
+  path: /
+- !ruby/object:HTTP::Cookie
+  name: "bad name"
+  value: v
+  domain: example.org
+  path: /
+- !ruby/object:HTTP::Cookie
+  name: good2
+  value: v
+  domain: example.org
+  path: /

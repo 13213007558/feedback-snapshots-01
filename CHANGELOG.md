@@ -1,3 +1,32 @@
+## 1.2.0.beta
+
+### Security
+
+- Harden `HTTP::CookieJar::YAMLSaver#load` against untrusted YAML cookie data.
+
+  - All YAML parsing now goes through a single restricted entry point
+    (`YAMLSaver#load_yaml`) built on `YAML.safe_load` with the frozen
+    `YAMLSaver::PERMITTED_CLASSES` whitelist (`Time`, `HTTP::Cookie`,
+    `Mechanize::Cookie`, `DomainName`) and aliases enabled.  The old
+    non-safe `YAML.load` fallback for ancient Ruby is removed, so an
+    arbitrary `!ruby/object:...` tag or a Symbol tag raises
+    `Psych::DisallowedClass` and never instantiates a class or runs its
+    hooks.
+  - A whitelisted object tag is no longer trusted.  Legacy Mechanize
+    nested-hash records are rebuilt through the `HTTP::Cookie`
+    constructor with explicit validation of keys and value types
+    (string domain/path/name/value, boolean flags, `Time`/parseable
+    time-string dates, integer `max_age`); unknown attribute names and
+    smuggled nested structures are rejected.
+  - Import is all-or-nothing: the whole document is validated before the
+    target jar is touched, so a parse error or one malformed record
+    raises instead of being swallowed and reported as a successful
+    import, leaving any pre-existing cookies unchanged.
+  - Legacy Mechanize data on a non-rewindable stream now fails with a
+    clear `ArgumentError` rather than raising an opaque `Errno::ESPIPE`.
+
+  Valid current and legacy Mechanize files continue to load unchanged.
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)
