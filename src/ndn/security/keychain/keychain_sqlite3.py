@@ -308,6 +308,7 @@ class Key(AbstractKey):
         name = Name.to_bytes(name)
         self.pib.conn.execute('UPDATE certificates SET is_default=1 WHERE certificate_name=?', (name,))
         self.pib.conn.commit()
+        self.pib._signer_cache = {}
 
     def default_cert(self) -> Certificate:
         """
@@ -417,6 +418,7 @@ class Identity(AbstractIdentity):
         name = Name.to_bytes(name)
         self.pib.conn.execute('UPDATE keys SET is_default=1 WHERE key_name=?', (name,))
         self.pib.conn.commit()
+        self.pib._signer_cache = {}
 
     def default_key(self) -> Key:
         """
@@ -525,6 +527,7 @@ class KeychainSqlite3(Keychain):
         name = Name.to_bytes(name)
         self.conn.execute('UPDATE identities SET is_default=1 WHERE identity=?', (name,))
         self.conn.commit()
+        self._signer_cache = {}
 
     def default_identity(self) -> Identity:
         """
@@ -638,7 +641,11 @@ class KeychainSqlite3(Keychain):
         if not key_locator_name:
             key_locator_name = cert_name
         key_locator_bytes = Name.to_bytes(key_locator_name)
-        cache_key = (key_locator_bytes, with_signature_time)
+        # The cache key must include the TPM key name, not only the KeyLocator.
+        # An explicit ``key_locator`` can be shared across different keys, so a
+        # KeyLocator-only key would return a stale signer backed by another
+        # private key after the default identity/key changes.
+        cache_key = (Name.to_bytes(key_name), key_locator_bytes, with_signature_time)
         signer = self._signer_cache.get(cache_key, None)
         if not signer:
             signer = self.tpm.get_signer(key_name, key_locator_name,

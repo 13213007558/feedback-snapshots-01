@@ -12,6 +12,9 @@ Next (breaking)
 * Fix Ed25519 signature
 * build: allow Python 3.14
 * Use Python 3.11 syntax
+* Key the sqlite3 signer cache by TPM key name in addition to KeyLocator, and
+  invalidate it on default identity/key/cert changes, so a shared KeyLocator
+  can never resolve to another identity's cached private key.
 
 0.5 (2026-10-07)
 ++++++++++++++++
