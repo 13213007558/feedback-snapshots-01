@@ -121,6 +121,51 @@ Or install it yourself as:
     header['Set-Cookie'] = cookie2.set_cookie_value
 
 
+    ##############################
+    # Backend authentication example
+    ##############################
+
+    # A cookie name can be sent from several paths or domains, e.g. a
+    # host-wide "sid=parent" with Path=/ and a more specific
+    # "sid=child" with Path=/app.  RFC 6265 sends BOTH of them:
+    #
+    #   Cookie: sid=child; sid=parent
+    #
+    # Turning that into a name=>value hash (or taking the last pair)
+    # silently picks one identity, and the result changes if the
+    # cookies are stored in a different order.  Keep the ambiguity
+    # explicit instead:
+
+    selection = jar.cookies_for(request_url)
+
+    # 1. Ordinary traffic: emit the whole, standards-compliant header.
+    #    Same-name cookies are all included in the RFC 6265 order
+    #    (longer path first, earlier creation first).
+    header['Cookie'] = selection.cookie_header
+
+    # 2. Authentication: name the cookie explicitly.  This returns the
+    #    value only when the name is unique among the cookies eligible
+    #    for the URL; it never defaults to "the last one".
+    def authenticate(selection)
+      session_id = selection.authentication_value!('session_id')
+      User.find_by_session_id(session_id)
+    rescue HTTP::CookieJar::CookieNotFoundError,
+           HTTP::CookieJar::AmbiguousCookieError => error
+      # Reject the request; do not guess which identity was meant.
+      raise Unauthorized, "authentication cookie is unusable: #{error.message}"
+    end
+
+    # Inspect what made a name ambiguous; each entry keeps its domain,
+    # path and creation time.
+    selection.ambiguous_names.each do |name, cookies|
+      cookies.map { |cookie| "#{cookie.domain}#{cookie.path}=#{cookie.value}" }
+    end
+
+    # NOTE: HTTP::Cookie.cookie_value_to_hash collapses same-name pairs
+    # and is only appropriate for non-authentication cookies; using it
+    # to select a session/login value is insecure.
+
+
 ## Incompatibilities with Mechanize::Cookie/CookieJar
 
 There are several incompatibilities between

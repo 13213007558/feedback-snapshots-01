@@ -110,8 +110,59 @@ class HTTP::CookieJar
   # Gets an array of cookies sorted by the path and creation time.  If
   # `url` is given, only ones that should be sent to the URL/URI are
   # selected, with the access time of each of them updated.
+  #
+  # Note that same-name cookies from different domains or paths are all
+  # returned; this array is never collapsed by name.  When you need to
+  # choose a single authentication value, use #cookies_for and its
+  # ambiguity-preserving API instead of turning the result into a hash.
   def cookies(url = nil)
     each(url).sort
+  end
+
+  # Returns a CookieSelection containing every cookie that should be
+  # sent to `url`, in the RFC 6265 sending order (longer path first,
+  # earlier creation first).
+  #
+  # Unlike a plain name-to-value hash, the selection keeps every
+  # same-name cookie along with its domain, path, origin and creation
+  # information.  Use CookieSelection#cookie_header to generate the
+  # Cookie header for ordinary traffic, and
+  # CookieSelection#authentication_value! to safely pick a uniquely
+  # named authentication value:
+  #
+  #     selection = jar.cookies_for(url)
+  #     header['Cookie'] = selection.cookie_header
+  #
+  #     begin
+  #       session_id = selection.authentication_value!('session_id')
+  #     rescue HTTP::CookieJar::AmbiguousCookieError,
+  #            HTTP::CookieJar::CookieNotFoundError => error
+  #       # Reject the request instead of guessing an identity.
+  #     end
+  def cookies_for(url)
+    CookieSelection.new(cookies(url), HTTP::Cookie::URIParser.parse(url))
+  end
+
+  # Returns the Cookie request header value for `url` following RFC
+  # 6265 section 5.4, or nil if there is no cookie to send.
+  #
+  # Every cookie eligible for the URL is emitted in the standard
+  # sending order; same-name cookies from different domains or paths
+  # are all included rather than one overwriting the others.
+  def cookie_header_for(url)
+    cookies_for(url).cookie_header
+  end
+
+  # Returns the unique value of the authentication cookie named `name`
+  # among the cookies eligible for `url`.
+  #
+  # The cookie name must be given explicitly; there is no default
+  # "last one wins" behavior.  CookieNotFoundError is raised when no
+  # eligible cookie carries the name, and AmbiguousCookieError when
+  # several eligible cookies carry it, so an insertion-order change
+  # can never silently switch the authenticated identity.
+  def authentication_value_for(name, url)
+    cookies_for(url).authentication_value!(name)
   end
 
   # Tests if the jar is empty.  If `url` is given, tests if there is
@@ -328,3 +379,4 @@ end
 
 require 'http/cookie_jar/abstract_store'
 require 'http/cookie_jar/abstract_saver'
+require 'http/cookie_jar/cookie_selection'

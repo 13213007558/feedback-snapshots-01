@@ -1,3 +1,22 @@
+## Unreleased
+
+- Add `HTTP::CookieJar#cookies_for`, which returns an
+  `HTTP::CookieJar::CookieSelection` preserving every same-name
+  cookie (with its domain, path, origin and creation time) in the RFC
+  6265 sending order instead of collapsing them into a hash.
+- Add `CookieSelection#cookie_header` / `HTTP::CookieJar#cookie_header_for`
+  for ordinary request headers, and the ambiguity-aware
+  `CookieSelection#authentication_value!` /
+  `HTTP::CookieJar#authentication_value_for` for choosing a uniquely
+  named authentication value.  Ambiguous or missing names raise
+  `AmbiguousCookieError` / `CookieNotFoundError` rather than silently
+  picking one identity, so insertion order can never switch an
+  authenticated user.
+- Warn when `HTTP::Cookie.cookie_value_to_hash` is used, since its
+  same-name collapse is unsafe for authentication; it remains usable
+  for non-authentication cookies.
+
+
 ## 1.1.6 (2026-04-20)
 
 - Use `autoload` to avoid "circular require" warnings between `http/cookie` and `http/cookie_jar`. (#65)

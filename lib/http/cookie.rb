@@ -338,7 +338,19 @@ class HTTP::Cookie
     # Parses a Cookie header value into a hash of name-value string
     # pairs.  The first appearance takes precedence if multiple pairs
     # with the same name occur.
+    #
+    # SECURITY NOTE: this collapses same-name pairs, so the ambiguity
+    # of a cookie name sent from different paths or domains is lost.
+    # It must only be used for non-authentication cookies where any
+    # single value is acceptable.  Never use the resulting hash to
+    # choose an authentication or session value; use
+    # HTTP::CookieJar#cookies_for and
+    # HTTP::CookieJar::CookieSelection#authentication_value! instead,
+    # which keep every same-name cookie and refuse to guess an
+    # identity.
     def cookie_value_to_hash(cookie_value)
+      warn "HTTP::Cookie.cookie_value_to_hash collapses same-name cookies and " \
+           "is unsafe for authentication; use HTTP::CookieJar#cookies_for" if $VERBOSE
       {}.tap { |hash|
         Scanner.new(cookie_value).scan_cookie { |name, value|
           hash[name] ||= value

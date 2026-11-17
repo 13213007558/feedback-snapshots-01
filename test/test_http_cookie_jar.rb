@@ -208,6 +208,161 @@ module TestHTTPCookieJar
       }
     end
 
+    def parent_and_child_same_name_cookies(now)
+      [
+        HTTP::Cookie.new(cookie_values(
+          :name => 'sid', :value => 'parent-value',
+          :path => '/', :created_at => now)),
+        HTTP::Cookie.new(cookie_values(
+          :name => 'sid', :value => 'child-value',
+          :path => '/app', :created_at => now + 1)),
+      ]
+    end
+
+    def test_cookies_for_keeps_same_name_cookies_in_sending_order
+      now = Time.at(Time.now.to_i)
+      url = URI 'http://rubyforge.org/app/home'
+
+      [
+        parent_and_child_same_name_cookies(now),
+        parent_and_child_same_name_cookies(now).reverse,
+      ].each { |ordered|
+        @jar.clear
+        ordered.each { |cookie| @jar.add(cookie) }
+
+        selection = @jar.cookies_for(url)
+
+        # Both same-name cookies are retained, never collapsed.
+        assert_equal 2, selection.size
+        assert_equal %w[child-value parent-value],
+                     selection.map { |cookie| cookie.value }
+        assert_equal %w[/app /], selection.map { |cookie| cookie.path }
+
+        # The on-the-wire header follows RFC 6265 regardless of order.
+        assert_equal 'sid=child-value; sid=parent-value',
+                     selection.cookie_header
+        assert_equal 'sid=child-value; sid=parent-value',
+                     @jar.cookie_header_for(url)
+      }
+    end
+
+    def test_cookie_selection_preserves_domain_path_and_creation_metadata
+      now = Time.at(Time.now.to_i)
+      url = URI 'http://rubyforge.org/app/home'
+      parent, child = parent_and_child_same_name_cookies(now)
+      @jar.add(parent)
+      @jar.add(child)
+
+      selection = @jar.cookies_for(url)
+      named = selection.cookies_named('sid')
+
+      assert_equal 2, named.size
+      assert_equal ['/app', '/'], named.map { |cookie| cookie.path }
+      assert_equal ['rubyforge.org', 'rubyforge.org'],
+                   named.map { |cookie| cookie.domain }
+      assert_equal [now + 1, now], named.map { |cookie| cookie.created_at }
+      assert_equal [child, parent], named
+
+      assert selection.ambiguous?('sid')
+      assert_equal %w[sid], selection.ambiguous_names.keys
+      assert_equal [child, parent], selection.ambiguous_names['sid']
+      assert !selection.ambiguous?('absent')
+    end
+
+    def test_cookie_selection_rejects_ambiguous_authentication_value
+      now = Time.at(Time.now.to_i)
+      url = URI 'http://rubyforge.org/app/home'
+      @jar.add(parent_and_child_same_name_cookies(now).first)
+      @jar.add(parent_and_child_same_name_cookies(now).last)
+
+      selection = @jar.cookies_for(url)
+
+      # The non-raising variant never guesses an identity.
+      assert_nil selection.authentication_value('sid')
+
+      error = assert_raise(HTTP::CookieJar::AmbiguousCookieError) {
+        selection.authentication_value!('sid')
+      }
+      assert_match(/\bsid\b/, error.message)
+      assert_match(/parent-value/, error.message)
+      assert_match(/child-value/, error.message)
+
+      assert_raise(HTTP::CookieJar::AmbiguousCookieError) {
+        @jar.authentication_value_for('sid', url)
+      }
+    end
+
+    def test_authentication_value_is_stable_across_insertion_orders
+      now = Time.at(Time.now.to_i)
+      url = URI 'http://rubyforge.org/app/home'
+      parent, child = parent_and_child_same_name_cookies(now)
+
+      [parent, child].permutation.to_a.each { |ordered|
+        @jar.clear
+        ordered.each { |cookie| @jar.add(cookie) }
+
+        assert_raise(HTTP::CookieJar::AmbiguousCookieError) {
+          @jar.authentication_value_for('sid', url)
+        }
+      }
+    end
+
+    def test_authentication_value_succeeds_when_name_is_unique
+      now = Time.at(Time.now.to_i)
+      url = URI 'http://rubyforge.org/'
+      parent, _child = parent_and_child_same_name_cookies(now)
+      @jar.add(parent)
+
+      selection = @jar.cookies_for(url)
+
+      assert !selection.ambiguous?('sid')
+      assert_equal 'parent-value', selection.authentication_value('sid')
+      assert_equal 'parent-value', selection.authentication_value!('sid')
+      assert_equal 'parent-value',
+                   @jar.authentication_value_for('sid', url)
+    end
+
+    def test_authentication_value_raises_when_name_is_absent
+      url = URI 'http://rubyforge.org/'
+      selection = @jar.cookies_for(url)
+
+      assert_nil selection.authentication_value('sid')
+      assert_equal [], selection.cookies_named('sid')
+      assert_raise(HTTP::CookieJar::CookieNotFoundError) {
+        selection.authentication_value!('sid')
+      }
+      assert_raise(HTTP::CookieJar::CookieNotFoundError) {
+        @jar.authentication_value_for('sid', url)
+      }
+    end
+
+    def test_cookie_header_for_returns_nil_without_matching_cookies
+      assert_nil @jar.cookie_header_for('http://example.com/')
+      assert @jar.cookies_for('http://example.com/').empty?
+    end
+
+    def test_non_authentication_cookie_header_is_still_generated
+      now = Time.at(Time.now.to_i)
+      parent, child = parent_and_child_same_name_cookies(now)
+      tracking = HTTP::Cookie.new(cookie_values(
+        :name => 'theme', :value => 'dark',
+        :path => '/', :created_at => now + 2))
+      @jar.add(parent)
+      @jar.add(child)
+      @jar.add(tracking)
+
+      url = URI 'http://rubyforge.org/app/home'
+      selection = @jar.cookies_for(url)
+
+      # Ordinary traffic still sends every cookie, duplicates included.
+      assert_equal 'sid=child-value; sid=parent-value; theme=dark',
+                   selection.cookie_header
+
+      # While the ambiguous auth name cannot be chosen, an unrelated
+      # unique name can.
+      assert_equal 'dark', selection.authentication_value!('theme')
+    end
+
     def test_fall_back_rules_for_local_domains
       url = URI 'http://www.example.local'
 
