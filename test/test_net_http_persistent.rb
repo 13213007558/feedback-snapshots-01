@@ -1150,7 +1150,9 @@ class TestNetHttpPersistent < Minitest::Test
     @http.request @uri, post
     req = c.http.req
 
-    assert_same post, req
+    refute_same post, req
+    assert_kind_of Net::HTTP::Post, req
+    assert_equal post.path, req.path
   end
 
   def test_request_setup
@@ -1161,7 +1163,7 @@ class TestNetHttpPersistent < Minitest::Test
 
     req = @http.request_setup input
 
-    assert_same input,         req
+    refute_same input,         req
     assert_equal '/path',      req.path
 
     assert_equal 'test ua',    req['user-agent']
@@ -1169,6 +1171,13 @@ class TestNetHttpPersistent < Minitest::Test
 
     assert_equal 'keep-alive', req['connection']
     assert_equal '30',         req['keep-alive']
+
+    # the caller's request is left untouched: client headers are not written
+    # back onto it
+    assert_equal 'Ruby',  input['user-agent']
+    assert_equal '*/*',   input['accept']
+    refute_includes input.to_hash, 'connection'
+    refute_includes input.to_hash, 'keep-alive'
   end
 
   def test_request_string
@@ -1194,6 +1203,186 @@ class TestNetHttpPersistent < Minitest::Test
 
     assert_kind_of Net::HTTP::Get, req
     assert_equal '/path?a=b',  req.path
+  end
+
+  def test_request_does_not_mutate_caller_request
+    input = Net::HTTP::Post.new @uri.request_uri
+    input['Authorization'] = 'Bearer caller'
+    input['X-Custom']       = 'kept'
+
+    @http.headers['X-Custom']          = 'added'
+    @http.override_headers['X-Custom'] = 'replaced'
+
+    connection
+    @http.request @uri, input
+
+    assert_equal ['Bearer caller'], input.get_fields('authorization')
+    assert_equal ['kept'],          input.get_fields('x-custom')
+    refute_includes input.to_hash, 'connection'
+    refute_includes input.to_hash, 'keep-alive'
+  end
+
+  def test_request_reuse_does_not_accumulate_headers
+    @http.headers['X-Trace']          = 'trace'
+    @http.headers['Authorization']    = 'Bearer client'
+    @http.override_headers['X-Audit'] = 'audit'
+
+    input = Net::HTTP::Post.new @uri.request_uri
+    c = connection
+
+    3.times { @http.request @uri, input }
+
+    # Every prepared copy is independent; BasicConnection keeps the latest, so
+    # drive the same request_setup path and assert each copy on its own.
+    requests = 3.times.map { @http.request_setup(input) }
+
+    requests.each do |req|
+      assert_equal ['Bearer client'], req.get_fields('authorization'),
+        'default credential must not be re-added'
+      assert_equal ['trace'],         req.get_fields('x-trace'),
+        'ordinary header must not accumulate across reused request'
+      assert_equal ['audit'],         req.get_fields('x-audit')
+    end
+
+    refute input.key?('authorization'),
+      'client default credential must never be written back to the request'
+    refute input.key?('x-trace')
+    refute input.key?('x-audit')
+  end
+
+  def test_explicit_request_authorization_is_not_overridden_or_duplicated
+    input = Net::HTTP::Post.new @uri.request_uri
+    input['Authorization'] = 'Bearer explicit'
+
+    @http.headers['Authorization']          = 'Bearer from-headers'
+    @http.override_headers['Authorization'] = 'Bearer from-override'
+
+    c = connection
+    @http.request @uri, input
+    sent = c.http.req
+
+    assert_equal ['Bearer explicit'], sent.get_fields('authorization')
+    assert_equal ['Bearer explicit'], input.get_fields('authorization')
+  end
+
+  def test_explicit_request_authorization_is_case_insensitive
+    input = Net::HTTP::Post.new @uri.request_uri
+    input['AUTHORIZATION'] = 'Bearer explicit'
+
+    @http.headers['authorization'] = 'Bearer client'
+
+    req = @http.request_setup input
+
+    assert_equal ['Bearer explicit'], req.get_fields('authorization')
+  end
+
+  def test_explicit_request_host_is_preserved
+    input = Net::HTTP::Post.new @uri.request_uri
+    input['Host'] = 'caller.example'
+
+    @http.headers['Host']          = 'headers.example'
+    @http.override_headers['Host'] = 'override.example'
+
+    c = connection
+    @http.request @uri, input
+    sent = c.http.req
+
+    assert_equal ['caller.example'], sent.get_fields('host')
+    assert_equal ['caller.example'], input.get_fields('host')
+  end
+
+  def test_client_supplies_identity_headers_when_request_has_none
+    @http.headers['Authorization'] = 'Bearer client'
+    @http.override_headers['Host'] = 'client.example'
+
+    req = @http.request_setup Net::HTTP::Post.new(@uri.request_uri)
+
+    assert_equal ['Bearer client'],   req.get_fields('authorization')
+    assert_equal ['client.example'],  req.get_fields('host')
+  end
+
+  def test_ordinary_headers_keep_multi_value_convention
+    @http.headers['X-Multi'] = ['one', 'two']
+
+    req = @http.request_setup Net::HTTP::Post.new(@uri.request_uri)
+
+    assert_equal ['one', 'two'], req.get_fields('x-multi')
+  end
+
+  def test_override_headers_replace_ordinary_request_header
+    input = Net::HTTP::Post.new @uri.request_uri
+    input['X-Audit'] = 'request-value'
+
+    @http.override_headers['X-Audit'] = 'client-wins'
+
+    req = @http.request_setup input
+
+    assert_equal ['client-wins'], req.get_fields('x-audit')
+    assert_equal ['request-value'], input.get_fields('x-audit'),
+      'caller request must stay unchanged'
+  end
+
+  def test_two_clients_interleaved_on_one_request_send_distinct_identities
+    client_a = Net::HTTP::Persistent.new
+    client_b = Net::HTTP::Persistent.new
+    client_a.headers['Authorization'] = 'Bearer A'
+    client_b.headers['Authorization'] = 'Bearer B'
+    client_a.headers['X-Client']      = 'a'
+    client_b.headers['X-Client']      = 'b'
+
+    c_a = connection_for_client client_a
+    c_b = connection_for_client client_b
+
+    shared = Net::HTTP::Post.new @uri.request_uri
+
+    wire = []
+    4.times do |i|
+      if i.even?
+        client_a.request @uri, shared
+        wire << c_a.http.req
+      else
+        client_b.request @uri, shared
+        wire << c_b.http.req
+      end
+    end
+
+    assert_equal ['Bearer A', 'Bearer B', 'Bearer A', 'Bearer B'],
+      wire.map { |req| req['authorization'] }
+    assert_equal ['a', 'b', 'a', 'b'],
+      wire.map { |req| req['x-client'] }
+
+    wire.each do |req|
+      assert_equal 1, req.get_fields('authorization').length,
+        'no request on the wire may carry credentials from both clients'
+      refute_same shared, req
+    end
+
+    refute shared.key?('authorization'),
+      'the shared caller object must never gain client credentials'
+    refute shared.key?('x-client')
+  end
+
+  def connection_for_client client
+    net_http_args = [@uri.hostname, @uri.port, nil, nil, nil, nil]
+
+    connection = Net::HTTP::Persistent::Connection.allocate
+    connection.ssl_generation = client.ssl_generation
+    connection.http = BasicConnection.new
+    connection.reset
+
+    def (connection.http).request(req)
+      @req = req
+      r = Net::HTTPResponse.allocate
+      r.instance_variable_set :@header, {}
+      def r.http_version() '1.1' end
+      def r.read_body() :read_body end
+      yield r if block_given?
+      r
+    end
+
+    client.pool.available.push connection, connection_args: net_http_args
+
+    connection
   end
 
   def test_reset

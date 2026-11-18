@@ -96,6 +96,17 @@ autoload :OpenSSL, 'openssl'
 # MyUserAgent" while <code>http.override_headers['User-Agent'] =
 # 'MyUserAgent'</code> will send "MyUserAgent".
 #
+# The request object handed to #request is never modified.  A copy is prepared
+# per send, so reusing one request object across requests or across different
+# Net::HTTP::Persistent instances cannot accumulate headers or leak one
+# request's credentials into another.
+#
+# Authorization and Host are identity headers: a value already set on the
+# request is always kept and neither #headers nor #override_headers can add a
+# second value or replace it.  The client only supplies these headers when the
+# request does not already carry them.  Other headers retain their normal
+# behavior, including multiple values added through #headers.
+#
 # == Tuning
 #
 # === Segregation
@@ -978,24 +989,44 @@ class Net::HTTP::Persistent
   end
 
   ##
+  # Headers that identify a single endpoint or credential and therefore must
+  # never be accumulated with add_field or silently replaced.  Header names
+  # are compared case-insensitively by Net::HTTPHeader.
+
+  SINGLETON_HEADERS = %w[Authorization Host].freeze
+
+  ##
   # Creates a GET request if +req_or_uri+ is a URI and adds headers to the
   # request.
   #
-  # Returns the request.
+  # The caller's request is never mutated: a copy is prepared and returned so
+  # the same request object can be reused, including across different
+  # Net::HTTP::Persistent clients with different credentials, without leaking
+  # headers from one send into the next.
+  #
+  # #headers are appended with Net::HTTPHeader#add_field so ordinary,
+  # multi-valued headers keep their values.  #override_headers replace any
+  # existing value with Net::HTTPHeader#[]=.
+  #
+  # Explicit Authorization and Host headers already present on the request win
+  # over both #headers and #override_headers; the client never adds a second
+  # credential or replaces the request's own identity.
+  #
+  # Returns the prepared request.
 
   def request_setup req_or_uri # :nodoc:
     req = if req_or_uri.respond_to? 'request_uri' then
             Net::HTTP::Get.new req_or_uri.request_uri
           else
-            req_or_uri
+            prepare_request_copy req_or_uri
           end
 
-    @headers.each do |pair|
-      req.add_field(*pair)
+    @headers.each do |name, value|
+      req.add_field name, value unless singleton_header?(req, name)
     end
 
     @override_headers.each do |name, value|
-      req[name] = value
+      req[name] = value unless singleton_header?(req, name)
     end
 
     unless req['Connection'] then
@@ -1004,6 +1035,34 @@ class Net::HTTP::Persistent
     end
 
     req
+  end
+
+  ##
+  # Returns a copy of +request+ whose headers can be mutated without touching
+  # the caller's object.  Net::HTTPHeader stores headers in a shared hash after
+  # Object#dup, so the header hash and its value arrays are duplicated too.
+  # The request body and body stream are intentionally shared.
+
+  def prepare_request_copy request
+    copy = request.dup
+
+    header_copy = copy.instance_variable_get(:@header).each_with_object({}) do |(name, values), headers|
+      headers[name] = values.dup
+    end
+
+    copy.instance_variable_set :@header, header_copy
+
+    copy
+  end
+
+  ##
+  # Returns true when +name+ is a singleton identity header that is already
+  # present on +req+ and must be preserved instead of appended to or
+  # overridden.
+
+  def singleton_header? req, name
+    SINGLETON_HEADERS.any? { |singleton| singleton.casecmp(name).zero? } &&
+      req.key?(name)
   end
 
   ##
