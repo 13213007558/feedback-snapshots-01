@@ -14,6 +14,7 @@ from asyncua import ua
 
 from .address_space import AddressSpace
 from .monitored_item_service import MonitoredItemService
+from .subscription_access import SubscriptionOwner
 
 NotificationT = TypeVar("NotificationT")
 
@@ -37,6 +38,7 @@ class InternalSubscription:
         aspace: AddressSpace,
         callback: PublishResultCallback,
         session_id: ua.NodeId,
+        principal: str | None = None,
         request_callback: PublishRequestCallback | None = None,
         delete_callback: DeleteCallback | None = None,
         no_acks_limit: int = 500,
@@ -64,6 +66,8 @@ class InternalSubscription:
         self.monitored_item_srv = MonitoredItemService(self, aspace)
         self.delete_callback: DeleteCallback | None = delete_callback
         self.session_id: ua.NodeId = session_id
+        self.owner = SubscriptionOwner(session_id=session_id, principal=principal)
+        self._owner_epoch = 0
         self._triggered_datachanges: dict[int, list[ua.MonitoredItemNotification]] = {}
         self._triggered_events: dict[int, list[ua.EventFieldList]] = {}
         self._triggered_statuschanges: list[ua.StatusCode] = []
@@ -81,6 +85,56 @@ class InternalSubscription:
 
     def __str__(self) -> str:
         return f"Subscription(id:{self.data.SubscriptionId})"
+
+    @property
+    def subscription_id(self) -> int:
+        return self.data.SubscriptionId
+
+    @property
+    def principal(self) -> str | None:
+        return self.owner.principal
+
+    def is_owned_by(self, session_id: ua.NodeId) -> bool:
+        return self.owner.session_id == session_id
+
+    def rebind(
+        self,
+        session_id: ua.NodeId,
+        principal: str | None,
+        callback: PublishResultCallback,
+        request_callback: PublishRequestCallback | None,
+    ) -> None:
+        """Hand the subscription to a new session and publish endpoint.
+
+        Bumping the ownership epoch invalidates every publish request that was
+        queued for, or is being serviced on behalf of, the previous owner.  The
+        old callback is replaced so no notification produced from now on can be
+        delivered to the previous connection.  Unacknowledged results are kept
+        so the new owner can retrieve them via Republish.
+        """
+        self._owner_epoch += 1
+        self.session_id = session_id
+        self.owner = SubscriptionOwner(session_id=session_id, principal=principal, epoch=self._owner_epoch)
+        self.pub_result_callback = callback
+        self.pub_request_callback = request_callback
+
+    def rebind_connection(
+        self, callback: PublishResultCallback, request_callback: PublishRequestCallback | None
+    ) -> None:
+        """Move delivery to a new connection without changing the owning session.
+
+        Used when the same session reactivates on a fresh SecureChannel.
+        """
+        self._owner_epoch += 1
+        self.owner = SubscriptionOwner(
+            session_id=self.owner.session_id, principal=self.owner.principal, epoch=self._owner_epoch
+        )
+        self.pub_result_callback = callback
+        self.pub_request_callback = request_callback
+
+    @property
+    def ownership_epoch(self) -> int:
+        return self._owner_epoch
 
     async def start(self) -> None:
         self.logger.debug("starting subscription %s", self.data.SubscriptionId)
@@ -186,18 +240,29 @@ class InternalSubscription:
             if requestdata is None:
                 self._publish_cycles_count += 1
                 return False
+        epoch = self._owner_epoch
         while True:
             result = self._pop_publish_result()
+            if epoch != self._owner_epoch:
+                # Ownership moved while this Publish was being serviced.  The
+                # previous owner must not receive notifications produced after
+                # the transfer; the retained result is offered to the new owner
+                # through AvailableSequenceNumbers.
+                return False
             if requestdata is None:
                 await self.pub_result_callback(result)
             else:
                 await self.pub_result_callback(result, requestdata)
+            if epoch != self._owner_epoch:
+                return False
             if not result.MoreNotifications:
                 return True
             if self.pub_request_callback:
                 requestdata = self.pub_request_callback(self.data.SubscriptionId)
                 if requestdata is None:
                     return True
+                if epoch != self._owner_epoch:
+                    return False
 
     def _pop_publish_result(self) -> ua.PublishResult:
         """

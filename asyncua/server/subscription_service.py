@@ -14,6 +14,11 @@ from asyncua.common import uamethod, utils
 
 from .address_space import AddressSpace
 from .internal_subscription import InternalSubscription
+from .subscription_access import (
+    SamePrincipalTransferPolicy,
+    SubscriptionTransferPolicy,
+    SubscriptionTransferRequest,
+)
 
 if TYPE_CHECKING:
     from .internal_server import InternalServer
@@ -25,14 +30,15 @@ class SubscriptionService:
     There is one `SubscriptionService` instance for every `Server`/`InternalServer`.
     """
 
-    def __init__(self, aspace: AddressSpace, iserver: "InternalServer | None" = None) -> None:
+    def __init__(self, aspace: AddressSpace, iserver: InternalServer | None = None) -> None:
         self.logger = logging.getLogger(__name__)
         self.aspace: AddressSpace = aspace
-        self.iserver: "InternalServer | None" = iserver
+        self.iserver: InternalServer | None = iserver
         self.subscriptions: dict[int, InternalSubscription] = {}
         self._sub_id_counter = 77
         self.standard_events: dict[int, Any] = {}
         self._conditions: dict[ua.NodeId, Any] = {}
+        self.transfer_policy: SubscriptionTransferPolicy = SamePrincipalTransferPolicy()
 
     async def create_subscription(
         self,
@@ -40,6 +46,7 @@ class SubscriptionService:
         callback: Callable[..., Any],
         session_id: ua.NodeId,
         request_callback: Callable[..., Any] | None = None,
+        principal: str | None = None,
     ) -> ua.CreateSubscriptionResult:
         self.logger.info("create subscription")
         max_subs = self.iserver.max_subscriptions if self.iserver else 1_000
@@ -59,6 +66,7 @@ class SubscriptionService:
             self.aspace,
             callback,
             session_id,
+            principal=principal,
             request_callback=request_callback,
             delete_callback=lambda: self.subscriptions.pop(result.SubscriptionId, None),
             no_acks_limit=no_acks_limit,
@@ -82,29 +90,50 @@ class SubscriptionService:
         cap = self.iserver.max_keep_alive_count
         return min(requested, cap) if requested > 0 else cap
 
-    def modify_subscription(self, params: ua.ModifySubscriptionParameters) -> ua.ModifySubscriptionResult:
+    def _owned_subscription(self, subscription_id: int, session_id: ua.NodeId) -> InternalSubscription:
+        sub = self.subscriptions.get(int(subscription_id))
+        if sub is None:
+            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
+        if not sub.is_owned_by(session_id):
+            self.logger.warning(
+                "Session %s attempted to access subscription %s owned by %s",
+                session_id,
+                subscription_id,
+                sub.owner.session_id,
+            )
+            raise utils.ServiceError(ua.StatusCodes.BadUserAccessDenied)
+        return sub
+
+    def modify_subscription(
+        self, params: ua.ModifySubscriptionParameters, session_id: ua.NodeId
+    ) -> ua.ModifySubscriptionResult:
         self.logger.info("modify subscription")
         result = ua.ModifySubscriptionResult()
-        try:
-            sub = self.subscriptions[params.SubscriptionId]
-            sub.max_notifications_per_publish = params.MaxNotificationsPerPublish
-            result.RevisedPublishingInterval = sub.data.RevisedPublishingInterval
-            result.RevisedLifetimeCount = sub.data.RevisedLifetimeCount
-            result.RevisedMaxKeepAliveCount = sub.data.RevisedMaxKeepAliveCount
+        sub = self._owned_subscription(params.SubscriptionId, session_id)
+        sub.max_notifications_per_publish = params.MaxNotificationsPerPublish
+        result.RevisedPublishingInterval = sub.data.RevisedPublishingInterval
+        result.RevisedLifetimeCount = sub.data.RevisedLifetimeCount
+        result.RevisedMaxKeepAliveCount = sub.data.RevisedMaxKeepAliveCount
+        return result
 
-            return result
-        except KeyError:
-            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
-
-    async def delete_subscriptions(self, ids: list[int]) -> list[ua.StatusCode]:
+    async def delete_subscriptions(self, ids: list[int], session_id: ua.NodeId) -> list[ua.StatusCode]:
         self.logger.info("delete subscriptions: %s", ids)
         res: list[ua.StatusCode] = []
         existing_subs: list[InternalSubscription] = []
         for i in ids:
-            sub = self.subscriptions.pop(i, None)
+            sub = self.subscriptions.get(int(i))
             if sub is None:
                 res.append(ua.StatusCode(ua.StatusCodes.BadSubscriptionIdInvalid))
+            elif not sub.is_owned_by(session_id):
+                self.logger.warning(
+                    "Session %s attempted to delete subscription %s owned by %s",
+                    session_id,
+                    i,
+                    sub.owner.session_id,
+                )
+                res.append(ua.StatusCode(ua.StatusCodes.BadUserAccessDenied))
             else:
+                self.subscriptions.pop(int(i), None)
                 existing_subs.append(sub)
                 res.append(ua.StatusCode())
         stop_results = await asyncio.gather(*[sub.stop() for sub in existing_subs], return_exceptions=True)
@@ -113,76 +142,106 @@ class SubscriptionService:
                 self.logger.warning("Exception while stopping subscription", exc_info=stop_result)
         return res
 
-    def publish(self, acks: Iterable[ua.SubscriptionAcknowledgement]) -> tuple[int, list[ua.StatusCode]]:
+    def publish(
+        self, acks: Iterable[ua.SubscriptionAcknowledgement], session_id: ua.NodeId
+    ) -> tuple[int, list[ua.StatusCode]]:
         self.logger.info("publish request with acks %s", acks)
-        if not self.subscriptions:
+        owned = [sub for sub in self.subscriptions.values() if sub.is_owned_by(session_id)]
+        if not owned:
             raise utils.ServiceError(ua.StatusCodes.BadNoSubscription)
         results: list[ua.StatusCode] = []
         for ack in acks:
-            sub = self.subscriptions.get(ack.SubscriptionId)
+            sub = self.subscriptions.get(int(ack.SubscriptionId))
             if sub is None:
                 results.append(ua.StatusCode(ua.StatusCodes.BadSubscriptionIdInvalid))
+            elif not sub.is_owned_by(session_id):
+                self.logger.warning(
+                    "Session %s attempted to acknowledge subscription %s owned by %s",
+                    session_id,
+                    ack.SubscriptionId,
+                    sub.owner.session_id,
+                )
+                results.append(ua.StatusCode(ua.StatusCodes.BadUserAccessDenied))
             else:
                 sub.publish([ack.SequenceNumber])
                 results.append(ua.StatusCode())
-        return len(self.subscriptions), results
+        return len(owned), results
 
     async def create_monitored_items(
-        self, params: ua.CreateMonitoredItemsParameters
+        self, params: ua.CreateMonitoredItemsParameters, session_id: ua.NodeId
     ) -> list[ua.MonitoredItemCreateResult]:
         self.logger.info("create monitored items")
-        if params.SubscriptionId not in self.subscriptions:
-            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
-        return await self.subscriptions[params.SubscriptionId].monitored_item_srv.create_monitored_items(params)
+        sub = self._owned_subscription(params.SubscriptionId, session_id)
+        return await sub.monitored_item_srv.create_monitored_items(params)
 
-    def modify_monitored_items(self, params: ua.ModifyMonitoredItemsParameters) -> list[ua.MonitoredItemModifyResult]:
+    def modify_monitored_items(
+        self, params: ua.ModifyMonitoredItemsParameters, session_id: ua.NodeId
+    ) -> list[ua.MonitoredItemModifyResult]:
         self.logger.info("modify monitored items")
-        if params.SubscriptionId not in self.subscriptions:
-            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
-        return self.subscriptions[params.SubscriptionId].monitored_item_srv.modify_monitored_items(params)
+        sub = self._owned_subscription(params.SubscriptionId, session_id)
+        return sub.monitored_item_srv.modify_monitored_items(params)
 
-    async def set_publishing_mode(self, params: ua.SetPublishingModeParameters) -> list[ua.StatusCode]:
+    async def set_publishing_mode(
+        self, params: ua.SetPublishingModeParameters, session_id: ua.NodeId
+    ) -> list[ua.StatusCode]:
         self.logger.info("set publishing mode")
         results: list[ua.StatusCode] = []
         for sid in params.SubscriptionIds:
-            sub = self.subscriptions.get(sid)
+            sub = self.subscriptions.get(int(sid))
             if sub is None:
                 results.append(ua.StatusCode(ua.StatusCodes.BadSubscriptionIdInvalid))
+            elif not sub.is_owned_by(session_id):
+                self.logger.warning(
+                    "Session %s attempted to change publishing mode of subscription %s owned by %s",
+                    session_id,
+                    sid,
+                    sub.owner.session_id,
+                )
+                results.append(ua.StatusCode(ua.StatusCodes.BadUserAccessDenied))
             else:
                 await sub.set_publishing_mode(params.PublishingEnabled)
                 results.append(ua.StatusCode())
         return results
 
-    async def set_monitoring_mode(self, params: ua.SetMonitoringModeParameters) -> list[ua.StatusCode]:
+    async def set_monitoring_mode(
+        self, params: ua.SetMonitoringModeParameters, session_id: ua.NodeId
+    ) -> list[ua.StatusCode]:
         self.logger.info("set monitoring mode")
-        if params.SubscriptionId not in self.subscriptions:
-            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
-        return await self.subscriptions[params.SubscriptionId].monitored_item_srv.set_monitoring_mode(
-            params.MonitoringMode, params.MonitoredItemIds
-        )
+        sub = self._owned_subscription(params.SubscriptionId, session_id)
+        return await sub.monitored_item_srv.set_monitoring_mode(params.MonitoringMode, params.MonitoredItemIds)
 
-    def delete_monitored_items(self, params: ua.DeleteMonitoredItemsParameters) -> list[ua.StatusCode]:
+    def delete_monitored_items(
+        self, params: ua.DeleteMonitoredItemsParameters, session_id: ua.NodeId
+    ) -> list[ua.StatusCode]:
         self.logger.info("delete monitored items")
-        if params.SubscriptionId not in self.subscriptions:
-            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
-        return self.subscriptions[params.SubscriptionId].monitored_item_srv.delete_monitored_items(
-            params.MonitoredItemIds
-        )
+        sub = self._owned_subscription(params.SubscriptionId, session_id)
+        return sub.monitored_item_srv.delete_monitored_items(params.MonitoredItemIds)
 
-    def republish(self, params: ua.RepublishParameters) -> ua.NotificationMessage:
-        if params.SubscriptionId not in self.subscriptions:
-            # TODO: what should I do?
-            return ua.NotificationMessage()
-        return self.subscriptions[params.SubscriptionId].republish(params.RetransmitSequenceNumber)
+    def republish(self, params: ua.RepublishParameters, session_id: ua.NodeId) -> ua.NotificationMessage:
+        sub = self.subscriptions.get(int(params.SubscriptionId))
+        if sub is None:
+            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
+        if not sub.is_owned_by(session_id):
+            self.logger.warning(
+                "Session %s attempted to republish subscription %s owned by %s",
+                session_id,
+                params.SubscriptionId,
+                sub.owner.session_id,
+            )
+            raise utils.ServiceError(ua.StatusCodes.BadUserAccessDenied)
+        return sub.republish(params.RetransmitSequenceNumber)
 
     async def transfer_subscriptions(
         self,
         params: ua.TransferSubscriptionsParameters,
         session_id: ua.NodeId,
         callback: Callable[..., Any],
+        principal: str | None = None,
+        request_callback: Callable[..., Any] | None = None,
     ) -> list[ua.TransferResult]:
         self.logger.info("transfer_subscriptions: %s", params.SubscriptionIds)
         results: list[ua.TransferResult] = []
+        policy = self.transfer_policy
         for sub_id in params.SubscriptionIds:
             sub = self.subscriptions.get(int(sub_id))
             result = ua.TransferResult()
@@ -190,8 +249,25 @@ class SubscriptionService:
                 result.StatusCode = ua.StatusCode(ua.StatusCodes.BadSubscriptionIdInvalid)
                 results.append(result)
                 continue
-            sub.session_id = session_id
-            sub.pub_result_callback = callback
+            request = SubscriptionTransferRequest(
+                subscription_id=int(sub_id),
+                owner=sub.owner,
+                requester_session_id=session_id,
+                requester_principal=principal,
+                send_initial_values=params.SendInitialValues,
+            )
+            if not policy.can_transfer(request):
+                self.logger.warning(
+                    "Transfer of subscription %s from %s to %s refused by %s",
+                    sub_id,
+                    sub.owner.session_id,
+                    session_id,
+                    type(policy).__name__,
+                )
+                result.StatusCode = ua.StatusCode(ua.StatusCodes.BadUserAccessDenied)
+                results.append(result)
+                continue
+            sub.rebind(session_id, principal, callback, request_callback)
             result.AvailableSequenceNumbers = sorted(sub._not_acknowledged_results.keys())
             results.append(result)
         return results

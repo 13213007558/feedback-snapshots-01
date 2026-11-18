@@ -36,6 +36,7 @@ from .address_space import NodeData
 from .binary_server_asyncio import BinaryServer
 from .event_generator import EventGenerator
 from .internal_server import InternalServer
+from .subscription_access import CallableTransferPolicy, SubscriptionTransferPolicy, SubscriptionTransferRequest
 from .user_managers import UserManager
 
 if TYPE_CHECKING:
@@ -927,12 +928,37 @@ class Server:
         Function is called with certificate and application description and should raise the correct status code
         when invalid.
 
-            async def example_validation_method(certificate: x509.Certificate, app_description: ua.ApplicationDescription):
+            async def example_validation_method(
+                certificate: x509.Certificate, app_description: ua.ApplicationDescription
+            ):
                 ...
                 if not_valid_condition:
                     raise ServiceError(ua.StatusCodes.BadCertificateInvalid)
         """
         self.iserver.certificate_validator = validator
+
+    def set_subscription_transfer_policy(self, policy: SubscriptionTransferPolicy) -> None:
+        """
+        Set the admission policy consulted by TransferSubscriptions.
+
+        A subscription belongs to the authenticated session that created it; no
+        other session may read, acknowledge, republish, modify or delete it. The
+        policy is the single place where ownership may change. The default
+        policy accepts a reconnecting session that authenticated as the same
+        named principal and refuses cross-principal transfers.
+
+        Pass :class:`~asyncua.server.subscription_access.AllowAllTransferPolicy`
+        to opt in to cross-principal transfer, or any object with a
+        ``can_transfer(SubscriptionTransferRequest) -> bool`` method.
+        """
+        self.iserver.subscription_service.transfer_policy = policy
+
+    def set_subscription_transfer_callback(self, decide: Callable[[SubscriptionTransferRequest], bool]) -> None:
+        """
+        Convenience wrapper around :meth:`set_subscription_transfer_policy` for a
+        plain callable admission function.
+        """
+        self.set_subscription_transfer_policy(CallableTransferPolicy(decide))
 
     async def get_pubsub(self) -> PubSub:
         """

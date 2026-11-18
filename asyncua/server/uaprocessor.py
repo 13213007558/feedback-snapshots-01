@@ -299,9 +299,8 @@ class UaProcessor:
                 if self._session_watchdog_task is None or self._session_watchdog_task.done():
                     self._session_watchdog_task = asyncio.create_task(self._session_watchdog_loop())
                 for sub in self.iserver.subscription_service.subscriptions.values():
-                    if sub.session_id == existing.session_id:
-                        sub.pub_result_callback = self.forward_publish_response
-                        sub.pub_request_callback = self.get_publish_request
+                    if sub.is_owned_by(existing.session_id):
+                        sub.rebind_connection(self.forward_publish_response, self.get_publish_request)
             if self._connection.security_policy.host_certificate is None:
                 data = self.session.nonce
             else:
@@ -532,6 +531,9 @@ class UaProcessor:
                     if sub is None:
                         # subscription is no longer active
                         continue
+                    if not sub.is_owned_by(self.session.session_id):
+                        # subscription has been transferred to another session
+                        continue
                     if await sub.publish_results(data):
                         # publish request has been consumed
                         break
@@ -552,7 +554,9 @@ class UaProcessor:
             elif typeid == ua.NodeId(ua.ObjectIds.TransferSubscriptionsRequest_Encoding_DefaultBinary):
                 _logger.info("transfer subscriptions request (%s)", user)
                 params = struct_from_binary(ua.TransferSubscriptionsParameters, body)
-                results = await self.session.transfer_subscriptions(params, self.forward_publish_response)
+                results = await self.session.transfer_subscriptions(
+                    params, self.forward_publish_response, request_callback=self.get_publish_request
+                )
                 response = ua.TransferSubscriptionsResponse()
                 response.Parameters.Results = results
                 self.send_response(requesthdr.RequestHandle, seqhdr, response)
@@ -630,8 +634,7 @@ class UaProcessor:
         if not self.session.external or not self.session.is_activated():
             return True
         has_subs = any(
-            sub.session_id == self.session.session_id
-            for sub in self.iserver.subscription_service.subscriptions.values()
+            sub.is_owned_by(self.session.session_id) for sub in self.iserver.subscription_service.subscriptions.values()
         )
         return not has_subs
 

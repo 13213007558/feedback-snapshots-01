@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Iterable
@@ -53,6 +54,7 @@ class InternalSession(AbstractSession):
         self.name: str = name
         self.user: User = user
         self.nonce: bytes | None = None
+        self._principal: str | None = None if user.role is UserRole.Anonymous else user.name
         self.state = SessionState.Created
         self.session_id = ua.NodeId(self._counter)
         InternalSession._counter += 1
@@ -69,6 +71,17 @@ class InternalSession(AbstractSession):
         return (
             f"InternalSession(name:{self.name}, user:{self.user}, id:{self.session_id}, auth_token:{self.auth_token})"
         )
+
+    @property
+    def principal(self) -> str | None:
+        """Stable identity of the authenticated user for subscription ownership.
+
+        Derived from the credential the user manager accepted, so it survives a
+        reconnect that recreates the ``User`` object. Returns None for anonymous
+        sessions: an unnamed principal must never be treated as interchangeable
+        with another unnamed principal.
+        """
+        return self._principal
 
     async def get_endpoints(
         self, params: ua.GetEndpointsParameters | None = None, sockname: tuple[str, int] | None = None
@@ -124,7 +137,7 @@ class InternalSession(AbstractSession):
             self.iserver.unregister_external_session(self)
         if delete_subs:
             await self.delete_subscriptions(
-                [id for id, sub in self.subscription_service.subscriptions.items() if sub.session_id == self.session_id]
+                [id for id, sub in self.subscription_service.subscriptions.items() if sub.is_owned_by(self.session_id)]
             )
 
     def touch(self) -> None:
@@ -174,6 +187,8 @@ class InternalSession(AbstractSession):
         if not isinstance(id_token, self.iserver.supported_tokens):
             self.logger.error("Rejected active session UserIdentityToken not supported")
             raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
+        username: str | None = None
+        user: User = self.user
         if self.iserver.user_manager is not None:
             try:
                 if isinstance(id_token, ua.UserNameIdentityToken):
@@ -194,6 +209,7 @@ class InternalSession(AbstractSession):
             if user is None:
                 raise ServiceError(ua.StatusCodes.BadUserAccessDenied)
             self.user = user
+        self._principal = self._principal_from_identity(id_token, username, user, peer_certificate)
         self.nonce = create_nonce(32)
         result.ServerNonce = self.nonce
         self.state = SessionState.Activated
@@ -203,6 +219,21 @@ class InternalSession(AbstractSession):
         self._start_timeout_watchdog()
         self.logger.info("Activated internal session %s for user %s", self.name, self.user)
         return result
+
+    @staticmethod
+    def _principal_from_identity(
+        id_token: Any,
+        username: str | None,
+        user: User,
+        peer_certificate: bytes | None,
+    ) -> str | None:
+        if isinstance(id_token, ua.UserNameIdentityToken) and username:
+            return f"user:{username}"
+        if isinstance(id_token, ua.X509IdentityToken) and peer_certificate:
+            return f"x509:{hashlib.sha256(peer_certificate).hexdigest()}"
+        if user.role is UserRole.Anonymous:
+            return None
+        return user.name
 
     async def read(self, params: ua.ReadParameters) -> list[ua.DataValue]:
         if self.user is None:
@@ -284,7 +315,11 @@ class InternalSession(AbstractSession):
         request_callback: Callable[..., Any] | None = None,
     ) -> ua.CreateSubscriptionResult:
         result = await self.subscription_service.create_subscription(
-            params, callback, self.session_id, request_callback=request_callback
+            params,
+            callback,
+            self.session_id,
+            request_callback=request_callback,
+            principal=self.principal,
         )
         return result
 
@@ -292,7 +327,7 @@ class InternalSession(AbstractSession):
         self, params: ua.CreateMonitoredItemsParameters
     ) -> list[ua.MonitoredItemCreateResult]:
         """Returns Future"""
-        subscription_result = await self.subscription_service.create_monitored_items(params)
+        subscription_result = await self.subscription_service.create_monitored_items(params, self.session_id)
         await self.iserver.callback_service.dispatch(
             CallbackType.ItemSubscriptionCreated, ServerItemCallback(params, subscription_result, None, self.external)
         )
@@ -301,27 +336,27 @@ class InternalSession(AbstractSession):
     async def modify_monitored_items(
         self, params: ua.ModifyMonitoredItemsParameters
     ) -> list[ua.MonitoredItemModifyResult]:
-        subscription_result = self.subscription_service.modify_monitored_items(params)
+        subscription_result = self.subscription_service.modify_monitored_items(params, self.session_id)
         await self.iserver.callback_service.dispatch(
             CallbackType.ItemSubscriptionModified, ServerItemCallback(params, subscription_result, None, self.external)
         )
         return subscription_result
 
     async def set_monitoring_mode(self, params: ua.SetMonitoringModeParameters) -> list[ua.StatusCode]:
-        return await self.subscription_service.set_monitoring_mode(params)
+        return await self.subscription_service.set_monitoring_mode(params, self.session_id)
 
     async def set_publishing_mode(self, params: ua.SetPublishingModeParameters) -> list[ua.StatusCode]:
-        return await self.subscription_service.set_publishing_mode(params)
+        return await self.subscription_service.set_publishing_mode(params, self.session_id)
 
     def republish(self, params: ua.RepublishParameters) -> ua.NotificationMessage:
-        return self.subscription_service.republish(params)
+        return self.subscription_service.republish(params, self.session_id)
 
     async def delete_subscriptions(self, ids: list[int]) -> list[ua.StatusCode]:
-        return await self.subscription_service.delete_subscriptions(ids)
+        return await self.subscription_service.delete_subscriptions(ids, self.session_id)
 
     async def delete_monitored_items(self, params: ua.DeleteMonitoredItemsParameters) -> list[ua.StatusCode]:
         # This is an async method, dues to symmetry with client code
-        subscription_result = self.subscription_service.delete_monitored_items(params)
+        subscription_result = self.subscription_service.delete_monitored_items(params, self.session_id)
         await self.iserver.callback_service.dispatch(
             CallbackType.ItemSubscriptionDeleted, ServerItemCallback(params, subscription_result, None, self.external)
         )
@@ -329,12 +364,12 @@ class InternalSession(AbstractSession):
         return subscription_result
 
     def publish(self, acks: Iterable[ua.SubscriptionAcknowledgement] | None = None) -> tuple[int, list[ua.StatusCode]]:
-        return self.subscription_service.publish(acks or [])
+        return self.subscription_service.publish(acks or [], self.session_id)
 
     def modify_subscription(self, params: ua.ModifySubscriptionParameters) -> ua.ModifySubscriptionResult:
         # Sync because the underlying service is sync; the client-side UaSession
         # is async (RPC). Not part of AbstractSession because the shapes diverge.
-        return self.subscription_service.modify_subscription(params)
+        return self.subscription_service.modify_subscription(params, self.session_id)
 
     # The server-side override takes an extra `callback` (the per-connection
     # publish-response callback owned by the UaProcessor handling the transfer
@@ -342,6 +377,15 @@ class InternalSession(AbstractSession):
     # to the new connection's socket. The client-side override has no such
     # need, hence the signature divergence.
     async def transfer_subscriptions(  # type: ignore[override]
-        self, params: ua.TransferSubscriptionsParameters, callback: Callable[..., Any]
+        self,
+        params: ua.TransferSubscriptionsParameters,
+        callback: Callable[..., Any],
+        request_callback: Callable[..., Any] | None = None,
     ) -> list[ua.TransferResult]:
-        return await self.subscription_service.transfer_subscriptions(params, self.session_id, callback)
+        return await self.subscription_service.transfer_subscriptions(
+            params,
+            self.session_id,
+            callback,
+            principal=self.principal,
+            request_callback=request_callback,
+        )
