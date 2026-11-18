@@ -246,3 +246,6 @@ test.yar
 
 # Files created by plyara at runtime
 parsetab.py
+
+# Boundary mutation test failure artifacts
+tests/boundary_artifacts/
