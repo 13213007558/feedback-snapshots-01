@@ -352,6 +352,47 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *TS48058_Abis*: few IE structures for the GSM Abis protocol from TS 48.058
 
 
+nas_review
+----------
+
+This subdirectory provides `review_nas5g()`, a traffic-review oriented wrapper
+around the 5G NAS parser. A security header only *declares* protection: it does
+not prove that the embedded MAC is valid, and enabling null cipher only makes a
+payload readable, it does not make it trustworthy. The wrapper therefore keeps
+decoding and trust strictly separate and returns a `NASReviewResult` with:
+
+* the security header as declared on the wire (`sec_hdr`, `sec_hdr_name`,
+  `ciphering_claimed`), plus the on-wire `MAC` and sequence number;
+* the raw protected payload, always preserved as untouched bytes
+  (`raw_protected_payload`);
+* whether an inner parse was attempted and its outcome (`inner_parse_state`,
+  `inner_message`, `inner_parse_error`);
+* the integrity verdict returned by an injected verifier
+  (`verification_state`), never inferred from a successful decode;
+* an explicit `trust_state` and machine-readable `reason` / `explanation`.
+
+Trust states distinguish the cases a review backend must show differently:
+
+* `plaintext_unverified`: no security header, readable but not authenticated;
+* `integrity_unknown`: no verifier, an abstaining verifier, or a verifier error;
+* `integrity_failed`: the verifier rejected the MAC, even if the inner bytes
+  still happen to form a valid NAS message;
+* `integrity_verified`: MAC passed (integrity-only header, or ciphered payload
+  that stays opaque);
+* `null_cipher_confirmed`: MAC passed *and* the payload of a ciphering header
+  decodes, which is the only way to confirm that null cipher is actually used.
+
+Integrity checking is provided by an injectable callback taking a
+`VerificationContext` and returning `True`, `False` or `None` (abstain); it
+never receives any key material through the review API. Lab helpers
+(`make_lab_hmac_verifier`, `apply_lab_hmac`, `make_static_verifier`) and a
+pycrate `mac_verify` adapter (`make_pycrate_mac_verifier`) are included, so the
+behaviour can be exercised without a base station, SIM card or production key.
+See `test/test_nas_review.py` and run `tools/nas_security_review_demo.py` for
+the same inner message presented in plain, valid-protected and bad-protected
+envelopes.
+
+
 pycrate_diameter
 ----------------
 
