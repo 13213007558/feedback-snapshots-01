@@ -11,3 +11,4 @@ lib/net/http/persistent/pool.rb
 lib/net/http/persistent/timed_stack_multi.rb
 test/test_net_http_persistent.rb
 test/test_net_http_persistent_timed_stack_multi.rb
+test/test_net_http_persistent_tls_verification.rb
