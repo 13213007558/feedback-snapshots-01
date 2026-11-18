@@ -136,6 +136,38 @@ JSON Output:
 
 # Additional Information
 
+## Condition Cost Analysis
+
+The `plyara.cost` module performs a limited, conservative cost analysis of
+rule conditions so that a scanning service can reject rules whose condition
+work scales with the scanned file size before publishing them, rather than
+using the rule text length as a proxy for execution cost.
+
+The analysis covers integer intervals over constants, `filesize`, string
+occurrence counts (`#a`), loop variables, and external variables whose bounds
+are supplied through trusted configuration, as well as `for` loops over such
+intervals (including nested loops with correlated bounds) and boolean
+combinations of string match predicates. The result is a work upper bound
+expressed as a polynomial in `filesize`, classified as constant, linear,
+higher-order, or undeterminable, with a derivation source recorded per
+construct. Both operands of `and`/`or` are always counted: short-circuit
+evaluation may reduce actual work, but an unexecuted branch is not treated as
+free. Conditions outside the supported subset, and bounds exceeding the
+configured budget, are never marked safe to publish. The analysis does not
+model the internal overhead of any particular YARA engine, and it never
+modifies the parsed rules.
+
+```python
+>>> from plyara.cost import CostConfig, analyze_source
+>>> config = CostConfig(external_bounds={'ext_limit': (1, 64)}, max_degree=1, max_work=10**6)
+>>> report = analyze_source('rule r { condition: for any i in (1..filesize) : ( $a at i ) }', config)[0]
+>>> report.cost_class.value, str(report.bound), report.safe_to_publish
+('linear', 'filesize', True)
+```
+
+An independent counting interpreter can cross-check the derived bound on
+small concrete inputs via `plyara.cost.verify_with_samples`.
+
 ## Reusing The Parser
 
 If you want to reuse a single instance of the parser object for efficiency when parsing large quantities of rule or rulesets, the new clear() method must be used.
