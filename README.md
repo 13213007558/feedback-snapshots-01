@@ -151,6 +151,42 @@ for file in files:
     parser.clear()
 ```
 
+## Auditing Module Usage
+
+A scanning service that only publishes rules using a limited set of YARA modules needs more than the `import` list: rules can import modules they never use, reference modules they never imported, use a member that is not allowed, or hide module-looking names inside strings, regular expressions and dynamic indexes. The read-only `ModuleAccessAuditor` cross-checks the declared imports against the identifiers actually used in each condition section.
+
+The policy is supplied by the caller as a module-to-members allowlist. The presence of a module does not allow any member absent from its set. Rule level exceptions are also supplied explicitly by the caller as exact references.
+
+```python
+from plyara import ModuleAccessAuditor, AuditCategory
+
+allowed_modules = {
+    'pe': {'number_of_sections', 'exports', 'DLL'},
+    'hash': {'sha256'},
+}
+rule_exceptions = {
+    'special_rule': {'pe.forbidden_member'},
+}
+
+report = ModuleAccessAuditor(allowed_modules, rule_exceptions).audit(rule_text)
+
+if not report.passed:
+    for finding in report.blocking_findings:
+        print(finding.line, finding.column, finding.category.value, finding.reference)
+```
+
+Each `AuditFinding` carries the rule name, a one based line and column, the exact condition term and an explanation. The categories are:
+
+- `unused_import`: an imported module is never referenced from any condition.
+- `undeclared_module_use`: an allowlisted module is used without a matching import.
+- `unallowed_module`: an imported module is not part of the publishing policy.
+- `unknown_member`: the member is not in the caller supplied member allowlist.
+- `ambiguous_identifier`: a dotted identifier uses a root matching no imported or allowlisted module.
+- `indeterminate_access`: a dynamic index or nested access whose target cannot be determined statically.
+- `pseudo_name`: a string reference such as `$pe`, or a module-looking name inside string or regex content, reported for transparency and never blocking.
+
+The auditor is read-only: it never rewrites the input text or the parsed rule dictionaries, and rejection decisions stay with the caller. It is a lexical policy check, not YARA engine level semantic validation: expression types, evaluation results and runtime behavior are not verified.
+
 ## Breaking Change: Import Effects
 
 ### Background
