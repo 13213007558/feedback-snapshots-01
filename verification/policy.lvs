@@ -1,0 +1,22 @@
+// Authorization policy for the protected namespace (Light VerSec).
+//
+// Root of trust: the self-signed certificate /protected/KEY/<id>/self/<v>.
+// Nothing outside this hierarchy can mint keys inside "protected". A signature
+// that verifies under some other key is cryptographically sound but carries no
+// publication authority here.
+//
+// "author" is a named tag. LVS binds the same tag across every rule it appears
+// in, so the author component in the data name must equal the author component
+// in the signing key name. Underscore-prefixed identifiers are rule-local
+// temporaries and do NOT bind across rules.
+
+#KEY: "KEY"/_/_/_
+
+// Editorial content: alice's key can publish only under /protected/news/alice/.
+#news: "protected"/"news"/author/_ <= #news_author
+
+// Author key: /protected/news/author/<name>/KEY/<id>/<issuer>/<version>
+#news_author: "protected"/"news"/"author"/author/"KEY"/_/_/_ <= #root
+
+// Root key of the protected namespace.
+#root: "protected"/#KEY
