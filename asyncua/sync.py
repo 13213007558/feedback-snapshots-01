@@ -357,7 +357,19 @@ class Client:
     def get_namespace_array(self) -> list[str]: ...
 
     @syncmethod
-    def set_security(self) -> None: ...
+    def set_security(
+        self,
+        policy: type[Any],
+        certificate: Any,
+        private_key: Any,
+        private_key_password: str | bytes | None = None,
+        server_certificate: Any = None,
+        mode: ua.MessageSecurityMode = ua.MessageSecurityMode.SignAndEncrypt,
+        certificate_chain: Sequence[Any] | None = None,
+        *,
+        server_identity: Any = None,
+        endpoint_security_policy: Any = None,
+    ) -> Any: ...
 
     @syncmethod
     def set_security_string(self, string: str) -> None: ...

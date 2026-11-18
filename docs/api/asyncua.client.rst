@@ -21,6 +21,14 @@ asyncua.client.client module
    :undoc-members:
    :show-inheritance:
 
+asyncua.client.endpoint\_security module
+-----------------------------------------
+
+.. automodule:: asyncua.client.endpoint_security
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 asyncua.client.ua\_client module
 --------------------------------
 

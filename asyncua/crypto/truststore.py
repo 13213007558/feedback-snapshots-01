@@ -56,6 +56,11 @@ class TrustStore:
         )
 
     @property
+    def is_loaded(self) -> bool:
+        """True when trusted certificates were loaded into the verification store."""
+        return self._trust_store is not None
+
+    @property
     def trust_locations(self) -> list[Path]:
         return self._trust_locations
 

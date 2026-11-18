@@ -37,6 +37,20 @@ from ..ua.uaerrors import (
     BadSecurityPolicyRejected,
     BadSessionIdInvalid,
 )
+from .endpoint_security import (
+    CredentialReleaseDenied,
+    EndpointOrigin,
+    EndpointSecurityPolicy,
+    EndpointSelection,
+    EndpointSelectionError,
+    MissingServerTrustError,
+    ServerIdentity,
+    require_credentials_allowed,
+    security_policy_class,
+    select_endpoint,
+    validate_session_endpoint,
+    verify_server_certificate,
+)
 from .ua_client import StateSubscription, UaClient, UaClientState
 
 _logger = logging.getLogger(__name__)
@@ -150,6 +164,22 @@ class Client:
         self._stale_check_interval: float = 0.5
         self.certificate_validator: CertificateValidatorMethod | None = None
         """hook to validate a certificate, raises a ServiceError when not valid"""
+        self._security_configured: bool = False
+        self._server_certificate_explicit: bool = False
+        self.server_identity: ServerIdentity | None = None
+        """deployment-owned identity used when selecting endpoints from discovery"""
+        self.endpoint_security_policy: EndpointSecurityPolicy | None = None
+        """strict endpoint and credential-release policy; None keeps legacy behaviour"""
+        self.selected_endpoint: EndpointSelection | None = None
+        """endpoint accepted by endpoint_security_policy for the current connection"""
+        self.session_endpoint: EndpointSelection | None = None
+        """endpoint confirmed by the CreateSession response"""
+        self.credential_release_callback: Callable[[EndpointSelection], None] | None = None
+        """called after credential checks pass, immediately before a user token is built"""
+        self.last_credential_release: EndpointSelection | None = None
+        self.last_connection_target: EndpointOrigin | None = None
+        """normalized origin actually used by the last socket connect attempt"""
+        self._session_confirmed: bool = False
         # Set before connect() to let a fresh client process resume the existing
         # server-side session via ActivateSession instead of creating a new one
         # (spec Part 4 §6.7) — useful after a client crash.
@@ -277,13 +307,61 @@ class Client:
         server_certificate: str | uacrypto.CertProperties | bytes | None = None,
         mode: ua.MessageSecurityMode = ua.MessageSecurityMode.SignAndEncrypt,
         certificate_chain: Sequence[str | uacrypto.CertProperties | bytes | Path] | None = None,
-    ) -> None:
+        *,
+        server_identity: ServerIdentity | None = None,
+        endpoint_security_policy: EndpointSecurityPolicy | None = None,
+    ) -> EndpointSelection | None:
         """
         Set SecureConnection mode.
-        Call this before connect()
+        Call this before connect().
+
+        Passing ``server_identity`` or ``endpoint_security_policy`` enables the
+        strict endpoint path: discovery only proposes endpoints, while the
+        deployment-owned identity decides whether any of them may be used.
+        ``server_certificate`` may additionally pin the exact certificate; when
+        it is omitted, the certificate is taken from an endpoint that passed
+        the configured pin or trust-store check.  Without a strict policy,
+        omitting ``server_certificate`` keeps the legacy discovery-trust
+        behaviour and must not be used for credentials.
         """
+        if server_identity is not None and endpoint_security_policy is not None:
+            raise ValueError("pass either server_identity or endpoint_security_policy, not both")
+        self._security_configured = True
+        self._server_certificate_explicit = server_certificate is not None or endpoint_security_policy is not None
+        has_credentials = bool(self._username or self._password)
+        if server_identity is not None:
+            endpoint_security_policy = EndpointSecurityPolicy(
+                identity=server_identity,
+                allowed_security_policy_uris=frozenset({policy.URI}),
+                minimum_security_mode=(ua.MessageSecurityMode.SignAndEncrypt if has_credentials else mode),
+                require_username_token=False,
+                require_username_token_encryption=True,
+            )
+        if endpoint_security_policy is not None:
+            if policy is security_policies.SecurityPolicyNone or policy.URI == security_policies.SecurityPolicyNone.URI:
+                raise ua.UaError("SecurityPolicyNone cannot be used on the strict endpoint path")
+            if mode in (ua.MessageSecurityMode.None_, ua.MessageSecurityMode.Invalid):
+                raise ua.UaError("strict endpoint selection requires Sign or SignAndEncrypt")
+            await self._set_strict_security(
+                policy,
+                certificate,
+                private_key,
+                private_key_password,
+                server_certificate,
+                mode,
+                certificate_chain,
+                endpoint_security_policy,
+            )
+            return self.selected_endpoint
+        if (self._username or self._password) and server_certificate is None:
+            raise MissingServerTrustError(
+                "refusing to send user credentials without a configured server certificate; "
+                "pass server_certificate or use server_identity/endpoint_security_policy"
+            )
         if server_certificate is None:
-            # Force unencrypted/unsigned SecureChannel to list the endpoints
+            # Force unencrypted/unsigned SecureChannel to list the endpoints.
+            # The certificate taken here is discovery data; use server_identity
+            # with credentials so it is checked against deployment trust first.
             new_policy = security_policies.SecurityPolicyNone()
             self.security_policy = new_policy
             self.uaclient.security_policy = new_policy
@@ -301,7 +379,132 @@ class Client:
         ]
         if not isinstance(private_key, uacrypto.CertProperties):
             private_key = uacrypto.CertProperties(private_key, password=private_key_password)
-        return await self._set_security(policy, certificate, private_key, server_certificate, mode, chain)
+        await self._set_security(policy, certificate, private_key, server_certificate, mode, chain)
+        return None
+
+    async def _set_strict_security(
+        self,
+        policy: type[security_policies.SecurityPolicy],
+        certificate: str | uacrypto.CertProperties | bytes | Path,
+        private_key: str | uacrypto.CertProperties | bytes | Path,
+        private_key_password: str | bytes | None,
+        server_certificate: str | uacrypto.CertProperties | bytes | None,
+        mode: ua.MessageSecurityMode,
+        certificate_chain: Sequence[str | uacrypto.CertProperties | bytes | Path] | None,
+        endpoint_security_policy: EndpointSecurityPolicy,
+    ) -> None:
+        certificate_props = (
+            certificate if isinstance(certificate, uacrypto.CertProperties) else uacrypto.CertProperties(certificate)
+        )
+        key_props = (
+            private_key
+            if isinstance(private_key, uacrypto.CertProperties)
+            else uacrypto.CertProperties(private_key, password=private_key_password)
+        )
+        chain_props = [
+            cert if isinstance(cert, uacrypto.CertProperties) else uacrypto.CertProperties(cert)
+            for cert in (certificate_chain or [])
+        ]
+        client_cert = await uacrypto.load_certificate(certificate_props.path_or_content, certificate_props.extension)
+        client_key = await uacrypto.load_private_key(key_props.path_or_content, key_props.password, key_props.extension)
+        chain = await asyncio.gather(*(uacrypto.load_certificate(c.path_or_content, c.extension) for c in chain_props))
+        uacrypto.check_certificate(client_cert, self.application_uri, socket.gethostname())
+
+        actual_origin = EndpointOrigin.parse(self.server_url.geturl())
+        pinned_certificate = await self._load_optional_certificate(server_certificate)
+        if pinned_certificate is not None:
+            verify_server_certificate(pinned_certificate, endpoint_security_policy.identity)
+            if (
+                endpoint_security_policy.identity.allowed_origins
+                and actual_origin not in endpoint_security_policy.identity.allowed_origins
+            ):
+                raise EndpointSelectionError(
+                    f"connection target {actual_origin} is not in the configured address allow-list"
+                )
+        if pinned_certificate is not None:
+            self.security_policy = policy(pinned_certificate, client_cert, client_key, mode, host_cert_chain=chain)
+        else:
+            self.security_policy = security_policies.SecurityPolicyNone()
+        self.uaclient.set_security(self.security_policy)
+
+        endpoints = await self.connect_and_get_server_endpoints()
+        selection = select_endpoint(
+            endpoints,
+            endpoint_security_policy,
+            actual_origin,
+            required_policy_uri=policy.URI,
+            required_mode=mode,
+        )
+        if pinned_certificate is not None and uacrypto.der_from_x509(selection.certificate) != uacrypto.der_from_x509(
+            pinned_certificate
+        ):
+            raise EndpointSelectionError("discovery selected a certificate that differs from the pinned certificate")
+        self.endpoint_security_policy = endpoint_security_policy
+        self.selected_endpoint = selection
+        self.session_endpoint = None
+        self.security_policy = policy(selection.certificate, client_cert, client_key, mode, host_cert_chain=chain)
+        self.uaclient.set_security(self.security_policy)
+
+    @staticmethod
+    async def _load_optional_certificate(
+        server_certificate: str | uacrypto.CertProperties | bytes | None,
+    ) -> x509.Certificate | None:
+        if server_certificate is None:
+            return None
+        props = (
+            server_certificate
+            if isinstance(server_certificate, uacrypto.CertProperties)
+            else uacrypto.CertProperties(server_certificate)
+        )
+        return await uacrypto.load_certificate(props.path_or_content, props.extension)
+
+    async def select_endpoint_from_discovery(
+        self,
+        policy: EndpointSecurityPolicy,
+        security_policy_uri: str | None = None,
+        security_mode: ua.MessageSecurityMode | None = None,
+    ) -> EndpointSelection:
+        """Fetch endpoints and return the strongest one allowed by ``policy``.
+
+        Discovery itself uses ``SecurityPolicyNone`` so it can run against
+        servers whose endpoints are all encrypted, but that channel is only
+        used to fetch declarations.  No session is opened and no credentials
+        are released.  The result is for inspection; ``set_security`` performs
+        the selection again with the real channel.
+        """
+        actual_origin = EndpointOrigin.parse(self.server_url.geturl())
+        saved = (
+            self.security_policy,
+            self.uaclient.security_policy,
+            self.server_identity,
+            self.endpoint_security_policy,
+            self.selected_endpoint,
+            self.session_endpoint,
+        )
+        was_connected = self.uaclient.has_transport
+        try:
+            self.security_policy = security_policies.SecurityPolicyNone()
+            self.uaclient.set_security(self.security_policy)
+            endpoints = await self.connect_and_get_server_endpoints()
+        finally:
+            (
+                self.security_policy,
+                self.uaclient.security_policy,
+                self.server_identity,
+                self.endpoint_security_policy,
+                self.selected_endpoint,
+                self.session_endpoint,
+            ) = saved
+            if was_connected:
+                self.uaclient.set_security(self.security_policy)
+        required_policy = security_policy_class(security_policy_uri) if security_policy_uri else None
+        return select_endpoint(
+            endpoints,
+            policy,
+            actual_origin,
+            required_policy_uri=required_policy.URI if required_policy else None,
+            required_mode=security_mode,
+        )
 
     async def _set_security(
         self,
@@ -557,6 +760,7 @@ class Client:
         except Exception:
             _logger.exception("close_secure_channel raised during disconnect; continuing teardown")
         self.disconnect_socket()
+        self._session_confirmed = False
         self._clear_persisted_session()
 
     def _try_load_persisted_session(self) -> bool:
@@ -650,7 +854,7 @@ class Client:
         """
         connect to socket defined in url
         """
-
+        self.last_connection_target = EndpointOrigin.parse(self.server_url.geturl())
         await self.uaclient.connect_socket(self.server_url.hostname, self.server_url.port)
 
     def disconnect_socket(self) -> None:
@@ -791,11 +995,25 @@ class Client:
         server_certificate = None
         if response.ServerCertificate is not None:
             server_certificate = _first_cert_from_chain(response.ServerCertificate)
+        if self.endpoint_security_policy is not None:
+            if self.selected_endpoint is None:
+                raise EndpointSelectionError("no endpoint was selected before CreateSession")
+            ep = validate_session_endpoint(
+                self.selected_endpoint,
+                self.endpoint_security_policy,
+                response.ServerEndpoints,
+                EndpointOrigin.parse(self.server_url.geturl()),
+                server_certificate,
+            )
+            self.session_endpoint = ep
+            self._policy_ids = ep.endpoint.UserIdentityTokens
+        else:
+            ep = Client.find_endpoint(response.ServerEndpoints, self.security_policy.Mode, self.security_policy.URI)
+            self._policy_ids = ep.UserIdentityTokens
         if not self.security_policy.peer_certificate:
             self.security_policy.peer_certificate = server_certificate
         elif self.security_policy.peer_certificate != server_certificate:
             raise ua.UaError("Server certificate mismatch")
-        ep = Client.find_endpoint(response.ServerEndpoints, self.security_policy.Mode, self.security_policy.URI)
 
         if self.certificate_validator and server_certificate:
             try:
@@ -805,7 +1023,6 @@ class Client:
                 _logger.error("create_session fault response: %s (%s)", status.doc, status.name)
                 raise ua.UaStatusCodeError(exp.code) from exp
 
-        self._policy_ids = ep.UserIdentityTokens
         if self.session_timeout != response.RevisedSessionTimeout:
             _logger.warning(
                 "Requested session timeout to be %dms, got %dms instead",
@@ -813,6 +1030,7 @@ class Client:
                 response.RevisedSessionTimeout,
             )
             self.session_timeout = response.RevisedSessionTimeout
+        self._session_confirmed = True
         return response
 
     def _start_renew_loop(self) -> None:
@@ -1171,7 +1389,38 @@ class Client:
         params.UserTokenSignature.Algorithm = alg
         params.UserTokenSignature.Signature = sig
 
+    def _authorize_credential_release(self, username: str | None, password: str | None) -> None:
+        if not (username or password):
+            return
+        if self.endpoint_security_policy is None:
+            if self._security_configured and not self._server_certificate_explicit:
+                raise CredentialReleaseDenied(
+                    "credentials require an explicitly configured server identity or pinned certificate"
+                )
+            if self._security_configured and not self._session_confirmed:
+                raise CredentialReleaseDenied("credentials require a completed CreateSession")
+            return
+        if self.session_endpoint is None:
+            raise CredentialReleaseDenied("credentials require a CreateSession-confirmed endpoint")
+        if self.last_connection_target is None:
+            raise CredentialReleaseDenied("credentials require a recorded connection target")
+        if self.last_connection_target != self.session_endpoint.origin:
+            raise CredentialReleaseDenied(
+                f"connected target {self.last_connection_target} does not match validated endpoint "
+                f"{self.session_endpoint.origin}"
+            )
+        require_credentials_allowed(
+            self.session_endpoint,
+            self.endpoint_security_policy,
+            self.security_policy.URI,
+            self.security_policy.Mode,
+        )
+        self.last_credential_release = self.session_endpoint
+        if self.credential_release_callback is not None:
+            self.credential_release_callback(self.session_endpoint)
+
     def _add_user_auth(self, params: ua.ActivateSessionParameters, username: str | None, password: str | None) -> None:
+        self._authorize_credential_release(username, password)
         params.UserIdentityToken = ua.UserNameIdentityToken()
         params.UserIdentityToken.UserName = username
         policy = self.server_policy(ua.UserTokenType.UserName)
