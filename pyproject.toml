@@ -34,6 +34,7 @@ Issues = "https://github.com/plyara/plyara/issues"
 
 [project.scripts]
 plyara = "plyara.command_line:main"
+yara-deps = "plyara.dependency_command_line:main"
 
 [project.optional-dependencies]
 tests = ['pycodestyle', 'pydocstyle', 'pyflakes', 'coverage']

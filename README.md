@@ -134,6 +134,55 @@ JSON Output:
 ]
 ```
 
+# Effective Dependency Analysis
+
+Before publishing a ruleset you need to know which detections actually change
+when a rule is edited. A text search for the rule name is not enough because a
+`global` rule acts as an implicit AND gate over every other rule in the same
+file namespace, while identical names inside strings, comments, module member
+expressions (`pe.imphash`) and external variables are not rule references.
+
+`plyara.dependencies` builds the effective dependency graph from parsed rules
+and keeps the two structurally different relations separate:
+
+- `explicit` / `wildcard` edges — rule names referenced from a condition,
+  including wildcard prefixes such as `Detection_*`.
+- `gate` edges — the implicit gating relation from every `global` rule to every
+  non-global rule in the same namespace.
+
+Each file is treated as its own namespace, mirroring `yara.compile(filepath=...)`.
+Bare identifiers that do not resolve to a rule, an imported module member, a
+`for` loop variable or a declared external variable stay listed as unresolved
+symbols, and explicit-reference cycles are reported as paths.
+
+```python
+from plyara.dependencies import DependencyAnalyzer, RuleRef
+
+analyzer = DependencyAnalyzer(external_variables=['ext_var', 'os_ext'])
+graph = analyzer.analyze_paths(['security.yar', 'other.yar'])
+
+for edge in graph.edges:
+    print(edge.kind.value, edge.source, '->', edge.target,
+          f'{graph.rules[edge.source].path}:{edge.line}', edge.snippet)
+
+# Removing a global gate returns every gated rule in the namespace plus the
+# reverse transitive closure, not only the rules that name it explicitly.
+impacted = graph.impact(RuleRef('security', 'G_Platform'))
+for cycle in graph.cycles():
+    print(' -> '.join(str(ref) for ref in cycle))
+```
+
+The `yara-deps` console script exposes the same analysis:
+
+```sh
+yara-deps --external ext_var graph security.yar
+yara-deps --external ext_var impact security::G_Platform security.yar
+yara-deps cycles security.yar
+yara-deps --externals-file externals.json unresolved security.yar
+```
+
+All subcommands accept `--json` for machine-readable output.
+
 # Additional Information
 
 ## Reusing The Parser
