@@ -151,6 +151,70 @@ for file in files:
     parser.clear()
 ```
 
+## Namespace Link Preflight
+
+Multiple rule packages can be published together without letting same-named
+private helpers bind to the wrong implementation. `plyara.preflight` parses
+caller-supplied texts, binds every dependency inside its declared namespace, and
+returns deterministic findings. It never renames rules, never opens `include`
+targets, and never downloads external content.
+
+```python
+from plyara.preflight import SourceText, preflight
+
+report = preflight([
+    SourceText(
+        namespace='vendor-a',
+        text='private rule helper { condition: true }\nrule entry { condition: helper and score > 10 }',
+        origin='vendor-a.yar',
+        externals={'score': 'integer'},
+    ),
+    SourceText(
+        namespace='vendor-b',
+        text='private rule helper { condition: false }\nrule entry { condition: helper }',
+        origin='vendor-b.yar',
+    ),
+])
+
+assert report.ok
+help = [ref for ref in report.references if ref.term == 'helper']
+assert {ref.namespace for ref in help} == {'vendor-a', 'vendor-b'}
+assert {ref.target_namespace for ref in help} == {'vendor-a', 'vendor-b'}
+print(report.to_json())
+```
+
+A bare dependency binds only in the namespace of the text that contains it. A
+qualified dependency such as `vendor-b.helper` binds only in `vendor-b`. The
+report keeps each finding type separate:
+
+- `duplicate_definitions`: the same rule name defined more than once in one namespace.
+- `missing_references`: no definition or external exists in the binding namespace.
+- `ambiguous_references`: several definitions compete inside the binding namespace.
+- `global_gating`: each `global` rule and the rules it implicitly gates in its namespace.
+- `external_conflicts`: conflicting external types, or an external name that collides with a rule name.
+
+Every `RuleDefinition`, reference, and finding carries a `SourceLocation` with
+the namespace, origin label, source SHA-256, and rule line span. `include`
+directives are listed in `includes` but their targets are not read.
+
+The CLI accepts a JSON manifest on standard input or from a file:
+
+```json
+{
+  "sources": [
+    {"namespace": "vendor-a", "text": "rule entry { condition: true }", "origin": "vendor-a.yar"}
+  ]
+}
+```
+
+```sh
+plyara-preflight manifest.json
+plyara-preflight manifest.json --check   # exit 1 when the preflight reports errors
+```
+
+All collections are sorted before returning, so swapping the order of source
+packages produces an equal report.
+
 ## Breaking Change: Import Effects
 
 ### Background
