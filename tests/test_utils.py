@@ -19,6 +19,7 @@ import unittest
 import plyara.core
 from plyara.utils import generate_hash
 from plyara.utils import rebuild_yara_rule
+from plyara.utils import resolve_condition_references
 
 
 class TestUtilities(unittest.TestCase):
@@ -109,6 +110,140 @@ class TestUtilities(unittest.TestCase):
             self.assertIn('bool_value = false', unparsed)
             self.assertIn('digit_value = 5', unparsed)
             self.assertIn('digit_value = 10', unparsed)
+
+
+class TestResolveConditionReferences(unittest.TestCase):
+    """Check the limited condition reference resolver."""
+
+    SHARED_STRINGS = '''
+        $a = "foo"
+        $b1 = "bar"
+        $b2 = "baz"
+        $ = "anon"
+    '''
+
+    def _resolve(self, condition, strings=None):
+        strings = self.SHARED_STRINGS if strings is None else strings
+        section = '\nstrings:{}\n'.format(strings) if strings.strip() else ''
+        test_rule = 'rule test_rule {{{}\ncondition:\n{}\n}}'.format(section, condition)
+        parsed = plyara.core.Plyara().parse_string(test_rule)
+        self.assertEqual(len(parsed), 1)
+        return resolve_condition_references(parsed[0])
+
+    def test_of_wildcard_set(self):
+        result = self._resolve('any of ($b*)')
+
+        self.assertEqual(len(result['sets']), 1)
+        entry = result['sets'][0]
+        self.assertEqual(entry['quantifier'], 'any')
+        self.assertEqual(entry['expression'], ['$b*'])
+        self.assertEqual(entry['members'], ['$b1', '$b2'])
+        self.assertEqual(entry['status'], 'resolved')
+        self.assertEqual(entry['scope'], 'condition')
+        self.assertEqual(result['issues'], list())
+
+    def test_of_them_set(self):
+        result = self._resolve('2 of them')
+
+        self.assertEqual(len(result['sets']), 1)
+        entry = result['sets'][0]
+        self.assertEqual(entry['quantifier'], '2')
+        self.assertEqual(entry['expression'], ['them'])
+        self.assertEqual(entry['members'], ['$a', '$b1', '$b2', '$'])
+        self.assertEqual(entry['status'], 'resolved')
+
+    def test_for_of_anonymous_references(self):
+        result = self._resolve('for any of ($*) : ( # > 1 and $ )')
+
+        self.assertEqual(len(result['sets']), 1)
+        entry = result['sets'][0]
+        self.assertEqual(entry['quantifier'], 'any')
+        self.assertEqual(entry['expression'], ['$*'])
+        self.assertEqual(entry['members'], ['$a', '$b1', '$b2', '$'])
+        self.assertEqual(entry['scope'], 'for_of')
+
+        self.assertEqual(len(result['references']), 2)
+        count_ref, match_ref = result['references']
+        self.assertEqual(count_ref['term'], '#')
+        self.assertEqual(count_ref['kind'], 'anonymous_count')
+        self.assertEqual(count_ref['scope'], 'for_of_body')
+        self.assertEqual(count_ref['members'], ['$a', '$b1', '$b2', '$'])
+        self.assertEqual(count_ref['source'], 'for_of_set')
+        self.assertEqual(count_ref['status'], 'resolved')
+        self.assertEqual(match_ref['term'], '$')
+        self.assertEqual(match_ref['kind'], 'anonymous_match')
+        self.assertEqual(match_ref['members'], ['$a', '$b1', '$b2', '$'])
+        self.assertEqual(match_ref['source'], 'for_of_set')
+        self.assertEqual(result['issues'], list())
+        self.assertEqual(result['unparsed'], list())
+
+    def test_direct_reference_kinds(self):
+        result = self._resolve('$a and #b1 > 0 and @b2 == 1 and !b1 < 10')
+
+        kinds = [ref['kind'] for ref in result['references']]
+        self.assertEqual(kinds, ['match', 'count', 'offset', 'length'])
+        for ref, name in zip(result['references'], ['$a', '$b1', '$b2', '$b1']):
+            self.assertEqual(ref['members'], [name])
+            self.assertEqual(ref['source'], 'strings')
+            self.assertEqual(ref['status'], 'resolved')
+            self.assertEqual(ref['scope'], 'condition')
+        self.assertEqual(result['issues'], list())
+
+    def test_duplicate_reference_positions_preserved(self):
+        result = self._resolve('$a and $a or #b1 and #b1')
+
+        self.assertEqual(len(result['references']), 4)
+        indexes = [ref['index'] for ref in result['references']]
+        self.assertEqual(len(set(indexes)), 4)
+        first, second = [ref for ref in result['references'] if ref['term'] == '$a']
+        self.assertNotEqual(first['index'], second['index'])
+
+    def test_undefined_reference_not_filled_from_string_content(self):
+        strings = '\n$a = "this text mentions $ghost and #ghost"\n'
+        result = self._resolve('$ghost and #ghost', strings=strings)
+
+        self.assertEqual(len(result['references']), 2)
+        for ref in result['references']:
+            self.assertEqual(ref['status'], 'undefined')
+            self.assertEqual(ref['members'], list())
+        self.assertEqual(len(result['issues']), 2)
+        self.assertTrue(any('$ghost' in issue for issue in result['issues']))
+        self.assertTrue(any('#ghost' in issue for issue in result['issues']))
+
+    def test_empty_set_reported(self):
+        result = self._resolve('any of ($zz*)')
+
+        self.assertEqual(result['sets'][0]['status'], 'empty_set')
+        self.assertEqual(result['sets'][0]['members'], list())
+        self.assertTrue(any('matched no strings' in issue for issue in result['issues']))
+
+    def test_undefined_set_member_reported(self):
+        result = self._resolve('all of ($a, $ghost)')
+
+        entry = result['sets'][0]
+        self.assertEqual(entry['status'], 'resolved')
+        self.assertEqual(entry['members'], ['$a'])
+        self.assertTrue(any('Undefined string "$ghost"' in issue for issue in result['issues']))
+
+    def test_them_with_no_strings_is_empty_set(self):
+        result = self._resolve('any of them', strings='')
+
+        self.assertEqual(result['sets'][0]['status'], 'empty_set')
+        self.assertEqual(result['sets'][0]['members'], list())
+        self.assertTrue(any('empty set' in issue for issue in result['issues']))
+
+    def test_unparsed_syntax_reported_honestly(self):
+        result = self._resolve('any of them in (0..100) and for all i in (1..#a) : ( @a[i] < 5 )')
+
+        self.assertEqual(result['sets'][0]['status'], 'resolved')
+        reasons = [entry['reason'] for entry in result['unparsed']]
+        self.assertTrue(any('Range qualifier' in reason for reason in reasons))
+        self.assertTrue(any('For-in loop' in reason for reason in reasons))
+
+        offset_refs = [ref for ref in result['references'] if ref['term'] == '@a']
+        self.assertEqual(len(offset_refs), 1)
+        self.assertEqual(offset_refs[0]['members'], ['$a'])
+        self.assertEqual(offset_refs[0]['scope'], 'for_in_body')
 
 
 if __name__ == '__main__':

@@ -183,6 +183,301 @@ def detect_dependencies(rule):
     return dependencies
 
 
+def resolve_condition_references(rule):
+    """Resolve string references in a parsed rule condition (limited scope).
+
+    This is NOT a full YARA condition evaluator. It understands a deliberately
+    small subset of condition syntax, sufficient for reviewing which declared
+    strings a condition actually references:
+
+    - Direct references: ``$a`` (match), ``#a`` (count), ``@a`` (offset),
+      ``!a`` (length)
+    - Set expressions: ``<quantifier> of them``, ``<quantifier> of ($a, $b*)``
+    - For-of loops: ``for <quantifier> of (<set>) : ( ... )`` including the
+      anonymous references ``$``, ``#``, ``@`` and ``!`` inside the loop body
+    - For-in loops (``for all i in (1..#a) : ( ... )``) are tracked for scope
+      only; their iteration expressions are not evaluated
+
+    Resolution is performed exclusively against the string names declared in
+    the rule's strings section. String *values* are never inspected, so text
+    that merely looks like a reference inside a string's content cannot
+    satisfy an otherwise undefined reference.
+
+    Anything outside this subset (ranges on ``of`` expressions, unparenthesized
+    loop bodies, unexpected tokens) is reported in ``unparsed`` rather than
+    silently guessed at.
+
+    Args:
+        rule: Dict output from a parsed rule.
+
+    Returns:
+        dict: Analysis result with the following keys:
+
+            - ``rule_name``: Name of the analyzed rule.
+            - ``references``: List of dicts, one per reference occurrence
+              (duplicates preserved), each with ``term``, ``index`` (position
+              in ``condition_terms``), ``kind`` (``match``, ``count``,
+              ``offset``, ``length`` or their ``anonymous_*`` variants),
+              ``scope`` (``condition``, ``for_of_body`` or ``for_in_body``),
+              ``members``
+              (resolved string names), ``source`` (``strings`` or
+              ``for_of_set``) and ``status`` (``resolved``, ``undefined`` or
+              ``empty_set``).
+            - ``sets``: List of dicts describing each ``of`` expression, with
+              ``index`` (position of the ``of`` term), ``quantifier``,
+              ``expression`` (raw set terms), ``members``, ``status``
+              (``resolved``, ``empty_set`` or ``undefined``) and ``scope``
+              (``condition`` or ``for_of``).
+            - ``issues``: Human-readable messages for undefined names and
+              empty sets.
+            - ``unparsed``: Dicts with ``index``, ``terms`` and ``reason``
+              for syntax this limited analyzer does not model.
+    """
+    strings = rule.get('strings', list())
+    declared_names = [entry['name'] for entry in strings]
+    declared_set = set(declared_names)
+
+    terms = rule.get('condition_terms', list())
+    term_count = len(terms)
+
+    references = list()
+    sets = list()
+    issues = list()
+    unparsed = list()
+
+    def _expand_set_element(element):
+        """Resolve one set element to declared string names."""
+        if '*' in element:
+            pattern = re.compile(re.escape(element).replace(r'\*', '.*') + r'\Z')
+            return [name for name in declared_names if pattern.match(name)]
+        return [element] if element in declared_set else []
+
+    def _parse_set(start):
+        """Parse a set spec starting at index start.
+
+        Returns tuple of (expression, members, undefined, next_index).
+        """
+        if start >= term_count:
+            return list(), list(), list(), start
+
+        if terms[start] == 'them':
+            return ['them'], list(declared_names), list(), start + 1
+
+        if terms[start] == '(':
+            expression = list()
+            members = list()
+            undefined = list()
+            index = start + 1
+            while index < term_count and terms[index] != ')':
+                term = terms[index]
+                if term != ',':
+                    expression.append(term)
+                    expanded = _expand_set_element(term)
+                    if not expanded:
+                        if '*' in term:
+                            issues.append('Set element "{}" at condition term {} matched no strings'.format(term, index))
+                        else:
+                            issues.append('Undefined string "{}" in set at condition term {}'.format(term, index))
+                            undefined.append(term)
+                    members.extend(expanded)
+                index += 1
+            if index >= term_count:
+                unparsed.append({
+                    'index': start,
+                    'terms': terms[start:],
+                    'reason': 'Unterminated set expression',
+                })
+            return expression, members, undefined, index + 1
+
+        unparsed.append({
+            'index': start,
+            'terms': terms[start:start + 1],
+            'reason': 'Unsupported set expression (expected "them" or a parenthesized set)',
+        })
+        return [terms[start]], list(), list(), start + 1
+
+    def _record_set(of_index, quantifier, scope):
+        """Parse and record an of-expression; returns index after the set."""
+        expression, members, undefined, next_index = _parse_set(of_index + 1)
+
+        if not members:
+            status = 'undefined' if undefined else 'empty_set'
+            issues.append('Set for "of" at condition term {} resolved to no strings ({})'.format(
+                of_index, 'undefined names' if undefined else 'empty set'))
+        else:
+            status = 'resolved'
+
+        sets.append({
+            'index': of_index,
+            'quantifier': quantifier,
+            'expression': expression,
+            'members': members,
+            'status': status,
+            'scope': scope,
+        })
+
+        # Range qualifiers on of-expressions are recognized but not evaluated
+        if next_index < term_count and terms[next_index] in ('at', 'in'):
+            unparsed.append({
+                'index': next_index,
+                'terms': [terms[next_index]],
+                'reason': 'Range qualifier on of-expression is not evaluated',
+            })
+
+        return next_index, len(sets) - 1, members, status
+
+    reference_kinds = {'$': 'match', '#': 'count', '@': 'offset', '!': 'length'}
+
+    loop_stack = list()
+    depth = 0
+    index = 0
+
+    while index < term_count:
+        term = terms[index]
+
+        if term == '(':
+            depth += 1
+            index += 1
+            continue
+
+        if term == ')':
+            depth -= 1
+            while loop_stack and loop_stack[-1]['body_depth'] > depth:
+                loop_stack.pop()
+            index += 1
+            continue
+
+        if term == 'for':
+            header_end = index + 1
+            while header_end < term_count and terms[header_end] != ':':
+                header_end += 1
+            if header_end >= term_count:
+                unparsed.append({
+                    'index': index,
+                    'terms': terms[index:],
+                    'reason': 'For loop without a body separator',
+                })
+                index = term_count
+                continue
+
+            quantifier = terms[index + 1] if index + 1 < term_count else None
+
+            if index + 2 < term_count and terms[index + 2] == 'of':
+                next_index, set_list_index, members, set_status = _record_set(index + 2, quantifier, 'for_of')
+                if next_index != header_end:
+                    unparsed.append({
+                        'index': next_index,
+                        'terms': terms[next_index:header_end],
+                        'reason': 'Unsupported terms in for-of header',
+                    })
+                loop = {
+                    'kind': 'for_of',
+                    'set_index': set_list_index,
+                    'members': members,
+                    'status': set_status,
+                    'body_depth': None,
+                }
+            else:
+                loop = {
+                    'kind': 'for_in',
+                    'set_index': None,
+                    'members': None,
+                    'status': None,
+                    'body_depth': None,
+                }
+                unparsed.append({
+                    'index': index,
+                    'terms': terms[index:header_end + 1],
+                    'reason': 'For-in loop iteration is tracked for scope only, not evaluated',
+                })
+
+            body_start = header_end + 1
+            if body_start < term_count and terms[body_start] == '(':
+                depth += 1
+                loop['body_depth'] = depth
+                loop_stack.append(loop)
+                index = body_start + 1
+            else:
+                unparsed.append({
+                    'index': body_start,
+                    'terms': terms[body_start:body_start + 1],
+                    'reason': 'Unparenthesized loop body is not supported',
+                })
+                index = body_start
+            continue
+
+        if term == 'of':
+            quantifier = terms[index - 1] if index > 0 else None
+            next_index, _, _, _ = _record_set(index, quantifier, 'condition')
+            index = next_index
+            continue
+
+        if term in reference_kinds:
+            # Bare $, #, @ or ! is an anonymous reference valid only in a for-of body
+            active_loop = loop_stack[-1] if loop_stack else None
+            if active_loop and active_loop['kind'] == 'for_of':
+                references.append({
+                    'term': term,
+                    'index': index,
+                    'kind': 'anonymous_{}'.format(reference_kinds[term]),
+                    'scope': 'for_of_body',
+                    'members': list(active_loop['members']),
+                    'source': 'for_of_set',
+                    'status': active_loop['status'],
+                })
+            else:
+                issues.append('Anonymous reference "{}" at condition term {} outside a for-of loop'.format(term, index))
+                references.append({
+                    'term': term,
+                    'index': index,
+                    'kind': 'anonymous_{}'.format(reference_kinds[term]),
+                    'scope': 'condition',
+                    'members': list(),
+                    'source': None,
+                    'status': 'undefined',
+                })
+            index += 1
+            continue
+
+        if term != '!=' and term[:1] in reference_kinds:
+            symbol = term[:1]
+            name = '${}'.format(term[1:])
+            if name in declared_set:
+                members = [name]
+                status = 'resolved'
+            else:
+                members = list()
+                status = 'undefined'
+                issues.append('Undefined string reference "{}" at condition term {}'.format(term, index))
+            if not loop_stack:
+                scope = 'condition'
+            elif loop_stack[-1]['kind'] == 'for_of':
+                scope = 'for_of_body'
+            else:
+                scope = 'for_in_body'
+            references.append({
+                'term': term,
+                'index': index,
+                'kind': reference_kinds[symbol],
+                'scope': scope,
+                'members': members,
+                'source': 'strings',
+                'status': status,
+            })
+            index += 1
+            continue
+
+        index += 1
+
+    return {
+        'rule_name': rule.get('rule_name'),
+        'references': references,
+        'sets': sets,
+        'issues': issues,
+        'unparsed': unparsed,
+    }
+
+
 def generate_hash(rule, legacy=False):
     """Calculate a secure hash of the logic in the rule strings and condition.
 
