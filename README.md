@@ -453,6 +453,7 @@ Four different tools are provided (yet):
 * *pycrate_map_op_info.py* prints prototypes and various information related to TCAP-MAP (Mobile Application Part) 
    and CAMEL operations and application-contexts.
 * *pycrate_gtp_type_info.py* prints prototypes and various information related to GTP messages and transactions as in version 0, 1 or 2.
+* *pfcp_session_check.py* is an offline consistency checker for the PDR / FAR / URR / QER / BAR / Traffic Endpoint rule groups carried by a PFCP Session Modification Request (TS 29.244). It validates one modification against one already-installed session: duplicate rule IDs, missing update/remove targets, same-packet and cross-packet rule references, removal of rules still in use, and session/message scope. A rejected transaction is never installed (the candidate state is built on the side), and both the raw declared inventory and the reference-resolved effective view are returned with exact IE paths. Running the module directly prints a self-contained coherent/dangling demo; the annotated cases live in *test/test_pfcp_session_check.py*.
 
 
 Examples
