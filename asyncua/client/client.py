@@ -1115,6 +1115,28 @@ class Client:
                 return dataclasses.replace(policy, SecurityPolicyUri=self.security_policy.URI)
         return ua.UserTokenPolicy(TokenType=token_type, SecurityPolicyUri=self.security_policy.URI)
 
+    def _require_server_policy(self, token_type: ua.UserTokenType) -> ua.UserTokenPolicy:
+        """
+        Select a UserTokenPolicy actually advertised by the trusted endpoint.
+        An empty SecurityPolicyUri inherits the endpoint policy. Refuse to send
+        credentials against a policy the server never offered instead of
+        fabricating one.
+        """
+        candidates = [
+            dataclasses.replace(policy, SecurityPolicyUri=policy.SecurityPolicyUri or self.security_policy.URI)
+            for policy in self._policy_ids
+            if policy.TokenType == token_type
+        ]
+        if not candidates:
+            raise ua.UaError(f"Server offers no UserTokenPolicy for token type {token_type!r}")
+        if any(
+            candidate.SecurityPolicyUri != candidates[0].SecurityPolicyUri
+            or candidate.PolicyId != candidates[0].PolicyId
+            for candidate in candidates[1:]
+        ):
+            _logger.warning("Server advertises ambiguous %s UserTokenPolicies, using %r", token_type, candidates[0])
+        return candidates[0]
+
     async def activate_session(
         self,
         username: str | None = None,
@@ -1165,7 +1187,7 @@ class Client:
             params.UserIdentityToken.CertificateData += uacrypto.der_from_x509(cert)
         # specs part 4, 5.6.3.1: the data to sign is created by appending
         # the last serverNonce to the serverCertificate
-        policy = self.server_policy(ua.UserTokenType.Certificate)
+        policy = self._require_server_policy(ua.UserTokenType.Certificate)
         sig, alg = security_policies.sign_asymmetric(self.user_private_key, challenge, policy.SecurityPolicyUri)
         params.UserIdentityToken.PolicyId = policy.PolicyId
         params.UserTokenSignature.Algorithm = alg
@@ -1174,7 +1196,7 @@ class Client:
     def _add_user_auth(self, params: ua.ActivateSessionParameters, username: str | None, password: str | None) -> None:
         params.UserIdentityToken = ua.UserNameIdentityToken()
         params.UserIdentityToken.UserName = username
-        policy = self.server_policy(ua.UserTokenType.UserName)
+        policy = self._require_server_policy(ua.UserTokenType.UserName)
         if not policy.SecurityPolicyUri or policy.SecurityPolicyUri == security_policies.SecurityPolicyNone.URI:
             # see specs part 4, 7.36.3: if the token is NOT encrypted,
             # then the password only contains UTF-8 encoded password
@@ -1185,9 +1207,16 @@ class Client:
                 params.UserIdentityToken.Password = password.encode("utf8")
             params.UserIdentityToken.EncryptionAlgorithm = None
         elif password:
+            if self.security_policy.peer_certificate is None:
+                raise ua.UaError(
+                    f"UserTokenPolicy {policy.PolicyId!r} requires password encryption but no server certificate "
+                    "is available"
+                )
             data, uri = self._encrypt_password(password, policy.SecurityPolicyUri)
             params.UserIdentityToken.Password = data
             params.UserIdentityToken.EncryptionAlgorithm = uri
+        else:
+            raise ua.UaError(f"UserTokenPolicy {policy.PolicyId!r} requires an encrypted password")
         params.UserIdentityToken.PolicyId = policy.PolicyId
 
     def _encrypt_password(self, password: str, policy_uri: str) -> tuple[bytes, str]:

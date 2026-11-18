@@ -154,7 +154,11 @@ class InternalSession(AbstractSession):
             self.logger.exception("Session timeout watchdog crashed")
 
     def activate_session(
-        self, params: ua.ActivateSessionParameters, peer_certificate: bytes | None
+        self,
+        params: ua.ActivateSessionParameters,
+        peer_certificate: bytes | None,
+        channel_policy_uri: str | None = None,
+        channel_mode: ua.MessageSecurityMode = ua.MessageSecurityMode.None_,
     ) -> ua.ActivateSessionResult:
         self.logger.info("activate session")
         result = ua.ActivateSessionResult()
@@ -174,14 +178,20 @@ class InternalSession(AbstractSession):
         if not isinstance(id_token, self.iserver.supported_tokens):
             self.logger.error("Rejected active session UserIdentityToken not supported")
             raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
+        trusted_policy = self.iserver.resolve_user_token_policy(id_token, channel_policy_uri)
         if self.iserver.user_manager is not None:
             try:
                 if isinstance(id_token, ua.UserNameIdentityToken):
-                    username, password = self.iserver.decrypt_user_token(self, id_token)
+                    username, password = self.iserver.decrypt_user_token(self, id_token, trusted_policy, channel_mode)
                 elif isinstance(id_token, ua.X509IdentityToken):
-                    peer_certificate = self.iserver.verify_x509_token(self, id_token, params.UserTokenSignature)
+                    peer_certificate = self.iserver.verify_x509_token(
+                        self, id_token, params.UserTokenSignature, trusted_policy
+                    )
                     username, password = None, None
                 else:
+                    if trusted_policy.TokenType != ua.UserTokenType.Anonymous:
+                        self.logger.error("Rejected anonymous token against a non-anonymous PolicyId")
+                        raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
                     username, password = None, None
             except (ServiceError, ua.uaerrors.UaStatusCodeError):
                 raise

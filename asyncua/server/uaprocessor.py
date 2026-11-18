@@ -307,7 +307,12 @@ class UaProcessor:
             else:
                 data = self._connection.security_policy.host_certificate + self.session.nonce
             self._connection.security_policy.asymmetric_cryptography.verify(data, params.ClientSignature.Signature)
-            result = self.session.activate_session(params, self._connection.security_policy.peer_certificate)
+            result = self.session.activate_session(
+                params,
+                self._connection.security_policy.peer_certificate,
+                self._connection.security_policy.URI,
+                self._connection.security_policy.Mode,
+            )
             response = ua.ActivateSessionResponse()
             response.Parameters = result
             # _logger.info("sending read response")

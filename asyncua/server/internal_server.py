@@ -6,6 +6,7 @@ Can be used on server side or to implement binary/https opc-ua servers
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Callable
 from copy import copy
@@ -16,10 +17,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from asyncua import ua
+from asyncua.crypto import security_policies
 from asyncua.crypto.permission_rules import User, UserRole
+from asyncua.crypto.security_policies import SecurityPolicyNone
 
 from ..common.callback import CallbackService
 from ..common.node import Node
+from ..common.utils import ServiceError
 from ..crypto import uacrypto
 from ..crypto.validator import CertificateValidatorMethod
 from .address_space import AddressSpace, AttributeService, MethodService, NodeData, NodeManagementService, ViewService
@@ -447,35 +451,133 @@ class InternalServer:
         """
         self.user_manager = user_manager
 
-    def decrypt_user_token(self, isession: Any, token: ua.UserNameIdentityToken) -> tuple[str, str]:
+    def resolve_user_token_policy(
+        self, token: ua.UserIdentityToken, channel_policy_uri: str | None
+    ) -> ua.UserTokenPolicy:
+        """
+        Resolve the trusted UserTokenPolicy advertised on the endpoint matching
+        the current SecureChannel. An empty SecurityPolicyUri inherits the
+        channel policy (OPC UA Part 4, 7.41). Duplicate PolicyIds are accepted
+        only when they resolve to the same effective policy.
+        """
+        channel_uri = channel_policy_uri or SecurityPolicyNone.URI
+        matches: list[ua.UserTokenPolicy] = []
+        for endpoint in self.endpoints:
+            if endpoint.SecurityPolicyUri != channel_uri:
+                continue
+            for policy in endpoint.UserIdentityTokens:
+                if policy.PolicyId != token.PolicyId:
+                    continue
+                effective_uri = policy.SecurityPolicyUri or channel_uri
+                candidate = dataclasses.replace(policy, SecurityPolicyUri=effective_uri)
+                if matches and any(
+                    existing.TokenType != candidate.TokenType
+                    or existing.SecurityPolicyUri != candidate.SecurityPolicyUri
+                    for existing in matches
+                ):
+                    self.logger.error("Ambiguous UserTokenPolicy for PolicyId %r", token.PolicyId)
+                    raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+                if not matches:
+                    matches.append(candidate)
+        if not matches:
+            self.logger.error("Rejected UserIdentityToken with unknown PolicyId %r", token.PolicyId)
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
+        return matches[0]
+
+    def _check_user_name_token(
+        self,
+        isession: "InternalSession",
+        token: ua.UserNameIdentityToken,
+        policy: ua.UserTokenPolicy,
+        channel_mode: ua.MessageSecurityMode,
+    ) -> None:
+        if policy.TokenType != ua.UserTokenType.UserName:
+            self.logger.error("Rejected UserNameIdentityToken against PolicyId %r of wrong token type", token.PolicyId)
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
+        if policy.SecurityPolicyUri == SecurityPolicyNone.URI:
+            if token.EncryptionAlgorithm:
+                self.logger.error("Rejected encrypted UserNameIdentityToken against a plaintext policy")
+                raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+            return
+        if channel_mode != ua.MessageSecurityMode.SignAndEncrypt:
+            self.logger.error("Plaintext credentials are not permitted outside an encrypted SecureChannel")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+        if not token.EncryptionAlgorithm:
+            self.logger.error("Rejected unencrypted UserNameIdentityToken against an encrypting policy")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+        if token.EncryptionAlgorithm != self._asymmetric_encryption_algorithm(policy.SecurityPolicyUri):
+            self.logger.error("Rejected UserNameIdentityToken using an unadvertised encryption algorithm")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+        if not isinstance(token.Password, bytes) or len(token.Password) < 4:
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
+        if isession.nonce is None or len(isession.nonce) == 0:
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
+
+    @staticmethod
+    def _asymmetric_encryption_algorithm(policy_uri: str) -> str | None:
+        for cls in (
+            security_policies.SecurityPolicyBasic256Sha256,
+            security_policies.SecurityPolicyBasic256,
+            security_policies.SecurityPolicyBasic128Rsa15,
+            security_policies.SecurityPolicyAes128Sha256RsaOaep,
+            security_policies.SecurityPolicyAes256Sha256RsaPss,
+        ):
+            if policy_uri == cls.URI:
+                return cls.AsymmetricEncryptionURI
+        return None
+
+    def decrypt_user_token(
+        self,
+        isession: "InternalSession",
+        token: ua.UserNameIdentityToken,
+        policy: ua.UserTokenPolicy,
+        channel_mode: ua.MessageSecurityMode,
+    ) -> tuple[str, str]:
         """
         unpack the username and password for the benefit of the user defined user manager
         """
+        self._check_user_name_token(isession, token, policy, channel_mode)
         user_name = token.UserName
-        password = token.Password
+        password_bytes = token.Password
 
-        # TODO check if algorithm is allowed, throw BadSecurityPolicyRejected if not
+        if not token.EncryptionAlgorithm:
+            # plaintext token, permitted by the trusted (SecurityPolicy#None) policy
+            password = password_bytes.decode("utf-8") if isinstance(password_bytes, bytes) else ""
+            return user_name, password
 
-        # decrypt password if we can
-        if token.EncryptionAlgorithm:
-            if token.EncryptionAlgorithm == "http://www.w3.org/2001/04/xmlenc#rsa-1_5":
-                raw_pw = uacrypto.decrypt_rsa15(self.private_key, password)
-            elif token.EncryptionAlgorithm == "http://www.w3.org/2001/04/xmlenc#rsa-oaep":
-                raw_pw = uacrypto.decrypt_rsa_oaep(self.private_key, password)
-            elif token.EncryptionAlgorithm == "http://opcfoundation.org/UA/security/rsa-oaep-sha2-256":
-                raw_pw = uacrypto.decrypt_rsa_oaep_sha256(self.private_key, password)
-            else:
-                self.logger.warning("Unknown password encoding %s", token.EncryptionAlgorithm)
-                raise ValueError("Unknown password encoding")
-            length = unpack_from("<I", raw_pw)[0] - len(isession.nonce)
-            password = raw_pw[4 : 4 + length]
-            password = password.decode("utf-8")
-        elif isinstance(password, bytes):
-            password = password.decode("utf-8")
+        if token.EncryptionAlgorithm == "http://www.w3.org/2001/04/xmlenc#rsa-1_5":
+            raw_pw = uacrypto.decrypt_rsa15(self.private_key, password_bytes)
+        elif token.EncryptionAlgorithm == "http://www.w3.org/2001/04/xmlenc#rsa-oaep":
+            raw_pw = uacrypto.decrypt_rsa_oaep(self.private_key, password_bytes)
+        elif token.EncryptionAlgorithm == "http://opcfoundation.org/UA/security/rsa-oaep-sha2-256":
+            raw_pw = uacrypto.decrypt_rsa_oaep_sha256(self.private_key, password_bytes)
+        else:
+            self.logger.error("Rejected UserNameIdentityToken with unknown encryption algorithm")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+
+        if len(raw_pw) < 4 or len(isession.nonce) + 4 > len(raw_pw):
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
+        declared_length = unpack_from("<I", raw_pw)[0]
+        password_length = declared_length - len(isession.nonce)
+        if password_length < 0 or 4 + password_length + len(isession.nonce) != len(raw_pw):
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
+        if raw_pw[4 + password_length :] != isession.nonce:
+            self.logger.error("Rejected UserNameIdentityToken bound to a different server nonce")
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
+        try:
+            password = raw_pw[4 : 4 + password_length].decode("utf-8")
+        except UnicodeDecodeError:
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid) from None
 
         return user_name, password
 
-    def verify_x509_token(self, isession: Any, token: ua.X509IdentityToken, signature: ua.SignatureData) -> bytes:
+    def verify_x509_token(
+        self,
+        isession: "InternalSession",
+        token: ua.X509IdentityToken,
+        signature: ua.SignatureData,
+        policy: ua.UserTokenPolicy,
+    ) -> bytes:
         """
         verify certificate signature
         """
@@ -483,7 +585,15 @@ class InternalServer:
         alg = signature.Algorithm
         sig = signature.Signature
 
-        # TODO check if algorithm is allowed, throw BadSecurityPolicyRejected if not
+        if policy.TokenType != ua.UserTokenType.Certificate:
+            self.logger.error("Rejected X509IdentityToken against PolicyId %r of wrong token type", token.PolicyId)
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenRejected)
+        if policy.SecurityPolicyUri == SecurityPolicyNone.URI:
+            self.logger.error("Rejected X509IdentityToken against a policy without a signature algorithm")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
+        if alg != self._asymmetric_signature_algorithm(policy.SecurityPolicyUri):
+            self.logger.error("Rejected X509IdentityToken using an unadvertised signature algorithm")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
 
         challenge = b""
         if self.certificate is not None:
@@ -492,7 +602,7 @@ class InternalServer:
             challenge += isession.nonce
 
         if not (alg and sig):
-            raise ValueError("No signature")
+            raise ServiceError(ua.StatusCodes.BadIdentityTokenInvalid)
 
         if alg == "http://www.w3.org/2000/09/xmldsig#rsa-sha1":
             uacrypto.verify_sha1(cert, challenge, sig)
@@ -501,7 +611,20 @@ class InternalServer:
         elif alg == "http://opcfoundation.org/UA/security/rsa-pss-sha2-256":
             uacrypto.verify_pss_sha256(cert, challenge, sig)
         else:
-            self.logger.warning("Unknown certificate signature algorithm %s", alg)
-            raise ValueError("Unknown algorithm")
+            self.logger.error("Rejected X509IdentityToken with unknown signature algorithm")
+            raise ServiceError(ua.StatusCodes.BadSecurityPolicyRejected)
 
         return token.CertificateData
+
+    @staticmethod
+    def _asymmetric_signature_algorithm(policy_uri: str) -> str | None:
+        for cls in (
+            security_policies.SecurityPolicyBasic256Sha256,
+            security_policies.SecurityPolicyBasic256,
+            security_policies.SecurityPolicyBasic128Rsa15,
+            security_policies.SecurityPolicyAes128Sha256RsaOaep,
+            security_policies.SecurityPolicyAes256Sha256RsaPss,
+        ):
+            if policy_uri == cls.URI:
+                return cls.AsymmetricSignatureURI
+        return None
