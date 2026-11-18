@@ -1,0 +1,74 @@
+[
+  {
+    "ts": 1000.0,
+    "src": "10.10.0.1",
+    "sport": 2123,
+    "dst": "10.10.0.2",
+    "dport": 2123,
+    "gtpc_hex": "48200026000000000002bc000100080000010121436587f9570009008a0a0a00010a0a00010300010007",
+    "note": "A1 Create Session Request"
+  },
+  {
+    "ts": 1000.012,
+    "src": "10.20.0.1",
+    "sport": 2123,
+    "dst": "10.20.0.2",
+    "dport": 2123,
+    "gtpc_hex": "48200026000000000002bc000100080000010289674523f1570009008a0b0b00010a1400010300010003",
+    "note": "B1 Create Session Request (same seq 700)"
+  },
+  {
+    "ts": 1000.4,
+    "src": "10.10.0.1",
+    "sport": 2123,
+    "dst": "10.10.0.2",
+    "dport": 2123,
+    "gtpc_hex": "48200026000000000002bc000100080000010121436587f9570009008a0a0a00010a0a00010300010007",
+    "note": "A1 retransmission (identical bytes)"
+  },
+  {
+    "ts": 1000.65,
+    "src": "10.10.0.2",
+    "sport": 2123,
+    "dst": "10.10.0.1",
+    "dport": 2123,
+    "gtpc_hex": "482100200a0a00010002bc00020002001000570009008b0a0a00f10a0a00020300010007",
+    "note": "A1 Create Session Response (accepted)"
+  },
+  {
+    "ts": 1002.0,
+    "src": "10.10.0.1",
+    "sport": 2123,
+    "dst": "10.10.0.2",
+    "dport": 2123,
+    "gtpc_hex": "48200026000000000002bc000100080000010155050011f1570009008a0a0a00020a0a00010300010008",
+    "note": "A2 Create Session Request (seq 700 reused, recovery 8)"
+  },
+  {
+    "ts": 1002.9,
+    "src": "10.10.0.2",
+    "sport": 2123,
+    "dst": "10.10.0.1",
+    "dport": 2123,
+    "gtpc_hex": "482100200a0a00010002bc00020002001000570009008b0a0a00f10a0a00020300010007",
+    "note": "late duplicate of A1 response"
+  },
+  {
+    "ts": 1003.1,
+    "src": "10.10.0.2",
+    "sport": 2123,
+    "dst": "10.10.0.1",
+    "dport": 2123,
+    "gtpc_hex": "4825000e0a0a00010002be00020002001000",
+    "note": "A3 Delete Session Response (captured first)"
+  },
+  {
+    "ts": 1003.05,
+    "src": "10.10.0.1",
+    "sport": 2123,
+    "dst": "10.10.0.2",
+    "dport": 2123,
+    "gtpc_hex": "482400080a0a00f10002be00",
+    "note": "A3 Delete Session Request (captured late)"
+  }
+]
