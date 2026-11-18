@@ -123,8 +123,7 @@ class SubscriptionService:
             if sub is None:
                 results.append(ua.StatusCode(ua.StatusCodes.BadSubscriptionIdInvalid))
             else:
-                sub.publish([ack.SequenceNumber])
-                results.append(ua.StatusCode())
+                results.extend(sub.publish([ack.SequenceNumber]))
         return len(self.subscriptions), results
 
     async def create_monitored_items(
@@ -170,10 +169,10 @@ class SubscriptionService:
         )
 
     def republish(self, params: ua.RepublishParameters) -> ua.NotificationMessage:
-        if params.SubscriptionId not in self.subscriptions:
-            # TODO: what should I do?
-            return ua.NotificationMessage()
-        return self.subscriptions[params.SubscriptionId].republish(params.RetransmitSequenceNumber)
+        sub = self.subscriptions.get(params.SubscriptionId)
+        if sub is None:
+            raise utils.ServiceError(ua.StatusCodes.BadSubscriptionIdInvalid)
+        return sub.republish(params.RetransmitSequenceNumber)
 
     async def transfer_subscriptions(
         self,
@@ -192,7 +191,7 @@ class SubscriptionService:
                 continue
             sub.session_id = session_id
             sub.pub_result_callback = callback
-            result.AvailableSequenceNumbers = sorted(sub._not_acknowledged_results.keys())
+            result.AvailableSequenceNumbers = sub.retransmission_queue.available_sequence_numbers
             results.append(result)
         return results
 

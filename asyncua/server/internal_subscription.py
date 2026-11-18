@@ -7,10 +7,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from asyncua import ua
+from asyncua.common.utils import ServiceError
 
 from .address_space import AddressSpace
 from .monitored_item_service import MonitoredItemService
@@ -23,6 +25,107 @@ if TYPE_CHECKING:
     PublishResultCallback = Callable[..., Awaitable[None]]
     PublishRequestCallback = Callable[[int], PublishRequestData | None]
     DeleteCallback = Callable[[], Any]
+
+
+class RetransmissionQueue:
+    """
+    Independent state model for the OPC UA publication/retransmission/acknowledgement
+    lifecycle of one subscription (Part 4, sections 5.13 and 5.14.5).
+
+    Notification sequence numbers are the sole key. A published notification moves
+    through three disjoint states:
+
+    * retained: published, not yet acknowledged, still available for Republish;
+    * acknowledged: explicitly acknowledged by the client through Publish;
+    * evicted: dropped because the bounded retransmission capacity was exceeded.
+
+    Republish is a read-only operation: it never moves a notification out of the
+    retained state, so a legal duplicate Republish keeps returning the same
+    NotificationMessage. Keepalive messages (sequence number 0) never enter the
+    queue because they carry no NotificationData and are not acknowledged.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self._retained: OrderedDict[int, ua.PublishResult] = OrderedDict()
+        self._acknowledged: set[int] = set()
+        self._evicted: set[int] = set()
+
+    def store(self, result: ua.PublishResult) -> list[int]:
+        """
+        Retain a freshly published result. Returns the sequence numbers that had
+        to be evicted to respect the bounded capacity. Eviction always removes
+        the oldest retained notification and the gap remains visible through
+        `available_sequence_numbers` rather than being renumbered away.
+        """
+        seq = result.NotificationMessage.SequenceNumber
+        if seq == 0 or not result.NotificationMessage.NotificationData:
+            return []
+        self._retained[seq] = result
+        evicted: list[int] = []
+        while len(self._retained) > self.capacity:
+            oldest, _ = self._retained.popitem(last=False)
+            self._evicted.add(oldest)
+            evicted.append(oldest)
+        return evicted
+
+    def republish(self, seq: int) -> ua.NotificationMessage:
+        """
+        Return the retained NotificationMessage without changing its state.
+        Acknowledged or evicted numbers are explicitly distinguished from
+        numbers this subscription never published.
+        """
+        result = self._retained.get(seq)
+        if result is not None:
+            return result.NotificationMessage
+        if seq in self._acknowledged or seq in self._evicted:
+            raise ServiceError(ua.StatusCodes.BadMessageNotAvailable)
+        raise ServiceError(ua.StatusCodes.BadSequenceNumberUnknown)
+
+    def acknowledge(self, seq: int) -> ua.StatusCode:
+        """
+        Process one client acknowledgement. Only a retained notification can be
+        acknowledged; acknowledgements of stale or unknown numbers are reported
+        back to the client and never consume another notification.
+        """
+        if self._retained.pop(seq, None) is not None:
+            self._acknowledged.add(seq)
+            return ua.StatusCode()
+        if seq in self._acknowledged or seq in self._evicted:
+            return ua.StatusCode(ua.StatusCodes.BadMessageNotAvailable)
+        return ua.StatusCode(ua.StatusCodes.BadSequenceNumberUnknown)
+
+    @property
+    def available_sequence_numbers(self) -> list[int]:
+        return list(self._retained.keys())
+
+    @property
+    def retained_sequence_numbers(self) -> set[int]:
+        return set(self._retained.keys())
+
+    @property
+    def acknowledged_sequence_numbers(self) -> set[int]:
+        return set(self._acknowledged)
+
+    @property
+    def evicted_sequence_numbers(self) -> set[int]:
+        return set(self._evicted)
+
+    def has_gap(self) -> bool:
+        """
+        True when capacity eviction has removed notifications whose successors
+        are still retained, i.e. the retained window is not a contiguous suffix
+        of the published range.
+        """
+        if not self._retained or not self._evicted:
+            return False
+        return max(self._evicted) < next(reversed(self._retained))
+
+    def __len__(self) -> int:
+        return len(self._retained)
+
+    def __contains__(self, seq: object) -> bool:
+        return seq in self._retained
 
 
 class InternalSubscription:
@@ -70,7 +173,7 @@ class InternalSubscription:
         self._notification_seq = 1
         self._no_acks_limit = no_acks_limit
         self.max_queue_size = max_queue_size
-        self._not_acknowledged_results: dict[int, ua.PublishResult] = {}
+        self.retransmission_queue = RetransmissionQueue(no_acks_limit)
         self._startup = True
         self._publishing_enabled = publishing_enabled
         self.max_notifications_per_publish = max_notifications_per_publish
@@ -81,6 +184,10 @@ class InternalSubscription:
 
     def __str__(self) -> str:
         return f"Subscription(id:{self.data.SubscriptionId})"
+
+    @property
+    def _not_acknowledged_results(self) -> OrderedDict[int, ua.PublishResult]:
+        return self.retransmission_queue._retained
 
     async def start(self) -> None:
         self.logger.debug("starting subscription %s", self.data.SubscriptionId)
@@ -213,18 +320,21 @@ class InternalSubscription:
         self._keep_alive_count = 0
         self._publish_cycles_count = 0
         self._startup = False
-        result.NotificationMessage.SequenceNumber = self._notification_seq
+        is_keepalive = not result.NotificationMessage.NotificationData
+        if is_keepalive:
+            # Part 4 5.13.1: a keep-alive carries sequence number 0 and does
+            # not consume a notification sequence number.
+            result.NotificationMessage.SequenceNumber = 0
+        else:
+            result.NotificationMessage.SequenceNumber = self._notification_seq
         if result.NotificationMessage.NotificationData and self.pub_request_callback:
             # Acknowledgement is only expected when the Subscription is for a client.
             self._notification_seq += 1
-            self._not_acknowledged_results[result.NotificationMessage.SequenceNumber] = result
-            while len(self._not_acknowledged_results) > self._no_acks_limit:
-                oldest = next(iter(self._not_acknowledged_results))
-                self._not_acknowledged_results.pop(oldest)
+            self.retransmission_queue.store(result)
         result.MoreNotifications = self._publishing_enabled and bool(
             self._triggered_datachanges or self._triggered_events
         )
-        result.AvailableSequenceNumbers = list(self._not_acknowledged_results.keys())
+        result.AvailableSequenceNumbers = self.retransmission_queue.available_sequence_numbers
         return result
 
     @staticmethod
@@ -263,23 +373,24 @@ class InternalSubscription:
             notif.Status = self._triggered_statuschanges.pop(0)
             result.NotificationMessage.NotificationData.append(notif)
 
-    def publish(self, acks: Iterable[int]) -> None:
+    def publish(self, acks: Iterable[int]) -> list[ua.StatusCode]:
         """
-        Reset publish cycle count, acknowledge PublishResults.
-        :param acks: Sequence number of the PublishResults to acknowledge
+        Acknowledge PublishResults. Each acknowledgement is validated against
+        the independent retransmission state: only retained sequence numbers
+        are removed, stale or unknown numbers are reported as errors and never
+        consume another notification.
         """
-        # self.logger.info("publish request with acks %s", acks)
-        for nb in acks:
-            self._not_acknowledged_results.pop(nb, None)
+        return [self.retransmission_queue.acknowledge(nb) for nb in acks]
 
     def republish(self, nb: int) -> ua.NotificationMessage:
-        # self.logger.info("re-publish request for ack %s in subscription %s", nb, self)
-        result = self._not_acknowledged_results.pop(nb, None)
-        if result:
-            self.logger.info("re-publishing ack %s in subscription %s", nb, self)
-            return result.NotificationMessage
-        self.logger.info("Error request to re-published non existing ack %s in subscription %s", nb, self)
-        return ua.NotificationMessage()
+        """
+        Re-send a retained NotificationMessage without removing it from the
+        retransmission queue, so a legal duplicate Republish keeps returning
+        the same message. Stale and unknown sequence numbers raise the
+        protocol-defined service faults instead of an empty fake message.
+        """
+        self.logger.info("re-publish request for seq %s in subscription %s", nb, self)
+        return self.retransmission_queue.republish(nb)
 
     async def enqueue_datachange_event(self, mid: int, eventdata: ua.MonitoredItemNotification, maxsize: int) -> None:
         """

@@ -249,7 +249,9 @@ class Subscription:
         self.last_publish_at = time.monotonic()
         if publish_result.NotificationMessage.NotificationData is None:
             return
-        self.last_sequence_number = int(publish_result.NotificationMessage.SequenceNumber)
+        sequence_number = int(publish_result.NotificationMessage.SequenceNumber)
+        if sequence_number != 0:
+            self.last_sequence_number = sequence_number
         produced = 0
         for event in self._explode_notifications(publish_result.NotificationMessage.NotificationData):
             await self._deliver(event)
@@ -468,20 +470,28 @@ class Subscription:
     async def _republish_gaps(self, available: list[int]) -> bool:
         if not isinstance(self.server, UaSession) or self.subscription_id is None:
             return True
-        target = max(available) if available else (self.last_sequence_number or 0)
-        seq = (self.last_sequence_number or 0) + 1
+        if not available:
+            return True
+        target = max(available)
         self._replaying = True
         try:
-            while True:
+            # The server reports the exact retained sequence numbers, which may
+            # be non-contiguous after capacity eviction. Replay those instead of
+            # assuming a dense range, otherwise an evicted lower number would
+            # abort the walk and skip every still-retained notification.
+            for seq in sorted(available):
                 try:
                     msg = await self.server.republish(self.subscription_id, seq)
                 except BadMessageNotAvailable:
-                    break
+                    # The server evicted it between TransferSubscriptions and
+                    # Republish: skip the hole and keep fetching the rest.
+                    continue
                 except Exception:
-                    self.logger.warning("republish failed for sub %s seq %s", self.subscription_id, seq, exc_info=True)
+                    self.logger.warning(
+                        "republish failed for sub %s seq %s", self.subscription_id, seq, exc_info=True
+                    )
                     return False
                 await self.publish_callback(ua.PublishResult(self.subscription_id, NotificationMessage=msg))
-                seq += 1
         finally:
             self._replaying = False
         return (self.last_sequence_number or 0) >= target
