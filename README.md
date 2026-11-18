@@ -361,6 +361,27 @@ This subdirectory contains the following modules:
 * *Diameter*: a generic Diameter module which implements DiameterGeneric and AVPGeneric structures
 * *DiameterIETF*: a Diameter module which relies on AVP types provided in all IETF RFC
 * *Diameter3GPP*: a Diameter module which relies on AVP types provided in all 3GPP TS
+* *DiameterReview*: an offline AVP comprehension review layer on top of the structural decoder
+
+The *DiameterReview* module distinguishes walking a message from understanding it.
+A pycrate structural decode only proves that AVP length fields make the message walkable;
+the review layer additionally checks every AVP identity, defined as the `(Vendor-ID, AVP Code)`
+pair, against a local capability registry (`CapRegistry`, populated from the IETF and 3GPP
+dictionaries by `default_registry()`). A base-protocol code never covers a vendor-specific
+AVP that reuses the same numeric code. For each AVP, including nested ones inside grouped
+AVPs, it reports:
+* the M / V / P header flags, declared length, data length, 32-bit padding and raw bytes,
+* duplicate occurrences of the same identity (every instance is retained),
+* a disposition: `known`, `unknown-optional-ignored` (M-bit clear, RFC 6733 4.1.1) or
+  `unknown-mandatory-reject` (M-bit set, RFC 6733 6.2, Result-Code 5010),
+* a message-level verdict: `fully-understood`, `partially-understood` or `not-understood`,
+  with the precise nesting path and reason for every unknown AVP.
+
+The review is fully offline: it never connects to an AAA server and the original message
+bytes are retained verbatim in the result. The `tools/pycrate_diameter_review_demo.py`
+script builds same-code-different-vendor, unknown-optional and unknown-mandatory messages
+locally and prints the per-path disposition report; see also
+`test/test_diameter_review.py`.
 
 
 pycrate_osmo
@@ -445,8 +466,9 @@ All the methods useful for working with ASN.1 objects at runtime can be found in
 Tools
 =====
 
-Four different tools are provided (yet):
+Five different tools are provided (yet):
 * *pycrate_showmedia.py* parses some media files (jpg, bmp, gif, mp3, png, tiff, mpeg4) and pretty print the file structure on the standard output.
+* *pycrate_diameter_review_demo.py* builds Diameter messages with same-code-different-vendor, unknown optional and unknown mandatory AVPs offline, then prints the AVP comprehension review report (nesting paths, M/V/P flags, padding, duplicates, disposition reasons) without contacting any AAA server.
 * *pycrate_asn1compile.py* compiles ASN.1 source file(s) and produce a Python source file that makes use of the ASN.1 runtime.
    This source file is then usable to encode / decode any ASN.1 object from the compiled ASN.1 specification.
 * *pycrate_berdecode.py* parses any BER/CER/DER encoded binary value of ASN.1 objects and prints the corresponding structure.
