@@ -20,6 +20,8 @@ NotificationT = TypeVar("NotificationT")
 if TYPE_CHECKING:
     from asyncua.server.uaprocessor import PublishRequestData
 
+    from .event_filter_access import EventFieldAccessPolicy
+
     PublishResultCallback = Callable[..., Awaitable[None]]
     PublishRequestCallback = Callable[[int], PublishRequestData | None]
     DeleteCallback = Callable[[], Any]
@@ -43,6 +45,7 @@ class InternalSubscription:
         max_queue_size: int = 10_000,
         publishing_enabled: bool = True,
         max_notifications_per_publish: int = 0,
+        event_field_policy_provider: Callable[[], "EventFieldAccessPolicy | None"] | None = None,
     ) -> None:
         """
         :param loop: Event loop instance
@@ -61,6 +64,9 @@ class InternalSubscription:
         self.data: ua.CreateSubscriptionResult = data
         self.pub_result_callback: PublishResultCallback = callback
         self.pub_request_callback: PublishRequestCallback | None = request_callback
+        self._event_field_policy_provider: Callable[[], EventFieldAccessPolicy | None] | None = (
+            event_field_policy_provider
+        )
         self.monitored_item_srv = MonitoredItemService(self, aspace)
         self.delete_callback: DeleteCallback | None = delete_callback
         self.session_id: ua.NodeId = session_id
@@ -81,6 +87,12 @@ class InternalSubscription:
 
     def __str__(self) -> str:
         return f"Subscription(id:{self.data.SubscriptionId})"
+
+    @property
+    def event_field_policy(self) -> "EventFieldAccessPolicy | None":
+        if self._event_field_policy_provider is None:
+            return None
+        return self._event_field_policy_provider()
 
     async def start(self) -> None:
         self.logger.debug("starting subscription %s", self.data.SubscriptionId)

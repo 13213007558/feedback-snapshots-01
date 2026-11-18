@@ -37,6 +37,14 @@ asyncua.server.event\_generator module
    :undoc-members:
    :show-inheritance:
 
+asyncua.server.event\_filter\_access module
+-------------------------------------------
+
+.. automodule:: asyncua.server.event_filter_access
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 asyncua.server.history module
 -----------------------------
 

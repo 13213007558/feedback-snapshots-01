@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING, Any
 from asyncua import ua
 
 from .address_space import AddressSpace
+from .event_filter_access import EventFilterAccessError, EventFilterAccessValidator
 
 if TYPE_CHECKING:
+    from .event_filter_access import EventFieldAccessPolicy
     from .internal_subscription import InternalSubscription
 
 
@@ -60,6 +62,7 @@ class MonitoredItemService:
         self._monitored_events: dict[ua.NodeId, list[int]] = {}
         self._monitored_datachange: dict[int, int] = {}
         self._monitored_item_counter = 111
+        self.filter_validator = EventFilterAccessValidator(aspace, lambda: isub.event_field_policy)
 
     def __str__(self) -> str:
         return f"MonitoredItemService({self.isub.data.SubscriptionId})"
@@ -73,7 +76,7 @@ class MonitoredItemService:
         results: list[ua.MonitoredItemCreateResult] = []
         for item in params.ItemsToCreate:
             if item.ItemToMonitor.AttributeId == ua.AttributeIds.EventNotifier:
-                result = self._create_events_monitored_item(item)
+                result = await self._create_events_monitored_item(item)
             else:
                 result = await self._create_data_change_monitored_item(item)
             results.append(result)
@@ -97,7 +100,23 @@ class MonitoredItemService:
                 result.RevisedSamplingInterval = params.RequestedParameters.SamplingInterval
                 result.RevisedQueueSize = params.RequestedParameters.QueueSize
                 if params.RequestedParameters.Filter is not None:
-                    mdata.filter = params.RequestedParameters.Filter
+                    new_filter = params.RequestedParameters.Filter
+                    if mdata.where_clause_evaluator is not None:
+                        if not isinstance(new_filter, ua.EventFilter):
+                            result.StatusCode = ua.StatusCode(ua.StatusCodes.BadEventFilterInvalid)
+                            return result
+                        try:
+                            self.filter_validator.validate_filter(new_filter)
+                        except EventFilterAccessError as ex:
+                            self.logger.info("rejecting modified event monitored item: %s", ex)
+                            result.StatusCode = ex.status_code
+                            return result
+                        mdata.filter = new_filter
+                        mdata.where_clause_evaluator = WhereClauseEvaluator(
+                            self.logger, self.aspace, new_filter.WhereClause
+                        )
+                    else:
+                        mdata.filter = new_filter
                 mdata.queue_size = params.RequestedParameters.QueueSize
                 return result
         result = ua.MonitoredItemModifyResult()
@@ -132,7 +151,9 @@ class MonitoredItemService:
             return cap
         return min(int(requested), cap)
 
-    def _create_events_monitored_item(self, params: ua.MonitoredItemCreateRequest) -> ua.MonitoredItemCreateResult:
+    async def _create_events_monitored_item(
+        self, params: ua.MonitoredItemCreateRequest
+    ) -> ua.MonitoredItemCreateResult:
         self.logger.info(
             "request to subscribe to events for node %s and attribute %s",
             params.ItemToMonitor.NodeId,
@@ -143,6 +164,15 @@ class MonitoredItemService:
         node_id = params.ItemToMonitor.NodeId
         if node_id is None:
             result.StatusCode = ua.StatusCode(ua.StatusCodes.BadNodeIdInvalid)
+            return result
+        if not isinstance(mdata.filter, ua.EventFilter):
+            result.StatusCode = ua.StatusCode(ua.StatusCodes.BadEventFilterInvalid)
+            return result
+        try:
+            self.filter_validator.validate_filter(mdata.filter)
+        except EventFilterAccessError as ex:
+            self.logger.info("rejecting event monitored item: %s", ex)
+            result.StatusCode = ex.status_code
             return result
         dv = self.aspace.read_attribute_value(node_id, ua.AttributeIds.EventNotifier)
         ev_notify_byte = dv.Value.Value if dv.Value is not None else None

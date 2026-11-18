@@ -13,6 +13,7 @@ from asyncua import ua
 from asyncua.common import uamethod, utils
 
 from .address_space import AddressSpace
+from .event_filter_access import EventFieldAccessPolicy
 from .internal_subscription import InternalSubscription
 
 if TYPE_CHECKING:
@@ -33,6 +34,10 @@ class SubscriptionService:
         self._sub_id_counter = 77
         self.standard_events: dict[int, Any] = {}
         self._conditions: dict[ua.NodeId, Any] = {}
+        self.event_field_policy: EventFieldAccessPolicy | None = None
+
+    def set_event_field_policy(self, policy: EventFieldAccessPolicy) -> None:
+        self.event_field_policy = policy
 
     async def create_subscription(
         self,
@@ -65,6 +70,7 @@ class SubscriptionService:
             max_queue_size=max_queue_size,
             publishing_enabled=params.PublishingEnabled,
             max_notifications_per_publish=params.MaxNotificationsPerPublish,
+            event_field_policy_provider=lambda: self.event_field_policy,
         )
         await internal_sub.start()
         self.subscriptions[result.SubscriptionId] = internal_sub

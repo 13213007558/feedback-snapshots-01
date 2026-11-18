@@ -39,6 +39,7 @@ from .internal_server import InternalServer
 from .user_managers import UserManager
 
 if TYPE_CHECKING:
+    from .event_filter_access import EventFieldAccessPolicy
     from .internal_session import InternalSession
 
 _logger = logging.getLogger(__name__)
@@ -643,6 +644,14 @@ class Server:
         ev_gen = EventGenerator(self.iserver.isession)
         await ev_gen.init(etype, emitting_node=emitting_node)
         return ev_gen
+
+    def set_event_field_policy(self, policy: EventFieldAccessPolicy) -> None:
+        """
+        Restrict the event fields that client EventFilters may reference in
+        SelectClauses and WhereClause. Filters referencing denied or unresolvable
+        fields are rejected when the monitored item is created.
+        """
+        self.iserver.set_event_field_policy(policy)
 
     async def create_custom_data_type(
         self,

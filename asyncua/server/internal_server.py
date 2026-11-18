@@ -23,6 +23,7 @@ from ..common.node import Node
 from ..crypto import uacrypto
 from ..crypto.validator import CertificateValidatorMethod
 from .address_space import AddressSpace, AttributeService, MethodService, NodeData, NodeManagementService, ViewService
+from .event_filter_access import EventFieldAccessPolicy
 from .event_generator import EventGenerator
 from .history import HistoryManager
 from .internal_session import InternalSession
@@ -345,6 +346,10 @@ class InternalServer:
 
     def unregister_external_session(self, session: "InternalSession") -> None:
         self._external_sessions.pop(session.auth_token, None)
+
+    def set_event_field_policy(self, policy: EventFieldAccessPolicy) -> None:
+        """Restrict which event fields EventFilters may reference for every new subscription."""
+        self.subscription_service.set_event_field_policy(policy)
 
     async def enable_history_data_change(
         self, node: Node, period: timedelta | None = timedelta(days=7), count: int = 0
