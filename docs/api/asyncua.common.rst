@@ -117,6 +117,14 @@ asyncua.common.structures104 module
    :undoc-members:
    :show-inheritance:
 
+asyncua.common.structures_bounded module
+----------------------------------------
+
+.. automodule:: asyncua.common.structures_bounded
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 asyncua.common.subscription module
 ----------------------------------
 
