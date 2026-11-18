@@ -25,6 +25,8 @@ if TYPE_CHECKING:
         VariableTypeAttributes,
     )
 
+    from .ranged_write import RangedWriteGateway
+
     __TYPE_ATTRIBUTES = (
         DataTypeAttributes
         | ReferenceTypeAttributes
@@ -110,6 +112,16 @@ class AttributeService:
                     or not ua.ua_binary.test_bit(ual.Value.Value, ua.AccessLevel.CurrentWrite)
                 ):
                     res.append(ua.StatusCode(ua.StatusCodes.BadUserAccessDenied))
+                    continue
+            if writevalue.AttributeId == ua.AttributeIds.Value:
+                gateway = self._aspace.ranged_write_gateway
+                if gateway is not None:
+                    status = await gateway.try_write(writevalue, user)
+                    if status is not None:
+                        res.append(status)
+                        continue
+                if writevalue.IndexRange:
+                    res.append(ua.StatusCode(ua.StatusCodes.BadWriteNotSupported))
                     continue
             if writevalue.AttributeId == ua.AttributeIds.Value and self._aspace.force_server_timestamp:
                 dv = dataclasses.replace(writevalue.Value, ServerTimestamp=datetime.now(UTC), ServerPicoseconds=None)
@@ -664,6 +676,7 @@ class AddressSpace:
         self._handle_to_attribute_map: dict[int, tuple[ua.NodeId, ua.AttributeIds]] = {}
         self._default_idx = 2
         self._nodeid_counter = {0: 20000, 1: 2000}
+        self.ranged_write_gateway: RangedWriteGateway | None = None
 
     def __getitem__(self, nodeid: ua.NodeId) -> NodeData:
         return self._nodes.__getitem__(nodeid)
