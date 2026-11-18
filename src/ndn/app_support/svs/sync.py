@@ -19,14 +19,19 @@ import logging
 import typing
 import secrets
 import time
+import collections
 import asyncio as aio
 from enum import Enum
 from ... import encoding as enc
 from ... import app
 from .tlv import StateVec, StateVecWrapper, StateVecEntry
+from .policy import (AllowlistSourceVerifier, BoundedUpdatePolicy, EntryInspection,
+                     RejectedEntry, RejectReason, SourceVerifier)
 
 
-__all__ = ['OnMissingDataFunc', 'SvsState', 'SvsInst']
+__all__ = ['OnMissingDataFunc', 'SvsState', 'SvsInst', 'RejectReason', 'RejectedEntry',
+           'SourceVerifier', 'AllowlistSourceVerifier', 'BoundedUpdatePolicy',
+           'EntryInspection']
 
 
 OnMissingDataFunc = typing.Callable[["SvsInst"], None]
@@ -72,11 +77,19 @@ class SvsInst:
     int_validator: app.Validator
     timer_task: aio.Task | None
 
+    source_verifier: SourceVerifier | None
+    update_policy: BoundedUpdatePolicy
+    rejected_entries: typing.Deque[RejectedEntry]
+    reject_counts: dict[RejectReason, int]
+
     def __init__(self, base_prefix: enc.NonStrictName, self_node_id: enc.NonStrictName,
                  on_missing_data: OnMissingDataFunc, sync_int_signer: enc.Signer,
                  sync_int_validator: app.Validator,
                  sync_interval: float = 30, suppression_interval: float = 0.2,
-                 last_used_seq_num: int = 0):
+                 last_used_seq_num: int = 0,
+                 source_verifier: SourceVerifier | None = None,
+                 update_policy: BoundedUpdatePolicy | None = None,
+                 rejected_log_size: int = 64):
         self.base_prefix = enc.Name.normalize(base_prefix)
         self.self_node_id = enc.Name.to_bytes(self_node_id)
         self.sync_interval = sync_interval
@@ -93,6 +106,18 @@ class SvsInst:
         self.int_validator = sync_int_validator
         self.timer_task = None
         self.logger = logging.getLogger(__name__)
+        # Pluggable source verification. When unset, every node identity is
+        # admitted (the historical behaviour). Deployments that need to defend
+        # against forged publishers should supply a verifier such as
+        # AllowlistSourceVerifier.
+        self.source_verifier = source_verifier
+        self.update_policy = update_policy if update_policy is not None else BoundedUpdatePolicy()
+        # Bounded audit trail of hard rejections so a caller can inspect why
+        # entries were refused without growing memory without limit.
+        if rejected_log_size < 0:
+            raise ValueError('rejected_log_size must be non-negative')
+        self.rejected_entries = collections.deque(maxlen=rejected_log_size)
+        self.reject_counts = {reason: 0 for reason in RejectReason}
 
     def sample_sync_timer(self):
         dev = secrets.randbits(16) / 327680 * self.sync_interval
@@ -101,6 +126,29 @@ class SvsInst:
     def sample_sup_timer(self):
         dev = secrets.randbits(16) / 65536 * self.suppression_interval
         return self.suppression_interval + dev - self.suppression_interval * 0.5
+
+    def _record_reject(self, node_id: bytes, seq_no: int, reason: RejectReason,
+                       known_seq: int) -> None:
+        self.reject_counts[reason] += 1
+        self.rejected_entries.append(RejectedEntry(node_id, seq_no, reason, known_seq))
+        self.logger.warning('Refused state-vector entry [%s]: seq=%s known=%s reason=%s',
+                            enc.Name.to_str(node_id), seq_no, known_seq, reason.value)
+
+    def _admit_entry(self, node_id: bytes, seq_no: int) -> EntryInspection:
+        """
+        Run the admission pipeline for a single remote state-vector entry.
+
+        Checks, in order: source identity, self-conflict, and the bounded
+        update policy (non-negative / monotonic / bounded jump). Only an
+        accepted entry may later be merged into the formal state.
+        """
+        known_seq = self.local_sv.get(node_id, 0)
+        if self.source_verifier is not None and not self.source_verifier(node_id):
+            return EntryInspection(False, RejectReason.UNVERIFIED_SOURCE)
+        if node_id == self.self_node_id and seq_no > self.self_seq:
+            # The local node is the only authoritative publisher of its own ID.
+            return EntryInspection(False, RejectReason.SELF_CONFLICT)
+        return self.update_policy.inspect(node_id, seq_no, known_seq)
 
     def sync_handler(self, name: enc.FormalName, _app_param: enc.BinaryStr | None,
                      _reply: app.ReplyFunc, _context: app.PktContext) -> None:
@@ -117,32 +165,47 @@ class SvsInst:
             return
         remote_sv = remote_sv_pkt.entries
 
-        # No lock is needed since we do not await
-        # Compare state vectors
+        # No lock is needed since we do not await.
+        # Each entry is admitted independently: a rejected entry is refused and
+        # recorded, but the remaining entries of the same packet are still
+        # processed and can update the formal state.
         rsv_dict = {}
+        need_notif = False
+        need_fetch = False
         for rsv in remote_sv:
             if not rsv.node_id:
                 continue
             rsv_id = enc.Name.to_bytes(rsv.node_id)
             rsv_seq = rsv.seq_no
-            if rsv_id == self.self_node_id and rsv_seq > self.self_seq:
-                self.logger.error('Remote side has more local data for local node.')
-                return
+            inspection = self._admit_entry(rsv_id, rsv_seq)
+            if not inspection.accepted:
+                reason = typing.cast(RejectReason, inspection.reason)
+                self._record_reject(rsv_id, rsv_seq, reason, self.local_sv.get(rsv_id, 0))
+                if reason == RejectReason.STALE_SEQ:
+                    # The remote view is behind; re-advertise our newer state.
+                    need_notif = True
+                # Duplicates and hard rejections trigger neither state update
+                # nor fetching.
+                continue
+            known_seq = self.local_sv.get(rsv_id, 0)
             rsv_dict[rsv_id] = rsv_seq
-
-        need_notif = len(rsv_dict.keys() - self.local_sv.keys()) > 0
-        need_fetch = False
-        for rsv_id, rsv_seq in rsv_dict.items():
-            lsv_seq = self.local_sv.get(rsv_id, 0)
-            if lsv_seq < rsv_seq:
-                # Remote is latest
-                need_fetch = True
-                self.local_sv[rsv_id] = rsv_seq
-                self.logger.debug('Missing data for: [%s]: %s < %s', enc.Name.to_str(rsv_id), lsv_seq, rsv_seq)
-            elif lsv_seq > rsv_seq:
-                # Local is latest
+            if rsv_id not in self.local_sv:
+                # A newly observed, verified node identity.
                 need_notif = True
-                self.logger.debug('Outdated remote on: [%s]: %s < %s', enc.Name.to_str(rsv_id), rsv_seq, lsv_seq)
+            # Inspection guarantees rsv_seq > known_seq.
+            need_fetch = True
+            self.local_sv[rsv_id] = rsv_seq
+            self.logger.debug('Missing data for: [%s]: %s < %s',
+                              enc.Name.to_str(rsv_id), known_seq, rsv_seq)
+
+        if not rsv_dict:
+            # Nothing admissible: still reset the timer so an attacker spamming
+            # invalid packets cannot suppress our own periodic advertisement.
+            if self.state == SvsState.SyncSteady:
+                self.next_sync_timing = time.time() + self.sample_sync_timer()
+                if self.running:
+                    self.timer_rst_event.set()
+            return
 
         if need_notif or self.state == SvsState.SyncSuppression:
             # Set the aggregation timer
@@ -151,21 +214,43 @@ class SvsInst:
                 self.agg_sv = rsv_dict.copy()
                 # Reset sync timer
                 self.next_sync_timing = time.time() + self.sample_sup_timer()
-                self.timer_rst_event.set()
+                if self.running:
+                    self.timer_rst_event.set()
             else:
                 self.aggregate(rsv_dict)
         else:
             # Reset sync timer
             self.next_sync_timing = time.time() + self.sample_sync_timer()
-            self.timer_rst_event.set()
+            if self.running:
+                self.timer_rst_event.set()
 
         if need_fetch:
             self.on_missing_data(self)
 
+    def missing_data_ranges(self, fetched: dict[bytes, int]) -> dict[bytes, tuple[int, int]]:
+        """
+        Compute the bounded sequence ranges that still need to be fetched.
+
+        ``fetched`` maps a node ID to the highest sequence already retrieved
+        for that node. The returned mapping gives an inclusive
+        ``(low, high)`` range per node derived from the formal state only, so
+        unverified or jump-rejected entries can never appear here. The range
+        size per node is bounded by what :attr:`update_policy` admitted.
+        """
+        ranges = {}
+        for node_id, confirmed_seq in self.local_sv.items():
+            if node_id == self.self_node_id:
+                continue
+            fetched_seq = fetched.get(node_id, 0)
+            if fetched_seq < confirmed_seq:
+                ranges[node_id] = (fetched_seq + 1, confirmed_seq)
+        return ranges
+
     def aggregate(self, rsv_dict: dict[bytes, int]):
         for rsv_id, rsv_seq in rsv_dict.items():
-            asv_seq = self.local_sv.get(rsv_id, 0)
-            self.agg_sv[rsv_id] = max(asv_seq, rsv_seq)
+            asv_seq = self.agg_sv.get(rsv_id, 0)
+            lsv_seq = self.local_sv.get(rsv_id, 0)
+            self.agg_sv[rsv_id] = max(asv_seq, lsv_seq, rsv_seq)
 
     async def on_timer(self):
         while self.running:
