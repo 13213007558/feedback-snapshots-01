@@ -40,6 +40,7 @@ from test.test_ether  import *
 from test.test_csn1   import *
 from test.test_asn1rt import *
 from test.test_mobile import *
+from test.test_nas_direction import *
 from test.test_gsmrr  import *
 from test.test_sms    import *
 from test.test_crypto import *
@@ -264,6 +265,12 @@ class TestPycrate(unittest.TestCase):
         test_nas_mo()
         test_nas_mt()
         test_nas_5g()
+        test_nasdir_dispatch_tables()
+        test_nasdir_single_direction()
+        test_nasdir_same_type_different_structure()
+        test_nasdir_nested_container()
+        test_nasdir_unknown_type()
+        test_nasdir_missing_direction()
         test_5gsid()
         test_sigtran()
         test_sccp()
