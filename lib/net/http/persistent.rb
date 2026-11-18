@@ -529,7 +529,12 @@ class Net::HTTP::Persistent
       Socket.const_defined? :TCP_NODELAY
 
     @pool = Net::HTTP::Persistent::Pool.new size: pool_size do |http_args|
-      Net::HTTP::Persistent::Connection.new Net::HTTP, http_args, @ssl_generation
+      # The trailing use_ssl flag is part of the pool key, not a Net::HTTP
+      # argument, so it never reaches Net::HTTP.new.
+      use_ssl = http_args.last
+      Net::HTTP::Persistent::Connection.new(
+        Net::HTTP, http_args[0...-1], @ssl_generation, use_ssl
+      )
     end
 
     @certificate        = nil
@@ -637,6 +642,11 @@ class Net::HTTP::Persistent
       net_http_args.concat [nil, nil, nil, nil]
     end
 
+    # The scheme must be part of the pool key so a plaintext HTTP connection
+    # can never be handed out for an HTTPS URI (or vice versa), even when the
+    # host, port and proxy settings are identical.
+    net_http_args << use_ssl
+
     connection = @pool.checkout net_http_args
 
     begin
@@ -646,10 +656,22 @@ class Net::HTTP::Persistent
         connection.ssl_generation != @ssl_generation
 
       if not http.started? then
-        ssl   http if use_ssl
+        ssl http if use_ssl
         start http
       elsif expired? connection then
         reset connection
+      end
+
+      # Defense in depth: a connection is only valid for the security
+      # context it was opened with.  Never keep using a plaintext socket for
+      # a TLS request or a TLS socket for a plaintext request.  The pool key
+      # already separates the two, so this only repairs a mismatched socket
+      # instead of disabling reuse for correctly-keyed connections.
+      if http.use_ssl? != use_ssl then
+        finish connection
+
+        ssl http if use_ssl
+        start http
       end
 
       http.ignore_eof         = @ignore_eof    if @ignore_eof

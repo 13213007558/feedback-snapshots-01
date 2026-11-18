@@ -87,6 +87,9 @@ class TestNetHttpPersistent < Minitest::Test
       @address, @port = 'example.com', 80
       @use_ssl = false
     end
+    def use_ssl?
+      @use_ssl
+    end
     def finish
       @finished += 1
       @socket = nil
@@ -124,10 +127,11 @@ class TestNetHttpPersistent < Minitest::Test
   def basic_connection
     raise "#{@uri} is not HTTP" unless @uri.scheme.downcase == 'http'
 
-    net_http_args = [@uri.hostname, @uri.port, nil, nil, nil, nil]
+    net_http_args = [@uri.hostname, @uri.port, nil, nil, nil, nil, false]
 
     connection = Net::HTTP::Persistent::Connection.allocate
     connection.ssl_generation = @http.ssl_generation
+    connection.instance_variable_set :@use_ssl, false
     connection.http = BasicConnection.new
     connection.reset
 
@@ -158,10 +162,11 @@ class TestNetHttpPersistent < Minitest::Test
   def ssl_connection
     raise "#{@uri} is not HTTPS" unless @uri.scheme.downcase == 'https'
 
-    net_http_args = [@uri.hostname, @uri.port, nil, nil, nil, nil]
+    net_http_args = [@uri.hostname, @uri.port, nil, nil, nil, nil, true]
 
     connection = Net::HTTP::Persistent::Connection.allocate
     connection.ssl_generation = @http.ssl_generation
+    connection.instance_variable_set :@use_ssl, true
     connection.http = BasicConnection.new
     connection.reset
 
@@ -275,7 +280,7 @@ class TestNetHttpPersistent < Minitest::Test
       c
     end
 
-    stored = @http.pool.checkout ['example.com', 80, nil, nil, nil, nil]
+    stored = @http.pool.checkout ['example.com', 80, nil, nil, nil, nil, false]
 
     assert_same used, stored
   end
@@ -479,7 +484,7 @@ class TestNetHttpPersistent < Minitest::Test
 
     stored = http.pool.checkout ['example.com', 80,
                                  'proxy.example', 80,
-                                 'johndoe', 'muffins']
+                                 'johndoe', 'muffins', false]
 
     assert_same used, stored
   end
@@ -496,7 +501,7 @@ class TestNetHttpPersistent < Minitest::Test
 
     stored = http.pool.checkout ['example.com', 80,
                                  'proxy.example', 80,
-                                 'john@doe', 'muf:fins']
+                                 'john@doe', 'muf:fins', false]
 
     assert stored
   end
@@ -1524,7 +1529,7 @@ class TestNetHttpPersistent < Minitest::Test
     # ConnectionPool 2.4+ calls `checkin(force: true)` after fork
     @http.pool.checkin(force: true)
 
-    @http.pool.checkout ['example.com', 80, nil, nil, nil, nil]
+    @http.pool.checkout ['example.com', 80, nil, nil, nil, nil, false]
     @http.pool.checkin(force: true)
     @http.pool.reload do |connection|
       connection.close
