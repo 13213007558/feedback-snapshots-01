@@ -2,6 +2,16 @@
 History
 =======
 
+0.19.0 (unreleased)
+-------------------
+
+* FEATURE: limited, offline Portable PDB reader (``dnfile.read_portable_pdb``)
+* FEATURE: ``Document`` and ``MethodDebugInformation`` parsing with reference
+  widths derived from external type-system table row counts
+* FEATURE: explicit assembly association via the CodeView RSDS/``#Pdb`` id and
+  MethodDef row-count checks, with per-method unresolved reasons
+* Document paths are evidence only; no source file is opened or fetched
+
 0.18.0 (2026)
 -------------
 

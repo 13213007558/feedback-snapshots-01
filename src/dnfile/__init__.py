@@ -25,10 +25,25 @@ from typing import Dict, List, Optional
 from pefile import PE as _PE
 from pefile import DIRECTORY_ENTRY, MAX_SYMBOL_EXPORT_COUNT, Dump, Structure, DataContainer, PEFormatError
 
-from . import base, enums, errors, stream, resource
+from . import base, enums, errors, stream, resource, portable_pdb
 
 logger = logging.getLogger(__name__)
 CLR_METADATA_SIGNATURE = 0x424A5342
+
+
+def read_portable_pdb(source):
+    """Read a Portable PDB from one explicit path or byte string.
+
+    This is a bounded, offline entry point: it opens only the given PDB and
+    never follows Document names or accesses the network.  See
+    :mod:`dnfile.portable_pdb` for the supported tables and association rules.
+    """
+    return portable_pdb.read_portable_pdb(source)
+
+
+def associate_debug_records(pdb, assembly, max_methods=None):
+    """Associate a Portable PDB with one explicitly supplied assembly."""
+    return portable_pdb.associate_debug_records(pdb, assembly, max_methods=max_methods)
 
 
 def _recover_stream_entry_rva(pe: "dnPE", candidate_rva: int, metadata_end_rva: int):

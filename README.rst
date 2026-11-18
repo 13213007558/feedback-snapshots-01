@@ -93,6 +93,32 @@ attribute of a dnPE object.
                     res_hash.add(hashlib.sha256(entry.data).hexdigest())
 
 
+Portable PDB (limited, offline)
+-------------------------------
+
+``dnfile`` can read a small, deliberate subset of Portable PDB files: the
+``#Pdb`` header, the ``Document`` and ``MethodDebugInformation`` tables, and
+the MethodDef reference widths needed to read them.  Association is explicit:
+the caller supplies one assembly, and the PDB is associated only when the
+20-byte ``#Pdb`` id matches the assembly's CodeView RSDS record and the
+external MethodDef row count matches the assembly's MethodDef table.
+
+.. code-block:: python
+
+   import dnfile
+
+   pdb = dnfile.read_portable_pdb("sample.pdb")
+   result = dnfile.associate_debug_records(pdb, "sample.dll")
+
+   print(result.identity.status)
+   for method in result.methods:
+       print(method.methoddef_token, method.status, method.reasons)
+
+Document names are reported as evidence only.  This reader never opens a
+Document path, searches for sibling files, or accesses the network.  A
+successful association does not assert that the debug information is
+trustworthy; it only records which identity and row-layout checks passed.
+
 TODO
 ----
 
