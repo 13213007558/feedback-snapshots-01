@@ -165,6 +165,72 @@ To use the channel layer ``echo_alias`` we would set it like so:
 You can read more in :doc:`/topics/channel_layers`.
 
 
+.. _handler_allowlist:
+
+Restricting Handlers By Source
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, a consumer dispatches any message whose ``type`` maps to a method
+on the consumer, regardless of whether it came from the connection or the
+channel layer. A consumer that also receives internal task notifications may
+want to make the set of business handlers reachable from each entry point
+explicit, so that a message from the channel layer cannot invoke a handler
+that was only meant for the connected client (or vice versa).
+
+Setting the opt-in ``handler_allowlist`` class attribute restricts dispatch to
+the listed business handlers, separately for each source:
+
+.. code-block:: python
+
+    from channels.consumer import AsyncConsumer
+
+    class TaskConsumer(AsyncConsumer):
+        handler_allowlist = {
+            "connection": {"client.ping", "task.acknowledge"},
+            "channel_layer": {"task.created", "task.acknowledge"},
+        }
+
+        async def websocket_connect(self, message):
+            await self.send({"type": "websocket.accept"})
+
+        async def client_ping(self, message):
+            ...
+
+        async def task_created(self, message):
+            ...
+
+        async def task_acknowledge(self, message):
+            # Reachable from both sources, so it is listed under both keys.
+            ...
+
+Entries may be written either as message types (``"task.created"``) or as
+handler names (``"task_created"``); both identify the same handler. A handler
+that is reachable from both sources must be listed in both sets -- there is no
+implicit sharing between them. Events whose handler is not allowed for the
+incoming source are logged and dropped without invoking consumer code.
+
+The protocol's connection lifecycle is always permitted on the connection
+source, even if it is not listed: ``websocket.connect`` and
+``websocket.disconnect`` for WebSocket scopes, and ``http.request`` and
+``http.disconnect`` for HTTP scopes. This keeps connection setup and teardown
+working, including the generic consumers' group cleanup on disconnect.
+
+The connection source is the ASGI ``receive`` callable. The channel layer
+source is the consumer's own channel as served by the configured channel
+layer. In worker mode (``scope["type"] == "channel"``) the ASGI ``receive``
+callable feeds messages from the named channel, so those messages are treated
+as channel layer events.
+
+Messages can read the source that delivered them through
+``self.event_source`` (``"connection"`` or ``"channel_layer"``) inside a
+handler, which is useful when the same handler serves both.
+
+Leaving ``handler_allowlist`` as ``None`` -- the default -- preserves the
+historical unrestricted dispatch, so existing consumers are unaffected.
+Invalid allowlists (unknown sources, non-string entries, or attempts to grant
+``dispatch``/``send``) raise ``ImproperlyConfigured`` when the consumer starts.
+
+
 .. _scope:
 
 Scope

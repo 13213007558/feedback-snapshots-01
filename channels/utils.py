@@ -33,11 +33,23 @@ async def await_many_dispatch(consumer_callables, dispatch):
     """
     Given a set of consumer callables, awaits on them all and passes results
     from them to the dispatch awaitable as they come in.
+
+    Each entry in ``consumer_callables`` may either be a plain callable (its
+    results are passed to ``dispatch``) or a ``(callable, dispatch)`` pair,
+    which lets the caller route results from different sources through
+    different dispatch callables.
     """
+    # Normalise entries to (callable, dispatch) pairs
+    routes = []
+    for consumer_callable in consumer_callables:
+        if isinstance(consumer_callable, tuple):
+            callable_, dispatch_ = consumer_callable
+        else:
+            callable_, dispatch_ = consumer_callable, dispatch
+        routes.append((callable_, dispatch_))
     # Call all callables, and ensure all return types are Futures
     tasks = [
-        asyncio.ensure_future(consumer_callable())
-        for consumer_callable in consumer_callables
+        asyncio.ensure_future(consumer_callable()) for consumer_callable, _ in routes
     ]
     try:
         while True:
@@ -47,8 +59,8 @@ async def await_many_dispatch(consumer_callables, dispatch):
             for i, task in enumerate(tasks):
                 if task.done():
                     result = task.result()
-                    await dispatch(result)
-                    tasks[i] = asyncio.ensure_future(consumer_callables[i]())
+                    await routes[i][1](result)
+                    tasks[i] = asyncio.ensure_future(routes[i][0]())
     finally:
         # Make sure we clean up tasks on exit
         for task in tasks:
