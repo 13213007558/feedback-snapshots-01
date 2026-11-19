@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -33,7 +34,6 @@ class InternalSession(AbstractSession):
     max_connections = 1000
     _current_connections = 0
     _counter = 10
-    _auth_counter = 1000
 
     def __init__(
         self,
@@ -56,8 +56,7 @@ class InternalSession(AbstractSession):
         self.state = SessionState.Created
         self.session_id = ua.NodeId(self._counter)
         InternalSession._counter += 1
-        self.auth_token = ua.NodeId(self._auth_counter)
-        InternalSession._auth_counter += 1
+        self.auth_token = ua.NodeId(uuid.uuid4())
         self.logger.info("Created internal session %s", self.name)
         self.session_timeout: float | None = None
         self._last_activity: float = time.monotonic()
@@ -66,9 +65,7 @@ class InternalSession(AbstractSession):
             self.iserver.register_external_session(self)
 
     def __str__(self) -> str:
-        return (
-            f"InternalSession(name:{self.name}, user:{self.user}, id:{self.session_id}, auth_token:{self.auth_token})"
-        )
+        return f"InternalSession(name:{self.name}, user:{self.user}, id:{self.session_id}, auth_token:<redacted>)"
 
     async def get_endpoints(
         self, params: ua.GetEndpointsParameters | None = None, sockname: tuple[str, int] | None = None

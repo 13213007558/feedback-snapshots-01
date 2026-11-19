@@ -286,28 +286,33 @@ class UaProcessor:
         elif typeid == ua.NodeId(ua.ObjectIds.ActivateSessionRequest_Encoding_DefaultBinary):
             _logger.info("Activate session request (%s)", user)
             params = struct_from_binary(ua.ActivateSessionParameters, body)
-            if not self.session:
+            session = self.session
+            bind_after_activation = False
+            if session is None:
                 # Spec Part 4 §6.7 reconnect: a fresh SecureChannel may carry an
-                # ActivateSession for a still-live session. Look it up by auth_token
-                # and rebind any existing subscriptions' publish callbacks here.
-                existing = self.iserver.lookup_external_session(requesthdr.AuthenticationToken)
-                if existing is None:
+                # ActivateSession for a still-live session. The token only selects
+                # the candidate; it must not bind this connection until the
+                # identity token and ClientSignature have both been verified.
+                session = self.iserver.lookup_external_session(requesthdr.AuthenticationToken)
+                if session is None:
                     _logger.info("request to activate non-existing session (%s)", user)
                     raise ServiceError(ua.StatusCodes.BadSessionIdInvalid)
-                self.session = existing
+                bind_after_activation = True
+            if self._connection.security_policy.host_certificate is None:
+                data = session.nonce
+            else:
+                data = self._connection.security_policy.host_certificate + session.nonce
+            self._connection.security_policy.asymmetric_cryptography.verify(data, params.ClientSignature.Signature)
+            result = session.activate_session(params, self._connection.security_policy.peer_certificate)
+            if bind_after_activation:
+                self.session = session
                 self._closing = False
                 if self._session_watchdog_task is None or self._session_watchdog_task.done():
                     self._session_watchdog_task = asyncio.create_task(self._session_watchdog_loop())
                 for sub in self.iserver.subscription_service.subscriptions.values():
-                    if sub.session_id == existing.session_id:
+                    if sub.session_id == session.session_id:
                         sub.pub_result_callback = self.forward_publish_response
                         sub.pub_request_callback = self.get_publish_request
-            if self._connection.security_policy.host_certificate is None:
-                data = self.session.nonce
-            else:
-                data = self._connection.security_policy.host_certificate + self.session.nonce
-            self._connection.security_policy.asymmetric_cryptography.verify(data, params.ClientSignature.Signature)
-            result = self.session.activate_session(params, self._connection.security_policy.peer_certificate)
             response = ua.ActivateSessionResponse()
             response.Parameters = result
             # _logger.info("sending read response")

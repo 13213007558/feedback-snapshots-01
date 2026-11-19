@@ -23,6 +23,7 @@ Usage Guide
     :caption: Client
 
     client/overview
+    client/session-resume
 
 .. toctree::
     :maxdepth: 2

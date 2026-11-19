@@ -35,6 +35,7 @@ from ..ua.uaerrors import (
     BadCertificateUntrusted,
     BadSecurityChecksFailed,
     BadSecurityPolicyRejected,
+    BadSessionClosed,
     BadSessionIdInvalid,
 )
 from .ua_client import StateSubscription, UaClient, UaClientState
@@ -154,6 +155,7 @@ class Client:
         # server-side session via ActivateSession instead of creating a new one
         # (spec Part 4 §6.7) — useful after a client crash.
         self.session_state_path: Path | None = None
+        self._session_file_owned: bool = False
 
     async def __aenter__(self) -> "Client":
         await self.connect()
@@ -509,21 +511,25 @@ class Client:
 
         Returns True when the session resumed; on failure clears the stale state and
         returns False so the caller falls back to CreateSession + ActivateSession.
+        Only a terminal server answer clears the file: transport and credential
+        failures leave it in place because the server-side session may still live.
         """
         if not self._try_load_persisted_session():
             return False
         try:
             await self._activate_with_credentials()
-        except Exception as exc:
-            if isinstance(exc, BadSessionIdInvalid):
-                _logger.info("Persisted session expired on server; creating fresh one")
-            else:
-                _logger.warning("Failed to resume persisted session; creating fresh one", exc_info=True)
+        except (BadSessionIdInvalid, BadSessionClosed) as exc:
+            _logger.info("Persisted session expired on server; creating fresh one: %s", exc)
             self._clear_persisted_session()
             self.uaclient.session.reset_authentication_token()
             self._server_nonce = None
             return False
-        _logger.info("Resumed persisted session %s", self.uaclient.session.authentication_token)
+        except Exception as exc:
+            _logger.warning("Resume attempt failed (file kept): %s", exc)
+            self.uaclient.session.reset_authentication_token()
+            self._server_nonce = None
+            return False
+        _logger.info("Resumed persisted session")
         self._save_session_state()
         self._start_renew_loop()
         return True
@@ -557,15 +563,16 @@ class Client:
         except Exception:
             _logger.exception("close_secure_channel raised during disconnect; continuing teardown")
         self.disconnect_socket()
-        self._clear_persisted_session()
+        if self._session_file_owned:
+            self._clear_persisted_session()
 
     def _try_load_persisted_session(self) -> bool:
         """Load `authentication_token` + `server_nonce` from disk into the live session.
 
         Returns True when a session is loaded and worth attempting ActivateSession on.
-        Returns False (and silently) when no state path is set, the file is missing,
-        or the recorded session is older than `session_timeout` (server would have
-        expired it already).
+        Returns False (and silently) when no state path is set or the file is missing.
+        The server is authoritative on expiry: `saved_at` is only reported, never used
+        to skip a file, because keepalive traffic keeps an old file's session alive.
         """
         if self.session_state_path is None:
             return False
@@ -588,13 +595,10 @@ class Client:
         age = time.time() - saved_at
         if age > self.session_timeout / 1000:
             _logger.info(
-                "Persisted session at %s is %.0fs old (>%.0fms timeout); skipping",
+                "Persisted session at %s was last written %.0fs ago; asking the server",
                 self.session_state_path,
                 age,
-                self.session_timeout,
             )
-            self._clear_persisted_session()
-            return False
         self.uaclient.session.restore_authentication_token(token)
         self._server_nonce = nonce
         return True
@@ -624,8 +628,11 @@ class Client:
             os.replace(tmp, path)
         except OSError as exc:
             _logger.warning("Could not save session state to %s: %s", path, exc)
+        else:
+            self._session_file_owned = True
 
     def _clear_persisted_session(self) -> None:
+        self._session_file_owned = False
         if self.session_state_path is None:
             return
         try:
@@ -1010,8 +1017,10 @@ class Client:
             await self.send_hello()
             await self.open_secure_channel()
             if had_session and await self._reactivate_session():
+                self._save_session_state()
                 return True
             await self._create_and_activate_session()
+            self._save_session_state()
             self._start_renew_loop()
         except Exception:
             self.disconnect_socket()
