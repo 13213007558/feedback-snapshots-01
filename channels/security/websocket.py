@@ -1,7 +1,10 @@
 from urllib.parse import urlparse
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.http.request import is_same_domain
+from django.urls.exceptions import Resolver404
+from django.urls.resolvers import RegexPattern, RoutePattern
 
 from ..generic.websocket import AsyncWebsocketConsumer
 
@@ -10,11 +13,17 @@ class OriginValidator:
     """
     Validates that the incoming connection has an Origin header that
     is in an allowed list.
+
+    When ``allow_no_origin`` is ``True``, connections that do not send an
+    ``Origin`` header at all (for example, a non-browser command line client)
+    are accepted. Connections that do send an ``Origin`` are still validated
+    against ``allowed_origins``.
     """
 
-    def __init__(self, application, allowed_origins):
+    def __init__(self, application, allowed_origins, allow_no_origin=False):
         self.application = application
         self.allowed_origins = allowed_origins
+        self.allow_no_origin = allow_no_origin
 
     async def __call__(self, scope, receive, send):
         # Make sure the scope is of type websocket
@@ -48,9 +57,11 @@ class OriginValidator:
 
         Returns ``True`` if validation function was successful, ``False`` otherwise.
         """
-        # None is not allowed unless all hosts are allowed
-        if parsed_origin is None and "*" not in self.allowed_origins:
-            return False
+        # A connection without an Origin header is allowed when the rule
+        # explicitly opts in (e.g. non-browser command line collectors)
+        # or when every origin is allowed via the "*" wildcard.
+        if parsed_origin is None:
+            return self.allow_no_origin or "*" in self.allowed_origins
         return self.validate_origin(parsed_origin)
 
     def validate_origin(self, parsed_origin):
@@ -142,6 +153,119 @@ def AllowedHostsOriginValidator(application):
     if settings.DEBUG and not allowed_hosts:
         allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
     return OriginValidator(application, allowed_hosts)
+
+
+class OriginRule:
+    """
+    Origin policy for one or more WebSocket routes.
+
+    ``allowed_origins`` uses the same format as :class:`OriginValidator`.
+    When ``allow_no_origin`` is ``True``, connections without an ``Origin``
+    header (typical of non-browser command line collectors) are accepted,
+    while any origin that is present is still checked against
+    ``allowed_origins``.
+    """
+
+    def __init__(self, allowed_origins, allow_no_origin=False):
+        self.allowed_origins = allowed_origins
+        self.allow_no_origin = allow_no_origin
+
+    def __call__(self, *args, **kwargs):
+        # OriginRule is used as a route callback marker; only
+        # OriginValidatorRouter consumes it, so it is never invoked directly.
+        raise RuntimeError(
+            "An OriginRule cannot serve requests on its own. Wrap it in an "
+            "OriginValidatorRouter."
+        )
+
+    @classmethod
+    def allowed_hosts(cls, allow_no_origin=False):
+        """
+        Build a rule backed by the Django ``ALLOWED_HOSTS`` setting, mirroring
+        :func:`AllowedHostsOriginValidator` (local hosts are also allowed when
+        ``DEBUG`` is enabled and no hosts are configured).
+        """
+        allowed_hosts = settings.ALLOWED_HOSTS
+        if settings.DEBUG and not allowed_hosts:
+            allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
+        return cls(allowed_hosts, allow_no_origin=allow_no_origin)
+
+
+class OriginValidatorRouter:
+    """
+    ASGI middleware that enforces a distinct :class:`OriginValidator` per
+    mount point rather than a single global origin policy.
+
+    ``application`` is the inner WebSocket application shared by every route.
+    ``routes`` is a list of Django ``path()``/``re_path()`` entries whose
+    callback is an :class:`OriginRule`. The first matching route wins, and
+    ``default_rule`` covers any path without an explicit route, so every
+    connection is still validated.
+
+    Route patterns are rewritten to match a path prefix (the same treatment
+    :class:`~channels.routing.URLRouter` gives nested routers), so
+    ``path("collector/", rule)`` also matches ``/collector/anything/else``.
+
+    A rejected connection is handed to :class:`WebsocketDenier` during the
+    handshake; the inner application (and therefore its consumer) is never
+    initialized for that connection.
+    """
+
+    #: Allows nesting inside a URLRouter, which rewrites the parent pattern.
+    _path_routing = True
+
+    def __init__(self, application, routes, default_rule):
+        self.application = application
+        self.routes = routes
+        self.default_validator = self._build_validator(default_rule)
+        self.route_validators = []
+        for route in self.routes:
+            if not isinstance(route.callback, OriginRule):
+                raise ImproperlyConfigured(
+                    "%s: every OriginValidatorRouter route must be a path()/"
+                    "re_path() entry whose callback is an OriginRule." % (route,)
+                )
+            pattern = route.pattern
+            if isinstance(pattern, RegexPattern):
+                arg = pattern._regex
+            elif isinstance(pattern, RoutePattern):
+                arg = pattern._route
+            else:
+                raise ValueError(f"Unsupported pattern type: {type(pattern)}")
+            route.pattern = pattern.__class__(arg, pattern.name, is_endpoint=False)
+            self.route_validators.append(
+                (route, self._build_validator(route.callback))
+            )
+
+    def _build_validator(self, rule):
+        if not isinstance(rule, OriginRule):
+            raise ImproperlyConfigured(
+                "OriginValidatorRouter expects OriginRule instances, got %r"
+                % (rule,)
+            )
+        return OriginValidator(
+            self.application,
+            rule.allowed_origins,
+            allow_no_origin=rule.allow_no_origin,
+        )
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "websocket":
+            raise ValueError(
+                "You cannot use OriginValidatorRouter on a non-WebSocket connection"
+            )
+        path = scope.get("path_remaining", scope.get("path", None))
+        if path is None:
+            raise ValueError("No 'path' key in connection scope, cannot route URLs")
+        # Remove leading / to match Django's handling
+        path = path.lstrip("/")
+        for route, validator in self.route_validators:
+            try:
+                if route.pattern.match(path):
+                    return await validator(scope, receive, send)
+            except Resolver404:
+                pass
+        return await self.default_validator(scope, receive, send)
 
 
 class WebsocketDenier(AsyncWebsocketConsumer):

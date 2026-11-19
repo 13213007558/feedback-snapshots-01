@@ -1,0 +1,20 @@
+4.4.0 Release Notes
+===================
+
+Channels 4.4.0 adds per-route WebSocket origin validation.
+
+Features
+--------
+
+* Added ``OriginValidatorRouter`` and ``OriginRule`` to
+  ``channels.security.websocket`` so a single application can enforce a
+  different ``Origin`` policy per mount point. A required ``default_rule``
+  covers every path without an explicit route, while ``OriginRule`` accepts
+  ``allow_no_origin=True`` to support non-browser clients (such as command line
+  collectors) that do not send an ``Origin`` header. Rejected connections are
+  closed during the handshake and never initialize the inner consumer.
+
+* ``OriginValidator`` now accepts an optional ``allow_no_origin`` argument. The
+  default (``False``) preserves the previous behaviour, so existing
+  ``OriginValidator`` and ``AllowedHostsOriginValidator`` configuration keeps
+  working unchanged.
