@@ -8,7 +8,7 @@ import json
 from typing import Optional, Tuple, Type, TypeVar, cast
 
 from .aead import AEAD
-from .diffie_hellman_ratchet import DiffieHellmanRatchet
+from .diffie_hellman_ratchet import DiffieHellmanRatchet, MessageWorkBudget, OldChainSkipPolicy
 from .kdf import KDF
 from .migrations import parse_double_ratchet_model
 from .models import DoubleRatchetModel, SkippedMessageKeyModel
@@ -56,7 +56,9 @@ class DoubleRatchet(ABC):
         shared_secret: bytes,
         recipient_ratchet_pub: bytes,
         message: bytes,
-        associated_data: bytes
+        associated_data: bytes,
+        message_work_budget: Optional[MessageWorkBudget] = None,
+        old_chain_skip_policy: OldChainSkipPolicy = OldChainSkipPolicy.WARN
     ) -> Tuple[DoubleRatchetTypeT, EncryptedMessage]:
         """
         Args:
@@ -72,6 +74,11 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            message_work_budget: The maximum total KDF derivations and Diffie-Hellman operations a single
+                received message may cause. Defaults to the worst case allowed by the DoS protection
+                threshold (see :meth:`MessageWorkBudget.from_dos_protection_threshold`).
+            old_chain_skip_policy: The policy for over-threshold skips in the previous receiving chain during
+                a ratchet step. Defaults to capping them with a warning, preserving heavy-loss recovery.
             shared_secret: A shared secret consisting of 32 bytes that was agreed on by means external to this
                 protocol.
             recipient_ratchet_pub: The ratchet public key of the recipient.
@@ -102,7 +109,9 @@ class DoubleRatchet(ABC):
             shared_secret,
             message_chain_kdf,
             message_chain_constant,
-            dos_protection_threshold
+            dos_protection_threshold,
+            message_work_budget,
+            old_chain_skip_policy
         )
 
         message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
@@ -127,7 +136,9 @@ class DoubleRatchet(ABC):
         shared_secret: bytes,
         own_ratchet_priv: bytes,
         message: EncryptedMessage,
-        associated_data: bytes
+        associated_data: bytes,
+        message_work_budget: Optional[MessageWorkBudget] = None,
+        old_chain_skip_policy: OldChainSkipPolicy = OldChainSkipPolicy.WARN
     ) -> Tuple[DoubleRatchetTypeT, bytes]:
         """
         Args:
@@ -143,6 +154,11 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            message_work_budget: The maximum total KDF derivations and Diffie-Hellman operations a single
+                received message may cause. Defaults to the worst case allowed by the DoS protection
+                threshold (see :meth:`MessageWorkBudget.from_dos_protection_threshold`).
+            old_chain_skip_policy: The policy for over-threshold skips in the previous receiving chain during
+                a ratchet step. Defaults to capping them with a warning, preserving heavy-loss recovery.
             shared_secret: A shared secret that was agreed on by means external to this protocol.
             own_ratchet_priv: The ratchet private key to use initially.
             message: The encrypted initial message.
@@ -178,7 +194,9 @@ class DoubleRatchet(ABC):
             shared_secret,
             message_chain_kdf,
             message_chain_constant,
-            dos_protection_threshold
+            dos_protection_threshold,
+            message_work_budget,
+            old_chain_skip_policy
         )
 
         message_key, skipped_message_keys = \
@@ -271,7 +289,9 @@ class DoubleRatchet(ABC):
         message_chain_constant: bytes,
         dos_protection_threshold: int,
         max_num_skipped_message_keys: int,
-        aead: Type[AEAD]
+        aead: Type[AEAD],
+        message_work_budget: Optional[MessageWorkBudget] = None,
+        old_chain_skip_policy: OldChainSkipPolicy = OldChainSkipPolicy.WARN
     ) -> DoubleRatchetTypeT:
         """
         Args:
@@ -289,6 +309,11 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            message_work_budget: The maximum total KDF derivations and Diffie-Hellman operations a single
+                received message may cause. Defaults to the worst case allowed by the DoS protection
+                threshold (see :meth:`MessageWorkBudget.from_dos_protection_threshold`).
+            old_chain_skip_policy: The policy for over-threshold skips in the previous receiving chain during
+                a ratchet step. Defaults to capping them with a warning, preserving heavy-loss recovery.
 
         Returns:
             A configured instance of :class:`DoubleRatchet`, with internal state restored from the model.
@@ -324,7 +349,9 @@ class DoubleRatchet(ABC):
             root_chain_kdf,
             message_chain_kdf,
             message_chain_constant,
-            dos_protection_threshold
+            dos_protection_threshold,
+            message_work_budget,
+            old_chain_skip_policy
         )
 
         return self
@@ -339,7 +366,9 @@ class DoubleRatchet(ABC):
         message_chain_constant: bytes,
         dos_protection_threshold: int,
         max_num_skipped_message_keys: int,
-        aead: Type[AEAD]
+        aead: Type[AEAD],
+        message_work_budget: Optional[MessageWorkBudget] = None,
+        old_chain_skip_policy: OldChainSkipPolicy = OldChainSkipPolicy.WARN
     ) -> DoubleRatchetTypeT:
         """
         Args:
@@ -357,6 +386,11 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            message_work_budget: The maximum total KDF derivations and Diffie-Hellman operations a single
+                received message may cause. Defaults to the worst case allowed by the DoS protection
+                threshold (see :meth:`MessageWorkBudget.from_dos_protection_threshold`).
+            old_chain_skip_policy: The policy for over-threshold skips in the previous receiving chain during
+                a ratchet step. Defaults to capping them with a warning, preserving heavy-loss recovery.
 
         Returns:
             A configured instance of :class:`DoubleRatchet`, with internal state restored from the serialized

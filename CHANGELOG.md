@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- `MessageWorkBudget`: an explicit, caller-visible per-message budget bounding the total number of KDF
+  derivations and Diffie-Hellman operations a single received message may trigger, covering skipped keys
+  that are later discarded as well as retained state
+- `OldChainSkipPolicy` (`WARN`/`RAISE`) selecting whether over-threshold skips in the previous receiving
+  chain during a ratchet step are capped with a warning (default, preserves heavy-loss recovery) or rejected
+- Optional `message_work_budget` and `old_chain_skip_policy` parameters on all `DiffieHellmanRatchet` and
+  `DoubleRatchet` constructors, including the (de)serialization entry points
+
 ### Changed
+- Budget, threshold and policy checks during decryption now run before any KDF/Diffie-Hellman work or state
+  change, so an over-budget or over-threshold message leaves the session state untouched
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed
 

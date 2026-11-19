@@ -1,9 +1,11 @@
 from typing import List, Set, Type
+from collections import OrderedDict
 from warnings import catch_warnings
 
 from doubleratchet import (
     DoSProtectionException,
-    DuplicateMessageException
+    DuplicateMessageException,
+    MessageWorkBudget
 )
 from doubleratchet.diffie_hellman_ratchet import DiffieHellmanRatchet
 from doubleratchet.recommended import (
@@ -240,24 +242,69 @@ async def test_diffie_hellman_ratchet() -> None:
             for _ in range(25):
                 await bob_dhr.next_encryption_key()
             encryption_key, header = await bob_dhr.next_encryption_key()
+            alice_state_before = alice_dhr.json
             try:
                 await alice_dhr.next_decryption_key(header)
                 assert False
             except DoSProtectionException:
                 pass
+            # A rejected (over-budget/over-threshold) message must leave the ratchet state untouched.
+            assert alice_dhr.json == alice_state_before
 
-            # Perform a Diffie-Hellman ratchet step
-            encryption_key, header = await alice_dhr.next_encryption_key()
-            decryption_key, skipped_message_keys = await bob_dhr.next_decryption_key(header)
-
-            # Test the (soft) DoS protection:
-            encryption_key, header = await bob_dhr.next_encryption_key()
+            # Test the (soft) DoS protection independently. Build a header whose previous sending chain
+            # (the one a ratchet step discards) skipped more than 10 message keys: first establish Bob's
+            # sending chain as Alice's receiving chain, then let Bob lose 25 messages on it before both
+            # sides ratchet forward.
+            soft_bob_priv = impl._generate_priv()
+            soft_alice = await impl.create(
+                None,
+                impl._derive_pub(soft_bob_priv),
+                RootChainKDF,
+                root_chain_key,
+                MessageChainKDF,
+                message_chain_constant,
+                10,
+                MessageWorkBudget(kdf_derivations=2 ** 31, diffie_hellman_operations=2)
+            )
+            soft_initial_key, soft_initial_header = await soft_alice.next_encryption_key()
+            soft_bob = await impl.create(
+                soft_bob_priv,
+                soft_initial_header.ratchet_pub,
+                RootChainKDF,
+                root_chain_key,
+                MessageChainKDF,
+                message_chain_constant,
+                10,
+                MessageWorkBudget(kdf_derivations=2 ** 31, diffie_hellman_operations=2)
+            )
+            assert await soft_bob.next_decryption_key(soft_initial_header) == (
+                soft_initial_key,
+                OrderedDict()
+            )
+            # Establish Bob's sending chain as Alice's receiving chain
+            soft_first_key, soft_first_header = await soft_bob.next_encryption_key()
+            assert await soft_alice.next_decryption_key(soft_first_header) == (
+                soft_first_key,
+                OrderedDict()
+            )
+            # Bob loses 25 messages of the now-established chain, then both sides ratchet forward
+            for _ in range(25):
+                await soft_bob.next_encryption_key()
+            soft_step_key, soft_step_header = await soft_alice.next_encryption_key()
+            assert await soft_bob.next_decryption_key(soft_step_header) == (
+                soft_step_key,
+                OrderedDict()
+            )
+            # Bob's next message references the long previous chain via previous_sending_chain_length
+            encryption_key, header = await soft_bob.next_encryption_key()
+            assert header.previous_sending_chain_length > 10
             with catch_warnings(record=True) as warnings:
-                decryption_key, skipped_message_keys = await alice_dhr.next_decryption_key(header)
+                decryption_key, skipped_message_keys = await soft_alice.next_decryption_key(header)
                 assert len(warnings) == 1
                 assert issubclass(warnings[0].category, UserWarning)
                 assert "DoS" in str(warnings[0].message)
-            assert len(skipped_message_keys) == 0  # Without DoS protection, this would be 25+
+            # Only the threshold-bounded number of previous-chain keys is calculated
+            assert len(skipped_message_keys) == 10
             assert len(encryption_key) == len(decryption_key) == 32
             assert encryption_key == decryption_key
 

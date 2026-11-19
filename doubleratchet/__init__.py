@@ -8,7 +8,9 @@ from .aead import (
 from .diffie_hellman_ratchet import (
     DiffieHellmanRatchet as DiffieHellmanRatchet,
     DoSProtectionException as DoSProtectionException,
-    DuplicateMessageException as DuplicateMessageException
+    DuplicateMessageException as DuplicateMessageException,
+    MessageWorkBudget as MessageWorkBudget,
+    OldChainSkipPolicy as OldChainSkipPolicy
 )
 from .double_ratchet import DoubleRatchet as DoubleRatchet
 from .kdf import KDF as KDF
