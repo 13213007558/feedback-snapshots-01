@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+Added
+~~~~~~~
+-   Add optional ``SESSION_MAX_SIZE`` config to reject session saves whose serialized size exceeds a byte budget. Rejected saves leave the previously stored session unchanged, do not set a new cookie, and are logged as warnings.
+
+
 0.8.0 - 2024-03-26
 ------------------
 

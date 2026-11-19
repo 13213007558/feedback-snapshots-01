@@ -33,7 +33,12 @@ Storage
 ------------------
 
 Take care to secure your storage and storage client connection. For example, setup SSL/TLS and storage authentication.
-  
+
+Session size budget
+------------------
+
+Server-side session stores can be abused by clients that repeatedly write large amounts of data into their session, consuming storage and memory disproportionately. Set ``SESSION_MAX_SIZE`` to a byte budget (measured on the serialized session data) to reject oversized saves. Rejected saves leave the previously stored session untouched, do not issue a new cookie, and are logged as warnings so the affected session can be identified.
+
 
 Session fixation
 ------------------

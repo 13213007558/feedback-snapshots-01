@@ -231,6 +231,36 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
 
         return session.modified or app.config["SESSION_REFRESH_EACH_REQUEST"]
 
+    def _is_within_size_budget(
+        self, app: Flask, session: ServerSideSession, store_id: str
+    ) -> bool:
+        """Check the serialized session against the ``SESSION_MAX_SIZE`` budget.
+
+        The size is measured as the length in bytes of the session serialized
+        with the configured ``SESSION_SERIALIZATION_FORMAT``. If the budget is
+        exceeded, the save is rejected and a warning is logged identifying the
+        session; the previously stored record (if any) is left untouched.
+
+        .. versionadded:: 0.9.0
+        """
+        max_size = app.config.get("SESSION_MAX_SIZE", Defaults.SESSION_MAX_SIZE)
+        if max_size is None:
+            return True
+
+        serialized_size = len(self.serializer.dumps(dict(session)))
+        if serialized_size <= max_size:
+            return True
+
+        app.logger.warning(
+            "Session save rejected for %r: serialized size of %d bytes exceeds "
+            "SESSION_MAX_SIZE of %d bytes. The previously stored session was "
+            "left unchanged.",
+            store_id,
+            serialized_size,
+            max_size,
+        )
+        return False
+
     # CLEANUP METHODS FOR NON TTL DATABASES
 
     def _register_cleanup_app_command(self):
@@ -299,6 +329,12 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
             return
 
         if not self.should_set_storage(app, session):
+            return
+
+        # Enforce the optional size budget before writing to storage. A
+        # rejected save leaves any previously stored record untouched and
+        # does not set a new cookie.
+        if not self._is_within_size_budget(app, session, store_id):
             return
 
         # Update existing or create new session in the database

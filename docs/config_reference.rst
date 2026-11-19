@@ -59,8 +59,24 @@ These are specific to Flask-Session.
 
    .. versionadded:: 0.7.0
 
+.. py:data:: SESSION_MAX_SIZE
+
+   The maximum size of a single session in bytes, measured as the length of
+   the session data after serialization with the configured
+   ``SESSION_SERIALIZATION_FORMAT``. When a save would exceed this budget, the
+   save is rejected: the previously stored session (if any) is left unchanged,
+   no new session cookie is sent, and a warning is logged identifying the
+   affected session. ``None`` disables the budget.
+
+   Default: ``None``
+
+   .. versionadded:: 0.9.0
+
 .. deprecated:: 0.7.0
     ``SESSION_USE_SIGNER``
+
+.. versionadded:: 0.9.0
+    ``SESSION_MAX_SIZE``
 
 .. versionadded:: 0.7.0
     ``SESSION_SERIALIZATION_FORMAT``
