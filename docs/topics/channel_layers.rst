@@ -80,6 +80,57 @@ be helpful in :doc:`/topics/testing` or for local-development purposes:
     result in sub-optimal performance, and ultimately data-loss in a
     multi-instance environment.
 
+Room Broadcast Budgets (In-Memory Layer)
+****************************************
+
+For local development and small-capacity tests, the in-memory layer can cap
+how many undelivered broadcast deliveries each group (room) may have
+outstanding. This makes the effect of slow consumers and large broadcasts
+visible before deploying:
+
+.. code-block:: python
+
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+            "CONFIG": {
+                "capacity": 10,
+                "group_budget": 100,
+                "group_budgets": {"room.congested*": 5},
+            },
+        },
+    }
+
+``group_budget`` is the default number of outstanding deliveries per group;
+``None`` (the default) keeps the previous unlimited behaviour.
+``group_budgets`` overrides it per group name, using the same glob patterns as
+``channel_capacity``. A budget is spent per member that a broadcast is
+delivered to and is released when that copy is received, when it expires, or
+when the member leaves or expires from the group.
+
+``group_send()`` admits a broadcast only if the room's remaining budget can
+cover every current member; otherwise the whole broadcast is rejected and no
+queue is touched. Once admitted, the existing per-channel ``capacity`` still
+applies, so a member with a full queue only loses its own copy. The return
+value describes the outcome:
+
+.. code-block:: python
+
+    result = await channel_layer.group_send("room", {"type": "chat.message"})
+    result.delivered        # members that received the message
+    result.dropped          # members dropped by their queue capacity
+    result.rejected         # members rejected by the room budget
+    result.reason           # None, "capacity", or "budget"
+    result.budget_remaining # remaining room budget, or None if unlimited
+
+A rejected or capacity-dropped message is never retried, matching the
+at-most-once delivery semantics of the groups extension. ``send()`` and
+``receive()`` are unchanged: direct sends do not consume room budget.
+
+The layer also accepts a ``clock`` callable (defaulting to ``time.time``).
+Injecting a controllable clock lets tests advance expiry and watch budget
+recovery without any real waiting.
+
 Synchronous Functions
 ---------------------
 

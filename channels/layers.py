@@ -6,6 +6,7 @@ import string
 import time
 import warnings
 from copy import deepcopy
+from typing import NamedTuple
 
 from django.conf import settings
 from django.core.signals import setting_changed
@@ -234,6 +235,49 @@ class BaseChannelLayer:
         return self.require_valid_group_name(group_name)
 
 
+class GroupSendResult(NamedTuple):
+    """
+    Outcome of an ``InMemoryChannelLayer.group_send()`` call.
+
+    ``delivered`` counts members whose queue accepted the message.
+    ``dropped`` counts members whose queue was full (the existing per-channel
+    capacity behaviour). ``rejected`` counts members that were not attempted
+    because the room did not have enough broadcast budget. ``reason`` is
+    ``"capacity"`` when messages were dropped, ``"budget"`` when the whole
+    broadcast was rejected, and ``None`` otherwise.
+    """
+
+    group: str
+    members: int
+    delivered: int
+    dropped: int
+    rejected: int
+    reason: str | None = None
+    budget_used: int = 0
+    budget_remaining: int | None = None
+    dropped_channels: tuple[str, ...] = ()
+    rejected_channels: tuple[str, ...] = ()
+
+    @property
+    def ok(self):
+        return self.dropped == 0 and self.rejected == 0
+
+
+class _QueuedMessage(NamedTuple):
+    """
+    A message in a channel queue, along with the group broadcast that put it
+    there (if any) so its room budget can be released on receive or expiry.
+    ``generation`` identifies the member's join generation, so messages left
+    behind by a member that already left cannot release a later member's
+    budget.
+    """
+
+    expires_at: float
+    message: dict
+    group: str | None = None
+    generation: int = 0
+
+
 class InMemoryChannelLayer(BaseChannelLayer):
     """
     In-memory channel layer implementation
@@ -245,6 +289,9 @@ class InMemoryChannelLayer(BaseChannelLayer):
         group_expiry=86400,
         capacity=100,
         channel_capacity=None,
+        group_budget=None,
+        group_budgets=None,
+        clock=None,
         **kwargs,
     ):
         super().__init__(
@@ -253,9 +300,33 @@ class InMemoryChannelLayer(BaseChannelLayer):
             channel_capacity=channel_capacity,
             **kwargs,
         )
+        if group_budget is not None and group_budget < 0:
+            raise ValueError("group_budget must be zero or greater, or None")
+        for budget in (group_budgets or {}).values():
+            if budget is not None and budget < 0:
+                raise ValueError("group budgets must be zero or greater, or None")
         self.channels = {}
         self.groups = {}
         self.group_expiry = group_expiry
+        # ``get_capacity()`` iterates compiled patterns, so compile the
+        # per-channel overrides here as the in-memory queue relies on it.
+        self.channel_capacity = self.compile_capacities(channel_capacity or {})
+        # Maximum number of undelivered broadcast deliveries a group may have
+        # outstanding. ``None`` preserves the historical unlimited behaviour.
+        self.group_budget = group_budget
+        # Per-group overrides, matched like channel_capacity.
+        self.group_budgets = self.compile_capacities(group_budgets or {})
+        # Outstanding budget per group, split by the receiving channel:
+        # {group: {channel: undelivered_count}}.
+        self._group_budget_used = {}
+        # Join generation per (group, channel), used to ensure messages left
+        # behind by a member that already left cannot release the budget of a
+        # later membership reusing the same channel name.
+        self._group_member_generation = {}
+        self._group_generation_seq = 0
+        # Injectable clock so expiry and budget recovery can be tested without
+        # sleeping. Defaults to wall-clock time, as before.
+        self.clock = clock or time.time
 
     # Channel layer API
 
@@ -272,14 +343,7 @@ class InMemoryChannelLayer(BaseChannelLayer):
         # name in message
         assert "__asgi_channel__" not in message
 
-        queue = self.channels.setdefault(
-            channel, asyncio.Queue(maxsize=self.get_capacity(channel))
-        )
-        # Add message
-        try:
-            queue.put_nowait((time.time() + self.expiry, deepcopy(message)))
-        except asyncio.queues.QueueFull:
-            raise ChannelFull(channel)
+        self._put(channel, message)
 
     async def receive(self, channel):
         """
@@ -296,12 +360,45 @@ class InMemoryChannelLayer(BaseChannelLayer):
 
         # Do a plain direct receive
         try:
-            _, message = await queue.get()
+            queued = await queue.get()
         finally:
             if queue.empty():
                 self.channels.pop(channel, None)
 
-        return message
+        # A group broadcast that has now been consumed no longer occupies the
+        # room's budget.
+        self._release_queued_budget(queued, channel)
+
+        return queued.message
+
+    def _put(self, channel, message, group=None, generation=0):
+        """
+        Put a message into a channel queue, preserving the existing capacity
+        semantics (QueueFull becomes ChannelFull).
+        """
+        queue = self.channels.setdefault(
+            channel, asyncio.Queue(maxsize=self.get_capacity(channel))
+        )
+        try:
+            queue.put_nowait(
+                _QueuedMessage(
+                    self.clock() + self.expiry, deepcopy(message), group, generation
+                )
+            )
+        except asyncio.queues.QueueFull:
+            raise ChannelFull(channel)
+
+    def _release_queued_budget(self, queued, channel):
+        """
+        Releases the budget held by a queued broadcast copy, unless it belongs
+        to a membership generation that has already been cleaned up.
+        """
+        if queued.group is None:
+            return
+        current = self._group_member_generation.get((queued.group, channel))
+        if current != queued.generation:
+            return
+        self._release_group_budget(queued.group, channel)
 
     async def new_channel(self, prefix="specific."):
         """
@@ -320,11 +417,14 @@ class InMemoryChannelLayer(BaseChannelLayer):
         Goes through all messages and groups and removes those that are expired.
         Any channel with an expired message is removed from all groups.
         """
+        now = self.clock()
         # Channel cleanup
         for channel, queue in list(self.channels.items()):
             # See if it's expired
-            while not queue.empty() and queue._queue[0][0] < time.time():
-                queue.get_nowait()
+            while not queue.empty() and queue._queue[0].expires_at < now:
+                queued = queue.get_nowait()
+                # Expired broadcasts give their room budget back.
+                self._release_queued_budget(queued, channel)
                 # Any removal prompts group discard
                 self._remove_from_groups(channel)
                 # Is the channel now empty and needs deleting?
@@ -332,20 +432,26 @@ class InMemoryChannelLayer(BaseChannelLayer):
                     self.channels.pop(channel, None)
 
         # Group Expiration
-        timeout = int(time.time()) - self.group_expiry
-        for channels in self.groups.values():
+        timeout = int(now) - self.group_expiry
+        for group, channels in list(self.groups.items()):
             for name, timestamp in list(channels.items()):
                 # If join time is older than group_expiry
                 # end the group membership
                 if timestamp and timestamp < timeout:
                     # Delete from group
                     channels.pop(name, None)
+                    # The expired member no longer occupies room budget.
+                    self._release_member_budget(group, name)
+            if not channels:
+                self.groups.pop(group, None)
 
     # Flush extension
 
     async def flush(self):
         self.channels = {}
         self.groups = {}
+        self._group_budget_used = {}
+        self._group_member_generation = {}
 
     async def close(self):
         # Nothing to go
@@ -355,8 +461,88 @@ class InMemoryChannelLayer(BaseChannelLayer):
         """
         Removes a channel from all groups. Used when a message on it expires.
         """
-        for channels in self.groups.values():
-            channels.pop(channel, None)
+        for group, channels in list(self.groups.items()):
+            if channel in channels:
+                channels.pop(channel, None)
+                self._release_member_budget(group, channel)
+            if not channels:
+                self.groups.pop(group, None)
+
+    # Room broadcast budget
+
+    def get_group_budget(self, group):
+        """
+        Returns the configured broadcast budget for a group, or None when the
+        group has no budget (the historical unlimited behaviour).
+        """
+        for pattern, budget in self.group_budgets:
+            if pattern.match(group):
+                return budget
+        return self.group_budget
+
+    def get_group_budget_used(self, group):
+        """
+        Returns the number of outstanding broadcast deliveries currently
+        occupying the group's budget.
+        """
+        return sum(self._group_budget_used.get(group, {}).values())
+
+    def get_group_budget_remaining(self, group):
+        """
+        Returns the group's remaining broadcast budget, or None when unlimited.
+        """
+        budget = self.get_group_budget(group)
+        if budget is None:
+            return None
+        return max(0, budget - self.get_group_budget_used(group))
+
+    def _reserve_group_budget(self, group, channel):
+        """
+        Records one outstanding broadcast delivery for ``channel`` in ``group``.
+        """
+        self._group_budget_used.setdefault(group, {})
+        self._group_budget_used[group][channel] = (
+            self._group_budget_used[group].get(channel, 0) + 1
+        )
+
+    def _release_group_budget(self, group, channel, count=1):
+        """
+        Releases up to ``count`` outstanding broadcast deliveries held by
+        ``channel`` in ``group``.
+        """
+        members = self._group_budget_used.get(group)
+        if not members or channel not in members:
+            return
+        remaining = members[channel] - count
+        if remaining > 0:
+            members[channel] = remaining
+        else:
+            members.pop(channel, None)
+        if not members:
+            self._group_budget_used.pop(group, None)
+
+    def _release_member_budget(self, group, channel):
+        """
+        Releases all budget held by a departing group member and forgets its
+        join generation.
+        """
+        members = self._group_budget_used.get(group)
+        if members:
+            members.pop(channel, None)
+            if not members:
+                self._group_budget_used.pop(group, None)
+        self._group_member_generation.pop((group, channel), None)
+
+    def _member_generation(self, group, channel):
+        """
+        Returns the current join generation for a group member, creating one
+        on first use.
+        """
+        key = (group, channel)
+        if key not in self._group_member_generation:
+            self._group_generation_seq += 1
+            self._group_member_generation[key] = self._group_generation_seq
+        return self._group_member_generation[key]
 
     # Groups extension
 
@@ -369,7 +555,8 @@ class InMemoryChannelLayer(BaseChannelLayer):
         self.require_valid_channel_name(channel)
         # Add to group dict
         self.groups.setdefault(group, {})
-        self.groups[group][channel] = time.time()
+        self.groups[group][channel] = self.clock()
+        self._member_generation(group, channel)
 
     async def group_discard(self, group, channel):
         # Both should be text and valid
@@ -380,27 +567,75 @@ class InMemoryChannelLayer(BaseChannelLayer):
         if group_channels:
             # remove channel if in group
             group_channels.pop(channel, None)
+            # A departing member releases the budget its queued broadcasts hold.
+            self._release_member_budget(group, channel)
             # is group now empty? If yes remove it
             if not group_channels:
                 self.groups.pop(group, None)
 
     async def group_send(self, group, message):
+        """
+        Broadcast a message to a group, respecting the group's broadcast
+        budget (if any) and the existing per-channel queue capacity.
+
+        A broadcast is admitted into the room's budget as a whole: if there is
+        not enough budget left for every current member, the whole broadcast is
+        rejected and no queue is touched. Once admitted, members whose queue is
+        full are dropped exactly as before.
+
+        Returns a :class:`GroupSendResult` with ``delivered``, ``dropped``
+        and ``rejected`` counts. Per the channel layer spec, this method never
+        raises ``ChannelFull``.
+        """
         # Check types
         assert isinstance(message, dict), "Message is not a dict"
+        assert "__asgi_channel__" not in message
         self.require_valid_group_name(group)
         # Run clean
         self._clean_expired()
 
-        # Send to each channel
-        ops = []
-        if group in self.groups:
-            for channel in self.groups[group].keys():
-                ops.append(asyncio.create_task(self.send(channel, message)))
-        for send_result in asyncio.as_completed(ops):
+        members = list(self.groups.get(group, {}).keys())
+        budget = self.get_group_budget(group)
+        used = self.get_group_budget_used(group)
+        if budget is not None and used + len(members) > budget:
+            # Not enough room budget for the whole broadcast: reject it
+            # atomically so callers get an unambiguous result.
+            return GroupSendResult(
+                group=group,
+                members=len(members),
+                delivered=0,
+                dropped=0,
+                rejected=len(members),
+                reason="budget",
+                budget_used=used,
+                budget_remaining=self.get_group_budget_remaining(group),
+                rejected_channels=tuple(members),
+            )
+
+        delivered = 0
+        dropped_channels = []
+        for channel in members:
+            generation = self._member_generation(group, channel)
             try:
-                await send_result
+                self._put(channel, message, group=group, generation=generation)
             except ChannelFull:
-                pass
+                dropped_channels.append(channel)
+            else:
+                delivered += 1
+                if budget is not None:
+                    self._reserve_group_budget(group, channel)
+
+        return GroupSendResult(
+            group=group,
+            members=len(members),
+            delivered=delivered,
+            dropped=len(dropped_channels),
+            rejected=0,
+            reason="capacity" if dropped_channels else None,
+            budget_used=self.get_group_budget_used(group),
+            budget_remaining=self.get_group_budget_remaining(group),
+            dropped_channels=tuple(dropped_channels),
+        )
 
 
 def get_channel_layer(alias=DEFAULT_CHANNEL_LAYER):

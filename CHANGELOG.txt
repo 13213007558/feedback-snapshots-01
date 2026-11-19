@@ -4,6 +4,17 @@ https://channels.readthedocs.io/en/latest/releases
 4.3.2 (2025-11-20)
 ------------------
 
+* Added configurable room broadcast budgets to ``InMemoryChannelLayer``
+  (``group_budget`` and per-group ``group_budgets``), with a ``GroupSendResult``
+  from ``group_send()`` reporting delivered, dropped, and rejected members.
+  Budget is released when copies are received, expire, or members leave.
+
+* Added an injectable ``clock`` to ``InMemoryChannelLayer`` so expiry and
+  budget recovery can be tested without real waits.
+
+* Fixed ``channel_capacity`` glob overrides in ``InMemoryChannelLayer``, which
+  previously raised when a channel matched a configured pattern.
+
 * Confirmed support for Django 6.0.
 
 * Confirmed support for Python 3.14.
