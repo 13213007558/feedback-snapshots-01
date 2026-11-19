@@ -5,6 +5,7 @@ require 'rotp/otp'
 require 'rotp/otp/uri'
 require 'rotp/hotp'
 require 'rotp/totp'
+require 'rotp/calibration'
 
 module ROTP
 end

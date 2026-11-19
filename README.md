@@ -130,6 +130,57 @@ totp.verify("250939", drift_behind: 15, at: now + 35) # => 1474590600
 totp.verify("250939", drift_behind: 15, at: now + 45) # => nil
 ```
 
+### Calibrating a device clock with an explicit challenge
+
+Widening the drift window is not a fix for a device whose clock is persistently
+a few minutes off: a large window keeps stale codes valid, and short OTPs can
+match more than one timecode so a single correct code does not identify the
+offset. `ROTP::Calibration` instead runs an explicit, time-boxed challenge that
+requires **two consecutive codes** whose candidate offsets intersect to exactly
+one value before any setting is changed.
+
+```ruby
+require 'rotp/calibration'
+
+# Persisted record for one authenticator. Ordinary logins use verify and never
+# learn an offset; offset_steps is only changed by the calibration flow.
+authenticator = ROTP::Calibration::Authenticator.new(
+  id: 'authn-1', account_id: 'acct-1', secret: 'base32secret3232'
+)
+
+service   = ROTP::Calibration::Service.new
+challenge = service.start_challenge(authenticator) # bound to acct-1/authn-1, 5min TTL
+
+# User submits the code currently shown on their device.
+result, authenticator = service.submit(challenge.id, authenticator, first_code)
+result.status   # => :more_evidence_needed
+result.report[:explanation]
+# => "Code \"492039\" matches offsets [-2]. A single correct code is
+#     insufficient because each matching timecode is a plausible clock offset,
+#     and short OTPs collide across timecodes. Submit the next consecutive
+#     code to intersect the candidates."
+
+# After the device rolls to its next code, submit that one.
+result, authenticator = service.submit(challenge.id, authenticator, next_code)
+result.status                 # => :calibrated
+result.saved_offset_steps     # => -2 (device clock is two periods slow)
+authenticator.offset_steps    # => -2, only updated once the offset was unique
+```
+
+Guarantees of the flow:
+
+- Challenges carry a TTL and are bound to one account and one authenticator;
+  presenting a challenge against another record returns `:binding_mismatch`.
+- Every accepted timecode is consumed, so resubmitting an already used position
+  returns `:replayed` instead of being counted again.
+- A code matching several timecodes keeps every candidate offset; the first
+  match is never assumed. The saved offset requires the consecutive evidence to
+  narrow the set to one member.
+- Contradictory evidence returns `:inconsistent` and saves nothing; an expired
+  or already completed challenge cannot accept more submissions.
+- `Authenticator#verify` applies the calibrated offset at login but never
+  updates it, so normal authentication cannot silently retrain the offset.
+
 ### Generating a Base32 Secret key
 
 ```ruby

@@ -48,6 +48,22 @@ module ROTP
       result
     end
 
+    # Returns every timecode within the drift window whose OTP matches `otp`.
+    # A single code can match more than one timecode when short OTPs collide,
+    # so callers that need to infer a clock offset must not assume the first
+    # match is the correct one.
+    # @param otp [String] the one time password to check
+    # @param drift_behind [Integer] how many seconds to look back
+    # @param drift_ahead [Integer] how many seconds to look ahead
+    # @param at [Time/Integer] reference time, defaults to Time.now
+    # @return [Array<Integer>] matching timecodes, oldest first
+    def matching_timecodes(otp, drift_ahead: 0, drift_behind: 0, at: Time.now)
+      otp_verify = OTP.instance_method(:verify).bind(self)
+      get_timecodes(at, drift_behind, drift_ahead).select do |timecode|
+        otp_verify.call(otp, generate_otp(timecode))
+      end
+    end
+
     # Returns the provisioning URI for the OTP
     # This can then be encoded in a QR Code and used
     # to provision the Google Authenticator app
