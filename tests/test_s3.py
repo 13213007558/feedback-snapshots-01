@@ -5,6 +5,7 @@ import os
 import pickle
 import threading
 from textwrap import dedent
+from typing import ClassVar
 from unittest import mock
 from unittest import skipIf
 from urllib.parse import urlparse
@@ -30,6 +31,91 @@ from tests.utils import NonSeekableContentFile
 class S3ManifestStaticStorageTestStorage(s3.S3ManifestStaticStorage):
     def read_manifest(self):
         return None
+
+
+class FakeS3Client:
+    """Stand-in for a boto3 s3 client that records which role it serves."""
+
+    def __init__(self, role_name, unsigned):
+        self.role_name = role_name
+        self.unsigned = unsigned
+
+    def head_object(self, **kwargs):
+        return {}
+
+    def generate_presigned_url(self, operation_name, Params, ExpiresIn, HttpMethod):
+        scheme = "unsigned" if self.unsigned else "signed"
+        return (
+            f"https://{self.role_name}.example.test/{scheme}/"
+            f"{Params['Key']}?expires={ExpiresIn}&method={HttpMethod}"
+        )
+
+
+class FakeS3Resource:
+    """Stand-in for the s3 resource returned by ``boto3.Session.resource``.
+
+    Every resource carries the role of the session that built it so tests can
+    prove which identity actually backs a storage connection.
+    """
+
+    def __init__(self, role_name, unsigned):
+        self.role_name = role_name
+        self.unsigned = unsigned
+        self.meta = mock.MagicMock()
+        self.meta.client = FakeS3Client(role_name, unsigned)
+        self.buckets = {}
+
+    def Bucket(self, bucket_name):
+        bucket = mock.MagicMock()
+        bucket.name = bucket_name
+        self.buckets[bucket_name] = bucket
+        return bucket
+
+    def Object(self, key):
+        return mock.MagicMock()
+
+
+class FakeBotoSession:
+    """Replacement for ``boto3.Session`` that records role identity and calls.
+
+    The credentials handed to the constructor become the recorded role, and
+    every ``resource("s3", ...)`` call is logged together with the effective
+    identity so tests can attribute connections back to the owning alias.
+    """
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, *args, **kwargs):
+        self.role_name = kwargs.get("aws_access_key_id")
+        self.secret_key = kwargs.get("aws_secret_access_key")
+        self.security_token = kwargs.get("aws_session_token")
+        self.profile_name = kwargs.get("profile_name")
+        self.resource_calls = []
+        self.resources = []
+        FakeBotoSession.instances.append(self)
+
+    def resource(self, service_name, **kwargs):
+        config = kwargs["config"]
+        unsigned = config.signature_version is botocore.UNSIGNED
+        resource = FakeS3Resource(self.role_name, unsigned)
+        self.resource_calls.append(
+            {
+                "service": service_name,
+                "role_name": self.role_name,
+                "unsigned": unsigned,
+                "resource": resource,
+            }
+        )
+        self.resources.append(resource)
+        return resource
+
+    @classmethod
+    def reset(cls):
+        cls.instances.clear()
+
+    @classmethod
+    def all_resources(cls):
+        return [resource for session in cls.instances for resource in session.resources]
 
 
 class S3StorageTests(TestCase):
@@ -731,8 +817,7 @@ class S3StorageTests(TestCase):
     def test_storage_url_custom_domain_signed_urls(self, dt):
         key_id = "test-key"
         filename = "file.txt"
-        pem = dedent(
-            """\
+        pem = dedent("""\
             -----BEGIN RSA PRIVATE KEY-----
             MIICWwIBAAKBgQCXVuwcMk+JmVSKuQ1K4dZx4Z1dEcRQgTlqvhAyljIpttXlZh2/
             fD3GkJCiqfwEmo+cdNK/LFzRj/CX8Wz1z1lH2USONpG6sAkotkatCbejiItDu5y6
@@ -747,8 +832,7 @@ class S3StorageTests(TestCase):
             waxahrRxQOKSr20c4wAzWnGddIUSO9I/VHs/al5EKsbBHrnOlQkwizSfuwqZtfZ7
             csNf8FeCFRiNELoLJwJAZxWBE2+8J9VW9AQ0SE7j4FyM/B8FvRhF5PLAAsw/OxHO
             SxiFP7Ptdac1tm5H5zOqaqSHWphI19HNNilXKmxuCA==
-            -----END RSA PRIVATE KEY-----"""
-        ).encode("ascii")
+            -----END RSA PRIVATE KEY-----""").encode("ascii")
 
         url = "https://mock.cloudfront.net/file.txt"
         signed_url = (
@@ -867,8 +951,7 @@ class S3StorageTests(TestCase):
         self.assertIsNone(storage.cloudfront_signer)
 
         key_id = "test-id"
-        pem = dedent(
-            """\
+        pem = dedent("""\
             -----BEGIN RSA PRIVATE KEY-----
             MIICWwIBAAKBgQCXVuwcMk+JmVSKuQ1K4dZx4Z1dEcRQgTlqvhAyljIpttXlZh2/
             fD3GkJCiqfwEmo+cdNK/LFzRj/CX8Wz1z1lH2USONpG6sAkotkatCbejiItDu5y6
@@ -883,8 +966,7 @@ class S3StorageTests(TestCase):
             waxahrRxQOKSr20c4wAzWnGddIUSO9I/VHs/al5EKsbBHrnOlQkwizSfuwqZtfZ7
             csNf8FeCFRiNELoLJwJAZxWBE2+8J9VW9AQ0SE7j4FyM/B8FvRhF5PLAAsw/OxHO
             SxiFP7Ptdac1tm5H5zOqaqSHWphI19HNNilXKmxuCA==
-            -----END RSA PRIVATE KEY-----"""
-        ).encode("ascii")
+            -----END RSA PRIVATE KEY-----""").encode("ascii")
 
         with override_settings(AWS_CLOUDFRONT_KEY_ID=key_id, AWS_CLOUDFRONT_KEY=pem):
             storage = s3.S3Storage()
@@ -1003,6 +1085,231 @@ class S3StorageTests(TestCase):
         ):
             storage = s3.S3Storage()
             self.assertEqual(storage.security_token, "baz")
+
+
+class S3ConnectionLifecycleTests(TestCase):
+    """Regression tests for two S3 aliases sharing one Django process.
+
+    Each alias is a separate S3Storage instance backed by its own role. The
+    fake boto session records the effective identity of every connection so
+    the tests can detect any path borrowing the other alias's connection,
+    while still asserting that normal same-thread reuse keeps working.
+    """
+
+    role_a: ClassVar[dict] = {
+        "access_key": "role-a-access-key",
+        "secret_key": "role-a-secret",
+        "security_token": "role-a-token",
+        "bucket_name": "bucket-a",
+    }
+    role_b: ClassVar[dict] = {
+        "access_key": "role-b-access-key",
+        "secret_key": "role-b-secret",
+        "security_token": "role-b-token",
+        "bucket_name": "bucket-b",
+    }
+
+    def setUp(self):
+        super().setUp()
+        FakeBotoSession.reset()
+        patcher = mock.patch("boto3.Session", new=FakeBotoSession)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.storage_a = s3.S3Storage(**self.role_a)
+        self.storage_b = s3.S3Storage(**self.role_b)
+
+    def resources_for_role(self, role_name):
+        return [
+            resource
+            for resource in FakeBotoSession.all_resources()
+            if resource.role_name == role_name
+        ]
+
+    def assert_role_isolation(self):
+        """No alias may hold a connection built from the other role."""
+        for storage, role_name, other in (
+            (self.storage_a, self.role_a["access_key"], self.role_b["access_key"]),
+            (self.storage_b, self.role_b["access_key"], self.role_a["access_key"]),
+        ):
+            connection = getattr(storage._connections, "connection", None)
+            unsigned = getattr(storage._unsigned_connections, "connection", None)
+            if connection is not None:
+                self.assertEqual(connection.role_name, role_name)
+                self.assertNotIn(connection, self.resources_for_role(other))
+            if unsigned is not None:
+                self.assertEqual(unsigned.role_name, role_name)
+                self.assertNotIn(unsigned, self.resources_for_role(other))
+
+    def assert_sessions_record_credentials(self):
+        sessions = {session.role_name: session for session in FakeBotoSession.instances}
+        for role in (self.role_a, self.role_b):
+            session = sessions[role["access_key"]]
+            self.assertEqual(session.secret_key, role["secret_key"])
+            self.assertEqual(session.security_token, role["security_token"])
+
+    def test_signed_connections_use_each_alias_role(self):
+        """Signed connections are built with the owning alias's role only."""
+        for storage, role in (
+            (self.storage_a, self.role_a),
+            (self.storage_b, self.role_b),
+        ):
+            connection = storage.connection
+            self.assertFalse(connection.unsigned)
+            self.assertEqual(connection.role_name, role["access_key"])
+            self.assertEqual(storage.bucket.name, role["bucket_name"])
+
+        self.assertEqual(
+            {session.role_name for session in FakeBotoSession.instances},
+            {self.role_a["access_key"], self.role_b["access_key"]},
+        )
+        self.assert_sessions_record_credentials()
+        self.assert_role_isolation()
+
+    def test_signed_connection_reused_within_same_thread(self):
+        """Repeated access on one thread returns the cached signed connection."""
+        first = self.storage_a.connection
+        calls_before = len(
+            [
+                call
+                for session in FakeBotoSession.instances
+                for call in session.resource_calls
+            ]
+        )
+        self.assertIs(self.storage_a.connection, first)
+        self.assertIs(self.storage_a.connection, first)
+
+        total_calls = sum(
+            len(session.resource_calls) for session in FakeBotoSession.instances
+        )
+        self.assertEqual(total_calls, calls_before)
+        self.assert_role_isolation()
+
+    def test_public_urls_use_unsigned_connection_of_owning_role(self):
+        """querystring_auth=False must use the unsigned role connection."""
+        self.storage_a.querystring_auth = False
+        self.storage_b.querystring_auth = False
+
+        url_a = self.storage_a.url("public-a.txt")
+        url_b = self.storage_b.url("public-b.txt")
+
+        for storage, role, url in (
+            (self.storage_a, self.role_a, url_a),
+            (self.storage_b, self.role_b, url_b),
+        ):
+            unsigned = storage.unsigned_connection
+            self.assertTrue(unsigned.unsigned)
+            self.assertEqual(unsigned.role_name, role["access_key"])
+            self.assertIn(role["access_key"], url)
+            self.assertIn("/unsigned/", url)
+
+        # The signed and unsigned connections of an alias are distinct objects.
+        self.assertIsNot(self.storage_a.unsigned_connection, self.storage_a.connection)
+        self.assert_role_isolation()
+
+    def test_unsigned_connection_reused_within_same_thread(self):
+        self.storage_a.querystring_auth = False
+        first = self.storage_a.unsigned_connection
+        self.storage_a.url("one.txt")
+        self.assertIs(self.storage_a.unsigned_connection, first)
+        self.storage_a.url("two.txt")
+        self.assertIs(self.storage_a.unsigned_connection, first)
+        self.assert_role_isolation()
+
+    def test_signed_connections_are_per_thread_and_per_alias(self):
+        """A new thread rebuilds connections without crossing aliases."""
+        main_a = self.storage_a.connection
+        main_b = self.storage_b.connection
+
+        results = {}
+        barrier = threading.Barrier(2)
+
+        def worker(alias):
+            storage = self.storage_a if alias == "a" else self.storage_b
+            barrier.wait()
+            results[alias] = storage.connection
+
+        threads = [
+            threading.Thread(target=worker, args=("a",)),
+            threading.Thread(target=worker, args=("b",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertIsNot(results["a"], main_a)
+        self.assertIsNot(results["b"], main_b)
+        self.assertIsNot(results["a"], results["b"])
+        self.assertEqual(results["a"].role_name, self.role_a["access_key"])
+        self.assertEqual(results["b"].role_name, self.role_b["access_key"])
+        # The main thread still owns its original cached connections.
+        self.assertIs(self.storage_a.connection, main_a)
+        self.assertIs(self.storage_b.connection, main_b)
+        self.assert_role_isolation()
+
+    def test_unsigned_connections_are_per_thread_and_per_alias(self):
+        self.storage_a.querystring_auth = False
+        self.storage_b.querystring_auth = False
+
+        results = {}
+
+        def worker(alias):
+            storage = self.storage_a if alias == "a" else self.storage_b
+            results[alias] = storage.unsigned_connection
+
+        threads = [
+            threading.Thread(target=worker, args=("a",)),
+            threading.Thread(target=worker, args=("b",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertTrue(results["a"].unsigned)
+        self.assertTrue(results["b"].unsigned)
+        self.assertEqual(results["a"].role_name, self.role_a["access_key"])
+        self.assertEqual(results["b"].role_name, self.role_b["access_key"])
+        self.assertIsNot(results["a"], results["b"])
+        self.assertIsNot(results["a"], self.storage_a.unsigned_connection)
+        self.assertIsNot(results["b"], self.storage_b.unsigned_connection)
+        self.assert_role_isolation()
+
+    def test_pickled_storage_rebuilds_role_connection_in_background_thread(self):
+        """A storage sent to a background task reconnects with its own role."""
+        # Populate caches on the main thread first.
+        self.assertIsNotNone(self.storage_a.connection)
+        self.storage_b.querystring_auth = False
+        self.assertIsNotNone(self.storage_b.unsigned_connection)
+
+        restored_a = pickle.loads(pickle.dumps(self.storage_a))
+        restored_b = pickle.loads(pickle.dumps(self.storage_b))
+
+        self.assertIsInstance(restored_a._connections, threading.local)
+        self.assertIsInstance(restored_b._unsigned_connections, threading.local)
+        self.assertFalse(hasattr(restored_a._connections, "connection"))
+        self.assertFalse(hasattr(restored_b._unsigned_connections, "connection"))
+
+        outcome = {}
+
+        def background_task():
+            # Rebuild happens lazily inside the worker thread.
+            outcome["a_signed"] = restored_a.connection
+            outcome["b_unsigned"] = restored_b.unsigned_connection
+            first_a = restored_a.connection
+            outcome["a_reused"] = first_a is restored_a.connection
+
+        thread = threading.Thread(target=background_task)
+        thread.start()
+        thread.join()
+
+        self.assertEqual(outcome["a_signed"].role_name, self.role_a["access_key"])
+        self.assertFalse(outcome["a_signed"].unsigned)
+        self.assertEqual(outcome["b_unsigned"].role_name, self.role_b["access_key"])
+        self.assertTrue(outcome["b_unsigned"].unsigned)
+        self.assertTrue(outcome["a_reused"])
+        self.assertIsNot(outcome["a_signed"], outcome["b_unsigned"])
+        self.assert_role_isolation()
 
 
 class S3StaticStorageTests(TestCase):
