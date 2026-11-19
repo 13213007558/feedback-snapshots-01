@@ -42,6 +42,19 @@ Backward Incompatibilities
 Bugfix
 ~~~~~~
 
+- A client that disconnects while its response is blocked on output
+  backpressure no longer strands a worker thread. Previously the channel hid
+  the socket from ``select()`` whenever output was pending, so end-of-file
+  could never be noticed while a task thread was parked on
+  ``outbuf_high_watermark``, and the worker plus its buffers were held until
+  the application happened to write again. The channel now probes for EOF
+  without consuming a pipelined request, and ``cancel()`` wakes a parked
+  thread. Closing a channel also releases the output buffers and unread
+  request bodies the server owns. This does not make application code
+  interruptible: a task still only learns about the disconnect by calling
+  ``waitress.client_disconnected`` or by writing, and nothing the
+  application already did is rolled back.
+
 - Ignore ``EBADF`` from ``select``/``poll`` when a socket is closed while
   the server is waiting for I/O, instead of crashing the worker loop.
   See https://github.com/Pylons/waitress/issues/468

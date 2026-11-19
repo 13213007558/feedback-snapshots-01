@@ -71,11 +71,38 @@ class HTTPChannel(wasyncore.dispatcher):
         self.addr = addr
         self.requests = []
 
+        # True while a task thread is parked in
+        # _flush_outbufs_below_high_watermark waiting for the main thread to
+        # drain the outbufs. While this is set readable() advertises the
+        # socket so the main thread can look for EOF without consuming a
+        # pipelined request, and so wake the parked task thread.
+        self._backpressure_waiting = False
+        self._probe_deadline = 0.0
+        # Set once the channel is torn down by handle_close() or cancel().
+        # A task thread must not park on outbuf_lock after that point: no
+        # later notification can be guaranteed, because the channel will not
+        # be in the mainloop's map anymore.
+        self._closed = False
+        self._canceled = False
+        # The request a task thread is currently servicing. Closing it here
+        # would pull the application's wsgi.input stream out from under it, so
+        # handle_close() and cancel() leave it alone.
+        self._active_request = None
+        # Number of task threads currently servicing a request. While > 0 the
+        # channel probes for EOF instead of reading pipelined requests, so a
+        # disconnect is noticed even when output is pending.
+        self._requests_in_flight = 0
+
     def check_client_disconnected(self):
         """
         This method is inserted into the environment of any created task so it
         may occasionally check if the client has disconnected and interrupt
         execution.
+
+        This is purely advisory: it reports a disconnect that the main thread
+        has already observed. Waitress never kills a task thread, so an
+        application that does not call this (or does not write) cannot be
+        interrupted while it is busy.
         """
 
         return not self.connected
@@ -146,14 +173,70 @@ class HTTPChannel(wasyncore.dispatcher):
         # 4. There's no data in the output buffer that needs to be sent
         #    before we potentially create a new task.
 
-        return not (
+        if not (
             self.will_close
             or self.close_when_flushed
             or len(self.requests) > self.adj.channel_request_lookahead
             or self.total_outbufs_len
+        ):
+            return True
+
+        # A task thread is working on a request but output is pending, so the
+        # rules above would hide the socket from select() and a client that
+        # closed its end could never be noticed. Advertise the socket so
+        # handle_read() can probe for EOF without consuming any pipelined
+        # request. The probe is rate limited by _probe_deadline: a socket that
+        # is readable but not at EOF must not make select() spin. Returning
+        # False simply defers the next probe to a later loop iteration.
+        return (
+            self._requests_in_flight
+            and not (self.will_close or self.close_when_flushed)
+            and time.monotonic() >= self._probe_deadline
         )
 
+    def _probe_eof(self):
+        """Check for EOF without consuming a pipelined request.
+
+        Only called while a task thread owns the request queue, so the normal
+        read path is unavailable: it would consume a pipelined request that
+        cannot be serviced yet. The peek must not consume the bytes it sees.
+        """
+
+        sock = self.socket
+        if sock is None:
+            return True
+
+        try:
+            data = sock.recv(1, socket.MSG_PEEK)
+        except BlockingIOError:
+            return False
+        except OSError:
+            return True
+        except TypeError:
+            # A socket-like test double that does not support MSG_PEEK. Such
+            # doubles are not backed by a real peer, so consuming is safe.
+            try:
+                data = sock.recv(1)
+            except BlockingIOError:  # pragma: nocover
+                return False
+            except OSError:
+                return True
+
+        return data == b""
+
     def handle_read(self):
+        if self._requests_in_flight:
+            # A task thread owns the request queue. Reading now would consume
+            # a pipelined request that cannot be serviced yet (and would race
+            # with the task), so only look for EOF. Rate limit the probe so a
+            # readable-but-open socket does not busy loop.
+            self._probe_deadline = time.monotonic() + 0.05
+
+            if self._probe_eof():
+                self.handle_close()
+
+            return
+
         try:
             data = self.recv(self.adj.recv_bytes)
         except OSError:
@@ -167,8 +250,10 @@ class HTTPChannel(wasyncore.dispatcher):
             self.last_activity = time.time()
             self.received(data)
         else:
-            # Client disconnected.
-            self.connected = False
+            # The peer closed its end. Full close (rather than only flipping
+            # connected) so that a task thread parked on backpressure is
+            # woken and the outbufs the channel owns are released.
+            self.handle_close()
 
     def send_continue(self):
         """
@@ -308,17 +393,46 @@ class HTTPChannel(wasyncore.dispatcher):
 
     def handle_close(self):
         with self.outbuf_lock:
-            for outbuf in self.outbufs:
-                try:
-                    outbuf.close()
-                except Exception:
-                    self.logger.exception(
-                        "Unknown exception while trying to close outbuf"
-                    )
-            self.total_outbufs_len = 0
+            if self._closed:
+                # EOF can be observed by the main thread and cancel() can run
+                # at the same time. Close once; later callers just return.
+                return
+
+            self._close_outbufs()
             self.connected = False
+            self._closed = True
+            # Wake a task thread parked in
+            # _flush_outbufs_below_high_watermark. This must happen while the
+            # lock is held so a thread that is about to wait cannot miss it.
             self.outbuf_lock.notify()
+
+        # Release request buffers the channel still owns. Requests that were
+        # handed to a task thread are that thread's to close; these are the
+        # ones still sitting in the channel's own queue or partially read.
+        with self.requests_lock:
+            for request in self.requests:
+                if request is not self._active_request:
+                    request.close()
+            self.requests = []
+
+            if self.request is not None and self.request is not self._active_request:
+                self.request.close()
+                self.request = None
+
         wasyncore.dispatcher.close(self)
+
+    def _close_outbufs(self):
+        # Release the buffers the channel owns. Any bytes still queued for a
+        # client that is gone are discarded here; this says nothing about
+        # side effects the application already performed. Caller must hold
+        # outbuf_lock.
+        for outbuf in self.outbufs:
+            try:
+                outbuf.close()
+            except Exception:
+                self.logger.exception("Unknown exception while trying to close outbuf")
+        self.total_outbufs_len = 0
+        self.current_outbuf_count = 0
 
     def add_channel(self, map=None):
         """See wasyncore.dispatcher
@@ -405,28 +519,59 @@ class HTTPChannel(wasyncore.dispatcher):
                     # thread, then wait for it to decide what to do next
                     # (probably close the socket, and then just return)
                     self.server.pull_trigger()
-                    self.outbuf_lock.wait()
 
+                    # The main thread may be about to close the socket, or it
+                    # may already have done so before we took the lock. Either
+                    # way there is nothing left to wait for; do not sleep on a
+                    # condition that nobody will notify.
+                    if self._closed or self._canceled:
+                        return
+
+                    self._wait_for_outbufs()
                     return
 
                 while (
-                    self.connected
-                    and self.total_outbufs_len > self.adj.outbuf_high_watermark
+                    self.total_outbufs_len > self.adj.outbuf_high_watermark
+                    and not (self._closed or self._canceled)
                 ):
                     self.server.pull_trigger()
-                    self.outbuf_lock.wait()
+                    self._wait_for_outbufs()
+
+    def _wait_for_outbufs(self):
+        """Sleep until the main thread drains the outbufs or ends the channel.
+
+        Every path that ends the channel (EOF in handle_read(), which goes
+        through handle_close(), and cancel()) notifies this condition while
+        holding the lock, so a wait that has already started cannot outlive
+        the connection. ``_closed``/``_canceled`` cover the case where the
+        channel ended before the lock was taken.
+        """
+
+        self._backpressure_waiting = True
+        try:
+            self.outbuf_lock.wait()
+        finally:
+            self._backpressure_waiting = False
 
     def service(self):
         """Execute one request. If there are more, we add another task to the
         server at the end."""
 
-        request = self.requests[0]
+        with self.requests_lock:
+            if not self.requests:
+                # cancel() emptied the queue (or another thread serviced the
+                # last request) before this task started.
+                return
+
+            request = self.requests[0]
 
         if request.error:
             task = self.error_task_class(self, request)
         else:
             task = self.task_class(self, request)
 
+        self._set_active_request(request)
+        self._begin_request()
         try:
             if self.connected:
                 task.service()
@@ -461,6 +606,9 @@ class HTTPChannel(wasyncore.dispatcher):
                     task.close_on_finish = True
             else:
                 task.close_on_finish = True
+        finally:
+            self._end_request()
+            self._clear_active_request(request)
 
         if task.close_on_finish:
             with self.requests_lock:
@@ -494,7 +642,9 @@ class HTTPChannel(wasyncore.dispatcher):
 
             # Add new task to process the next request
             with self.requests_lock:
-                self.requests.pop(0)
+                # A concurrent cancel() may already have dropped the queue.
+                if self.requests and self.requests[0] is request:
+                    self.requests.pop(0)
 
                 if self.connected and self.requests:
                     self.server.add_task(self)
@@ -516,8 +666,45 @@ class HTTPChannel(wasyncore.dispatcher):
         self.last_activity = time.time()
 
     def cancel(self):
-        """Cancels all pending / active requests"""
+        """Cancel the channel on behalf of the server.
+
+        This is only used for the server shutting down; it is not a way to
+        kill application code. A task thread blocked in ``write_soon`` is
+        woken so it can unwind through ``ClientDisconnected`` at its next
+        write, but a task that is busy computing is left alone to finish.
+        """
         self.will_close = True
-        self.connected = False
+        with self.outbuf_lock:
+            self.connected = False
+            self._canceled = True
+            # Release the output buffers the channel owns; a task thread that
+            # is still running will fail its next write with
+            # ClientDisconnected.
+            self._close_outbufs()
+            # Wake a task thread parked in
+            # _flush_outbufs_below_high_watermark rather than leaving it to
+            # hold a worker forever.
+            self.outbuf_lock.notify()
         self.last_activity = time.time()
-        self.requests = []
+        with self.requests_lock:
+            for request in self.requests:
+                if request is not self._active_request:
+                    request.close()
+            self.requests = []
+
+    def _set_active_request(self, request):
+        with self.requests_lock:
+            self._active_request = request
+
+    def _begin_request(self):
+        with self.requests_lock:
+            self._requests_in_flight += 1
+
+    def _end_request(self):
+        with self.requests_lock:
+            self._requests_in_flight -= 1
+
+    def _clear_active_request(self, request):
+        with self.requests_lock:
+            if self._active_request is request:
+                self._active_request = None

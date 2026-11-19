@@ -953,6 +953,244 @@ class TestHTTPChannelLookahead(TestHTTPChannel):
         self.assertEqual(len(data), 0)
 
 
+class TestBackpressureDisconnect(unittest.TestCase):
+    """Deterministic tests for a client that goes away while the task thread
+    is parked waiting for the output buffer to drop below the high water
+    mark.
+
+    The app blocks on a barrier until the test has closed the peer, so the
+    interleaving does not depend on sleeps or socket timing. A real
+    ``socket.socketpair`` supplies EOF and a blocking, non-draining peer.
+    """
+
+    def _makeChannel(self, watermark=64 * 1024):
+        import socket
+
+        from waitress.channel import HTTPChannel
+
+        local, peer = socket.socketpair()
+        local.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+
+        adj = DummyAdjustments()
+        adj.outbuf_high_watermark = watermark
+        adj.send_bytes = 1
+
+        server = DummyServer()
+        server.adj = adj
+        channel = HTTPChannel(server, local, ("127.0.0.1", 1), adj=adj, map={})
+        return channel, peer, local, server
+
+    def _startTask(self, channel, app):
+        import threading
+
+        channel.server.application = app
+        channel.received(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        thread = threading.Thread(target=channel.service, daemon=True)
+        thread.start()
+        return thread
+
+    def test_disconnect_wakes_parked_worker_and_releases_outbufs(self):
+        import threading
+
+        from waitress import wasyncore
+
+        channel, peer, local, _ = self._makeChannel()
+        started = threading.Event()
+
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "application/octet-stream")])
+            started.set()
+
+            def body():
+                while True:
+                    yield b"x" * 16384
+
+            return body()
+
+        thread = self._startTask(channel, app)
+        self.assertTrue(started.wait(5))
+
+        fd = local.fileno()
+        stop = threading.Event()
+
+        def mainloop():
+            # Drive the real wasyncore loop: select() only calls handle_read()
+            # if readable() advertises the socket.
+            while not stop.is_set():
+                wasyncore.poll(timeout=0.01, map={fd: channel})
+
+        loop_thread = threading.Thread(target=mainloop, daemon=True)
+        loop_thread.start()
+        try:
+            self._wait_until(lambda: channel._backpressure_waiting)
+            self.assertGreater(
+                channel.total_outbufs_len, channel.adj.outbuf_high_watermark
+            )
+
+            peer.close()
+
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), "worker was not woken by the close")
+            self.assertTrue(channel._closed)
+            self.assertFalse(channel.connected)
+            self.assertEqual(channel.total_outbufs_len, 0)
+            self.assertFalse(channel._backpressure_waiting)
+        finally:
+            stop.set()
+            loop_thread.join(2)
+            channel.handle_close()
+            local.close()
+
+    def test_server_cancel_wakes_parked_worker(self):
+        import threading
+
+        from waitress import wasyncore
+
+        channel, peer, local, _ = self._makeChannel()
+        started = threading.Event()
+        cleanup_ran = threading.Event()
+
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "application/octet-stream")])
+            started.set()
+
+            def body():
+                try:
+                    while True:
+                        yield b"x" * 16384
+                finally:
+                    # Cooperative cleanup, run because write_soon() raises and
+                    # WSGITask.execute() closes the iterable. This is the
+                    # application's own unwind, not a server-side rollback.
+                    cleanup_ran.set()
+
+            return body()
+
+        thread = self._startTask(channel, app)
+        self.assertTrue(started.wait(5))
+
+        fd = local.fileno()
+        stop = threading.Event()
+
+        def mainloop():
+            while not stop.is_set():
+                wasyncore.poll(timeout=0.01, map={fd: channel})
+
+        loop_thread = threading.Thread(target=mainloop, daemon=True)
+        loop_thread.start()
+        try:
+            self._wait_until(lambda: channel._backpressure_waiting)
+            channel.cancel()
+
+            thread.join(5)
+            self.assertFalse(
+                thread.is_alive(), "cancel() did not wake the parked worker"
+            )
+            self.assertTrue(channel._canceled)
+            self.assertEqual(channel.total_outbufs_len, 0)
+            self.assertTrue(cleanup_ran.is_set())
+        finally:
+            stop.set()
+            loop_thread.join(2)
+            channel.handle_close()
+            local.close()
+            peer.close()
+
+    def test_disconnect_while_request_queued_closes_request_buffers(self):
+        channel, peer, local, _ = self._makeChannel()
+        closed = []
+
+        class TrackingRequest(DummyParser):
+            def close(self):
+                closed.append(self)
+
+        channel.parser_class = lambda adj: TrackingRequest()
+        channel.received(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertEqual(len(channel.requests), 1)
+
+        # The main loop observes the peer's EOF and closes the channel even
+        # though the queued request was never serviced.
+        peer.close()
+        while not channel._closed:
+            channel.handle_read()
+
+        self.assertTrue(channel._closed)
+        self.assertFalse(channel.connected)
+        self.assertEqual(channel.requests, [])
+        self.assertEqual(len(closed), 1)
+        local.close()
+
+    def test_disconnect_while_app_runs_does_not_kill_it(self):
+        import threading
+
+        from waitress import wasyncore
+
+        channel, peer, local, _ = self._makeChannel()
+        entered = threading.Event()
+        release = threading.Event()
+        write_result = []
+        check_result = []
+
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Length", "2")])
+            entered.set()
+            # Busy application code is not preempted by Waitress. It can only
+            # observe the disconnect at a cooperative point, by asking or by
+            # writing.
+            release.wait(5)
+            check_result.append(environ["waitress.client_disconnected"]())
+            try:
+                channel.write_soon(b"ok")
+                write_result.append("wrote")
+            except Exception as exc:  # ClientDisconnected
+                write_result.append(type(exc).__name__)
+
+            return [b"ok"]
+
+        thread = self._startTask(channel, app)
+        self.assertTrue(entered.wait(5))
+
+        # Run a poll loop alongside the busy app so EOF is delivered through
+        # the normal main-thread path rather than by calling handle_read()
+        # directly (which would be a race with the app thread).
+        fd = local.fileno()
+        stop = threading.Event()
+
+        def mainloop():
+            while not stop.is_set():
+                wasyncore.poll(timeout=0.01, map={fd: channel})
+
+        loop_thread = threading.Thread(target=mainloop, daemon=True)
+        loop_thread.start()
+        try:
+            peer.close()
+            self._wait_until(lambda: channel._closed)
+            self.assertTrue(thread.is_alive(), "Waitress killed running user code")
+            self.assertEqual(check_result, [])
+
+            release.set()
+            thread.join(5)
+        finally:
+            stop.set()
+            loop_thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(check_result, [True])
+        self.assertEqual(write_result, ["ClientDisconnected"])
+        local.close()
+
+    def _wait_until(self, predicate, timeout=5):
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.001)
+        self.fail("condition not reached within %s seconds" % timeout)
+
+
 class DummySock:
     blocking = False
     closed = False

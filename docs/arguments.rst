@@ -325,6 +325,17 @@ channel_request_lookahead
     while waiting for the response at strategic points in the execution and to
     cancel the operation.
 
+    This callback is advisory. Waitress never kills a task thread: a client
+    that disconnects is only noticed by the network thread, and the task
+    learns about it either by calling ``waitress.client_disconnected()`` or
+    by writing to a connection that is already gone, which raises
+    ``ClientDisconnected`` from ``write_soon()``. An application that is busy
+    computing and does neither keeps its worker until it returns. When the
+    connection does end, Waitress wakes a task thread that is blocked waiting
+    for output backpressure to clear and releases the output buffers and
+    unread request bodies it owns; it does not undo anything the application
+    already wrote or committed.
+
     Default: ``0``
 
     .. versionadded:: 2.0.0
