@@ -106,7 +106,22 @@ class SASLState(enum.Enum):
 
     .. attribute:: FAILURE
 
-       the authentication failed
+       the authentication failed and the failure was acknowledged by the
+       peer. The transport can safely be re-used for another authentication
+       (or, depending on the protocol, for a normal session).
+
+    .. attribute:: INDEFINITE_FAILURE
+
+       the authentication is no longer alive from the local point of view,
+       but it cannot be proven that the peer has acknowledged the
+       termination. This happens when an exchange is cancelled while the
+       transport interface is still waiting for the next challenge, or when
+       the peer's reaction to an abort could not be obtained.
+
+       In this state the peer may still consider the authentication to be in
+       progress. Callers *must not* continue to use the underlying transport
+       for ordinary protocol traffic or another authentication; the
+       transport has to be closed.
 
     Internal states used by the state machine:
 
@@ -133,6 +148,7 @@ class SASLState(enum.Enum):
     CHALLENGE = "challenge"
     SUCCESS = "success"
     FAILURE = "failure"
+    INDEFINITE_FAILURE = "indefinite-failure"
     SUCCESS_SIMULATE_CHALLENGE = "success-simulate-challenge"
 
     @classmethod

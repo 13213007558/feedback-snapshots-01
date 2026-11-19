@@ -77,6 +77,45 @@ To implement SASL on an existing protocol, you need to subclass
 
 .. autoclass:: SASLState
 
+Cancellation and termination of an authentication
+===================================================
+
+An in-progress authentication can end in two distinguishable ways. It is
+important not to confuse them, because only one of them leaves the
+underlying transport in a known state.
+
+* A *confirmed* termination happens when the peer explicitly acknowledges
+  it: a :class:`SASLInterface` method either raises a
+  :class:`SASLFailure` or :meth:`SASLStateMachine.abort` receives a
+  :data:`SASLState.FAILURE` reply. The state machine then enters
+  :data:`SASLState.FAILURE` and the transport can be reused according to
+  the rules of the protocol carrying SASL.
+
+* An *unconfirmed* termination happens whenever the local coroutine is
+  cancelled while the interface is waiting for the next challenge (this
+  covers cancellation of the credential fetch,
+  :meth:`~SASLStateMachine.initiate`,
+  :meth:`~SASLStateMachine.response` or
+  :meth:`~SASLStateMachine.abort` itself), or when an abort is answered
+  with anything other than :data:`SASLState.FAILURE` -- including an
+  unexpected :data:`SASLState.SUCCESS`. The state machine enters
+  :data:`SASLState.INDEFINITE_FAILURE` in that case.
+
+:data:`SASLState.INDEFINITE_FAILURE` means that the local side has stopped
+participating, but it cannot prove that the peer noticed. The peer may
+still treat the exchange as active and may still expect the next
+response. Consequently the caller **must** close the underlying transport
+and must not continue with ordinary protocol traffic, must not start
+another authentication on the same transport and must not treat an
+unexpected success after an abort as an authenticated identity.
+
+When a coroutine of the state machine (or of a mechanism using it) is
+cancelled, the :class:`asyncio.CancelledError` is always re-raised to the
+caller. The state machine never suppresses the cancellation and never
+schedules additional transmissions in the background; in particular, an
+authentication proof which has not yet been sent at the time of
+cancellation is never sent afterwards.
+
 SASL mechanisms
 ===============
 
