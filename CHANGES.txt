@@ -74,6 +74,15 @@ Bugfix
   https://github.com/Pylons/waitress/issues/466 and
   https://github.com/Pylons/waitress/pull/488
 
+- A port number supplied through a trusted proxy header (``X-Forwarded-Port``,
+  or the port embedded in an ``X-Forwarded-Host`` / ``Forwarded`` host value)
+  is now validated to be a numeric port in the range 1-65535, the same rule
+  already applied to a direct Host header and an authority-form
+  request-target. A malformed value is rejected with a 400 (Bad Request)
+  instead of being written into ``SERVER_PORT`` and ``HTTP_HOST``. As with any
+  other malformed proxy header, the WSGI application is not called, so it can
+  never observe a partially rewritten environ.
+
 3.0.2 (2024-11-16)
 ------------------
 

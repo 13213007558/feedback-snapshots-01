@@ -1,3 +1,4 @@
+import copy
 import unittest
 
 
@@ -736,6 +737,328 @@ class TestProxyHeadersMiddleware(unittest.TestCase):
         self.assertIn(b'Header "X-Forwarded-Host" malformed', response.body)
 
 
+class TestProxyHeadersFailureAtomicity(unittest.TestCase):
+    """A malformed proxy header must short-circuit with a 400.
+
+    The application is never called, so it can never observe an environ that
+    was only partially rewritten by the headers parsed before the failure.
+    """
+
+    TRUSTED_PEER = "203.0.113.9"
+
+    def _makeOne(self, inner, **kw):
+        from waitress.proxy_headers import proxy_headers_middleware
+
+        kw.setdefault("trusted_proxy", self.TRUSTED_PEER)
+        return proxy_headers_middleware(inner, **kw)
+
+    def _invoke(self, inner, headers, trusted_headers, count=1,
+                addr=None, clear_untrusted=True):
+        addr = addr or (self.TRUSTED_PEER, 5100)
+        app = self._makeOne(
+            inner,
+            trusted_proxy_count=count,
+            trusted_proxy_headers=set(trusted_headers),
+            clear_untrusted=clear_untrusted,
+        )
+        environ = DummyEnviron(addr=addr, headers=headers)
+        before = copy.deepcopy(environ)
+        captured = {}
+
+        def start_response(status, response_headers):
+            captured["status"] = status
+            captured["headers"] = response_headers
+
+        body = b"".join(app(environ, start_response))
+        return before, environ, captured.get("status"), body
+
+    def test_valid_multi_hop_control_x_forwarded(self):
+        inner = DummyApp()
+        before, _, status, _ = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "192.0.2.1, 198.51.100.2, 203.0.113.1",
+                "X_FORWARDED_HOST": "example.com, example.org:9000",
+                "X_FORWARDED_PROTO": "https",
+                "X_FORWARDED_PORT": "8443",
+            },
+            trusted_headers=[
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-forwarded-proto",
+                "x-forwarded-port",
+            ],
+            count=2,
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(inner.calls, 1)
+        environ = inner.environ
+        self.assertEqual(environ["REMOTE_ADDR"], "198.51.100.2")
+        self.assertEqual(environ["SERVER_NAME"], "example.com")
+        self.assertEqual(environ["HTTP_HOST"], "example.com:8443")
+        self.assertEqual(environ["SERVER_PORT"], "8443")
+        self.assertEqual(environ["wsgi.url_scheme"], "https")
+        self.assertEqual(
+            environ["HTTP_X_FORWARDED_FOR"], "198.51.100.2, 203.0.113.1"
+        )
+        # identity fields really were rewritten relative to the input environ
+        self.assertNotEqual(before["REMOTE_ADDR"], environ["REMOTE_ADDR"])
+        self.assertNotEqual(before["HTTP_HOST"], environ["HTTP_HOST"])
+
+    def test_valid_multi_hop_control_forwarded_ipv6(self):
+        inner = DummyApp()
+        _, _, status, _ = self._invoke(
+            inner,
+            headers={
+                "FORWARDED": (
+                    'for="[2001:db8::1]:3821";host="example.com:8443";'
+                    'proto="https", for=192.0.2.1;host="example.internal:8080"'
+                ),
+            },
+            trusted_headers=["forwarded"],
+            count=2,
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(inner.calls, 1)
+        environ = inner.environ
+        self.assertEqual(environ["REMOTE_ADDR"], "2001:db8::1")
+        self.assertEqual(environ["REMOTE_PORT"], "3821")
+        self.assertEqual(environ["HTTP_HOST"], "example.com:8443")
+        self.assertEqual(environ["SERVER_PORT"], "8443")
+        self.assertEqual(environ["wsgi.url_scheme"], "https")
+
+    def test_xff_already_rewritten_then_forwarded_malformed(self):
+        # The multi-hop XFF header rewrites HTTP_X_FORWARDED_FOR before the
+        # malformed Forwarded header is reached; the failure still has to
+        # reject the whole request instead of handing that half-set environ
+        # (or the XFF-derived identity) to the application.
+        inner = DummyApp()
+        before, environ, status, body = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "192.0.2.1, 198.51.100.2, 203.0.113.1",
+                "FORWARDED": "for=1.2.3.4; proto =https",
+            },
+            trusted_headers=["x-forwarded-for", "forwarded"],
+            count=2,
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "Forwarded" malformed', body)
+        self.assertEqual(inner.calls, 0)
+        self.assertIsNone(inner.environ)
+        # the environ object itself was mutated before the short-circuit, but
+        # the application never saw it and the identity keys were untouched
+        self.assertEqual(environ["REMOTE_ADDR"], before["REMOTE_ADDR"])
+        self.assertEqual(environ["HTTP_HOST"], before["HTTP_HOST"])
+        self.assertEqual(environ["wsgi.url_scheme"], before["wsgi.url_scheme"])
+        self.assertNotEqual(
+            environ["HTTP_X_FORWARDED_FOR"], before["HTTP_X_FORWARDED_FOR"]
+        )
+
+    def test_malformed_xff_does_not_fallback_to_forwarded(self):
+        inner = DummyApp()
+        before, environ, status, body = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": '"unterminated',
+                "FORWARDED": "for=198.51.100.2;host=example.com:8080;proto=https",
+            },
+            trusted_headers=["x-forwarded-for", "forwarded"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "X-Forwarded-For" malformed', body)
+        self.assertEqual(inner.calls, 0)
+        # no fallback to the wider Forwarded identity happened
+        self.assertEqual(environ["REMOTE_ADDR"], before["REMOTE_ADDR"])
+        self.assertEqual(environ["SERVER_NAME"], before["SERVER_NAME"])
+        self.assertEqual(environ["HTTP_HOST"], before["HTTP_HOST"])
+
+    def test_valid_xff_then_malformed_xproto(self):
+        inner = DummyApp()
+        before, environ, status, body = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "198.51.100.2",
+                "X_FORWARDED_PROTO": "http, https",
+            },
+            trusted_headers=["x-forwarded-for", "x-forwarded-proto"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "X-Forwarded-Proto" malformed', body)
+        self.assertEqual(inner.calls, 0)
+        self.assertEqual(environ["REMOTE_ADDR"], before["REMOTE_ADDR"])
+        self.assertEqual(environ["wsgi.url_scheme"], before["wsgi.url_scheme"])
+
+    def test_valid_xff_then_malformed_xhost_quote(self):
+        inner = DummyApp()
+        _, _, status, body = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "198.51.100.2",
+                "X_FORWARDED_HOST": '"bad',
+            },
+            trusted_headers=["x-forwarded-for", "x-forwarded-host"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "X-Forwarded-Host" malformed', body)
+        self.assertEqual(inner.calls, 0)
+
+    def test_forwarded_valid_for_illegal_host_port_counterexample(self):
+        # Address parses fine but a later host element carries an illegal
+        # port: the whole request has to be rejected, not accepted with the
+        # valid for= identity and a poisoned HTTP_HOST/SERVER_PORT.
+        inner = DummyApp()
+        before, environ, status, body = self._invoke(
+            inner,
+            headers={
+                "FORWARDED": 'for=198.51.100.2;host="example.com:notaport";'
+                "proto=https"
+            },
+            trusted_headers=["forwarded"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "Forwarded host=" malformed', body)
+        self.assertEqual(inner.calls, 0)
+        self.assertEqual(environ["REMOTE_ADDR"], before["REMOTE_ADDR"])
+        self.assertEqual(environ["HTTP_HOST"], before["HTTP_HOST"])
+        self.assertEqual(environ["SERVER_PORT"], before["SERVER_PORT"])
+
+    def test_forwarded_host_out_of_range_port_counterexample(self):
+        inner = DummyApp()
+        _, _, status, body = self._invoke(
+            inner,
+            headers={
+                "FORWARDED": 'for=198.51.100.2;host="example.com:70000";'
+                "proto=https"
+            },
+            trusted_headers=["forwarded"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertEqual(inner.calls, 0)
+        self.assertIn(b"malformed", body)
+
+    def test_illegal_x_forwarded_port_values_rejected(self):
+        for bad_port in ("abc", "-1", "70000", "8.0", " 80 "):
+            with self.subTest(bad_port=bad_port):
+                inner = DummyApp()
+                _, environ, status, body = self._invoke(
+                    inner,
+                    headers={
+                        "X_FORWARDED_HOST": "example.com",
+                        "X_FORWARDED_PORT": bad_port,
+                    },
+                    trusted_headers=[
+                        "x-forwarded-host",
+                        "x-forwarded-port",
+                    ],
+                )
+                self.assertEqual(status, "400 Bad Request")
+                self.assertIn(
+                    b'Header "X-Forwarded-Port" malformed', body
+                )
+                self.assertEqual(inner.calls, 0)
+                self.assertNotIn("abc", str(environ.get("SERVER_PORT", "")))
+
+    def test_x_forwarded_host_embedded_illegal_port_rejected(self):
+        inner = DummyApp()
+        _, environ, status, body = self._invoke(
+            inner,
+            headers={"X_FORWARDED_HOST": "example.com:99999"},
+            trusted_headers=["x-forwarded-host"],
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn(b'Header "X-Forwarded-Host" malformed', body)
+        self.assertEqual(inner.calls, 0)
+        self.assertEqual(environ["HTTP_HOST"], "192.168.1.1:80")
+
+    def test_ipv6_xff_without_brackets_accepted(self):
+        inner = DummyApp()
+        _, _, status, _ = self._invoke(
+            inner,
+            headers={"X_FORWARDED_FOR": "2001:db8::1, 198.51.100.2"},
+            trusted_headers=["x-forwarded-for"],
+            count=2,
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(inner.calls, 1)
+        self.assertEqual(inner.environ["REMOTE_ADDR"], "2001:db8::1")
+
+    def test_untrusted_direct_peer_headers_cleared_identity_kept(self):
+        inner = DummyApp()
+        before, _, status, _ = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "198.51.100.2",
+                "X_FORWARDED_HOST": "evil.example",
+                "X_FORWARDED_PROTO": "https",
+                "FORWARDED": "for=6.6.6.6",
+            },
+            trusted_headers=[
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-forwarded-proto",
+                "forwarded",
+            ],
+            addr=("198.18.0.77", 4000),
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(inner.calls, 1)
+        environ = inner.environ
+        # direct untrusted peer identity is preserved
+        self.assertEqual(environ["REMOTE_ADDR"], "198.18.0.77")
+        self.assertEqual(environ["REMOTE_HOST"], "198.18.0.77")
+        self.assertEqual(environ["wsgi.url_scheme"], before["wsgi.url_scheme"])
+        self.assertEqual(environ["HTTP_HOST"], before["HTTP_HOST"])
+        # clear_untrusted policy still strips every proxy header
+        for name in (
+            "HTTP_X_FORWARDED_FOR",
+            "HTTP_X_FORWARDED_HOST",
+            "HTTP_X_FORWARDED_PROTO",
+            "HTTP_FORWARDED",
+        ):
+            self.assertNotIn(name, environ)
+
+    def test_trusted_wildcard_direct_peer(self):
+        inner = DummyApp()
+        app = self._makeOne(
+            inner,
+            trusted_proxy="*",
+            trusted_proxy_headers={"x-forwarded-for"},
+        )
+        environ = DummyEnviron(
+            addr=(self.TRUSTED_PEER, 5100),
+            headers={"X_FORWARDED_FOR": "198.51.100.2"},
+        )
+        status = {}
+
+        def start_response(s, h):
+            status["s"] = s
+
+        body = b"".join(app(environ, start_response))
+        self.assertEqual(status["s"], "200 OK")
+        self.assertEqual(body, b"hello")
+        self.assertEqual(inner.calls, 1)
+        self.assertEqual(inner.environ["REMOTE_ADDR"], "198.51.100.2")
+
+    def test_clear_untrusted_false_preserves_headers_on_success(self):
+        inner = DummyApp()
+        _, _, status, _ = self._invoke(
+            inner,
+            headers={
+                "X_FORWARDED_FOR": "198.51.100.2",
+                "X_FORWARDED_HOST": "example.org",
+            },
+            trusted_headers=["x-forwarded-for"],
+            clear_untrusted=False,
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(inner.calls, 1)
+        # untrusted X-Forwarded-Host is retained because the policy opted out
+        self.assertEqual(
+            inner.environ["HTTP_X_FORWARDED_HOST"], "example.org"
+        )
+
+
 class DummyLogger:
     def __init__(self):
         self.logged = []
@@ -745,7 +1068,12 @@ class DummyLogger:
 
 
 class DummyApp:
+    def __init__(self):
+        self.calls = 0
+        self.environ = None
+
     def __call__(self, environ, start_response):
+        self.calls += 1
         self.environ = environ
         start_response("200 OK", [("Content-Type", "text/plain")])
         yield b"hello"

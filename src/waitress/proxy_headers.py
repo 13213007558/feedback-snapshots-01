@@ -1,5 +1,6 @@
 from collections import namedtuple
 
+from .rfc7230 import ONLY_DIGIT_RE
 from .utilities import BadRequest, logger, undquote
 
 PROXY_HEADERS = frozenset(
@@ -153,7 +154,11 @@ def parse_proxy_headers(
             forwarded_port = undquote(environ.get("HTTP_X_FORWARDED_PORT", ""))
             if "," in forwarded_port:
                 raise_for_multiple_values()
+            if forwarded_port:
+                _validate_port(forwarded_port, "X-Forwarded-Port")
             untrusted_headers.remove("X_FORWARDED_PORT")
+        except MalformedProxyHeader:
+            raise
         except Exception as ex:
             raise MalformedProxyHeader(
                 "X-Forwarded-Port", str(ex), environ["HTTP_X_FORWARDED_PORT"]
@@ -271,6 +276,11 @@ def parse_proxy_headers(
             host, port = forwarded_host.rsplit(":", 1)
             host, port = host.strip(), str(port)
 
+            _validate_port(
+                port,
+                "Forwarded host=" if forwarded else "X-Forwarded-Host",
+            )
+
             # We trust the port in the Forwarded Host/X-Forwarded-Host over
             # X-Forwarded-Port, or whatever we got from Forwarded
             # Proto/X-Forwarded-Proto.
@@ -301,6 +311,10 @@ def parse_proxy_headers(
                     )
 
     if forwarded_port:
+        _validate_port(
+            forwarded_port,
+            "Forwarded" if forwarded else "X-Forwarded-Port",
+        )
         environ["SERVER_PORT"] = str(forwarded_port)
 
     if client_addr:
@@ -319,6 +333,15 @@ def strip_brackets(addr):
     if addr[0] == "[" and addr[-1] == "]":
         return addr[1:-1]
     return addr
+
+
+def _validate_port(port, header):
+    # The same in-range numeric port rule that the parser applies to a direct
+    # Host header or an authority-form request-target, so that a malformed
+    # proxy header can not smuggle a non-numeric or out of range port into
+    # SERVER_PORT and HTTP_HOST.
+    if not ONLY_DIGIT_RE.match(port.encode("latin-1")) or not 0 < int(port) <= 65535:
+        raise MalformedProxyHeader(header, "invalid port number", port)
 
 
 def clear_untrusted_headers(
