@@ -58,10 +58,22 @@ class UaProcessor:
 
     def send_response(self, requesthandle, seqhdr, response, msgtype=ua.MessageType.SecureMessage):
         response.ResponseHeader.RequestHandle = requesthandle
-        data = self._connection.message_to_binary(
-            struct_to_binary(response), message_type=msgtype, request_id=seqhdr.RequestId
-        )
+        try:
+            data = self._connection.message_to_binary(
+                struct_to_binary(response), message_type=msgtype, request_id=seqhdr.RequestId
+            )
+        except ua.UaError:
+            _logger.exception("Response does not fit the limits negotiated with the peer; closing the connection")
+            self._send_transport_error(
+                ua.StatusCodes.BadResponseTooLarge, "Response exceeds negotiated transport limits"
+            )
+            return
         self._transport.write(data)
+
+    def _send_transport_error(self, code: int, reason: str) -> None:
+        err = ua.ErrorMessage(ua.StatusCode(code), reason)
+        self._transport.write(uatcp_to_binary(ua.MessageType.Error, err))
+        self._transport.close()
 
     def open_secure_channel(self, algohdr, seqhdr, body):
         request = struct_from_binary(ua.OpenSecureChannelRequest, body)
@@ -140,9 +152,7 @@ class UaProcessor:
             msg = self._connection.receive_from_header_and_body(header, body)
         except ua.uaerrors.BadRequestTooLarge as e:
             _logger.warning("Received request that exceed the transport limits")
-            err = ua.ErrorMessage(ua.StatusCode(e.code), str(e))
-            data = uatcp_to_binary(ua.MessageType.Error, err)
-            self._transport.write(data)
+            self._send_transport_error(e.code, str(e))
             return False
         except ua.uaerrors.BadUserAccessDenied:
             _logger.warning("Unauthenticated user attempted to connect")

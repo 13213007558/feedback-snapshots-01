@@ -96,6 +96,7 @@ class UASocketProtocol(asyncio.Protocol):
         self.logger.info("Socket has closed connection")
         self.state = UASocketState.CLOSED
         self.transport = None
+        self.receive_buffer = None
         self._fail_all_pending(exc or ConnectionError("connection lost"))
         if self.on_connection_lost is not None:
             try:
@@ -128,6 +129,15 @@ class UASocketProtocol(asyncio.Protocol):
                     self.receive_buffer = bytes(unparsed)
                     return
                 if len(buf) < header.body_size:
+                    limit = self._connection._limits.max_recv_buffer
+                    if limit > 0 and header.packet_size > limit:
+                        self.logger.error(
+                            "Declared frame size %s exceeds max_recv_buffer %s, closing the connection",
+                            header.packet_size,
+                            limit,
+                        )
+                        self.disconnect_socket()
+                        return
                     self.logger.debug(
                         "We did not receive enough data from server. Need %s got %s", header.body_size, len(buf)
                     )

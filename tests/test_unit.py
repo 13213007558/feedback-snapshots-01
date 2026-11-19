@@ -1617,8 +1617,9 @@ def test_acknowledge_bounds_each_buffer_by_the_opposite_hello_buffer() -> None:
 @pytest.mark.parametrize("initial", [(65535, 65535), (8192, 65535)])
 def test_client_sends_what_the_server_receives_and_receives_what_it_sends(initial: tuple[int, int]) -> None:
     limits = TransportLimits(*initial, 0, 0)
-    ack = ua.Acknowledge(ReceiveBufferSize=8192, SendBufferSize=65535)
+    ack = ua.Acknowledge(ReceiveBufferSize=8192, SendBufferSize=65535, MaxMessageSize=4096, MaxChunkCount=3)
 
     limits.update_client_limits(ack)
 
     assert (limits.max_recv_buffer, limits.max_send_buffer) == (65535, 8192)
+    assert (limits.max_send_message_size, limits.max_send_chunk_count) == (4096, 3)

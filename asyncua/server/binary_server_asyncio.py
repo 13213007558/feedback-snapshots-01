@@ -10,7 +10,10 @@ from typing import Any
 
 from ..common.connection import TransportLimits
 from ..common.utils import Buffer, NotEnoughData
-from ..ua.ua_binary import header_from_binary
+from ..ua.status_codes import StatusCodes
+from ..ua.ua_binary import header_from_binary, uatcp_to_binary
+from ..ua.uaprotocol_hand import ErrorMessage, MessageType
+from ..ua.uatypes import StatusCode
 from .internal_server import InternalServer
 from .uaprocessor import UaProcessor
 
@@ -109,6 +112,22 @@ class OPCUAProtocol(asyncio.Protocol):
         except Exception:
             _logger.exception("activation watchdog crashed")
 
+    def _reject_oversized_frame(self, header: Any) -> None:
+        _logger.warning(
+            "Rejecting frame from %s: declared size %s is > max_recv_buffer %s",
+            self.peer_name,
+            header.packet_size,
+            self.limits.max_recv_buffer,
+        )
+        self._buffer = b""
+        self._close_with_error(StatusCodes.BadTcpMessageTooLarge, "Frame exceeds transport limits")
+
+    def _close_with_error(self, code: int, reason: str) -> None:
+        if self.transport is not None:
+            err = ErrorMessage(StatusCode(code), reason)
+            self.transport.write(uatcp_to_binary(MessageType.Error, err))
+            self.transport.close()
+
     def data_received(self, data: bytes) -> None:
         self._buffer += data
         # try to parse the incoming data
@@ -126,6 +145,9 @@ class OPCUAProtocol(asyncio.Protocol):
                     _logger.error("Got malformed header %s", header)
                     if self.transport is not None:
                         self.transport.close()
+                    return
+                if not self.limits.is_frame_size_within_limit(header.packet_size):
+                    self._reject_oversized_frame(header)
                     return
                 if len(buf) < header.body_size:
                     _logger.debug(
