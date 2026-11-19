@@ -6,15 +6,17 @@ import tempfile
 import unittest
 import uuid
 
-from uefi_firmware import MultiObject
+from uefi_firmware import MultiObject, efi_compressor
 from uefi_firmware.me import MeContainer
 from uefi_firmware.structs.intel_me_structs import MePartitionTable
-from uefi_firmware.structs.uefi_structs import FIRMWARE_VOLUME_GUIDS
+from uefi_firmware.structs.uefi_structs import (
+    FIRMWARE_GUIDED_GUIDS, FIRMWARE_VOLUME_GUIDS)
 from uefi_firmware.uefi import (
     CompressedSection, EfiSection, FirmwareFileSystemSection, FirmwareVolume,
-    FreeformGuidSection, VersionSection)
+    FreeformGuidSection, GuidDefinedSection, VersionSection)
 
 FILE_GUID = uuid.UUID("9e21fd93-9c72-4c15-8c4b-e77f1db2d792").bytes_le
+UNKNOWN_GUID = uuid.UUID("01234567-89ab-4def-8123-456789abcdef").bytes_le
 SECRET = b"bytes-from-image-A" * 4
 
 
@@ -47,6 +49,19 @@ def parse_volume(body):
     volume = FirmwareVolume(make_volume(make_file(body)))
     volume.process()
     return volume
+
+
+def make_guided(guid, data, preamble=b"", attrs=0):
+    '''A GUID-defined section's body, after the common header.'''
+    offset = 4 + 20 + len(preamble)
+    return guid + struct.pack("<HH", offset, attrs) + preamble + data
+
+
+def parse_guided(guid, data, preamble=b"", attrs=0):
+    body = make_guided(guid, data, preamble, attrs)
+    section = FirmwareFileSystemSection(make_section(0x02, body), FILE_GUID)
+    section.process()
+    return section.parsed_object
 
 
 def first_section(volume):
@@ -132,6 +147,63 @@ class RawSectionTest(unittest.TestCase):
         self.assertTrue(section.process())
         self.assertIsInstance(section.parsed_object, MeContainer)
         self.assertEqual(len(section.parsed_object.partitions), 1)
+
+
+class GuidDefinedClassificationTest(unittest.TestCase):
+
+    def test_same_body_classified_by_attributes(self):
+        # The same inner bytes under an unknown GUID: the attributes decide
+        # whether required processing is still owed, never the '_FVH' match.
+        body = make_volume(b"", size=0x100)
+        plain = parse_guided(UNKNOWN_GUID, body, attrs=0)
+        signed = parse_guided(UNKNOWN_GUID, body, attrs=0x02)
+        required = parse_guided(UNKNOWN_GUID, body, attrs=0x01)
+        for guided in (plain, signed, required):
+            # The volume is kept for reverse engineering, as a candidate.
+            self.assertIsInstance(guided.subsections[0], FirmwareVolume)
+            self.assertTrue(guided.heuristic)
+            self.assertIsNone(guided.handler)
+            self.assertFalse(guided.processed)
+        self.assertFalse(plain.processing_required)
+        self.assertTrue(required.processing_required)
+        self.assertEqual(plain.to_dict()['authStatus'], "ATTR_UNKNOWN")
+        # An unknown format cannot report its auth claim as verified.
+        self.assertEqual(signed.to_dict()['authStatus'], "UNVERIFIED")
+        self.assertEqual(required.to_dict()['authStatus'],
+                         "PROCESSING_REQUIRED")
+
+    def test_registered_handler_is_not_a_candidate(self):
+        # The same bytes under a registered GUID are decoded, not guessed.
+        body = make_volume(b"", size=0x100)
+        guided = parse_guided(
+            uuid.UUID(FIRMWARE_GUIDED_GUIDS["FIRMWARE_VOLUME"]).bytes_le,
+            body, attrs=0x02)
+        self.assertEqual(guided.handler, "firmware-volume")
+        self.assertFalse(guided.heuristic)
+        self.assertTrue(guided.processed)
+        self.assertIsInstance(guided.subsections[0], FirmwareVolume)
+        result = guided.to_dict()
+        self.assertEqual(result['authStatus'], "AUTH_VALID")
+        self.assertNotIn('preamble', result)
+
+    def test_supported_compression_still_expands(self):
+        inner = make_section(0x19, b"payload")
+        compressed = efi_compressor.LzmaCompress(inner, len(inner))
+        guided = parse_guided(
+            uuid.UUID(FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED"]).bytes_le,
+            compressed)
+        self.assertEqual(guided.handler, "lzma")
+        self.assertFalse(guided.heuristic)
+        self.assertEqual(guided.subsections[0].data, b"payload")
+
+    def test_candidate_keeps_its_unexplained_preamble(self):
+        preamble = b"\xde\xad\xbe\xef"
+        guided = parse_guided(
+            UNKNOWN_GUID, make_volume(b"", size=0x100), preamble=preamble)
+        self.assertEqual(guided.preamble, preamble)
+        result = guided.to_dict()
+        self.assertEqual(result['preamble'], preamble.hex())
+        self.assertTrue(result['heuristic'])
 
 
 if __name__ == '__main__':

@@ -754,10 +754,35 @@ class GuidDefinedSection(EfiSection):
         self.attrs = {"attrs": self.attr_mask}
         self.subsections = []
         self._body = bytes(data)
+        # Name of the registered handler that decoded the body, or None when
+        # the GUID is not recognized.
+        self.handler = None
+        # True when the content was classified by the '_FVH' heuristic rather
+        # than decoded according to a registered handler.
+        self.heuristic = False
 
     @property
     def objects(self):
         return self.subsections
+
+    @property
+    def processing_required(self):
+        return bool(self.attr_mask & self.ATTR_PROCESSING_REQUIRED)
+
+    @property
+    def processed(self):
+        '''The body was decoded by a registered handler for this GUID.'''
+        return self.handler is not None
+
+    def _auth_status(self):
+        attrs = self.attrs["attrs"]
+        if attrs == self.ATTR_PROCESSING_REQUIRED:
+            return "PROCESSING_REQUIRED"
+        if attrs == self.ATTR_AUTH_STATUS_VALID:
+            # Without a registered handler the encapsulation is unknown, so
+            # the valid-auth claim cannot be honored.
+            return "AUTH_VALID" if self.processed else "UNVERIFIED"
+        return "ATTR_UNKNOWN"
 
     @limit_nesting(False)
     def process(self):
@@ -784,10 +809,13 @@ class GuidDefinedSection(EfiSection):
 
         status = True
         if sguid(self.guid) in [FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED"], FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED_HP"]]:
+            self.handler = "lzma"
             status = decompress_guid(efi_compressor.LzmaDecompress)
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["TIANO_COMPRESSED"]:
+            self.handler = "tiano"
             status = decompress_guid(efi_compressor.TianoDecompress)
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["ZLIB_COMPRESSED_AMD"]:
+            self.handler = "zlib-amd"
             body = self.preamble + self.data
             if len(body) < 0x100:
                 dlog(self, sguid(self.guid), 'error, invalid AMD zlib section header size')
@@ -810,6 +838,7 @@ class GuidDefinedSection(EfiSection):
                 status = False
                 dlog(self, sguid(self.guid), 'zlib error: %s' % str(err))
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["GZIP_COMPRESSED_QC"]:
+            self.handler = "gzip"
             try:
                 data = zlib_decompress(
                     self.preamble + self.data, wbits=16 + zlib.MAX_WBITS)
@@ -825,6 +854,7 @@ class GuidDefinedSection(EfiSection):
                 dlog(self, sguid(self.guid), 'gzip error: %s' % str(err))
         # Todo: check for processing required attribute
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["STATIC_GUID"]:
+            self.handler = "static"
             status = self.process_subsections()
             if len(self.subsections) == 0:
                 # There were no subsections parsed, treat as a firmware volume
@@ -835,10 +865,13 @@ class GuidDefinedSection(EfiSection):
                     self.subsections.append(raw)
             pass
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["FIRMWARE_VOLUME"]:
+            self.handler = "firmware-volume"
             status = parse_volume()
         else:
-            # Undefined GUIDed-Section GUID, treat as a FV, don't require
-            # status
+            # No registered handler for this GUID. A '_FVH' magic inside the
+            # body only makes the volume a heuristic candidate, not a
+            # decoded one, and any required processing was not performed.
+            self.heuristic = True
             parse_volume()
         if not status:
             dlog(self, sguid(self.guid), 'Could not parse GUID object')
@@ -880,38 +913,38 @@ class GuidDefinedSection(EfiSection):
         return header + preamble + data
 
     def showinfo(self, ts='', index=0):
-        auth_status = "ATTR_UNKNOWN"
-        if self.attrs["attrs"] == self.ATTR_AUTH_STATUS_VALID:
-            auth_status = "AUTH_VALID"
-        if self.attrs["attrs"] == self.ATTR_PROCESSING_REQUIRED:
-            auth_status = "PROCESSING_REQUIRED"
+        auth_status = self._auth_status()
         print ("%s%s %s offset= 0x%x attrs= 0x%x (%s)" % (
             ts, blue("Guid-Defined:"), green(sguid(self.guid)),
             self.offset, self.attrs["attrs"], purple(auth_status)
         ))
+        if self.heuristic:
+            print ("%s  %s" % (ts, purple(
+                "heuristic candidate, no registered handler")))
         if len(self.subsections) > 0:
             for i, section in enumerate(self.subsections):
                 section.showinfo("%s  " % ts, index=i)
 
     def to_dict(self):
-        auth_status = "ATTR_UNKNOWN"
-        if self.attrs["attrs"] == self.ATTR_AUTH_STATUS_VALID:
-            auth_status = "AUTH_VALID"
-        if self.attrs["attrs"] == self.ATTR_PROCESSING_REQUIRED:
-            auth_status = "PROCESSING_REQUIRED"
-
         subsections = []
         if len(self.subsections) > 0:
             for section in self.subsections:
                 subsections.append(section.to_dict())
 
-        return {
+        result = {
             'guid': sguid(self.guid),
             'offset': self.offset,
             'attributes': self.attrs["attrs"],
-            'authStatus': auth_status,
+            'authStatus': self._auth_status(),
+            'handler': self.handler,
+            'heuristic': self.heuristic,
+            'processed': self.processed,
             'subsections': subsections,
         }
+        if self.heuristic:
+            # A candidate always carries the unexplained leading data.
+            result['preamble'] = self.preamble.hex()
+        return result
 
     def dump(self, parent="", generate_checksum=False, debug=False):
         for i, subsection in enumerate(self.subsections):
