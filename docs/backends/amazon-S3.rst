@@ -284,6 +284,48 @@ django-storages will now generate `signed cloudfront urls`_.
 .. _AWS docs: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-trusted-signers.html#private-content-creating-cloudfront-key-pairs-procedure
 .. _signed cloudfront urls: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-signed-urls.html
 
+.. _cloudfront-key-rotation:
+
+Rotating CloudFront Keys at Runtime
+-----------------------------------
+
+A storage instance is usually long lived (for example the object held by a
+worker process), so rotating the signing key must not require restarting the
+process.  Call :meth:`~storages.backends.s3.S3Storage.update_cloudfront_config`
+on the instance to swap the configuration in place::
+
+    from storages.backends.s3 import S3Storage
+
+    storage = S3Storage()  # e.g. a long-lived singleton
+
+    # Install a rotated key pair.  New URLs are signed with ``new_key``.
+    storage.update_cloudfront_config(new_key_id, new_key)
+
+    # Or install an already built signer, or disable signing entirely.
+    storage.update_cloudfront_config(signer=my_signer)
+    storage.update_cloudfront_config()  # disables signing
+
+The replacement is atomic: the signer and its key metadata are published
+together, and a URL is signed with a single signer, so a process can never
+intermittently emit two different signatures.  An incomplete key pair (only
+``key_id`` or only ``key``), an invalid PEM, or mixing ``signer`` with key
+arguments raises ``ImproperlyConfigured`` *before* anything changes.  Callers
+can therefore retry with a complete configuration while the previous one keeps
+being used.
+
+Rotation only affects URLs generated afterwards.  URLs that have already been
+handed out carry their own ``Expires`` value and remain valid until that time;
+no state on the storage instance is needed to keep them working.
+
+.. note::
+
+   For security, storage instances do not serialize CloudFront key material.
+   ``pickle`` omits ``cloudfront_key``, ``cloudfront_key_id`` and
+   ``cloudfront_signer``.  A storage instance sent to another process therefore
+   starts with signing disabled; call ``update_cloudfront_config()`` there (with
+   the key supplied by the task arguments or a secret manager) before
+   generating signed URLs.
+
 .. _cryptography: https://pypi.org/project/cryptography/
 .. _rsa: https://pypi.org/project/rsa/
 

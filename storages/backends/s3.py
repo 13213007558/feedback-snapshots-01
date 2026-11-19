@@ -90,6 +90,14 @@ else:
         )
 
 
+_CLOUDFRONT_OMITTED = object()
+
+_CLOUDFRONT_PAIR_ERROR = (
+    "Both AWS_CLOUDFRONT_KEY_ID/cloudfront_key_id and "
+    "AWS_CLOUDFRONT_KEY/cloudfront_key must be provided together."
+)
+
+
 def _filter_download_params(params):
     return {
         key: value
@@ -312,11 +320,16 @@ class S3Storage(CompressStorageMixin, BaseStorage):
     config = None
 
     _signers = {}  # noqa: RUF012
+    _signers_lock = threading.Lock()
+    # Rotations are rare; keep a small bound so retired key material is not
+    # retained for the lifetime of a long-running worker process.
+    _signers_max_size = 16
 
     def __init__(self, **settings):
-        omitted = object()
         if not hasattr(self, "cloudfront_signer"):
-            self.cloudfront_signer = settings.pop("cloudfront_signer", omitted)
+            self.cloudfront_signer = settings.pop(
+                "cloudfront_signer", _CLOUDFRONT_OMITTED
+            )
 
         super().__init__(**settings)
 
@@ -332,6 +345,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         self._bucket = None
         self._connections = threading.local()
         self._unsigned_connections = threading.local()
+        self._cloudfront_lock = threading.Lock()
 
         if self.config is not None:
             warnings.warn(
@@ -360,26 +374,124 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         if self.transfer_config is None:
             self.transfer_config = TransferConfig(use_threads=self.use_threads)
 
-        if self.cloudfront_signer is omitted:
-            if self.cloudfront_key_id and self.cloudfront_key:
-                self.cloudfront_signer = self.get_cloudfront_signer(
-                    self.cloudfront_key_id, self.cloudfront_key
-                )
-            elif bool(self.cloudfront_key_id) ^ bool(self.cloudfront_key):
+        if self.cloudfront_signer is _CLOUDFRONT_OMITTED:
+            self._set_cloudfront_config(
+                self.cloudfront_key_id, self.cloudfront_key, store_key=False
+            )
+
+    def _set_cloudfront_config(self, key_id, key, store_key=True):
+        """Build a signer from ``key_id`` / ``key`` and validate the pair."""
+        if key_id and key:
+            try:
+                signer = self.get_cloudfront_signer(key_id, key)
+            except (ValueError, TypeError) as err:
                 raise ImproperlyConfigured(
-                    "Both AWS_CLOUDFRONT_KEY_ID/cloudfront_key_id and "
-                    "AWS_CLOUDFRONT_KEY/cloudfront_key must be provided together."
+                    "Invalid CloudFront key material: %s" % err
+                ) from err
+        elif key_id or key:
+            raise ImproperlyConfigured(_CLOUDFRONT_PAIR_ERROR)
+        else:
+            signer = None
+        return self._install_cloudfront_signer(signer, key_id, key, store_key)
+
+    def _install_cloudfront_signer(self, signer, key_id=None, key=None, store_key=True):
+        """
+        Publish ``signer`` and (optionally) its key material as one unit.
+
+        The caller is responsible for having fully built and validated
+        ``signer`` first, so this only performs the atomic swap.  Holding the
+        lock while assigning both attributes guarantees that a concurrent
+        :meth:`url` call cannot observe a new signer with old key metadata or
+        the reverse.
+        """
+        with self._cloudfront_lock:
+            self.cloudfront_signer = signer
+            if store_key:
+                self.cloudfront_key_id = key_id
+                self.cloudfront_key = key
+        return signer
+
+    def update_cloudfront_config(
+        self,
+        key_id=_CLOUDFRONT_OMITTED,
+        key=_CLOUDFRONT_OMITTED,
+        *,
+        signer=_CLOUDFRONT_OMITTED,
+    ):
+        """
+        Atomically replace the CloudFront signing configuration at runtime.
+
+        This allows long-lived storage instances (e.g. in a worker process) to
+        pick up a rotated key pair without being restarted.  URLs generated
+        after this method returns are signed with the new key; URLs that were
+        already handed out keep using the key material that was active when
+        they were signed and remain valid until their own ``expire`` time.
+
+        There are three accepted forms:
+
+        * ``update_cloudfront_config(key_id, key)`` -- build a signer from a
+          PEM key pair and install it.
+        * ``update_cloudfront_config(signer=signer)`` -- install an already
+          built ``boto3`` ``CloudFrontSigner`` (useful for tests or custom
+          signing backends).  Pass ``signer=None`` to disable signing.
+        * ``update_cloudfront_config()`` -- disable signing.
+
+        An incomplete key pair, or mixing ``signer`` with key arguments, raises
+        ``ImproperlyConfigured`` *before* any state is changed, so callers can
+        treat the failure as "keep using the previous configuration".  A
+        partially applied configuration can therefore never make one process
+        emit a mix of signatures.
+
+        Returns the installed signer (``None`` when signing is disabled).
+        """
+        has_key_id = key_id is not _CLOUDFRONT_OMITTED
+        has_key = key is not _CLOUDFRONT_OMITTED
+        has_signer = signer is not _CLOUDFRONT_OMITTED
+
+        if has_signer:
+            if has_key_id or has_key:
+                raise ImproperlyConfigured(
+                    "Provide either signer or key_id/key, not both."
                 )
-            else:
-                self.cloudfront_signer = None
+            if signer is not None and not callable(
+                getattr(signer, "generate_presigned_url", None)
+            ):
+                raise ImproperlyConfigured(
+                    "signer must be None or provide a callable "
+                    "generate_presigned_url method."
+                )
+            return self._install_cloudfront_signer(signer, store_key=False)
+
+        if has_key_id != has_key:
+            raise ImproperlyConfigured(_CLOUDFRONT_PAIR_ERROR)
+
+        if not has_key_id:
+            # No arguments: disable signing.
+            return self._install_cloudfront_signer(None, store_key=False)
+
+        if key_id and key:
+            # Build (and validate) before mutating any state so a bad key never
+            # leaves the store with an installed-but-unusable configuration.
+            return self._set_cloudfront_config(key_id, key)
+        if key_id or key:
+            raise ImproperlyConfigured(_CLOUDFRONT_PAIR_ERROR)
+
+        # Both are empty: signing is disabled.
+        return self._install_cloudfront_signer(None, store_key=False)
 
     def get_cloudfront_signer(self, key_id, key):
         cache_key = f"{key_id}:{key}"
-        if cache_key not in self.__class__._signers:
-            self.__class__._signers[cache_key] = _cloud_front_signer_from_pem(
-                key_id, key
-            )
-        return self.__class__._signers[cache_key]
+        with self._signers_lock:
+            signer = self.__class__._signers.get(cache_key)
+            if signer is None:
+                signer = _cloud_front_signer_from_pem(key_id, key)
+                if len(self.__class__._signers) >= self._signers_max_size:
+                    # dicts are ordered; drop the oldest cached signer.
+                    self.__class__._signers.pop(
+                        next(iter(self.__class__._signers))
+                    )
+                self.__class__._signers[cache_key] = signer
+            return signer
 
     def get_default_settings(self):
         return {
@@ -448,12 +560,39 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         state.pop("_connections", None)
         state.pop("_unsigned_connections", None)
         state.pop("_bucket", None)
+        state.pop("_cloudfront_lock", None)
+        # A storage instance is frequently handed to another process (task
+        # queues, multiprocessing, ...).  The signer embeds the private key and
+        # is not picklable, so never serialize the signer or its PEM.  The
+        # receiving process can re-install a configuration via
+        # ``update_cloudfront_config()`` and will not emit unsigned URLs just
+        # because it cannot sign them.
+        state["cloudfront_signer"] = None
+        state.pop("cloudfront_key", None)
+        state.pop("cloudfront_key_id", None)
+        # ``@deconstructible`` captured the constructor arguments, which may
+        # also contain the private key or a custom signer.
+        ctor_args = state.get("_constructor_args")
+        if ctor_args:
+            args, kwargs = ctor_args
+            secret_keys = (
+                "cloudfront_key",
+                "cloudfront_key_id",
+                "cloudfront_signer",
+            )
+            kwargs = {
+                name: value
+                for name, value in kwargs.items()
+                if name not in secret_keys
+            }
+            state["_constructor_args"] = (args, kwargs)
         return state
 
     def __setstate__(self, state):
         state["_connections"] = threading.local()
         state["_unsigned_connections"] = threading.local()
         state["_bucket"] = None
+        state["_cloudfront_lock"] = threading.Lock()
         self.__dict__ = state
 
     @property
@@ -680,9 +819,12 @@ class S3Storage(CompressStorageMixin, BaseStorage):
                 "?{}".format(urlencode(params)) if params else "",
             )
 
-            if self.querystring_auth and self.cloudfront_signer:
+            # Read the signer once so a concurrent rotation cannot cause a
+            # single URL to be checked and signed with different configs.
+            signer = self.cloudfront_signer
+            if self.querystring_auth and signer:
                 expiration = datetime.utcnow() + timedelta(seconds=expire)
-                return self.cloudfront_signer.generate_presigned_url(
+                return signer.generate_presigned_url(
                     url, date_less_than=expiration
                 )
 

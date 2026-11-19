@@ -1005,6 +1005,180 @@ class S3StorageTests(TestCase):
             self.assertEqual(storage.security_token, "baz")
 
 
+class FakeCloudFrontSigner:
+    """Minimal signer that records the key it was created with."""
+
+    def __init__(self, key_id):
+        self.key_id = key_id
+        self.signed = []
+
+    def generate_presigned_url(self, url, date_less_than=None):
+        self.signed.append((url, date_less_than))
+        return "{}?Signature={}&Key-Pair-Id={}".format(
+            url, len(self.signed), self.key_id
+        )
+
+
+class S3CloudFrontRotationTests(TestCase):
+    PEM_OLD = "-----BEGIN RSA PRIVATE KEY-----\nOLD\n-----END RSA PRIVATE KEY-----\n"
+    PEM_NEW = "-----BEGIN RSA PRIVATE KEY-----\nNEW\n-----END RSA PRIVATE KEY-----\n"
+
+    def setUp(self):
+        self.storage = s3.S3Storage(custom_domain="cdn.example.com")
+        self.storage._connections.connection = mock.MagicMock()
+        self.storage._unsigned_connections.connection = mock.MagicMock()
+
+    def test_signers_are_isolated_between_stores(self):
+        other = s3.S3Storage(custom_domain="cdn.example.com")
+        old_signer = FakeCloudFrontSigner("old")
+        new_signer = FakeCloudFrontSigner("new")
+
+        self.storage.update_cloudfront_config(signer=old_signer)
+        other.update_cloudfront_config(signer=new_signer)
+
+        self.assertEqual(
+            self.storage.url("a.txt"),
+            "https://cdn.example.com/a.txt?Signature=1&Key-Pair-Id=old",
+        )
+        self.assertEqual(
+            other.url("a.txt"),
+            "https://cdn.example.com/a.txt?Signature=1&Key-Pair-Id=new",
+        )
+
+    def test_update_takes_effect_for_new_urls_only(self):
+        self.storage.update_cloudfront_config(signer=FakeCloudFrontSigner("old"))
+        before = self.storage.url("before.txt")
+
+        self.storage.update_cloudfront_config(signer=FakeCloudFrontSigner("new"))
+        after = self.storage.url("after.txt")
+
+        self.assertIn("Key-Pair-Id=old", before)
+        self.assertIn("Key-Pair-Id=new", after)
+
+    def test_old_url_keeps_its_expiry_after_rotation(self):
+        old_signer = FakeCloudFrontSigner("old")
+        self.storage.update_cloudfront_config(signer=old_signer)
+        issued_before = self.storage.url("before.txt", expire=60)
+        old_expiration = old_signer.signed[0][1]
+        self.assertIsNotNone(old_expiration)
+
+        self.storage.update_cloudfront_config(signer=FakeCloudFrontSigner("new"))
+        self.storage.url("after.txt", expire=120)
+
+        # Rotation must not retroactively change an already issued URL: its
+        # signature and Expires were computed by the old key when it was
+        # minted, so it stays valid until its own expiration.
+        self.assertIn("Key-Pair-Id=old", issued_before)
+        self.assertEqual(len(old_signer.signed), 1)
+        self.assertEqual(old_signer.signed[0][1], old_expiration)
+
+    def test_url_during_rotation_never_mixes_configurations(self):
+        old_signer = FakeCloudFrontSigner("old")
+        new_signer = FakeCloudFrontSigner("new")
+        self.storage.update_cloudfront_config(signer=old_signer)
+
+        results = []
+        start = threading.Barrier(8)
+
+        def reader():
+            start.wait()
+            for _ in range(50):
+                results.append(self.storage.url("f.txt"))
+
+        def rotator():
+            start.wait()
+            for _ in range(50):
+                self.storage.update_cloudfront_config(
+                    signer=old_signer if len(results) % 2 else new_signer
+                )
+
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        threads += [threading.Thread(target=rotator) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertTrue(results)
+        for url in results:
+            # Exactly one signer was used for each URL, never a blend.
+            self.assertEqual(url.count("Key-Pair-Id="), 1)
+            self.assertIn(url.split("Key-Pair-Id=")[1], ("old", "new"))
+
+    def test_incomplete_key_pair_is_rejected_and_state_is_unchanged(self):
+        signer = FakeCloudFrontSigner("old")
+        self.storage.update_cloudfront_config(signer=signer)
+
+        msg = s3.ImproperlyConfigured
+
+        with self.assertRaises(msg):
+            self.storage.update_cloudfront_config(key_id="new-id")
+        self.assertIs(self.storage.cloudfront_signer, signer)
+
+        with self.assertRaises(msg):
+            self.storage.update_cloudfront_config(key=self.PEM_NEW)
+        self.assertIs(self.storage.cloudfront_signer, signer)
+
+        with self.assertRaises(msg):
+            self.storage.update_cloudfront_config(
+                key_id="new-id", key=self.PEM_NEW, signer=signer
+            )
+        self.assertIs(self.storage.cloudfront_signer, signer)
+
+        # Still signing with the complete configuration.
+        self.assertIn("Key-Pair-Id=old", self.storage.url("still.txt"))
+
+    def test_invalid_key_material_keeps_previous_signer(self):
+        signer = FakeCloudFrontSigner("old")
+        self.storage.update_cloudfront_config(signer=signer)
+
+        with self.assertRaises(ImproperlyConfigured):
+            self.storage.update_cloudfront_config(key_id="bad", key="not a pem")
+
+        self.assertIs(self.storage.cloudfront_signer, signer)
+
+    @mock.patch("storages.backends.s3._cloud_front_signer_from_pem")
+    def test_pickle_does_not_include_private_key_or_signer(self, from_pem):
+        # Accept the fake PEMs used below without needing real key material.
+        from_pem.side_effect = lambda key_id, key: FakeCloudFrontSigner(key_id)
+        self.storage.update_cloudfront_config(signer=FakeCloudFrontSigner("old"))
+        # Simulate an instance constructed straight from key material, which
+        # stores both the PEM attribute and the deconstruct() arguments.
+        storage = s3.S3Storage(
+            cloudfront_key_id="key-id",
+            cloudfront_key=self.PEM_OLD,
+            custom_domain="cdn.example.com",
+        )
+        self.assertIsNotNone(storage.cloudfront_signer)
+
+        for instance in (self.storage, storage):
+            with self.subTest(instance=instance):
+                payload = pickle.dumps(instance)
+                self.assertNotIn(b"BEGIN RSA PRIVATE KEY", payload)
+                self.assertNotIn(b"OLD", payload)
+
+                restored = pickle.loads(payload)
+                self.assertIsNone(restored.cloudfront_signer)
+                self.assertFalse(hasattr(restored, "cloudfront_key"))
+                self.assertFalse(hasattr(restored, "cloudfront_key_id"))
+                self.assertIsInstance(restored._cloudfront_lock, type(threading.Lock()))
+                # The rest of the configuration survives the round trip.
+                self.assertEqual(restored.custom_domain, "cdn.example.com")
+
+    @mock.patch("storages.backends.s3._cloud_front_signer_from_pem")
+    def test_restored_instance_can_be_reconfigured(self, from_pem):
+        from_pem.side_effect = lambda key_id, key: FakeCloudFrontSigner(key_id)
+        storage = s3.S3Storage(
+            cloudfront_key_id="key-id",
+            cloudfront_key=self.PEM_OLD,
+            custom_domain="cdn.example.com",
+        )
+        restored = pickle.loads(pickle.dumps(storage))
+        signer = FakeCloudFrontSigner("restored")
+        restored.update_cloudfront_config(signer=signer)
+        self.assertIn("Key-Pair-Id=restored", restored.url("x.txt"))
+
+
 class S3StaticStorageTests(TestCase):
     def setUp(self):
         self.storage = s3.S3StaticStorage()

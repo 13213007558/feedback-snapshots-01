@@ -9,6 +9,16 @@ General
 
 - Add support for Django 5.2
 
+S3
+--
+
+- Add ``S3Storage.update_cloudfront_config()`` to atomically rotate the
+  CloudFront signing key on a live storage instance.  Invalid or incomplete
+  configurations raise ``ImproperlyConfigured`` without changing the active
+  signer.
+- Do not serialize CloudFront key material (``cloudfront_key``,
+  ``cloudfront_key_id``) or the signer when pickling a storage instance.
+
 1.14.6 (2025-04-01)
 *******************
 
