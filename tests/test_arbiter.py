@@ -42,6 +42,42 @@ class ReloadableConfigApplication(DummyApplication):
             self.cfg.set(key, value)
 
 
+def _arbiter_with_policy(policy):
+    arbiter = gunicorn.arbiter.Arbiter(DummyApplication())
+    arbiter.log = mock.Mock()
+    arbiter.cfg.set("control_socket", "/tmp/gunicorn-test.ctl")
+    arbiter.cfg.set("control_socket_policy", policy)
+    return arbiter
+
+
+def test_control_server_gets_the_policy():
+    arbiter = _arbiter_with_policy({"monitor": ["*"]})
+    with mock.patch("gunicorn.ctl.server.ControlSocketServer") as server_cls:
+        server_cls.return_value.start = mock.Mock()
+        arbiter._start_control_server()
+    assert server_cls.call_args.kwargs["policy"] is not None
+    policy = server_cls.call_args.kwargs["policy"]
+    assert [role.name for role, _ in policy._assignments] == ["monitor"]
+
+
+def test_control_server_without_policy_stays_open():
+    arbiter = _arbiter_with_policy(None)
+    with mock.patch("gunicorn.ctl.server.ControlSocketServer") as server_cls:
+        server_cls.return_value.start = mock.Mock()
+        arbiter._start_control_server()
+    assert server_cls.call_args.kwargs["policy"] is None
+
+
+def test_policy_that_no_longer_resolves_does_not_start_the_server():
+    # Simulates a reload where a user named by the policy was removed.
+    arbiter = _arbiter_with_policy({"monitor": ["no-such-user-xyz"]})
+    with mock.patch("gunicorn.ctl.server.ControlSocketServer") as server_cls:
+        arbiter._start_control_server()
+    server_cls.assert_not_called()
+    assert arbiter._control_server is None
+    arbiter.log.warning.assert_called_once()
+
+
 @mock.patch('gunicorn.sock.close_sockets')
 def test_arbiter_stop_closes_listeners(close_sockets):
     arbiter = gunicorn.arbiter.Arbiter(DummyApplication())

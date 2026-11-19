@@ -1027,9 +1027,25 @@ class Arbiter:
         socket_path = self._get_control_socket_path()
         socket_mode = self.cfg.control_socket_mode
 
+        policy = None
+        if self.cfg.control_socket_policy:
+            from gunicorn.ctl.policy import ControlPolicy, PolicyError
+
+            # Config.validate() already rejected an invalid policy at
+            # startup. On a reload the users or groups it names may have gone
+            # away since, and failing closed keeps the socket shut.
+            try:
+                policy = ControlPolicy(self.cfg.control_socket_policy)
+            except PolicyError as e:
+                self.log.warning(
+                    "Control socket policy is invalid, refusing to start the "
+                    "control socket: %s", e)
+                self._control_server = None
+                return
+
         try:
             self._control_server = ControlSocketServer(
-                self, socket_path, socket_mode
+                self, socket_path, socket_mode, policy=policy
             )
             self._control_server.start()
         except Exception as e:

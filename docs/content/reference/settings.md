@@ -85,6 +85,55 @@ allows only the socket owner. Set to ``0660`` to allow group access.
 
 !!! info "Added in 25.1.0"
 
+### `control_socket_policy`
+
+**Default:**
+
+``None`` (policy disabled)
+
+Command policy for the control socket.
+
+By default the socket file mode is the only access check: anyone who
+can connect may run every command. Set this to a mapping from role to
+the users or groups that get it, and the arbiter checks each command
+against the connecting process, read from the Unix peer credentials.
+
+The built-in roles are:
+
+- ``monitor``: read-only. ``show workers``, ``show all``,
+  ``show dirty``, ``show stats``, ``show listeners`` and ``help``.
+  Replies are trimmed to liveness fields: worker pids, ages, boot
+  state, heartbeat age, listener addresses, counts and the arbiter
+  pid. Configuration, app import paths and file descriptors are
+  hidden.
+- ``operator``: every command, including ``reload``, ``reopen``,
+  ``shutdown``, and the ``worker`` and ``dirty`` management commands.
+
+A value is a user name, a group name prefixed with ``@``, a numeric
+uid, or ``*``. When a peer matches several roles, the more privileged
+one applies, so a monitor that is also an operator keeps the operator
+rights. A peer that matches no role is refused with
+``permission_denied`` and the command does not run. An unknown
+command still reports ``unknown_command``, so a client can tell the
+two apart.
+
+Example::
+
+    control_socket_policy = {
+        "monitor": ["@monitor"],
+        "operator": ["deploy", "@wheel"],
+    }
+
+The socket mode must still allow the connection: for group access,
+also set ``control_socket_mode`` to ``0o660`` and give the directory
+a searchable mode.
+
+``gunicornc`` reports a refusal as ``Permission denied: ...`` and
+exits with status 2 when run with ``-c``; scripts can also use the
+client library and read ``ControlClientError.code``.
+
+!!! info "Added in 27.1.0"
+
 ### `control_socket_disable`
 
 **Command line:** `--no-control-socket`

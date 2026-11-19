@@ -241,6 +241,62 @@ class TestControlClientSendCommand:
                 server_sock.close()
 
 
+class TestControlClientErrorCode:
+    """The client keeps the server's stable error code."""
+
+    def _call_with_reply(self, reply):
+        # A socketpair needs no socket file, so this runs where a test
+        # sandbox refuses bind().
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client = ControlClient("/nonexistent.sock", timeout=5.0)
+            client._sock = left
+            thread = threading.Thread(
+                target=self._reply_once, args=(right, reply))
+            thread.start()
+            try:
+                with pytest.raises(ControlClientError) as exc_info:
+                    client.send_command("show workers")
+            finally:
+                thread.join(timeout=2.0)
+            return exc_info.value
+        finally:
+            left.close()
+            right.close()
+
+    @staticmethod
+    def _reply_once(sock, reply):
+        try:
+            msg = ControlProtocol.read_message(sock)
+            reply["id"] = msg["id"]
+            ControlProtocol.write_message(sock, reply)
+        finally:
+            sock.close()
+
+    def test_permission_denied_code(self):
+        error = self._call_with_reply({
+            "status": "error",
+            "error": "Role 'monitor' may not run 'reload'",
+            "code": "permission_denied",
+        })
+        assert error.code == "permission_denied"
+
+    def test_unknown_command_code(self):
+        error = self._call_with_reply({
+            "status": "error",
+            "error": "Unknown command: frobnicate",
+            "code": "unknown_command",
+        })
+        assert error.code == "unknown_command"
+
+    def test_old_server_without_code(self):
+        error = self._call_with_reply({
+            "status": "error",
+            "error": "Unknown command",
+        })
+        assert error.code is None
+
+
 class TestParseCommand:
     """Tests for command parsing."""
 

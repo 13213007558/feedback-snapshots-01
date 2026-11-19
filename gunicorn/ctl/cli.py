@@ -130,7 +130,7 @@ def format_listeners(data: dict) -> str:
     for lnr in listeners:
         addr = lnr.get("address", "?")
         ltype = lnr.get("type", "?")
-        fd = lnr.get("fd", "?")
+        fd = lnr.get("fd", "-")
         lines.append(f"{addr:<40} {ltype:<8} {fd}")
 
     lines.append("")
@@ -293,6 +293,9 @@ def run_command(socket_path: str, command: str, json_output: bool = False) -> in
             return 0
 
     except ControlClientError as e:
+        if e.code == "permission_denied":
+            print(f"Permission denied: {e}", file=sys.stderr)
+            return 2
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -363,7 +366,10 @@ def run_interactive(socket_path: str, json_output: bool = False) -> int:
                     print(output)
 
             except ControlClientError as e:
-                print(f"Error: {e}")
+                if e.code == "permission_denied":
+                    print(f"Permission denied: {e}")
+                else:
+                    print(f"Error: {e}")
                 # Try to reconnect
                 try:
                     client.close()

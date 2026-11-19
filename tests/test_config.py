@@ -622,3 +622,66 @@ class TestGetDefaultControlSocket:
             result = _get_default_control_socket()
             assert result == os.path.join(tmpdir, '.gunicorn', 'gunicorn.ctl')
             assert result.endswith('.gunicorn/gunicorn.ctl')
+
+
+class TestControlSocketPolicySetting:
+    """Tests for control_socket_policy validation."""
+
+    def test_default_is_disabled(self):
+        c = config.Config()
+        assert c.control_socket_policy is None
+
+    def test_mapping_is_kept(self):
+        c = config.Config()
+        c.set("control_socket_policy", {
+            "monitor": ["@monitor"],
+            "operator": ["deploy", "@wheel"],
+        })
+        assert c.control_socket_policy == {
+            "monitor": ["@monitor"],
+            "operator": ["deploy", "@wheel"],
+        }
+
+    def test_none_disables(self):
+        c = config.Config()
+        c.set("control_socket_policy", None)
+        assert c.control_socket_policy is None
+
+    def test_non_mapping_rejected(self):
+        c = config.Config()
+        pytest.raises(TypeError, c.set, "control_socket_policy",
+                      ["monitor"])
+
+    def test_empty_mapping_rejected(self):
+        c = config.Config()
+        pytest.raises(ValueError, c.set, "control_socket_policy", {})
+
+    def test_bad_selector_type_rejected(self):
+        c = config.Config()
+        pytest.raises(TypeError, c.set, "control_socket_policy",
+                      {"monitor": [{}]})
+
+    def test_unknown_role_fails_config_validation(self):
+        c = config.Config()
+        c.set("control_socket_policy", {"watcher": ["root"]})
+        with pytest.raises(ConfigError, match="Unknown control socket role"):
+            c.validate()
+
+    def test_valid_policy_passes_config_validation(self):
+        c = config.Config()
+        c.set("control_socket_policy", {"monitor": ["*"]})
+        c.validate()
+
+    def test_unknown_user_fails_config_validation(self):
+        c = config.Config()
+        c.set("control_socket_policy", {"monitor": ["no-such-user-xyz"]})
+        with pytest.raises(ConfigError, match="No such user"):
+            c.validate()
+
+    def test_policy_loads_from_a_config_file(self, tmp_path):
+        path = tmp_path / "gunicorn.conf.py"
+        path.write_text(
+            "control_socket_policy = {'monitor': ['*']}\n")
+        with AltArgs(["prog_name", "-c", str(path)]):
+            app = NoConfigApp()
+        assert app.cfg.control_socket_policy == {"monitor": ["*"]}

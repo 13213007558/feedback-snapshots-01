@@ -4,15 +4,17 @@
 
 """Tests for control socket server."""
 
+import asyncio
 import os
 import tempfile
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gunicorn.ctl.server import ControlSocketServer
 from gunicorn.ctl.client import ControlClient
+from gunicorn.ctl.policy import ControlPolicy, PeerCredentials
 
 
 class MockWorker:
@@ -212,6 +214,81 @@ class TestControlSocketServerForkLeak:
             time.sleep(0.2)
             alive = [t for t in threads if t is not None and t.is_alive()]
             assert not alive, f"{len(alive)} control thread(s) leaked"
+
+
+class TestControlSocketServerPolicyWiring:
+    """The server checks the peer's role and trims replies."""
+
+    def _server(self, policy=None):
+        arbiter = MockArbiter()
+        arbiter.WORKERS = {1001: MockWorker(1001, 1)}
+        return arbiter, ControlSocketServer(
+            arbiter, "/nonexistent.sock", policy=policy)
+
+    def test_no_policy_leaves_dispatch_open(self):
+        _arbiter, server = self._server()
+        response = asyncio.run(server._dispatch(
+            {"id": 1, "command": "show workers"}, None))
+        assert response["status"] == "ok"
+        assert "aborted" in response["data"]["workers"][0]
+
+    def test_policy_denies_before_dispatch(self):
+        policy = ControlPolicy({"monitor": ["*"]})
+        _arbiter, server = self._server(policy)
+        with patch("gunicorn.ctl.handlers.os.kill") as kill:
+            response = asyncio.run(server._dispatch(
+                {"id": 1, "command": "reload"},
+                PeerCredentials(pid=1, uid=0, gid=0)))
+        assert response["status"] == "error"
+        assert response["code"] == "permission_denied"
+        kill.assert_not_called()
+
+    def test_policy_allows_operator(self):
+        policy = ControlPolicy({"operator": ["*"]})
+        _arbiter, server = self._server(policy)
+        with patch("gunicorn.ctl.handlers.os.kill") as kill:
+            response = asyncio.run(server._dispatch(
+                {"id": 1, "command": "reload"},
+                PeerCredentials(pid=1, uid=0, gid=0)))
+        assert response["status"] == "ok"
+        kill.assert_called_once()
+
+    def test_policy_trims_reads(self):
+        policy = ControlPolicy({"monitor": ["*"]})
+        _arbiter, server = self._server(policy)
+        response = asyncio.run(server._dispatch(
+            {"id": 1, "command": "show workers"},
+            PeerCredentials(pid=1, uid=0, gid=0)))
+        assert set(response["data"]["workers"][0]) == {
+            "pid", "age", "booted", "last_heartbeat"}
+
+    def test_policy_missing_credentials_denied(self):
+        policy = ControlPolicy({"monitor": ["*"]})
+        _arbiter, server = self._server(policy)
+        response = asyncio.run(server._dispatch(
+            {"id": 1, "command": "show workers"}, None))
+        assert response["code"] == "permission_denied"
+
+    def test_policy_does_not_leak_unknown_commands(self):
+        policy = ControlPolicy({"operator": ["*"]})
+        _arbiter, server = self._server(policy)
+        monitor = PeerCredentials(pid=1, uid=0, gid=0)
+        response = asyncio.run(server._dispatch(
+            {"id": 1, "command": "frobnicate"}, monitor))
+        assert response["code"] == "unknown_command"
+
+    def test_policy_denies_before_parsing_arguments(self):
+        policy = ControlPolicy({"monitor": ["*"]})
+        arbiter, server = self._server(policy)
+        worker = MockWorker(1001, 1)
+        arbiter.WORKERS = {1001: worker}
+        with patch("gunicorn.ctl.handlers.os.kill") as kill:
+            response = asyncio.run(server._dispatch(
+                {"id": 1, "command": "worker", "args": ["kill", "1001"]},
+                PeerCredentials(pid=1, uid=0, gid=0)))
+        assert response["code"] == "permission_denied"
+        kill.assert_not_called()
+        assert 1001 in arbiter.WORKERS
 
 
 class TestControlSocketServerIntegration:

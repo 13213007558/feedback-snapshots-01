@@ -132,6 +132,12 @@ class TestMakeErrorResponse:
         assert result["id"] == 1
         assert result["status"] == "error"
         assert result["error"] == "Unknown command"
+        assert "code" not in result
+
+    def test_make_error_response_with_code(self):
+        result = make_error_response(1, "denied", code="permission_denied")
+
+        assert result["code"] == "permission_denied"
 
 
 class TestControlProtocolSocket:

@@ -105,6 +105,13 @@ class Config:
                     "Warning: http_protocols includes h2 but there is no TLS "
                     "and http2_cleartext is off, so HTTP/2 will never be "
                     "negotiated.\n")
+        if self.control_socket_policy:
+            from gunicorn.ctl.policy import ControlPolicy, PolicyError
+
+            try:
+                ControlPolicy(self.control_socket_policy)
+            except PolicyError as e:
+                raise ConfigError("control_socket_policy: %s" % e) from None
 
     def get_cmd_args_from_env(self):
         if 'GUNICORN_CMD_ARGS' in self.env_orig:
@@ -3362,6 +3369,98 @@ class ControlSocketMode(Setting):
         allows only the socket owner. Set to ``0660`` to allow group access.
 
         .. versionadded:: 25.1.0
+        """
+
+
+def validate_control_socket_policy(val):
+    """Validate the control socket access policy mapping.
+
+    Accepts a dict mapping a role name to a list of user or group selectors:
+
+        control_socket_policy = {
+            "monitor": ["@monitor"],
+            "operator": ["deploy", "@wheel"],
+        }
+
+    A selector is a user name, a group name prefixed with ``@``, a numeric
+    uid, or ``*`` for any local user. Only the shape is checked here; the
+    role names and the users and groups they name are resolved once the
+    whole configuration is loaded, and again when the control socket starts.
+    """
+    if val is None:
+        return None
+    if not isinstance(val, dict):
+        raise TypeError("Value is not a dictionary: %s" % val)
+    if not val:
+        # An empty mapping would turn the policy on and match nobody, or be
+        # read as "disabled". Refuse it instead of guessing.
+        raise ValueError(
+            "control_socket_policy must name at least one role; use None to "
+            "disable the policy")
+    for role, selectors in val.items():
+        if not isinstance(role, str):
+            raise TypeError("Control socket role must be a string: %s" % role)
+        if isinstance(selectors, (str, int)):
+            continue
+        if not isinstance(selectors, (list, tuple)):
+            raise TypeError(
+                "Role %r must list users or groups: %s" % (role, selectors))
+        for selector in selectors:
+            if not isinstance(selector, (str, int)):
+                raise TypeError(
+                    "Invalid selector for role %r: %s" % (role, selector))
+    return val
+
+
+class ControlSocketPolicy(Setting):
+    name = "control_socket_policy"
+    section = "Control"
+    validator = validate_control_socket_policy
+    default = None
+    default_doc = "``None`` (policy disabled)"
+    desc = """\
+        Command policy for the control socket.
+
+        By default the socket file mode is the only access check: anyone who
+        can connect may run every command. Set this to a mapping from role to
+        the users or groups that get it, and the arbiter checks each command
+        against the connecting process, read from the Unix peer credentials.
+
+        The built-in roles are:
+
+        - ``monitor``: read-only. ``show workers``, ``show all``,
+          ``show dirty``, ``show stats``, ``show listeners`` and ``help``.
+          Replies are trimmed to liveness fields: worker pids, ages, boot
+          state, heartbeat age, listener addresses, counts and the arbiter
+          pid. Configuration, app import paths and file descriptors are
+          hidden.
+        - ``operator``: every command, including ``reload``, ``reopen``,
+          ``shutdown``, and the ``worker`` and ``dirty`` management commands.
+
+        A value is a user name, a group name prefixed with ``@``, a numeric
+        uid, or ``*``. When a peer matches several roles, the more privileged
+        one applies, so a monitor that is also an operator keeps the operator
+        rights. A peer that matches no role is refused with
+        ``permission_denied`` and the command does not run. An unknown
+        command still reports ``unknown_command``, so a client can tell the
+        two apart.
+
+        Example::
+
+            control_socket_policy = {
+                "monitor": ["@monitor"],
+                "operator": ["deploy", "@wheel"],
+            }
+
+        The socket mode must still allow the connection: for group access,
+        also set ``control_socket_mode`` to ``0o660`` and give the directory
+        a searchable mode.
+
+        ``gunicornc`` reports a refusal as ``Permission denied: ...`` and
+        exits with status 2 when run with ``-c``; scripts can also use the
+        client library and read ``ControlClientError.code``.
+
+        .. versionadded:: 27.1.0
         """
 
 

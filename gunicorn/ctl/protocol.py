@@ -17,7 +17,7 @@ Request Format:
 
 Response Format:
     {"id": 1, "status": "ok", "data": {...}}
-    {"id": 1, "status": "error", "error": "message"}
+    {"id": 1, "status": "error", "error": "message", "code": "reason"}
 """
 
 import json
@@ -206,19 +206,28 @@ def make_response(request_id: int, data: dict = None) -> dict:
     }
 
 
-def make_error_response(request_id: int, error: str) -> dict:
+def make_error_response(request_id: int, error: str, code: str = None) -> dict:
     """
     Create an error response message.
+
+    ``code`` is a stable machine-readable reason (``permission_denied``,
+    ``unknown_command``, ...) so a client can branch on the kind of failure
+    without reading the message text. It is omitted when the server has no
+    more specific reason than the message.
 
     Args:
         request_id: Request identifier being responded to
         error: Error message
+        code: Optional stable error code
 
     Returns:
         Error response dictionary
     """
-    return {
+    response = {
         "id": request_id,
         "status": "error",
         "error": error,
     }
+    if code is not None:
+        response["code"] = code
+    return response

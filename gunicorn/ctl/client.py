@@ -18,7 +18,15 @@ from gunicorn.ctl.protocol import (
 
 
 class ControlClientError(Exception):
-    """Control client error."""
+    """Control client error.
+
+    ``code`` is the server's stable error code when the server sent one
+    (``permission_denied``, ``unknown_command``, ...), otherwise None.
+    """
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class ControlClient:
@@ -83,7 +91,9 @@ class ControlClient:
             Response data dictionary
 
         Raises:
-            ControlClientError: If communication fails
+            ControlClientError: If communication fails, or the server refuses
+                the command (``permission_denied``) or does not know it
+                (``unknown_command``)
         """
         if not self._sock:
             self.connect()
@@ -99,7 +109,8 @@ class ControlClient:
             raise ControlClientError(f"Communication error: {e}")
 
         if response.get("status") == "error":
-            raise ControlClientError(response.get("error", "Unknown error"))
+            raise ControlClientError(response.get("error", "Unknown error"),
+                                     code=response.get("code"))
 
         return response.get("data", {})
 

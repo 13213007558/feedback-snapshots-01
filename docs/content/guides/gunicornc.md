@@ -184,6 +184,7 @@ gunicorn> quit
 |---------|----------|---------|-------------|
 | `control_socket` | `--control-socket` | `gunicorn.ctl` | Unix socket path |
 | `control_socket_mode` | `--control-socket-mode` | `0o600` | Socket file permissions |
+| `control_socket_policy` | none | `None` | Per-command access policy (opt-in) |
 | `control_socket_disable` | `--no-control-socket` | `False` | Disable control socket |
 
 ### Example Configuration
@@ -217,10 +218,11 @@ fi
 
 ## Security
 
-The control socket uses filesystem permissions for access control:
+### Socket permissions
+
+By default the socket uses filesystem permissions:
 
 - **Default mode**: `0o600` (owner only)
-- **No authentication**: Relies on filesystem permissions
 - **Unix socket only**: No TCP/remote access
 
 To allow group access:
@@ -234,6 +236,77 @@ To disable the control socket entirely:
 ```bash
 gunicorn --no-control-socket myapp:app
 ```
+
+File permissions say who may connect, not what they may do. Once a
+process can connect, the mode does not stop it from reloading or shutting
+down the server. For that, enable the command policy.
+
+### Command policy
+
+`control_socket_policy` maps a role to the users or groups that get it.
+The arbiter reads the Unix peer credentials of each connection and checks
+every command before it runs.
+
+```python
+# gunicorn.conf.py
+control_socket = "/var/run/gunicorn/myapp.ctl"
+control_socket_mode = 0o660
+
+control_socket_policy = {
+    # A monitoring process: liveness only.
+    "monitor": ["@monitor"],
+    # Operations staff: may reload and stop the server.
+    "operator": ["deploy", "@wheel"],
+}
+```
+
+The two built-in roles:
+
+| Role | May run | Reads |
+|------|---------|-------|
+| `monitor` | `show workers`, `show all`, `show dirty`, `show stats`, `show listeners`, `help` | Liveness fields only |
+| `operator` | every command | Every field |
+
+A monitor sees worker pids, ages, boot state and heartbeat age, listener
+addresses and counts, and the arbiter pid. It does not see `show config`,
+the import paths of dirty apps, `worker_pids`, socket file descriptors, or
+the `aborted` flag. Replies are trimmed on the server, so a field added to
+a handler later is not exposed to monitors until it is listed in the
+policy.
+
+A selector is a user name, a group name prefixed with `@`, a numeric uid,
+or `*` for any local user. When a process matches more than one role, the
+more privileged role applies.
+
+The policy matches the command, not its values: `worker kill 1234` is the
+`worker kill` command, so a role that may run it may pick any pid. A value
+cannot turn one command into another.
+
+A denied command returns `permission_denied` and is not executed, so a
+monitor cannot start a reload or signal a worker by guessing. A command
+that does not exist returns `unknown_command` for every role, so a client
+can tell the two apart:
+
+```console
+$ gunicornc -c "reload"
+Permission denied: Role 'monitor' may not run 'reload'
+$ echo $?
+2
+
+$ gunicornc -c "frobnicate"
+Error: Unknown command: frobnicate
+$ echo $?
+1
+```
+
+Scripts using the client library can read `ControlClientError.code`
+(`"permission_denied"` or `"unknown_command"`).
+
+The policy is checked after the command is identified and before the
+handler runs, and the socket mode still has to let the client connect. If
+the policy lists a role or a user that does not exist, the configuration
+is rejected at startup. A control socket with a policy has no anonymous
+access: a peer that matches no role can connect but can run nothing.
 
 ## Protocol
 
@@ -270,9 +343,14 @@ The control interface uses a JSON-based protocol with length-prefixed framing:
 {
   "id": 1,
   "status": "error",
-  "error": "Unknown command: foo"
+  "error": "Unknown command: foo",
+  "code": "unknown_command"
 }
 ```
+
+`code` is present when the server knows a stable reason. The two a
+policy-checked server sends are `permission_denied` and `unknown_command`;
+a client should branch on the code, not on the message text.
 
 ## Troubleshooting
 
@@ -292,8 +370,14 @@ Error: Connection refused
 Error: Permission denied
 ```
 
+Either the socket file is not reachable, or the command policy refused the
+command. When the policy refuses, `gunicornc` prints
+`Permission denied: Role '...' may not run '...'` and exits with status 2.
+
 - Check that you have read/write access to the socket file
 - The socket is created with mode `0o600` by default (owner only)
+- Check `control_socket_policy`: the connecting user must match a role, and
+  the role must list the command
 
 ### Socket not found
 

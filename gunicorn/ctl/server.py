@@ -19,13 +19,35 @@ import asyncio
 import os
 import shlex
 import threading
+from dataclasses import dataclass
 
 from gunicorn.ctl.handlers import CommandHandlers
+from gunicorn.ctl.policy import (
+    AccessDenied,
+    UnknownCommand,
+    peer_credentials,
+)
 from gunicorn.ctl.protocol import (
     ControlProtocol,
     make_response,
     make_error_response,
 )
+
+
+@dataclass
+class _ParsedCommand:
+    """A command identified before the access check.
+
+    ``canonical`` is the command identity the policy matches against: the
+    command and its fixed word (show target, worker action, dirty action,
+    known shutdown mode). Numeric or PID values and any trailing words are
+    not part of it, and are only read by the handler after the check.
+    """
+
+    name: str
+    action: object
+    args: list
+    canonical: str
 
 
 # Module-level tracking of active control server instances for fork handling.
@@ -77,7 +99,8 @@ class ControlSocketServer:
     automatically stops before fork and restarts after in the parent.
     """
 
-    def __init__(self, arbiter, socket_path, socket_mode=0o600):
+    def __init__(self, arbiter, socket_path, socket_mode=0o600,
+                 policy=None):
         """
         Initialize control socket server.
 
@@ -85,10 +108,13 @@ class ControlSocketServer:
             arbiter: The Gunicorn arbiter instance
             socket_path: Path for the Unix socket
             socket_mode: Permission mode for socket (default 0o600)
+            policy: Optional ControlPolicy. When set, every command is checked
+                against the role of the connecting peer before it runs.
         """
         self.arbiter = arbiter
         self.socket_path = socket_path
         self.socket_mode = socket_mode
+        self.policy = policy
 
         self.handlers = CommandHandlers(arbiter)
         self._server = None
@@ -252,6 +278,10 @@ class ControlSocketServer:
             reader: asyncio StreamReader
             writer: asyncio StreamWriter
         """
+        credentials = None
+        if self.policy is not None:
+            credentials = self._peer_credentials(
+                writer.get_extra_info('socket'))
         try:
             while self._running:
                 try:
@@ -269,8 +299,9 @@ class ControlSocketServer:
                     # Protocol error
                     break
 
-                # Process command
-                response = await self._dispatch(message)
+                # Process command. The peer credentials are read once per
+                # connection, before the first command.
+                response = await self._dispatch(message, credentials)
 
                 # Send response
                 await ControlProtocol.write_message_async(writer, response)
@@ -285,12 +316,26 @@ class ControlSocketServer:
             except Exception:
                 pass
 
-    async def _dispatch(self, message: dict) -> dict:
+    def _peer_credentials(self, sock):
+        """Return the peer credentials for a connected socket.
+
+        Split out so a test can supply a peer without switching to its uid.
+        """
+        return peer_credentials(sock)
+
+    async def _dispatch(self, message: dict, credentials=None) -> dict:  # pylint: disable=too-many-return-statements
         """
         Dispatch command to appropriate handler.
 
+        The command is parsed far enough to know whether it exists, then
+        checked against the policy, and only then executed. A denied command
+        never reaches a handler, so a monitor cannot cause a reload, a worker
+        kill or any other side effect by guessing.
+
         Args:
             message: Request message dict
+            credentials: PeerCredentials of the connection, or None when the
+                transport has no peer credentials
 
         Returns:
             Response dictionary
@@ -302,8 +347,11 @@ class ControlSocketServer:
         if not command:
             return make_error_response(request_id, "Empty command")
 
+        role = None
         try:
-            # Parse command (e.g., "show workers" or "worker add 2")
+            # Parse only far enough to identify the command (e.g.
+            # "show workers" or "worker add 2"). Argument values are checked
+            # in the handler, after the access check.
             parts = shlex.split(command)
             if args:
                 parts.extend(str(a) for a in args)
@@ -311,10 +359,24 @@ class ControlSocketServer:
             if not parts:
                 return make_error_response(request_id, "Empty command")
 
+            parsed = self._parse_command(parts)
+
+            if self.policy is not None:
+                role = self.policy.role_for(credentials)
+                self.policy.check(role, parsed.canonical)
+
             # Route to handler
-            result = self._execute_command(parts)
+            result = self._execute_command(parsed)
+
+            if self.policy is not None:
+                result = self.policy.filter_result(role, parsed.canonical, result)
+
             return make_response(request_id, result)
 
+        except AccessDenied as e:
+            return make_error_response(request_id, str(e), code=e.code)
+        except UnknownCommand as e:
+            return make_error_response(request_id, str(e), code=e.code)
         except ValueError as e:
             return make_error_response(request_id, f"Invalid argument: {e}")
         except Exception as e:
@@ -322,98 +384,86 @@ class ControlSocketServer:
                 self.arbiter.log.exception("Command error")
             return make_error_response(request_id, f"Command failed: {e}")
 
-    def _execute_command(self, parts: list) -> dict:  # pylint: disable=too-many-return-statements
+    def _parse_command(self, parts: list) -> "_ParsedCommand":  # pylint: disable=too-many-return-statements
         """
-        Execute a parsed command.
+        Identify a command without side effects.
 
-        Args:
-            parts: Command parts (e.g., ["show", "workers"])
-
-        Returns:
-            Handler result dictionary
+        Raises:
+            UnknownCommand: the command or one of its words does not exist
         """
         if not parts:
-            raise ValueError("Empty command")
+            raise UnknownCommand("Empty command")
 
         cmd = parts[0].lower()
         rest = parts[1:]
 
-        # Map commands to handlers
         if cmd == "show":
-            return self._handle_show(rest)
-        elif cmd == "worker":
-            return self._handle_worker(rest)
-        elif cmd == "dirty":
-            return self._handle_dirty(rest)
-        elif cmd == "reload":
-            return self.handlers.reload()
-        elif cmd == "reopen":
-            return self.handlers.reopen()
-        elif cmd == "shutdown":
+            if not rest:
+                raise UnknownCommand(
+                    "Missing show target "
+                    "(all|workers|dirty|config|stats|listeners)")
+            target = rest[0].lower()
+            if target not in ("all", "workers", "dirty", "config", "stats",
+                              "listeners"):
+                raise UnknownCommand(f"Unknown show target: {target}")
+            return _ParsedCommand(cmd, target, rest[1:], f"show {target}")
+        if cmd == "worker":
+            if not rest:
+                raise UnknownCommand("Missing worker action (add|remove|kill)")
+            action = rest[0].lower()
+            if action not in ("add", "remove", "kill"):
+                raise UnknownCommand(f"Unknown worker action: {action}")
+            return _ParsedCommand(cmd, action, rest[1:], f"{cmd} {action}")
+        if cmd == "dirty":
+            if not rest:
+                raise UnknownCommand("Missing dirty action (add|remove)")
+            action = rest[0].lower()
+            if action not in ("add", "remove"):
+                raise UnknownCommand(f"Unknown dirty action: {action}")
+            return _ParsedCommand(cmd, action, rest[1:], f"{cmd} {action}")
+        if cmd in ("reload", "reopen", "help"):
+            return _ParsedCommand(cmd, None, rest, cmd)
+        if cmd == "shutdown":
+            # An unknown mode was always treated as graceful; keep that, but
+            # let the policy match the bare command in that case.
             mode = rest[0] if rest else "graceful"
-            return self.handlers.shutdown(mode)
-        elif cmd == "help":
-            return self.handlers.help()
-        else:
-            raise ValueError(f"Unknown command: {cmd}")
+            canonical = ("shutdown %s" % mode
+                         if mode in ("graceful", "quick") else "shutdown")
+            return _ParsedCommand(cmd, mode, rest[1:], canonical)
+        raise UnknownCommand(f"Unknown command: {cmd}")
 
-    def _handle_show(self, args: list) -> dict:
-        """Handle 'show' commands."""
-        if not args:
-            raise ValueError("Missing show target (all|workers|dirty|config|stats|listeners)")
+    def _execute_command(self, parsed: "_ParsedCommand") -> dict:  # pylint: disable=too-many-return-statements
+        """Run a parsed command. Called only after the access check."""
+        cmd, action, args = parsed.name, parsed.action, parsed.args
 
-        target = args[0].lower()
-
-        if target == "all":
-            return self.handlers.show_all()
-        elif target == "workers":
-            return self.handlers.show_workers()
-        elif target == "dirty":
-            return self.handlers.show_dirty()
-        elif target == "config":
-            return self.handlers.show_config()
-        elif target == "stats":
-            return self.handlers.show_stats()
-        elif target == "listeners":
-            return self.handlers.show_listeners()
-        else:
-            raise ValueError(f"Unknown show target: {target}")
-
-    def _handle_worker(self, args: list) -> dict:
-        """Handle 'worker' commands."""
-        if not args:
-            raise ValueError("Missing worker action (add|remove|kill)")
-
-        action = args[0].lower()
-        action_args = args[1:]
-
-        if action == "add":
-            count = int(action_args[0]) if action_args else 1
-            return self.handlers.worker_add(count)
-        elif action == "remove":
-            count = int(action_args[0]) if action_args else 1
-            return self.handlers.worker_remove(count)
-        elif action == "kill":
-            if not action_args:
+        if cmd == "show":
+            return {
+                "all": self.handlers.show_all,
+                "workers": self.handlers.show_workers,
+                "dirty": self.handlers.show_dirty,
+                "config": self.handlers.show_config,
+                "stats": self.handlers.show_stats,
+                "listeners": self.handlers.show_listeners,
+            }[action]()
+        if cmd == "worker":
+            if action == "add":
+                count = int(args[0]) if args else 1
+                return self.handlers.worker_add(count)
+            if action == "kill" and not args:
                 raise ValueError("Missing PID for worker kill")
-            pid = int(action_args[0])
-            return self.handlers.worker_kill(pid)
-        else:
-            raise ValueError(f"Unknown worker action: {action}")
-
-    def _handle_dirty(self, args: list) -> dict:
-        """Handle 'dirty' commands."""
-        if not args:
-            raise ValueError("Missing dirty action (add|remove)")
-
-        action = args[0].lower()
-        action_args = args[1:]
-
-        if action == "add":
-            count = int(action_args[0]) if action_args else 1
-            return self.handlers.dirty_add(count)
-        elif action == "remove":
-            count = int(action_args[0]) if action_args else 1
+            if action == "remove":
+                count = int(args[0]) if args else 1
+                return self.handlers.worker_remove(count)
+            return self.handlers.worker_kill(int(args[0]))
+        if cmd == "dirty":
+            count = int(args[0]) if args else 1
+            if action == "add":
+                return self.handlers.dirty_add(count)
             return self.handlers.dirty_remove(count)
-        else:
-            raise ValueError(f"Unknown dirty action: {action}")
+        if cmd == "reload":
+            return self.handlers.reload()
+        if cmd == "reopen":
+            return self.handlers.reopen()
+        if cmd == "shutdown":
+            return self.handlers.shutdown(action)
+        return self.handlers.help()
