@@ -391,6 +391,10 @@ producing binaries that parse cleanly with LIEF and can be loaded into analysis 
 Binary Ninja). Synthesis is deterministic from report content only and does not need the stored
 buffer; it is not available for `cil` and `dalvik` reports. The feature is experimental: it works on
 well-formed reports but has not been hardened against pathological or adversarial inputs.
+`SmdaReport.synthesisProvenance()` returns a JSON-serializable manifest recording which address
+ranges of the output carry recovered bytes (per basic block, with content hashes) and which are
+newly generated structure, so a backend storing the result can keep the two apart — see
+[`SYNTHESIS.md`](SYNTHESIS.md) for the provenance model, the guarantees and the limitations.
 
 ## Development
 

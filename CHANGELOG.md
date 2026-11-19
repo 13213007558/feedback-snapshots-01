@@ -72,6 +72,22 @@ past roughly six lines it belongs in the PR the entry links.
 
 ### Added
 
+- **(synthesis)** Provenance manifest for synthesized binaries via `SmdaReport.synthesisProvenance()`
+  (also `smda.synthesis.buildProvenanceManifest`). A synthesized PE/ELF/Mach-O mixes recovered bytes
+  with generated structure, and a backend storing one had no way to tell them apart. The
+  JSON-serializable manifest enumerates every recovered range — per basic block (not per function
+  extent, since blocks are non-contiguous and the gaps are generated NOP fill), per referenced
+  string, and per import slot (recovered address, generated thunk content) — with content hashes an
+  independent reader can verify against the output; any byte outside the listed regions is
+  `default_origin: generated`. Same-address conflicts between blocks, impossible in a well-formed
+  report but constructible by hand, are recorded with the planting-order winner. The manifest is a
+  pure function of report content: it never mutates the report and, like synthesis itself, does not
+  consult the stored buffer, so `STORE_BUFFER` changes neither output. The provenance model, the
+  guarantees and what a synthesized file cannot prove about the original are documented in
+  `SYNTHESIS.md`. *Covered in `tests/testSynthesis.py`:* a one-function report with two basic
+  blocks separated by a data gap round-trips through PE and ELF synthesis with every manifest
+  region verified by an independent LIEF read and the gap reading as generated NOP fill.
+
 ### Changed
 
 ### Deprecated

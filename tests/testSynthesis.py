@@ -8,6 +8,7 @@ block because blocks of a function are not necessarily contiguous.
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -696,6 +697,124 @@ class SynthesisLayoutTestSuite(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SynthesisProvenanceTestSuite(unittest.TestCase):
+    """The provenance manifest records which synthesized bytes are recovered and which are
+    generated, so a backend storing the output can tell the two apart."""
+
+    # one function whose two basic blocks sit on either side of an unreachable data gap
+    TWO_BLOCK_CODE = bytes.fromhex("5589e5") + bytes.fromhex("eb08") + b"\x00" * 8 + bytes.fromhex("31c05dc3")
+    GAP_START = 0x1005
+    SECOND_BLOCK = 0x100D
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        string_config = SmdaConfig()
+        string_config.WITH_STRINGS = True
+        cls.pe_report = Disassembler(string_config).disassembleUnmappedBuffer(_load_xored_fixture("cutwail_xored"))
+
+    def _two_block_report(self):
+        return Disassembler(SmdaConfig()).disassembleBuffer(self.TWO_BLOCK_CODE, 0x1000, 32)
+
+    def test_two_separated_blocks_are_listed_and_verify_with_an_independent_reader(self):
+        report = self._two_block_report()
+        manifest = report.synthesisProvenance()
+        block_regions = [region for region in manifest["regions"] if region["origin"] == "recovered_block"]
+        self.assertEqual([region["va_start"] for region in block_regions], [0x1000, self.SECOND_BLOCK])
+        self.assertEqual(manifest["conflicts"], [])
+
+        for output_format in (FORMAT_PE, FORMAT_ELF):
+            with self.subTest(output_format=output_format):
+                parsed = lief.parse(report.synthesizeBinary(output_format=output_format))
+                for region in block_regions:
+                    content = bytes(parsed.get_content_from_virtual_address(region["va_start"], region["size"]))
+                    self.assertEqual(hashlib.sha256(content).hexdigest(), region["sha256"])
+
+    def test_the_gap_between_two_blocks_is_generated_not_recovered(self):
+        report = self._two_block_report()
+        manifest = report.synthesisProvenance()
+        recovered = [region for region in manifest["regions"] if region["origin"] == "recovered_block"]
+        for address in range(self.GAP_START, self.SECOND_BLOCK):
+            self.assertFalse(any(region["va_start"] <= address < region["va_end"] for region in recovered))
+
+        parsed = lief.parse(report.synthesizeBinary(output_format=FORMAT_PE))
+        gap = bytes(parsed.get_content_from_virtual_address(self.GAP_START, self.SECOND_BLOCK - self.GAP_START))
+        self.assertEqual(gap, b"\x90" * (self.SECOND_BLOCK - self.GAP_START))
+        self.assertEqual(manifest["default_origin"], "generated")
+
+    def test_synthesis_and_provenance_do_not_modify_the_report(self):
+        report = SmdaReport.fromDict(self.pe_report.toDict())
+        before = report.toDict()
+
+        report.synthesizeBinary()
+        report.synthesisProvenance()
+
+        self.assertEqual(report.toDict(), before)
+
+    def test_store_buffer_switch_changes_neither_synthesis_nor_provenance(self):
+        config_with = SmdaConfig()
+        config_with.STORE_BUFFER = True
+        config_without = SmdaConfig()
+        config_without.STORE_BUFFER = False
+        with_buffer = Disassembler(config_with).disassembleUnmappedBuffer(_load_xored_fixture("cutwail_xored"))
+        without_buffer = Disassembler(config_without).disassembleUnmappedBuffer(_load_xored_fixture("cutwail_xored"))
+        self.assertIsNotNone(with_buffer.buffer)
+        self.assertIsNone(without_buffer.buffer)
+
+        self.assertEqual(with_buffer.synthesizeBinary(), without_buffer.synthesizeBinary())
+        self.assertEqual(with_buffer.synthesisProvenance(), without_buffer.synthesisProvenance())
+
+    def test_a_same_address_conflict_is_recorded_and_the_last_planted_block_wins(self):
+        report_dict = json.loads(json.dumps(self._two_block_report().toDict()))
+        function = report_dict["xcfg"][str(0x1000)]
+        rival = copy.deepcopy(function)
+        rival["offset"] = 0x2000
+        rival["blocks"] = {str(0x1000): [[0x1000, "cc", "int3", ""]]}
+        rival["blockrefs"] = {str(0x1000): []}
+        report_dict["xcfg"][str(0x2000)] = rival
+        conflicted = SmdaReport.fromDict(report_dict)
+
+        manifest = conflicted.synthesisProvenance()
+
+        self.assertEqual(len(manifest["conflicts"]), 1)
+        conflict = manifest["conflicts"][0]
+        self.assertEqual((conflict["va_start"], conflict["va_end"]), (0x1000, 0x1001))
+        self.assertEqual(conflict["winner"], {"function_offset": 0x2000, "block_offset": 0x1000})
+        self.assertEqual(conflict["overwritten"], {"function_offset": 0x1000, "block_offset": 0x1000})
+        parsed = lief.parse(conflicted.synthesizeBinary(output_format=FORMAT_PE))
+        self.assertEqual(bytes(parsed.get_content_from_virtual_address(0x1000, 1)), b"\xcc")
+
+    def test_import_slots_are_recovered_addresses_with_generated_content(self):
+        manifest = self.pe_report.synthesisProvenance()
+        slots = [region for region in manifest["regions"] if region["origin"] == "import_slot"]
+
+        expected = {int(key) for key in self.pe_report.xmetadata["imported_functions"]}
+        self.assertEqual({region["va_start"] for region in slots}, expected)
+        self.assertTrue(all(region["content_origin"] == "generated" for region in slots))
+
+    def test_referenced_strings_are_listed_as_recovered_regions(self):
+        manifest = self.pe_report.synthesisProvenance()
+        strings = [region for region in manifest["regions"] if region["origin"] == "recovered_string"]
+
+        expected = {
+            stringref["data_addr"]
+            for smda_function in self.pe_report.getFunctions()
+            for stringref in smda_function.stringrefs or []
+        }
+        self.assertTrue(expected)
+        self.assertEqual({region["va_start"] for region in strings}, expected)
+
+    def test_the_manifest_is_json_serializable_for_backend_storage(self):
+        manifest = self.pe_report.synthesisProvenance()
+
+        round_tripped = json.loads(json.dumps(manifest))
+
+        self.assertEqual(round_tripped, manifest)
+        self.assertEqual(round_tripped["kind"], "smda.synthesis.provenance")
+        self.assertEqual(round_tripped["format_version"], 1)
+        self.assertEqual(round_tripped["default_origin"], "generated")
 
 
 class SynthesisSectionOverflowTestSuite(unittest.TestCase):

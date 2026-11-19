@@ -7,6 +7,7 @@ and import metadata so the output parses cleanly with analysis tools.
 
 from smda.common.BinaryFormat import FORMAT_ELF, FORMAT_MACHO, FORMAT_PE, sniffBinaryFormat
 from smda.synthesis.BinarySynthesizer import BinarySynthesizer
+from smda.synthesis.Provenance import buildProvenanceManifest as buildProvenanceManifest
 
 _FORMAT_ALIASES = {
     "pe": FORMAT_PE,

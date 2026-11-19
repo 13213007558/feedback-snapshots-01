@@ -333,6 +333,27 @@ class SmdaReport:
             function_offsets=function_offsets, with_imports=with_imports, with_strings=with_strings
         )
 
+    def synthesisProvenance(self, function_offsets=None, with_imports=True, with_strings=True) -> dict:
+        """Experimental: provenance manifest for the binary synthesizeBinary() would build.
+
+        Returns a JSON-serializable dict enumerating which address ranges of the
+        synthesized file carry recovered content (basic blocks, referenced strings,
+        import slot addresses) with content hashes for independent verification;
+        every byte outside the listed regions is newly generated structure. The
+        manifest is a pure function of report content: building it neither mutates
+        this report nor consults the stored buffer (STORE_BUFFER).
+        """
+        from smda.synthesis.Provenance import buildProvenanceManifest
+
+        if self.architecture in ("cil", "dalvik"):
+            raise NotImplementedError(f"binary synthesis is not supported for '{self.architecture}' reports")
+        missing = [field for field in ("base_addr", "binary_size", "bitness") if getattr(self, field) is None]
+        if missing:
+            raise ValueError(f"cannot synthesize a binary from a report without {', '.join(missing)}")
+        return buildProvenanceManifest(
+            self, function_offsets=function_offsets, with_imports=with_imports, with_strings=with_strings
+        )
+
     def getSection(self, offset):
         for section in self.code_sections:
             if section[1] <= offset < section[2]:

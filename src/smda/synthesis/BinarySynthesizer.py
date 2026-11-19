@@ -195,7 +195,7 @@ class BinarySynthesizer:
                 continue
         return import_map
 
-    def _iterStringRefs(self):
+    def _iterStringRefContents(self):
         strings = []
         for smda_function in self.report.getFunctions():
             for stringref in smda_function.stringrefs or []:
@@ -205,6 +205,10 @@ class BinarySynthesizer:
                     continue
                 encoding = "utf-8" if stringref.get("type") == "utf8" else "ascii"
                 strings.append((data_addr, string.encode(encoding, errors="ignore")))
+        return strings
+
+    def _iterStringRefs(self):
+        strings = self._iterStringRefContents()
         # Go and Rust literals are packed without separators, so a terminator can land on the first
         # byte of the next literal; terminators go first and the strings overwrite them
         for data_addr, content in strings:
