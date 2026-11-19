@@ -1,8 +1,11 @@
-from typing import Any, Callable, TypedDict
+from datetime import timedelta
+from typing import Any, Callable, TypedDict, Union
 
 JWKDict = dict[str, Any]
 
 HashlibHash = Callable[..., Any]
+
+MaxTokenAge = Union[float, timedelta]
 
 
 class SigOptions(TypedDict, total=False):
@@ -41,6 +44,11 @@ class Options(TypedDict, total=False):
     """Default: ``verify_signature``. Check that ``exp`` (expiration) claim value is in the future (if present in payload). """
     verify_iat: bool
     """Default: ``verify_signature``. Check that ``iat`` (issued at) claim value is an integer (if present in payload). """
+    max_token_age: MaxTokenAge | None
+    """Default: ``None``. Reject tokens whose ``iat`` (issued at) claim is older
+    than this many seconds. Enabling it also requires the ``iat`` claim to be
+    present and well-formed, and requires ``verify_iat`` to remain enabled.
+    Accepts a number of seconds or a ``datetime.timedelta``."""
     verify_iss: bool
     """Default: ``verify_signature``. Check that ``iss`` (issuer) claim matches ``issuer``. """
     verify_jti: bool
@@ -62,6 +70,7 @@ class FullOptions(TypedDict):
     verify_aud: bool
     verify_exp: bool
     verify_iat: bool
+    max_token_age: MaxTokenAge | None
     verify_iss: bool
     verify_jti: bool
     verify_nbf: bool

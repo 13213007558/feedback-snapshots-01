@@ -14,6 +14,17 @@ Changed
   ES256 tokens, including rejection of tampered payloads and signatures,
   in `#1211 <https://github.com/jpadilla/pyjwt/pull/1211>`__.
 
+Added
+~~~~~
+
+- Add an opt-in ``max_token_age`` decode option (also settable through
+  ``PyJWT(options={"max_token_age": ...})``) that bounds how old a token may
+  be, measured from its ``iat`` claim. Tokens without a usable ``iat`` raise
+  ``MissingIssuedAtError`` and tokens older than the limit raise
+  ``TokenTooOldError``, a subclass of ``ExpiredSignatureError``. The existing
+  ``leeway`` applies to the age boundary and to future ``iat`` values, and
+  the option requires ``verify_iat`` to remain enabled.
+
 `v2.15.1 <https://github.com/jpadilla/pyjwt/compare/2.15.0...2.15.1>`__
 -----------------------------------------------------------------------
 

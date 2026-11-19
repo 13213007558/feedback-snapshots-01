@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import warnings
 from calendar import timegm
@@ -18,7 +19,9 @@ from .exceptions import (
     InvalidIssuerError,
     InvalidJTIError,
     InvalidSubjectError,
+    MissingIssuedAtError,
     MissingRequiredClaimError,
+    TokenTooOldError,
 )
 from .warnings import RemovedInPyjwt3Warning
 
@@ -33,10 +36,13 @@ if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
 
     from .algorithms import AllowedPrivateKeys, AllowedPublicKeys
     from .api_jwk import PyJWK
-    from .types import FullOptions, Options, SigOptions
+    from .types import FullOptions, MaxTokenAge, Options, SigOptions
 
     AllowedPrivateKeyTypes: TypeAlias = Union[AllowedPrivateKeys, PyJWK, str, bytes]
     AllowedPublicKeyTypes: TypeAlias = Union[AllowedPublicKeys, PyJWK, str, bytes]
+
+
+_MAX_TOKEN_AGE_UNSET = object()
 
 
 class PyJWT:
@@ -55,6 +61,7 @@ class PyJWT:
             "verify_exp": True,
             "verify_nbf": True,
             "verify_iat": True,
+            "max_token_age": None,
             "verify_aud": True,
             "verify_iss": True,
             "verify_sub": True,
@@ -189,6 +196,7 @@ class PyJWT:
         issuer: str | Container[str] | None = None,
         subject: str | None = None,
         leeway: float | timedelta = 0,
+        max_token_age: MaxTokenAge | None | object = _MAX_TOKEN_AGE_UNSET,
         # kwargs
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -226,6 +234,11 @@ class PyJWT:
         :type issuer: str or typing.Container[str] or None
         :param leeway: a time margin in seconds for the expiration check
         :type leeway: float or datetime.timedelta
+        :param max_token_age: optional, the maximum age in seconds of a token,
+            measured from its ``iat`` (issued at) claim. Requires the ``iat``
+            claim to be present and rejects tokens older than this limit.
+            Accepts a number of seconds or a :py:class:`datetime.timedelta`.
+        :type max_token_age: float or datetime.timedelta or None
         :rtype: dict[str, typing.Any]
         :returns: Decoded JWT with the JOSE Header on the key ``header``, the JWS
          Payload on the key ``payload``, and the JWS Signature on the key ``signature``.
@@ -257,6 +270,11 @@ class PyJWT:
             )
 
         merged_options = self._merge_options(options)
+        if max_token_age is not _MAX_TOKEN_AGE_UNSET:
+            merged_options = {
+                **merged_options,
+                "max_token_age": cast("MaxTokenAge | None", max_token_age),
+            }
 
         sig_options: SigOptions = {
             "verify_signature": verify_signature,
@@ -318,6 +336,7 @@ class PyJWT:
         subject: str | None = None,
         issuer: str | Container[str] | None = None,
         leeway: float | timedelta = 0,
+        max_token_age: MaxTokenAge | None | object = _MAX_TOKEN_AGE_UNSET,
         # kwargs
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -356,6 +375,11 @@ class PyJWT:
         :type issuer: str or typing.Container[str] or None
         :param leeway: a time margin in seconds for the expiration check
         :type leeway: float or datetime.timedelta
+        :param max_token_age: optional, the maximum age in seconds of a token,
+            measured from its ``iat`` (issued at) claim. Requires the ``iat``
+            claim to be present and rejects tokens older than this limit.
+            Accepts a number of seconds or a :py:class:`datetime.timedelta`.
+        :type max_token_age: float or datetime.timedelta or None
         :rtype: dict[str, typing.Any]
         :returns: the JWT claims
         """
@@ -378,6 +402,7 @@ class PyJWT:
             subject=subject,
             issuer=issuer,
             leeway=leeway,
+            max_token_age=max_token_age,
         )
         return cast(dict[str, Any], decoded["payload"])
 
@@ -393,6 +418,12 @@ class PyJWT:
         if isinstance(leeway, timedelta):
             leeway = leeway.total_seconds()
 
+        max_token_age = self._normalize_max_token_age(options.get("max_token_age"))
+        if max_token_age is not None and not options["verify_iat"]:
+            raise ValueError("max_token_age requires verify_iat to be enabled")
+        if max_token_age is not None and payload.get("iat") is None:
+            raise MissingIssuedAtError()
+
         if audience is not None and not isinstance(audience, (str, Iterable)):
             raise TypeError("audience must be a string, iterable or None")
 
@@ -400,9 +431,11 @@ class PyJWT:
 
         now = datetime.now(tz=timezone.utc).timestamp()
 
-        if "iat" in payload and options["verify_iat"]:
+        if max_token_age is not None:
+            issued_at = self._validate_iat(payload, now, leeway)
+            self._validate_token_age(issued_at, now, leeway, max_token_age)
+        elif "iat" in payload and options["verify_iat"]:
             self._validate_iat(payload, now, leeway)
-
         if "nbf" in payload and options["verify_nbf"]:
             self._validate_nbf(payload, now, leeway)
 
@@ -472,7 +505,7 @@ class PyJWT:
         payload: dict[str, Any],
         now: float,
         leeway: float,
-    ) -> None:
+    ) -> int:
         try:
             iat = int(payload["iat"])
         except (ValueError, TypeError, OverflowError):
@@ -481,6 +514,38 @@ class PyJWT:
             ) from None
         if iat > (now + leeway):
             raise ImmatureSignatureError("The token is not yet valid (iat)")
+        return iat
+
+    @staticmethod
+    def _normalize_max_token_age(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, timedelta):
+            value = value.total_seconds()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(
+                "max_token_age must be a number of seconds, "
+                "a datetime.timedelta, or None"
+            )
+        seconds = float(value)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(
+                "max_token_age must be a finite, non-negative number of seconds"
+            )
+        return seconds
+
+    def _validate_token_age(
+        self,
+        issued_at: int,
+        now: float,
+        leeway: float,
+        max_token_age: float,
+    ) -> None:
+        # The iat claim is the other end of the validity window: the token is
+        # accepted for ``max_token_age`` seconds after it was issued, with the
+        # same leeway margin applied to the boundary as ``exp`` uses.
+        if issued_at <= (now - max_token_age - leeway):
+            raise TokenTooOldError(issued_at, max_token_age)
 
     def _validate_nbf(
         self,

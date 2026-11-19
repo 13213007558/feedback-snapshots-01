@@ -352,6 +352,50 @@ Issued At Claim (iat)
     >>> token = jwt.encode({"iat": 1371720939}, "secret")
     >>> token = jwt.encode({"iat": datetime.datetime.now(tz=timezone.utc)}, "secret")
 
+Maximum token age
+~~~~~~~~~~~~~~~~~
+
+Some endpoints need a shorter lifetime than the token's ``exp`` allows, for
+example an approval endpoint that only accepts credentials signed in the last
+few minutes. Pass ``max_token_age`` (seconds or a ``datetime.timedelta``) to
+bound the age of the token using its ``iat`` claim:
+
+.. code-block:: pycon
+
+    >>> import time
+    >>> now = int(time.time())
+    >>> token = jwt.encode({"iat": now, "exp": now + 3600}, "secret")
+    >>> # This endpoint accepts tokens issued no more than 5 minutes ago
+    >>> decoded = jwt.decode(
+    ...     token, "secret", algorithms=["HS256"], max_token_age=300
+    ... )
+    >>> decoded["iat"] == now
+    True
+
+The limit is exclusive and applies to the whole token, independent of ``exp``.
+A token whose age is exactly ``max_token_age`` is rejected. When enabled,
+``iat`` must be present and well-formed: a token without it raises
+``jwt.MissingIssuedAtError``, and a token older than the limit raises
+``jwt.TokenTooOldError`` (a subclass of ``jwt.ExpiredSignatureError``, so
+existing expired-token handling continues to reject it).
+
+The same ``leeway`` is used for the age boundary, the future ``iat`` check and
+``exp``, so a clock-skew allowance does not have to be repeated:
+
+.. code-block:: pycon
+
+    >>> jwt.decode(
+    ...     token, "secret", algorithms=["HS256"], max_token_age=300,
+    ...     leeway=datetime.timedelta(seconds=5),
+    ... )["iat"] == now
+    True
+
+``max_token_age`` can also be configured once per client with
+``PyJWT(options={"max_token_age": 300})``; passing ``max_token_age=None`` to a
+single ``decode`` call disables that policy for that call. It requires
+``verify_iat`` to stay enabled; combining the two is rejected instead of
+silently skipping the age check.
+
 Subject Claim (sub)
 ~~~~~~~~~~~~~~~~~~~
 

@@ -18,12 +18,14 @@ from .exceptions import (
     InvalidKeyError,
     InvalidSignatureError,
     InvalidTokenError,
+    MissingIssuedAtError,
     MissingRequiredClaimError,
     PyJWKClientConnectionError,
     PyJWKClientError,
     PyJWKError,
     PyJWKSetError,
     PyJWTError,
+    TokenTooOldError,
 )
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
@@ -69,10 +71,12 @@ __all__ = [
     "InvalidKeyError",
     "InvalidSignatureError",
     "InvalidTokenError",
+    "MissingIssuedAtError",
     "MissingRequiredClaimError",
     "PyJWKClientConnectionError",
     "PyJWKClientError",
     "PyJWKError",
     "PyJWKSetError",
     "PyJWTError",
+    "TokenTooOldError",
 ]

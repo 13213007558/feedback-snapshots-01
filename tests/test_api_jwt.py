@@ -24,7 +24,9 @@ from jwt.exceptions import (
     InvalidJTIError,
     InvalidSignatureError,
     InvalidSubjectError,
+    MissingIssuedAtError,
     MissingRequiredClaimError,
+    TokenTooOldError,
 )
 from jwt.utils import base64url_decode
 from jwt.warnings import RemovedInPyjwt3Warning
@@ -1246,3 +1248,251 @@ class TestJWT:
 
         with pytest.raises(InvalidTokenError, match="Unsupported critical extension"):
             jwt.decode(token, secret, algorithms=["HS256"])
+
+
+class TestMaxTokenAge:
+    SECRET = "secret"
+    ISSUED_AT = 1_700_000_000
+    MAX_AGE = 120
+    LEEWAY = 5
+
+    def _encode(self, clock: int, **claims: object) -> str:
+        payload: dict[str, object] = {"iat": self.ISSUED_AT, **claims}
+        return pyjwt.encode(payload, self.SECRET, algorithm="HS256")
+
+    @staticmethod
+    def _freeze(clock: int) -> mock.Mock:
+        frozen = datetime.fromtimestamp(clock, tz=timezone.utc)
+        return mock.patch(
+            "jwt.api_jwt.datetime",
+            mock.Mock(wraps=datetime, now=mock.Mock(return_value=frozen)),
+        )
+
+    def test_token_is_accepted_until_age_reaches_limit(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        # The limit is exclusive, like ``exp``: a token whose age is exactly
+        # max_token_age is no longer accepted. One second earlier it is.
+        for clock in (self.ISSUED_AT, self.ISSUED_AT + self.MAX_AGE - 1):
+            with self._freeze(clock):
+                decoded = pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE,
+                )
+            assert decoded["iat"] == self.ISSUED_AT
+
+    def test_token_is_rejected_at_and_past_boundary(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        for clock in (self.ISSUED_AT + self.MAX_AGE, self.ISSUED_AT + self.MAX_AGE + 1):
+            with self._freeze(clock):
+                with pytest.raises(TokenTooOldError) as exc:
+                    pyjwt.decode(
+                        token,
+                        self.SECRET,
+                        algorithms=["HS256"],
+                        max_token_age=self.MAX_AGE,
+                    )
+            assert exc.value.issued_at == self.ISSUED_AT
+            assert exc.value.max_token_age == self.MAX_AGE
+            # Existing expired-token handlers keep working.
+            assert isinstance(exc.value, ExpiredSignatureError)
+
+    def test_leeway_extends_age_boundary_consistently(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+        boundary = self.ISSUED_AT + self.MAX_AGE + self.LEEWAY
+
+        with self._freeze(boundary - 1):
+            pyjwt.decode(
+                token,
+                self.SECRET,
+                algorithms=["HS256"],
+                max_token_age=self.MAX_AGE,
+                leeway=self.LEEWAY,
+            )
+
+        with self._freeze(boundary):
+            with pytest.raises(TokenTooOldError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE,
+                    leeway=self.LEEWAY,
+                )
+
+    def test_leeway_is_shared_with_future_iat(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        # At now = iat - leeway the token is exactly at the immature boundary
+        # and accepted; one second earlier it is rejected.
+        with self._freeze(self.ISSUED_AT - self.LEEWAY):
+            pyjwt.decode(
+                token,
+                self.SECRET,
+                algorithms=["HS256"],
+                max_token_age=self.MAX_AGE,
+                leeway=self.LEEWAY,
+            )
+
+        with self._freeze(self.ISSUED_AT - self.LEEWAY - 1):
+            with pytest.raises(ImmatureSignatureError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE,
+                    leeway=self.LEEWAY,
+                )
+
+    def test_missing_iat_is_reported_separately(self) -> None:
+        token = pyjwt.encode({"exp": self.ISSUED_AT + 600}, self.SECRET)
+
+        with self._freeze(self.ISSUED_AT):
+            with pytest.raises(MissingIssuedAtError) as exc:
+                pyjwt.decode(
+                    token, self.SECRET, algorithms=["HS256"], max_token_age=self.MAX_AGE
+                )
+        assert not isinstance(exc.value, TokenTooOldError)
+        assert issubclass(MissingIssuedAtError, MissingRequiredClaimError)
+        assert exc.value.claim == "iat"
+
+    def test_max_token_age_accepts_timedelta(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE + 1):
+            with pytest.raises(TokenTooOldError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=timedelta(seconds=self.MAX_AGE),
+                )
+
+    def test_max_token_age_can_be_set_on_client_options(self) -> None:
+        client = PyJWT(options={"max_token_age": self.MAX_AGE})
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE + 1):
+            with pytest.raises(TokenTooOldError):
+                client.decode(token, self.SECRET, algorithms=["HS256"])
+
+        # An explicit per-call value overrides the client-wide policy, and
+        # None disables it for one call.
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE + 1):
+            with pytest.raises(TokenTooOldError):
+                client.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE // 2,
+                )
+            client.decode(token, self.SECRET, algorithms=["HS256"], max_token_age=None)
+        assert client.options["max_token_age"] == self.MAX_AGE
+
+    def test_per_call_max_token_age_applies_without_client_default(self) -> None:
+        client = PyJWT()
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE + 1):
+            with pytest.raises(TokenTooOldError):
+                client.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE,
+                )
+        assert client.options["max_token_age"] is None
+
+    def test_malformed_iat_is_not_reported_as_too_old(self) -> None:
+        token = self._encode(self.ISSUED_AT, iat="not-a-timestamp")
+
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE + 1):
+            with pytest.raises(InvalidIssuedAtError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=self.MAX_AGE,
+                )
+
+    def test_two_policies_on_the_same_client(self) -> None:
+        approval = PyJWT(options={"max_token_age": 60})
+        token = self._encode(self.ISSUED_AT)
+
+        # 60s approval policy and the client's own long-lived decode policy
+        # disagree on the same token at the same instant.
+        with self._freeze(self.ISSUED_AT + 61):
+            with pytest.raises(TokenTooOldError):
+                approval.decode(token, self.SECRET, algorithms=["HS256"])
+            approval.decode(
+                token,
+                self.SECRET,
+                algorithms=["HS256"],
+                max_token_age=self.MAX_AGE,
+            )
+
+    def test_max_token_age_can_be_passed_through_options(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT + self.MAX_AGE):
+            with pytest.raises(TokenTooOldError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    options={"max_token_age": timedelta(seconds=self.MAX_AGE)},
+                )
+
+    def test_max_token_age_requires_verify_iat(self) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT):
+            # Silently ignoring the age limit would turn a security policy
+            # into a no-op, so the combination is rejected.
+            with pytest.raises(ValueError, match="verify_iat"):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    options={"verify_iat": False},
+                    max_token_age=self.MAX_AGE,
+                )
+
+    def test_exp_still_reported_as_expired(self) -> None:
+        token = self._encode(self.ISSUED_AT, exp=self.ISSUED_AT + 30)
+
+        with self._freeze(self.ISSUED_AT + 31):
+            with pytest.raises(ExpiredSignatureError) as exc:
+                pyjwt.decode(
+                    token, self.SECRET, algorithms=["HS256"], max_token_age=self.MAX_AGE
+                )
+        assert not isinstance(exc.value, TokenTooOldError)
+
+    @pytest.mark.parametrize("value", [-1, -0.5, float("inf"), float("nan")])
+    def test_invalid_max_token_age_values_are_rejected(self, value: float) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT):
+            with pytest.raises(ValueError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=value,
+                )
+
+    @pytest.mark.parametrize("value", [True, "60", object()])
+    def test_non_numeric_max_token_age_is_rejected(self, value: object) -> None:
+        token = self._encode(self.ISSUED_AT)
+
+        with self._freeze(self.ISSUED_AT):
+            with pytest.raises(TypeError):
+                pyjwt.decode(
+                    token,
+                    self.SECRET,
+                    algorithms=["HS256"],
+                    max_token_age=value,
+                )

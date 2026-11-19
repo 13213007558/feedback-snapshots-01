@@ -56,6 +56,25 @@ class ImmatureSignatureError(InvalidTokenError):
     pass
 
 
+class TokenTooOldError(ExpiredSignatureError):
+    """Raised when a token's ``iat`` claim is older than the configured
+    ``max_token_age``.
+
+    This is a subclass of :py:class:`ExpiredSignatureError` so that callers
+    which already reject expired tokens keep rejecting tokens whose age limit
+    has been exceeded, while callers that need to tell the two apart can catch
+    this more specific type.
+    """
+
+    def __init__(self, issued_at: int, max_token_age: float) -> None:
+        self.issued_at = issued_at
+        self.max_token_age = max_token_age
+        super().__init__(
+            f"The token is too old (issued at {issued_at}, "
+            f"max token age {max_token_age:g} seconds)"
+        )
+
+
 class InvalidKeyError(PyJWTError):
     """Raised when the specified key is not in the proper format"""
 
@@ -77,6 +96,20 @@ class MissingRequiredClaimError(InvalidTokenError):
 
     def __str__(self) -> str:
         return f'Token is missing the "{self.claim}" claim'
+
+
+class MissingIssuedAtError(MissingRequiredClaimError):
+    """Raised when ``max_token_age`` is enabled but the token has no usable
+    ``iat`` (issued at) claim.
+
+    This is a subclass of :py:class:`MissingRequiredClaimError` with
+    ``claim`` set to ``"iat"``, so callers that already handle missing
+    required claims keep working, while callers that need to tell this case
+    apart from a token that is merely too old can catch this type.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("iat")
 
 
 class PyJWKError(PyJWTError):
