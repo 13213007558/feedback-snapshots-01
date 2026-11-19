@@ -113,6 +113,70 @@ last_otp_at = totp.verify("492039", after: user.last_otp_at) #=> nil
 # It fails to verify because we are still in the same 30s interval window
 ```
 
+### Atomic verify-and-consume adapter (`ROTP::Consumption`)
+
+`ROTP::TOTP#verify` only tells you whether a code is cryptographically valid.
+It does not stop two identical login requests from both passing, and storing a
+"last request timestamp" on the account is not enough: a clock that moves
+backwards reopens an interval, and an HOTP device has no wall clock at all.
+
+`ROTP::Consumption` is a small adapter that records the OTP's own position - a
+TOTP timecode or an HOTP counter - and lets that position move forward exactly
+once. Positions are keyed by `(account_id, authenticator_id)`, so multiple
+authenticators on one account keep independent state.
+
+```ruby
+require 'rotp/consumption'
+
+store    = ROTP::Consumption::MemoryStore.new # thread-safe, in-memory Store
+verifier = ROTP::Consumption::Verifier.new(store)
+totp     = ROTP::TOTP.new("base32secret3232")
+
+# 1. Verify without mutating anything. A wrong code returns :invalid and never
+#    touches the stored position.
+result = verifier.verify(account_id: "user-1", authenticator_id: "phone",
+                         otp: totp, code: totp.now)
+result.status # => :ok
+
+# 2. Commit the position through an explicit compare-and-swap. Wrapping the
+#    OTP commit and your own business write in one transaction means a failed
+#    business write rolls the OTP position back too, so the user can retry the
+#    same code instead of being locked out.
+store.transaction do
+  verifier.commit(result.pending)
+  create_login_session! # if this raises, the OTP position is rolled back
+end
+
+# A second request carrying the same code loses the compare-and-swap race.
+verifier.verify(account_id: "user-1", authenticator_id: "phone",
+                otp: totp, code: totp.now).status # => :replayed
+```
+
+Result statuses:
+
+- `:ok` - code matched (`verify`) or the position advanced (`commit`)
+- `:invalid` - code matched no accepted OTP; the position is unchanged
+- `:replayed` - a genuine code at or behind the already-consumed position
+- `:contended` - the compare-and-swap lost to a concurrent commit
+
+`MemoryStore` implements the `ROTP::Consumption::Store` contract (`get`,
+`compare_and_swap`, `transaction`). A real backend expresses the same contract
+with optimistic locking and no in-process mutex:
+
+```sql
+-- first login (expected version is nil -> the row must not exist)
+INSERT INTO otp_state (account_id, authenticator_id, kind, watermark, version)
+  VALUES (?, ?, 'totp', ?, 0) ON CONFLICT DO NOTHING;
+
+-- later logins: only succeeds while the version read by #get is unchanged
+UPDATE otp_state SET watermark = ?, version = version + 1
+  WHERE account_id = ? AND authenticator_id = ? AND version = ?;
+```
+
+A runnable walkthrough of the duplicate-request race, clock rollback, HOTP
+counter skip, and commit-failure rollback lives in
+[`examples/consumption_demo.rb`](examples/consumption_demo.rb).
+
 ### Verifying a Time based OTP with drift
 
 Some users may enter a code just after it has expired. By adding 'drift' you can allow
