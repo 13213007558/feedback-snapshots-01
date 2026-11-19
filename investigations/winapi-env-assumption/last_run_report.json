@@ -1,0 +1,86 @@
+{
+  "sample": {
+    "sha256": "0715bfda331d5a4312ebee53bcb3907a61952d56a18f7f5afd34eb1d19b1dd97",
+    "base_addr": 65536,
+    "bitness": 32,
+    "architecture": "intel"
+  },
+  "smda_version": "5.0.2",
+  "api_databases": {
+    "winxp_sp3": {
+      "path": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261116-backend-security-210-18/prepared-jobs/FB-20261116-SEC18-181/workspace/data/apiscout_winxp_prof_sp3.json",
+      "sha256": "f0da678e3dad8284cde07ea4313d57324f1bce06c35e72d1356975846150cced",
+      "os_name": "Microsoft Windows XP Professional",
+      "os_version": "5.1.2600 Service Pack 3 Build 2600"
+    },
+    "win7_sp1": {
+      "path": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261116-backend-security-210-18/prepared-jobs/FB-20261116-SEC18-181/workspace/data/apiscout_win7_prof-n_sp1.json",
+      "sha256": "5c9d170c9d4731cd57bc4bfaa16d407aa5bfab5cab57c0140f6e44dbf52e9160",
+      "os_name": "Microsoft Windows 7 Professional N",
+      "os_version": "6.1.7601 Service Pack 1 Build 7601"
+    }
+  },
+  "call_sites": [
+    {
+      "instruction_offset": 65539,
+      "raw_target": 2014838928,
+      "candidates": {
+        "winxp_sp3": [
+          "msvcr80.dll_0x78130000!strncat"
+        ],
+        "win7_sp1": [
+          "msvcr80.dll_0x78130000!strncat",
+          "msvcr80.dll_0x78130000!_execle"
+        ]
+      },
+      "resolved_per_config": {
+        "unconfigured": null,
+        "target_matched_winxp_sp3": "msvcr80.dll_0x78130000!strncat",
+        "near_version_win7_sp1": "msvcr80.dll_0x78130000!_execle",
+        "both_unpinned_win7_first": "msvcr80.dll_0x78130000!_execle",
+        "both_unpinned_winxp_first": "msvcr80.dll_0x78130000!strncat"
+      }
+    },
+    {
+      "instruction_offset": 65544,
+      "raw_target": 2088770088,
+      "candidates": {
+        "winxp_sp3": [
+          "kernel32.dll_0x7c800000!CreateFileA"
+        ],
+        "win7_sp1": []
+      },
+      "resolved_per_config": {
+        "unconfigured": null,
+        "target_matched_winxp_sp3": "kernel32.dll_0x7c800000!CreateFileA",
+        "near_version_win7_sp1": null,
+        "both_unpinned_win7_first": "kernel32.dll_0x7c800000!CreateFileA",
+        "both_unpinned_winxp_first": "kernel32.dll_0x7c800000!CreateFileA"
+      }
+    },
+    {
+      "instruction_offset": 65549,
+      "raw_target": 2014642176,
+      "candidates": {
+        "winxp_sp3": [
+          "msvcr80.dll_0x78130000!strrchr"
+        ],
+        "win7_sp1": [
+          "msvcr80.dll_0x78130000!strrchr"
+        ]
+      },
+      "resolved_per_config": {
+        "unconfigured": null,
+        "target_matched_winxp_sp3": "msvcr80.dll_0x78130000!strrchr",
+        "near_version_win7_sp1": "msvcr80.dll_0x78130000!strrchr",
+        "both_unpinned_win7_first": "msvcr80.dll_0x78130000!strrchr",
+        "both_unpinned_winxp_first": "msvcr80.dll_0x78130000!strrchr"
+      }
+    }
+  ],
+  "call_edges": {
+    "0x00010003": "0x78180090",
+    "0x00010008": "0x7c801a28",
+    "0x0001000d": "0x78150000"
+  }
+}
