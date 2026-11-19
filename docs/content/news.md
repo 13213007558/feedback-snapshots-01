@@ -1,6 +1,19 @@
 <span id="news"></span>
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- Access log redaction: `access_log_redact` selects the fields the access log
+  may write, by atom (`u`, `q`, `U`, `r` ...) or by name (a request or
+  response header, an environment variable, a query parameter), so an
+  application can choose its own `access_log_format` without deciding what
+  may be recorded. Credentials such as `Authorization`, `Cookie` and any
+  field named like a token or a password are always redacted. The same rules
+  apply to the WSGI and ASGI workers, and to every named field in a custom
+  format; the request and response the application handles are unchanged.
+
 ## 27.0.1 - 2026-11-12
 
 ### Bug Fixes

@@ -587,6 +587,44 @@ Use lowercase for header and environment variable names, and put
 
     %({x-forwarded-for}i)s
 
+### `access_log_redact`
+
+**Command line:** `--access-log-redact FIELDS`
+
+**Default:** `[]`
+
+Fields to redact in the access log, in addition to the credentials
+that are always redacted.
+
+The access log format is chosen by the application, so the fields
+it writes are not known in advance. This setting selects them by
+atom or by name: a standard atom from the ``access_log_format``
+table (``u``, ``q``, ``U``, ``r`` ...), a request header, response
+header, environment variable or query parameter name
+(``authorization``, ``x-api-key``, ``remote-addr`` ...), or an
+explicit custom atom (``{authorization}i``, ``{set-cookie}o``).
+
+Names cover every format that reaches the field, so ``authorization``
+redacts ``{authorization}i``, ``{http_authorization}e`` and the ``u``
+atom decoded from it. Selecting a field also selects the fields
+derived from it: the query string covers the request line and any
+URI data, and one duration atom covers all four.
+
+Credential-bearing headers are always redacted, whatever this
+setting says: ``Authorization``, ``Cookie``, ``Proxy-Authorization``
+and any header, environment variable or query parameter whose name
+contains a token such as ``token``, ``secret``, ``session``,
+``password`` or ``api-key``. A query string keeps its parameter
+names and non-sensitive values; only the selected and sensitive
+values become ``[REDACTED]``.
+
+The request the application receives is not changed: environ and
+scope still carry the original values. The same rules apply to every
+worker, WSGI and ASGI alike, and to every named field in a custom
+format.
+
+!!! info "Added in 27.0.2"
+
 ### `errorlog`
 
 **Command line:** `--error-logfile FILE`, `--log-file FILE`

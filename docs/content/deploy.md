@@ -404,4 +404,28 @@ kill -USR1 $(cat /var/run/gunicorn.pid)
     Gunicorn's error log should capture Gunicorn-related messages only. Route your
     application logs separately.
 
+### Access log redaction
+
+The access log format is chosen by the application, so the fields it can
+write are not known to the server in advance. Set
+[`access_log_redact`](reference/settings.md#access_log_redact) to limit them:
+it takes standard atoms (`u`, `q`, `U`, `r` ...) and header, environment
+variable or query parameter names, and applies whichever way a format names
+the field.
+
+```bash
+gunicorn --access-log-redact=u,q,x-api-key app:app
+```
+
+```text
+[REDACTED] [REDACTED] /items [REDACTED] 200 512
+```
+
+Credentials are redacted without configuration: `Authorization`, `Cookie`,
+`Proxy-Authorization`, and any header, environment variable or query
+parameter named like a token, a secret or a password. A query string keeps
+its parameter names and non-sensitive values, so the log still shows which
+endpoint was called. The request and response the application handles are not
+changed; only the log line is.
+
 

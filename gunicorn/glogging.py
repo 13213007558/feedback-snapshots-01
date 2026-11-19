@@ -17,6 +17,7 @@ import threading
 import traceback
 
 from gunicorn import util
+from gunicorn.accesslog import AccessLogRedactor
 
 
 # syslog facility codes
@@ -190,6 +191,7 @@ class Logger:
         self.logfile = None
         self.lock = threading.Lock()
         self.cfg = cfg
+        self._access_log_redactor = None
         self.setup(cfg)
 
     def setup(self, cfg):
@@ -198,6 +200,10 @@ class Logger:
         self.cfg = cfg
         # Read on every request; recomputed here, which a config reload runs.
         self._access_log_enabled = self._compute_access_log_enabled()
+        # Built once per configuration; the policy is the same for every
+        # request, WSGI and ASGI alike.
+        self._access_log_redactor = AccessLogRedactor(
+            getattr(cfg, "access_log_redact", ()))
         self.loglevel = self.LOG_LEVELS.get(cfg.loglevel.lower(), logging.INFO)
         self.error_log.setLevel(self.loglevel)
         self.access_log.setLevel(logging.INFO)
@@ -380,12 +386,15 @@ class Logger:
         if not self.access_log_enabled:
             return
 
+        atoms = self.atoms(resp, req, environ, request_time)
+        redactor = self._access_log_redactor
+        if redactor is not None:
+            atoms = redactor.redact(atoms)
+
         # wrap atoms:
         # - make sure atoms will be test case insensitively
         # - if atom doesn't exist replace it by '-'
-        safe_atoms = self.atoms_wrapper_class(
-            self.atoms(resp, req, environ, request_time)
-        )
+        safe_atoms = self.atoms_wrapper_class(atoms)
 
         try:
             self.access_log.info(self.cfg.access_log_format, safe_atoms)
