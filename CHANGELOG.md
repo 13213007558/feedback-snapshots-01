@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- `doubleratchet.associated_data`, a versioned, length-delimited associated data contract that binds the
+  session identity, message direction, application data, and all three header fields into the AEAD input
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed

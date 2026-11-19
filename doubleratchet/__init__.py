@@ -5,6 +5,16 @@ from .aead import (
     AuthenticationFailedException as AuthenticationFailedException,
     DecryptionFailedException as DecryptionFailedException
 )
+from .associated_data import (
+    AssociatedDataError as AssociatedDataError,
+    DecodedAssociatedData as DecodedAssociatedData,
+    Direction as Direction,
+    SessionContext as SessionContext,
+    build_associated_data as build_associated_data,
+    decode_associated_data as decode_associated_data,
+    encode_associated_data as encode_associated_data,
+    encode_session_context as encode_session_context
+)
 from .diffie_hellman_ratchet import (
     DiffieHellmanRatchet as DiffieHellmanRatchet,
     DoSProtectionException as DoSProtectionException,

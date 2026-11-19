@@ -222,14 +222,29 @@ class DoubleRatchet(ABC):
     @abstractmethod
     def _build_associated_data(associated_data: bytes, header: Header) -> bytes:
         """
+        Build the AEAD associated data for one message.
+
+        The default implementation does not exist: concatenating the fields in an ad-hoc order is not a
+        unique encoding. Different (associated data, header) pairs can produce the same bytes when a
+        variable-length field is not separated from its neighbour. Use
+        :func:`doubleratchet.associated_data.build_associated_data` unless the application has its own
+        versioned, length-delimited format.
+
         Args:
-            associated_data: The associated data to prepend to the output. If the associated data is not
-                guaranteed to be a parseable byte sequence, a length value should be prepended to ensure that
-                the output is parseable as a unique pair (associated data, header).
-            header: The message header to encode in a unique, reversible manner.
+            associated_data: The application-provided value. When using the canonical contract, this is the
+                value returned by :func:`doubleratchet.associated_data.encode_associated_data`; that function
+                binds the session identity, the message direction, and the application data. Do not pass
+                arbitrary concatenations of session fields here: the AEAD cannot recover field boundaries
+                that were lost before it was called.
+            header: The message header. All three fields must be authenticated, including
+                ``previous_sending_chain_length``. If the header is encoded by concatenation, prefix each
+                variable-length field with its length and encode fixed-width integers explicitly.
 
         Returns:
-            A byte sequence encoding the associated data and the header in a unique, reversible way.
+            A byte sequence encoding the associated data and the header in a unique, reversible way. The
+            value must be prefix-free: some AEAD implementations append the ciphertext to the associated
+            data without a separator, so a value that is a prefix of another value would allow moving
+            ciphertext bytes into the associated data.
         """
 
     #################
