@@ -1,3 +1,9 @@
+=== master
+
+* Defer clearing the session until after the transaction commits when closing accounts, so a failed close transaction no longer logs out the session while leaving the account open
+
+* Do not issue a new remember key when clearing tokens for a closed account in the remember feature
+
 === 2.51.0 (2026-11-17)
 
 * Disallow submission of webauthn challenge more than 10 minutes after challenge provided by default (jeremyevans)

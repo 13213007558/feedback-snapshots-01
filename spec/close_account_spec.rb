@@ -162,6 +162,143 @@ describe 'Rodauth close_account feature' do
     end
   end
 
+  it "should revoke all browser sessions and remember logins when closing account" do
+    rodauth do
+      enable :login, :close_account, :remember, :active_sessions
+      hmac_secret '123'
+      close_account_redirect '/login'
+    end
+    roda do |r|
+      r.rodauth
+      rodauth.load_memory
+      r.get('protected'){rodauth.require_account; "Logged In"}
+      r.root{rodauth.logged_in? ? "Logged In" : "Not Logged In"}
+    end
+
+    # First browser session
+    login
+    page.body.must_include "Logged In"
+    session1 = get_cookie('rack.session')
+
+    # Second browser session
+    remove_cookie('rack.session')
+    login
+    page.body.must_include "Logged In"
+    session2 = get_cookie('rack.session')
+
+    # Third browser with a saved remember login
+    remove_cookie('rack.session')
+    login
+    visit '/remember'
+    choose 'Remember Me'
+    click_button 'Change Remember Setting'
+    remember_cookie = get_cookie('_remember')
+    remove_cookie('rack.session')
+    visit '/'
+    page.body.must_include "Logged In"
+
+    DB[:accounts].select_map(:status_id).must_equal [2]
+    DB[:account_remember_keys].count.must_equal 1
+    DB[:account_active_session_keys].count.must_be(:>=, 3)
+
+    # Close the account from the remember-authenticated browser
+    visit '/close-account'
+    fill_in 'Password', :with=>'0123456789'
+    click_button 'Close Account'
+    page.current_path.must_equal '/login'
+
+    DB[:accounts].select_map(:status_id).must_equal [3]
+    DB[:account_remember_keys].count.must_equal 0
+    DB[:account_active_session_keys].count.must_equal 0
+
+    # The first browser session is blocked
+    set_cookie('rack.session', session1)
+    visit '/protected'
+    page.current_path.must_equal '/login'
+    visit '/'
+    page.body.must_include "Not Logged In"
+
+    # The second browser session is blocked
+    set_cookie('rack.session', session2)
+    visit '/protected'
+    page.current_path.must_equal '/login'
+    visit '/'
+    page.body.must_include "Not Logged In"
+
+    # The saved remember login no longer authenticates
+    remove_cookie('rack.session')
+    set_cookie('_remember', remember_cookie)
+    visit '/'
+    page.body.must_include "Not Logged In"
+    visit '/protected'
+    page.current_path.must_equal '/login'
+  end
+
+  it "should not close account or clear sessions and remember logins if the close transaction fails" do
+    session_value_at_failure = nil
+    rodauth do
+      enable :login, :close_account, :remember, :active_sessions
+      hmac_secret '123'
+    end
+    roda do |r|
+      rodauth.define_singleton_method(:clear_tokens) do |reason|
+        super(reason)
+        if reason == :close_account
+          session_value_at_failure = session_value()
+          raise StandardError, "simulated close transaction failure"
+        end
+      end
+      r.rodauth
+      rodauth.load_memory
+      r.get('protected'){rodauth.require_account; "Logged In"}
+      r.root{rodauth.logged_in? ? "Logged In" : "Not Logged In"}
+    end
+
+    # First browser session
+    login
+    page.body.must_include "Logged In"
+    session1 = get_cookie('rack.session')
+
+    # Second browser with a saved remember login
+    remove_cookie('rack.session')
+    login
+    visit '/remember'
+    choose 'Remember Me'
+    click_button 'Change Remember Setting'
+    remember_cookie = get_cookie('_remember')
+    remove_cookie('rack.session')
+    visit '/'
+    page.body.must_include "Logged In"
+
+    DB[:accounts].select_map(:status_id).must_equal [2]
+    DB[:account_remember_keys].count.must_equal 1
+    active_sessions = DB[:account_active_session_keys].count
+    active_sessions.must_be(:>=, 2)
+
+    # The close transaction fails, so nothing must be left half closed
+    set_cookie('rack.session', session1)
+    visit '/close-account'
+    fill_in 'Password', :with=>'0123456789'
+    proc{click_button 'Close Account'}.must_raise StandardError
+
+    # The session must not have been cleared before the transaction failed
+    session_value_at_failure.must_equal DB[:accounts].get(:id)
+
+    DB[:accounts].select_map(:status_id).must_equal [2]
+    DB[:account_remember_keys].count.must_equal 1
+    DB[:account_active_session_keys].count.must_equal active_sessions
+
+    # The session used to attempt the close is still accepted
+    visit '/protected'
+    page.body.must_include "Logged In"
+
+    # The saved remember login still authenticates
+    remove_cookie('rack.session')
+    set_cookie('_remember', remember_cookie)
+    visit '/protected'
+    page.body.must_include "Logged In"
+  end
+
   it "should support closing accounts using an internal request" do
     rodauth do
       enable :login, :logout, :close_account, :internal_request

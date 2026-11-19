@@ -182,7 +182,7 @@ module Rodauth
     def clear_tokens(reason)
       super
       remove_remember_key
-      remember_login if logged_in? && logged_in_via_remember_key?
+      remember_login if reason != :close_account && logged_in? && logged_in_via_remember_key?
     end
 
     private

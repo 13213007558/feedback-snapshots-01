@@ -2,6 +2,12 @@
 
 The close account feature allows users to close their accounts.
 
+Closing an account runs in a transaction that updates the account status and
+revokes the credentials of all enabled features (such as remember keys, active
+sessions, and email-based tokens).  The current session is only cleared after
+the transaction commits, so if closing the account fails, the account status,
+the current session, and any saved remember logins are all left unchanged.
+
 == Auth Value Methods
 
 account_closed_status_value :: The integer representing closed accounts.
