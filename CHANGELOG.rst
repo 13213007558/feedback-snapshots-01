@@ -9,6 +9,15 @@ General
 
 - Add support for Django 5.2
 
+S3
+--
+
+- Add an optional ``capabilities`` declaration (``AWS_S3_CAPABILITIES``) to
+  restrict a storage alias to ``open``, ``list``, ``url`` and/or ``modify``
+  operations. Denied operations raise ``OperationNotAllowed`` before any
+  backend request is made, and ``location`` continues to confine object names
+  to the alias root.
+
 1.14.6 (2025-04-01)
 *******************
 

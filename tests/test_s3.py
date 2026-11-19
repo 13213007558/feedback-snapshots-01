@@ -16,6 +16,7 @@ from botocore.config import Config as ClientConfig
 from botocore.exceptions import ClientError
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import SuspiciousOperation
 from django.core.files.base import ContentFile
 from django.core.files.base import File
 from django.test import TestCase
@@ -23,7 +24,9 @@ from django.test import override_settings
 from django.utils.timezone import is_aware
 from moto import mock_aws
 
+from storages import capabilities as s3_capabilities
 from storages.backends import s3
+from storages.exceptions import OperationNotAllowed
 from tests.utils import NonSeekableContentFile
 
 
@@ -1206,3 +1209,152 @@ class TestBackwardsNames(TestCase):
         from storages.backends.s3boto3 import S3Boto3StorageFile  # noqa
         from storages.backends.s3boto3 import S3ManifestStaticStorage  # noqa
         from storages.backends.s3boto3 import S3StaticStorage  # noqa
+
+
+@mock_aws
+class S3StorageCapabilitiesTests(TestCase):
+    """
+    Two aliases against the same bucket: a read-only query alias rooted at
+    ``archive`` and a maintenance alias with full access.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.maintenance = s3.S3Storage()
+        self.bucket = self.maintenance.connection.Bucket(
+            settings.AWS_STORAGE_BUCKET_NAME
+        )
+        self.bucket.create()
+        self.bucket.put_object(Key="archive/report.txt", Body=b"report")
+        self.bucket.put_object(Key="archive/nested/data.txt", Body=b"nested")
+        self.bucket.put_object(Key="private/secret.txt", Body=b"secret")
+
+        self.reader = s3.S3Storage(
+            location="archive",
+            capabilities=s3_capabilities.StorageCapabilities.read_only(),
+        )
+
+    def test_read_only_alias_reads_and_lists(self):
+        with self.reader.open("report.txt") as f:
+            self.assertEqual(f.read(), b"report")
+
+        # The canonical object is the same one the maintenance alias sees.
+        self.assertEqual(
+            self.bucket.Object("archive/report.txt").get()["Body"].read(), b"report"
+        )
+
+        self.assertTrue(self.reader.exists("report.txt"))
+        self.assertEqual(self.reader.size("report.txt"), 6)
+        self.assertEqual(self.reader.listdir(""), (["nested"], ["report.txt"]))
+        self.assertEqual(self.reader.listdir("nested"), ([], ["data.txt"]))
+
+    def test_read_only_alias_generates_urls(self):
+        url = self.reader.url("report.txt")
+        self.assertIn("archive/report.txt", url)
+        self.assertIn("Signature=", url)
+
+    def test_read_only_alias_denies_modify_without_backend_request(self):
+        client = self.maintenance.connection.meta.client
+        with mock.patch.object(
+            client, "delete_object", side_effect=AssertionError("backend called")
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                self.reader.delete("report.txt")
+
+        with mock.patch.object(
+            client, "put_object", side_effect=AssertionError("backend called")
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                self.reader.save("new.txt", ContentFile(b"new"))
+
+        with self.assertRaises(OperationNotAllowed):
+            self.reader.open("new.txt", "wb")
+
+        # The maintenance alias is unaffected.
+        self.maintenance.delete("archive/report.txt")
+        self.assertFalse(self.maintenance.exists("archive/report.txt"))
+
+    def test_read_only_alias_cannot_presign_uploads(self):
+        with mock.patch.object(
+            self.maintenance.connection.meta.client,
+            "generate_presigned_url",
+            side_effect=AssertionError("backend called"),
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                self.reader.url("report.txt", http_method="PUT")
+
+    def test_capability_root_blocks_escape_and_direct_file_access(self):
+        # Object names are normalized with the existing storage rules, so a
+        # traversal attempt cannot escape the alias root.
+        with self.assertRaises(SuspiciousOperation):
+            self.reader.open("../private/secret.txt")
+
+        # A sibling prefix that merely starts with the same characters is not
+        # inside the alias root.
+        for name in ("archive_evil/report.txt", "archive2/report.txt"):
+            with self.assertRaises(OperationNotAllowed):
+                self.reader._check_operation("open", name)
+
+        # Constructing S3File directly must not bypass the alias declaration.
+        client = self.maintenance.connection.meta.client
+        with mock.patch.object(
+            client, "head_object", side_effect=AssertionError("backend called")
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                s3.S3File("private/secret.txt", "rb", self.reader)
+
+    def test_alias_capability_declaration_forms(self):
+        storage = s3.S3Storage(capabilities=["open", "url"])
+        self.assertTrue(storage.capabilities.open)
+        self.assertTrue(storage.capabilities.url)
+        self.assertFalse(storage.capabilities.list)
+        self.assertFalse(storage.capabilities.modify)
+
+        storage = s3.S3Storage(capabilities={"open": True, "url": False})
+        self.assertTrue(storage.capabilities.open)
+        self.assertTrue(storage.capabilities.list)
+        self.assertTrue(storage.capabilities.modify)
+        self.assertFalse(storage.capabilities.url)
+
+        storage = s3.S3Storage(capabilities="read_only")
+        self.assertFalse(storage.capabilities.modify)
+
+        with self.assertRaises(ImproperlyConfigured):
+            s3.S3Storage(capabilities=["open", "delete"])
+
+        path, args, kwargs = (
+            s3_capabilities.StorageCapabilities.read_only().deconstruct()
+        )
+        self.assertEqual(path, "storages.capabilities.StorageCapabilities")
+        self.assertEqual(args, ())
+        self.assertEqual(
+            kwargs,
+            {"open": True, "list": True, "url": True, "modify": False},
+        )
+
+    def test_denied_list_and_url_make_no_backend_requests(self):
+        reader = s3.S3Storage(capabilities=["open"])
+        client = self.maintenance.connection.meta.client
+        with mock.patch.object(
+            client, "get_paginator", side_effect=AssertionError("backend called")
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                reader.listdir("")
+
+        with mock.patch.object(
+            client,
+            "generate_presigned_url",
+            side_effect=AssertionError("backend called"),
+        ):
+            with self.assertRaises(OperationNotAllowed):
+                reader.url("report.txt")
+
+    def test_capabilities_from_global_setting(self):
+        with override_settings(AWS_S3_CAPABILITIES="read_only"):
+            storage = s3.S3Storage()
+        self.assertFalse(storage.capabilities.modify)
+        self.assertTrue(storage.capabilities.open)
+
+    def test_default_capabilities_allow_everything(self):
+        caps = s3.S3Storage().capabilities
+        self.assertTrue(all(caps.allows(op) for op in s3_capabilities.OPERATIONS))

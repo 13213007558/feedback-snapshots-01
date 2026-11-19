@@ -83,6 +83,57 @@ Settings
 
   Options such as ``public-read`` and ``private`` come from the `list of canned ACLs`_.
 
+``capabilities`` or ``AWS_S3_CAPABILITIES``
+
+  Default: all operations allowed
+
+  An optional declaration of the operations this storage alias may perform. This
+  is useful for giving a read-only process its own storage alias while keeping a
+  separate maintenance alias able to clean up objects. The allowed operations
+  are:
+
+  - ``open``: read object data and metadata (``open()``, ``size()``,
+    ``exists()``, ``get_modified_time()``).
+  - ``list``: enumerate objects (``listdir()``).
+  - ``url``: generate links and presigned download URLs (``url()``).
+  - ``modify``: save, delete, and generate presigned upload URLs.
+
+  The value may be a ``storages.capabilities.StorageCapabilities`` instance, the
+  preset strings ``"all"`` or ``"read_only"``, an iterable of allowed operation
+  names, or a mapping of operation names to booleans (omitted operations default
+  to ``True``). For example, to expose a read-only alias rooted at
+  ``archive/``::
+
+    from storages.capabilities import StorageCapabilities
+
+    STORAGES = {
+        "archive": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "bucket_name": "test-bucket",
+                "location": "archive",
+                "capabilities": StorageCapabilities.read_only(),
+            },
+        },
+        "maintenance": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {"bucket_name": "test-bucket"},
+        },
+    }
+
+  Object names continue to use the backend's normal rules. Names are resolved
+  against ``location``, so ``..`` cannot escape the alias root. A denied
+  operation raises ``storages.exceptions.OperationNotAllowed`` (a subclass of
+  Django's ``PermissionDenied`` and the builtin ``PermissionError``) before any
+  request is sent to the backend.
+
+  .. note::
+
+    These declarations are enforced by the storage backend, not by AWS. The
+    credentials used by an alias should still follow the principle of least
+    privilege, for example by using an IAM policy that only grants
+    ``s3:GetObject`` and ``s3:ListBucket``.
+
 ``querystring_auth`` or ``AWS_QUERYSTRING_AUTH``
 
   Default: ``True``

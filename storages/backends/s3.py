@@ -18,8 +18,10 @@ from django.utils.encoding import filepath_to_uri
 from django.utils.timezone import make_naive
 
 from storages.base import BaseStorage
+from storages.capabilities import StorageCapabilities
 from storages.compress import CompressedFileMixin
 from storages.compress import CompressStorageMixin
+from storages.exceptions import OperationNotAllowed
 from storages.utils import ReadBytesWrapper
 from storages.utils import check_location
 from storages.utils import clean_name
@@ -123,6 +125,9 @@ class S3File(CompressedFileMixin, File):
         self._storage = storage
         self.name = name[len(self._storage.location) :].lstrip("/")
         self._mode = mode
+        # Guard before touching the backend; this also covers callers that
+        # construct S3File directly instead of going through Storage.open().
+        storage._check_operation("open" if "w" not in mode else "modify", name)
         self.obj = storage.bucket.Object(name)
         if "w" not in mode:
             # Force early RAII-style exception if object does not exist
@@ -322,6 +327,10 @@ class S3Storage(CompressStorageMixin, BaseStorage):
 
         check_location(self)
 
+        self.capabilities = StorageCapabilities.from_value(
+            getattr(self, "capabilities", None)
+        )
+
         if (self.access_key or self.secret_key) and self.session_profile:
             raise ImproperlyConfigured(
                 "AWS_S3_SESSION_PROFILE/session_profile should not be provided with "
@@ -441,6 +450,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             "use_threads": setting("AWS_S3_USE_THREADS", True),
             "transfer_config": setting("AWS_S3_TRANSFER_CONFIG", None),
             "client_config": setting("AWS_S3_CLIENT_CONFIG", None),
+            "capabilities": setting("AWS_S3_CAPABILITIES", None),
         }
 
     def __getstate__(self):
@@ -526,8 +536,35 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         except ValueError:
             raise SuspiciousOperation("Attempted access to '%s' denied." % name)
 
+    def _check_operation(self, operation, name=None):
+        """
+        Ensure ``operation`` is declared on this alias and, when ``name`` is
+        given, that the object key is inside the alias root (``location``).
+
+        This runs before any backend request so that denied operations perform
+        no I/O.
+        """
+        if not self.capabilities.allows(operation):
+            raise OperationNotAllowed(
+                "{} is not permitted for {}.".format(operation, self.__class__.__name__)
+            )
+
+        # ``S3File`` can be constructed directly, so containment is checked
+        # here rather than relying only on ``_normalize_name()``.
+        if name is not None and self.location:
+            location = self.location.strip("/")
+            key = str(name).strip("/")
+            if not key.startswith(location + "/"):
+                raise OperationNotAllowed(
+                    "Access to '{}' is outside the storage root '{}'.".format(
+                        name, location
+                    )
+                )
+
     def _open(self, name, mode="rb"):
         name = self._normalize_name(clean_name(name))
+        operation = "open" if "r" in mode else "modify"
+        self._check_operation(operation)
         try:
             f = S3File(name, mode, self)
         except ClientError as err:
@@ -539,6 +576,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
     def _save(self, name, content):
         cleaned_name = clean_name(name)
         name = self._normalize_name(cleaned_name)
+        self._check_operation("modify")
         params = self._get_write_parameters(name, content)
 
         if is_seekable(content):
@@ -570,6 +608,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
     def delete(self, name):
         try:
             name = self._normalize_name(clean_name(name))
+            self._check_operation("modify")
             self.bucket.Object(name).delete()
         except ClientError as err:
             if err.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
@@ -579,8 +618,15 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             # Some other error was encountered. Re-raise it
             raise
 
+    def save(self, name, content, max_length=None):
+        # Fail before Django's ``get_available_name()`` can probe the backend.
+        normalized = self._normalize_name(clean_name(name))
+        self._check_operation("modify")
+        return super().save(name, content, max_length)
+
     def exists(self, name):
         name = self._normalize_name(clean_name(name))
+        self._check_operation("open")
         params = _filter_download_params(self.get_object_parameters(name))
         try:
             self.connection.meta.client.head_object(
@@ -596,6 +642,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
 
     def listdir(self, name):
         path = self._normalize_name(clean_name(name))
+        self._check_operation("list")
         # The path needs to end with a slash, but if the root is empty, leave it.
         if path and not path.endswith("/"):
             path += "/"
@@ -617,6 +664,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
 
     def size(self, name):
         name = self._normalize_name(clean_name(name))
+        self._check_operation("open")
         try:
             return self.bucket.Object(name).content_length
         except ClientError as err:
@@ -658,6 +706,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         USE_TZ is True, otherwise returns a naive datetime in the local timezone.
         """
         name = self._normalize_name(clean_name(name))
+        self._check_operation("open")
         entry = self.bucket.Object(name)
         if setting("USE_TZ"):
             # boto3 returns TZ aware timestamps
@@ -668,6 +717,10 @@ class S3Storage(CompressStorageMixin, BaseStorage):
     def url(self, name, parameters=None, expire=None, http_method=None):
         # Preserve the trailing slash after normalizing the path.
         name = self._normalize_name(clean_name(name))
+        self._check_operation("url")
+        if http_method and http_method.upper() in ("PUT", "POST"):
+            # A presigned upload URL is a modification path.
+            self._check_operation("modify")
         params = parameters.copy() if parameters else {}
         if expire is None:
             expire = self.querystring_expire
