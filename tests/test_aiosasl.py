@@ -57,8 +57,10 @@ class SASLInterfaceMock(aiosasl.SASLInterface):
         super().__init__()
         self._testobj = testobj
         self._action_sequence = action_sequence
+        self.recorded = []
 
     def _check_action(self, action, payload):
+        self.recorded.append((action, payload))
         try:
             (next_action,
              next_payload,
@@ -1021,6 +1023,168 @@ class TestSCRAM(TestSCRAMImpl, unittest.TestCase):
             smmock,
             aiosasl.SCRAM(self._provide_credentials)
         )
+
+
+class TestSCRAMSuccessWithPayload(TestSCRAMImpl, unittest.TestCase):
+    """
+    Tests for transports which report ``success`` with the final SCRAM
+    server message (``v=...``) attached as payload. The state machine
+    unfolds this into a simulated challenge; authentication must only be
+    reported as complete to the caller after the mechanism has verified
+    the server signature.
+    """
+    _scram_plus = 'no'
+
+    def _client_final_message(self):
+        return (self.client_final_message_without_proof +
+                b",p="+base64.b64encode(self.client_proof))
+
+    def _server_final_message(self):
+        return b"v="+base64.b64encode(self.server_signature)
+
+    def test_valid_server_signature(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,,"+self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self._client_final_message(),
+                 "success",
+                 self._server_final_message())
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAM(self._provide_credentials)
+        )
+
+        # the simulated final challenge must be answered locally by the
+        # state machine: the credentials (client proof) are sent exactly
+        # once and no additional response is emitted to adapt to the
+        # transport reporting success with attached data
+        responses = [
+            payload
+            for action, payload in smmock.interface.recorded
+            if action == "response"
+        ]
+        self.assertEqual(
+            [self._client_final_message()],
+            responses
+        )
+
+    def test_invalid_server_signature(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,,"+self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self._client_final_message(),
+                 "success",
+                 b"v="+base64.b64encode(b"fnord"))
+            ]))
+
+        # even though the transport reported success, the mechanism must
+        # not report completion: the server signature is invalid
+        with self.assertRaises(aiosasl.SASLFailure) as ctx:
+            self._run(smmock, aiosasl.SCRAM(self._provide_credentials))
+
+        self.assertIsNone(ctx.exception.opaque_error)
+        self.assertIn(
+            "signature",
+            str(ctx.exception).lower()
+        )
+
+    def test_missing_payload(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,,"+self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self._client_final_message(),
+                 "success",
+                 None),
+            ]))
+
+        # success without the final server message must not be accepted:
+        # there is no server signature to verify
+        with self.assertRaisesRegex(aiosasl.SASLFailure,
+                                    "protocol violation") as ctx:
+            self._run(smmock, aiosasl.SCRAM(self._provide_credentials))
+
+        self.assertEqual(
+            "malformed-request",
+            ctx.exception.opaque_error
+        )
+
+    def test_extra_challenge(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,,"+self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self._client_final_message(),
+                 "challenge",
+                 b"unexpected-extra-challenge"),
+                ("response",
+                 b"",
+                 "success",
+                 self._server_final_message())
+            ]))
+
+        # an additional challenge before the final server message is a
+        # protocol violation; the valid signature afterwards must not
+        # rescue the exchange
+        with self.assertRaisesRegex(aiosasl.SASLFailure,
+                                    "protocol violation"):
+            self._run(smmock, aiosasl.SCRAM(self._provide_credentials))
+
+    def test_non_empty_final_client_reply(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,,"+self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self._client_final_message(),
+                 "success",
+                 self._server_final_message())
+            ]))
+
+        state, payload = run_coroutine(smmock.initiate(
+            "SCRAM-SHA-1",
+            b"n,,"+self.client_first_message_bare))
+        self.assertEqual(aiosasl.SASLState.CHALLENGE, state)
+        self.assertEqual(self.server_first_message, payload)
+
+        state, payload = run_coroutine(
+            smmock.response(self._client_final_message()))
+        # the transport-level success with attached final data is
+        # unfolded into a simulated challenge
+        self.assertEqual(aiosasl.SASLState.CHALLENGE, state)
+        self.assertEqual(self._server_final_message(), payload)
+
+        # a mechanism answering the simulated challenge with a non-empty
+        # response indicates a protocol-violating early success from the
+        # server; this must fail instead of reporting success
+        with self.assertRaises(aiosasl.SASLFailure):
+            run_coroutine(smmock.response(b"non-empty"))
+
+        self.assertEqual(aiosasl.SASLState.FAILURE, smmock._state)
+        smmock.interface.finalize()
 
 
 class TestSCRAMDowngradeProtection(TestSCRAMImpl, unittest.TestCase):
