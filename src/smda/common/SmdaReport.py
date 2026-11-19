@@ -28,6 +28,7 @@ from smda.DisassemblyStatistics import DisassemblyStatistics
 from smda.SmdaConfig import SmdaConfig
 
 from .BinaryInfo import BinaryInfo
+from .labelprovider.ElfCallEvidence import ElfCallEvidenceTable
 from .SmdaBasicBlock import SmdaBasicBlock
 from .SmdaFunction import MAX_ADDRESS_VALUE, SmdaFunction
 
@@ -196,6 +197,24 @@ class SmdaReport:
                 "imported_functions": self._mergeImportedFunctions(disassembly),
                 "symbols": disassembly.binary_info.getSymbols(),
             }
+            # only ELF analyses produce call evidence; leaving the key off elsewhere keeps a
+            # PE/Mach-O report byte-compatible with what it was before
+            external_call_evidence = self._externalCallEvidence(disassembly)
+            if external_call_evidence:
+                self.xmetadata["external_call_evidence"] = external_call_evidence
+
+    @staticmethod
+    def _externalCallEvidence(disassembly):
+        """Serialize the provenance/conflict records for external calls.
+
+        Kept apart from ``imported_functions``: that map is a slot -> name view, and a name
+        cannot carry the disagreement between a relocation declaration and an unbound slot.
+        Empty for formats that do not produce evidence, so an ELF-less report is unchanged.
+        """
+        table = getattr(disassembly, "api_evidence", None)
+        if not table:
+            return {}
+        return table.toDict()
 
     @staticmethod
     def _mergeImportedFunctions(disassembly):
@@ -575,6 +594,13 @@ class SmdaReport:
         # fromDict mirrors __init__'s xmetadata = {} (not None) so downstream
         # consumers (e.g. BinarySynthesizer) never hit a TypeError on xmetadata["..."].
         smda_report.xmetadata = report_dict.get("xmetadata") or {}
+        # round-trip the evidence table so a reloaded report keeps the conflicts it recorded.
+        # The serializer sorts its output, so validating and re-emitting it yields the same
+        # JSON-safe document the writer produced; absent on older reports, and then there is
+        # simply nothing to restore.
+        evidence_table = smda_report.xmetadata.get("external_call_evidence")
+        if evidence_table is not None:
+            smda_report.xmetadata["external_call_evidence"] = ElfCallEvidenceTable.fromDict(evidence_table).toDict()
         # buffer is only present when the report was serialized with STORE_BUFFER enabled;
         # older reports omit it and keep buffer == None for backward compatibility.
         if report_dict.get("buffer") is not None:

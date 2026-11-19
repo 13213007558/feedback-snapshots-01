@@ -7,12 +7,25 @@ from bisect import bisect_right
 from itertools import chain
 
 from smda.common.analysis_budget import analysisTimeoutTripped
+from smda.common.arch.ArchBackend import ArchBackend
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.ExceptionHandling import reraise_non_operational_exception
 from smda.common.labelprovider.DelphiKbSymbolProvider import DelphiKbSymbolProvider
 from smda.common.labelprovider.DelphiPythiaProvider import DelphiPythiaProvider
 from smda.common.labelprovider.DelphiReSymProvider import DelphiReSymProvider
 from smda.common.labelprovider.ElfApiResolver import ElfApiResolver
+from smda.common.labelprovider.ElfCallEvidence import (
+    BINDING_BOUND,
+    BINDING_LAZY,
+    BINDING_UNBOUND,
+    BINDING_UNOBSERVED,
+    GOT_SLOT,
+    TARGET_DIRECT,
+    TARGET_SLOT,
+    TARGET_UNKNOWN,
+    ElfCallEvidence,
+    ElfCallSiteEvidence,
+)
 from smda.common.labelprovider.ElfSymbolProvider import ElfSymbolProvider
 from smda.common.labelprovider.GoLabelProvider import GoSymbolProvider
 from smda.common.labelprovider.MachoSymbolProvider import MachoSymbolProvider
@@ -136,6 +149,111 @@ class RecursiveDisassembler:
         self._api_cache[cache_key] = ("", "")
         return ("", "")
 
+    def _isElfImage(self):
+        """Whether the analysed image is an ELF, read from its own magic.
+
+        The provenance model is about ELF import identity (relocation, version, PLT/GOT). A
+        PE or Mach-O report keeps its established shape, including its import map, so the
+        evidence table is not attached there.
+        """
+        binary_info = getattr(self.disassembly, "binary_info", None)
+        image = getattr(binary_info, "binary", None) if binary_info is not None else None
+        return isinstance(image, (bytes, bytearray)) and image[:4] == b"\x7fELF"
+
+    def collectApiEvidence(self, to_address):
+        """Return every claim the active providers make about one call, by target kind.
+
+        This is separate from ``resolveApi`` on purpose: that one answers "what name do I
+        show", and has to pick. This one answers "what does each producer say", and keeps
+        the disagreement, which is what a report consumer needs to tell a relocation
+        declaration or an unbound slot from a confirmed call.
+        """
+        evidence = []
+        for provider in getattr(self, "active_api_providers", self.api_providers):
+            get_evidence = getattr(provider, "getRelocationEvidence", None)
+            if get_evidence is None:
+                continue
+            evidence.extend(get_evidence(to_address))
+        return evidence
+
+    def _observeSlotBinding(self, slot, expected=None):
+        """Classify what a pointer slot holds, without letting any loader bind it.
+
+        The image is the only source: zero is unbound, an address inside the image's own PLT
+        is the lazy-binding trampoline, an address outside the image is a resolved library
+        address, and a slot the image does not cover cannot be observed at all.
+        """
+        del expected
+        binary_info = getattr(self.disassembly, "binary_info", None)
+        if binary_info is None or slot is None:
+            return BINDING_UNOBSERVED
+        pointer_size = 8 if getattr(binary_info, "bitness", None) == 64 else 4
+        if pointer_size == 8:
+            value = self.disassembly.dereferenceQword(slot)
+        else:
+            value = self.disassembly.dereferenceDword(slot)
+        if value is None:
+            return BINDING_UNOBSERVED
+        if value == 0:
+            return BINDING_UNBOUND
+        if self.disassembly.isAddrWithinMemoryImage(value):
+            # the engine's own stub-range helper is a static/classmethod on ArchBackend, so
+            # it is reached the same way for every native backend
+            ranges = ArchBackend._getImportStubRanges(binary_info)
+            if any(start <= value < end for start, end in ranges):
+                return BINDING_LAZY
+            # an in-image target is a local thunk, not a library binding
+            return BINDING_BOUND
+        return BINDING_BOUND
+
+    def _recordCallEvidence(self, call_addr, target_addr, slot, target_kind):
+        """Record what is knowable about a call site: its address shape and any claims.
+
+        Returns the call site's evidence record, or None when nothing could be attributed.
+        The slot observation is always attached when a slot is named, even in an unresolved
+        state: "the image has not bound this slot" is the fact that keeps a declared import
+        from being reported as a confirmed call.
+        """
+        table = getattr(self.disassembly, "api_evidence", None)
+        if table is None or not self._isElfImage():
+            # a frontend-built or test-double DisassemblyResult need not carry the table, and
+            # evidence recording is an ELF enrichment, not a precondition for resolving an API
+            return None
+        claims = self.collectApiEvidence(slot if slot is not None else target_addr)
+        binding = None
+        if slot is not None:
+            binding = self._observeSlotBinding(slot, target_addr)
+            if binding == BINDING_BOUND:
+                observed_name = self.resolveApi(slot, target_addr)[1]
+                if observed_name:
+                    claims.append(ElfCallEvidence(GOT_SLOT, observed_name, slot=slot, binding=binding))
+        site = table.get(call_addr)
+        if not claims and binding is None and site is None:
+            return None
+        if site is None:
+            # a call through a slot the image has not bound has no name to record, but the
+            # slot and its unresolved state are still facts about this call site
+            site = ElfCallSiteEvidence(
+                call_addr,
+                target_addr=target_addr,
+                slot=slot,
+                target_kind=target_kind,
+                binding=binding,
+            )
+            table.add(site)
+        else:
+            if slot is not None and site.slot is None:
+                site.slot = slot
+            if target_addr is not None and site.target_addr is None:
+                site.target_addr = target_addr
+            if target_kind != TARGET_UNKNOWN and site.target_kind == TARGET_UNKNOWN:
+                site.target_kind = target_kind
+            if binding is not None and site.binding is None:
+                site.binding = binding
+        for claim in claims:
+            site.add(claim)
+        return site
+
     def resolveSymbol(self, address):
         if not hasattr(self, "_symbol_cache"):
             self._symbol_cache = {}
@@ -187,8 +305,29 @@ class RecursiveDisassembler:
         if state.start_addr == to_addr:
             state.setRecursion(True)
 
-    def _handleApiTarget(self, from_addr, to_addr, dereferenced, slot=None):
+    def _handleApiTarget(
+        self,
+        from_addr,
+        to_addr,
+        dereferenced,
+        slot=None,
+        target_kind=None,
+        target_addr=None,
+    ):
         if to_addr:
+            # Every call site that names an import slot gets an evidence record, whether or
+            # not a provider can name it: the slot's observed state is itself evidence, and
+            # an unbound slot must stay visibly unknown rather than vanish from the report.
+            if target_kind is None:
+                target_kind = TARGET_SLOT if slot is not None else TARGET_DIRECT
+            # the actual instruction target is separate from the slot the relocation names:
+            # a call to a PLT stub and the slot that stub reads are two addresses
+            self._recordCallEvidence(
+                from_addr,
+                target_addr if target_addr is not None else dereferenced,
+                slot,
+                target_kind,
+            )
             # identify API calls on the fly
             dll, api = self.resolveApi(to_addr, dereferenced)
             if dll or api:

@@ -71,6 +71,19 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(labels)** Record ELF external-call identity as evidence with explicit conflicts, instead of one display name
+  per call. Each call site now carries `xmetadata.external_call_evidence[<call addr>]`: the instruction's target kind
+  and address (`direct`/`plt_stub`/`slot`), the GOT slot the relocation names, the observed slot binding
+  (`bound`/`lazy`/`unbound`/`unobserved`, read from the mapped image only - no dynamic linker is invoked), and the
+  individual claims with their `name`, symbol `version` and `weak` flag. A call whose relocation table states two
+  versions of one name (e.g. `memcpy@GLIBC_2.2.5` and `memcpy@GLIBC_2.14` on the same slot) is reported as
+  `identity_state == "conflicted"` with `resolved_name == null`; it contributes no name to `apirefs`, and its slot is
+  left out of `xmetadata.imported_functions` rather than merged by base name. A relocation-declared import whose slot
+  is still zero or holds a lazy PLT trampoline is `declared`, never `confirmed`, and an undefined weak symbol is not a
+  resolution. The evidence table round-trips through `toDict()`/`fromDict()`, so a reloaded report keeps the conflict.
+  *Reproduced on a bundled synthetic ELF fixture (`elf_same_symbol_two_versions_x64_xored`) with one call per case:*
+  two-version conflict, single version, unbound slot, and a slot with no relocation at all. No cost on PE/Mach-O
+  reports, which keep their previous `xmetadata` shape.
 
 ### Changed
 

@@ -10,6 +10,8 @@ from collections import Counter
 
 from capstone.arm_const import ARM_OP_IMM, ARM_OP_MEM, ARM_OP_REG, ARM_SFT_INVALID
 
+from smda.common.labelprovider.ElfCallEvidence import TARGET_SLOT
+
 from .dataflow import RegisterTracker, decode, norm_reg, pc_value, precedingInstructions, track, written_registers
 from .definitions import CALL_BASES, split_mnemonic
 
@@ -409,7 +411,12 @@ class ArmIndirectCallAnalyzer:
                     continue
                 resolved += 1
                 if slot is not None and d._handleApiTarget(
-                    address, slot, value if value is not None else slot, slot=slot
+                    address,
+                    slot,
+                    value if value is not None else slot,
+                    slot=slot,
+                    target_kind=TARGET_SLOT,
+                    target_addr=value if value is not None else slot,
                 ):
                     continue
                 if value is None:

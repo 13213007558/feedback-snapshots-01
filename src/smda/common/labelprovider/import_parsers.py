@@ -59,17 +59,60 @@ def parse_pe_delay_imports(lief_binary, base_addr=None):
     return import_symbols
 
 
-def parse_elf_relocation_imports(lief_binary):
-    """Build import map keyed by relocation slot address: addr -> (lib, name).
+def elf_symbol_version(symbol):
+    """Return the version a dynamic symbol is bound as, or None when it states none.
 
-    Names stay exactly as the dynamic symbol table spells them, here and in every
-    caller: API resolution is keyed by them, so they must remain comparable with PE
-    and Mach-O imports, which are equally undecorated, and synthesis writes them back
-    into an import table.
+    A version requirement is what distinguishes ``memcpy@GLIBC_2.2.5`` from
+    ``memcpy@GLIBC_2.14``; the bare name alone cannot, so it is carried separately rather
+    than folded into the name.
     """
+    symbol_version = getattr(symbol, "symbol_version", None)
+    if not getattr(symbol, "has_version", False) or not symbol_version:
+        return None
+    if not getattr(symbol_version, "has_auxiliary_version", False):
+        return None
+    auxiliary = getattr(symbol_version, "symbol_version_auxiliary", None)
+    if auxiliary is None:
+        return None
+    return lief_name(auxiliary) or None
+
+
+def elf_symbol_is_weak(symbol):
+    """Whether the dynamic symbol is declared weak.
+
+    An *undefined weak* import is allowed to resolve to zero; treating it like a strong
+    import is what lets an unbound PLT slot look like a confirmed call.
+    """
+    binding = getattr(symbol, "binding", None)
+    weak = getattr(getattr(lief.ELF, "Symbol", None), "BINDING", None)
+    weak = getattr(weak, "WEAK", None)
+    if weak is None:
+        return None
+    try:
+        return binding == weak
+    except TypeError:
+        return None
+
+
+def _relocation_type_name(relocation):
+    relocation_type = getattr(relocation, "type", None)
+    return getattr(relocation_type, "name", None) or str(relocation_type)
+
+
+def parse_elf_relocation_evidence(lief_binary):
+    """Return relocation claims keyed by slot address: addr -> [ElfCallEvidence].
+
+    The claims keep name, version and weakness separate. A slot can carry several
+    relocations (a ``GLOB_DAT`` beside a lazy ``JUMP_SLOT``, a TLS pair); those are kept,
+    not collapsed. Names stay exactly as the dynamic symbol table spells them: API
+    resolution is keyed by them, so they must remain comparable with PE and Mach-O imports,
+    and synthesis writes them back into an import table.
+    """
+    from smda.common.labelprovider.ElfCallEvidence import RELOCATION, ElfCallEvidence
+
     if not isinstance(lief_binary, lief.ELF.Binary):
         return {}
-    import_symbols = {}
+    evidence = {}
     for relocation in lief_binary.relocations:
         if not relocation.has_symbol:
             continue
@@ -81,15 +124,43 @@ def parse_elf_relocation_imports(lief_binary):
         symbol_name = lief_name(symbol)
         if not symbol_name:
             continue
+        version = elf_symbol_version(symbol)
+        claim = ElfCallEvidence(
+            RELOCATION,
+            symbol_name,
+            version=version,
+            library=version,
+            weak=elf_symbol_is_weak(symbol),
+            slot=relocation.address,
+            detail=_relocation_type_name(relocation),
+        )
+        evidence.setdefault(relocation.address, []).append(claim)
+    return evidence
 
-        lib = None
-        symbol_version = getattr(symbol, "symbol_version", None)
-        if symbol.has_version and symbol_version and symbol_version.has_auxiliary_version:
-            aux = symbol_version.symbol_version_auxiliary
-            lib = lief_name(aux) or None
 
-        import_symbols[relocation.address] = (lib, symbol_name)
-    return import_symbols
+def parse_elf_relocation_imports(lief_binary):
+    """Build import map keyed by relocation slot address: addr -> (lib, name).
+
+    The ``lib`` field of an ELF import entry is the symbol's version requirement, matching
+    the long-standing ``GLIBC_2.2.5`` convention. The version is also kept on the evidence
+    model, so consumers that need to tell same-named versions apart read it from there.
+
+    A slot whose relocations name more than one identity is left out: the map can only hold
+    one ``(lib, name)`` per slot, and writing the first one down would be the very merge by
+    base name that the version is there to prevent. The claims remain available from
+    :func:`parse_elf_relocation_evidence` and are what the report's evidence table carries.
+    """
+    import_map = {}
+    for address, claims in parse_elf_relocation_evidence(lief_binary).items():
+        identities = []
+        for claim in claims:
+            if claim.identity not in identities:
+                identities.append(claim.identity)
+        if len(identities) > 1:
+            continue
+        claim = claims[0]
+        import_map[address] = (claim.version or claim.library, claim.name)
+    return import_map
 
 
 def parse_macho_bindings(lief_binary, adjustment=0):

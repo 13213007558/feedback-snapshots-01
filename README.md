@@ -303,6 +303,32 @@ keyed by virtual address, while the legacy `exported_functions` and `symbols` ma
 function-only. C++ names are demangled in these label maps; API references (`SmdaFunction.apirefs`)
 keep the undecorated import name so they stay comparable across PE, ELF and Mach-O.
 
+### ELF external-call evidence
+
+A call into a library can be described by several producers, and on ELF they do not say the same
+kind of thing. `xmetadata.external_call_evidence` (ELF only) records every claim per call site, by
+instruction address, instead of collapsing them into one name:
+
+- `claims` -- each claim carries `kind` (`relocation`, `plt_stub`, `got_slot`, `symbol_table` or
+  `heuristic`), the `name`, the symbol `version` (e.g. `GLIBC_2.14`), the `weak` flag and the slot it
+  came from;
+- `target_kind` / `target_addr` -- how the instruction reached it (`direct`, `plt_stub`, `slot`),
+  separate from the slot a relocation names: a call to a PLT stub and the GOT slot that stub reads
+  are two different addresses;
+- `binding` -- what the GOT slot holds in the image (`bound`, `lazy`, `unbound`, `unobserved`),
+  read from the mapped bytes, never by loading the sample through a dynamic linker;
+- `identity_state` -- `confirmed` (a declaration and a bound slot agree), `declared` (a relocation
+  states an identity but nothing shows it bound), `unknown`, or `conflicted`;
+- `conflicting_identities` and `resolved_name` -- when claims disagree, the disputed identities are
+  listed and `resolved_name` is `null`.
+
+`identity_state == "conflicted"` is the case to look for when two same-named symbols differ in
+version. SMDA does not merge them by base name: such a call site contributes no name to
+`apirefs`, and its slot is left out of `xmetadata.imported_functions`, which can only hold one
+`(lib, name)` per slot. The evidence round-trips through `SmdaReport.fromDict()`, so a reloaded
+report keeps the conflict rather than resolving it. An undefined weak symbol whose slot is still
+zero is `declared` at best, never `confirmed`.
+
 ### Escaper output compatibility
 
 Anything that stores escaped-operand signatures -- minhashes and escaped-block shingles, as MCRIT

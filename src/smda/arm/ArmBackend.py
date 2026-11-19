@@ -6,6 +6,7 @@ import re
 from capstone import CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB, Cs
 
 from smda.common.arch.ArchBackend import ArchBackend
+from smda.common.labelprovider.ElfCallEvidence import TARGET_PLT_STUB
 
 from .analyzers import ArmIndirectCallAnalyzer, ArmJumpTableAnalyzer, ArmTfIdf, resolveImportStub
 from .definitions import (
@@ -392,7 +393,9 @@ class ArmBackend(ArchBackend):
         target_thumb = thumb if base == "bl" else not thumb
         slot = self._resolvePltSlot(d, target)
         if slot is not None:
-            resolved = d._handleApiTarget(i_address, slot, slot, slot=slot)
+            resolved = d._handleApiTarget(
+                i_address, slot, slot, slot=slot, target_kind=TARGET_PLT_STUB, target_addr=target
+            )
             if resolved:
                 state.addCodeRef(i_address, target)
                 return is_noreturn_api(resolved[1])
@@ -455,7 +458,9 @@ class ArmBackend(ArchBackend):
             state.setSanelyEnding(True)
         else:
             slot = self._resolvePltSlot(d, target)
-            if slot is not None and d._handleApiTarget(i_address, slot, slot, slot=slot):
+            if slot is not None and d._handleApiTarget(
+                i_address, slot, slot, slot=slot, target_kind=TARGET_PLT_STUB, target_addr=target
+            ):
                 state.setSanelyEnding(True)
             elif (
                 (state.isFirstInstruction() and target != i_address + instruction[1])
@@ -486,7 +491,9 @@ class ArmBackend(ArchBackend):
         stub = resolveImportStub(d, state.start_addr, d.capstone.is_thumb)
         if stub is not None and stub[0] == i_address + i_size:
             state.setThunkCall(True)
-            if stub[1] is not None and d._handleApiTarget(i_address, stub[1], stub[2], slot=stub[1]):
+            if stub[1] is not None and d._handleApiTarget(
+                i_address, stub[1], stub[2], slot=stub[1], target_kind=TARGET_PLT_STUB, target_addr=stub[2]
+            ):
                 state.setSanelyEnding(True)
             elif stub[1] is None and self._isCodeAddress(d, stub[2] & ~1):
                 d.fc_manager.addTailcallCandidate(stub[2] & ~1, bool(stub[2] & 1))
@@ -568,7 +575,9 @@ class ArmBackend(ArchBackend):
         arm_end = pc_value(i_address, True, aligned=True) + A32_INSTRUCTION_SIZE
         state.addDataRef(i_address, i_address + i_size, size=arm_end - i_address - i_size)
         slot = self._resolvePltSlot(d, i_address)
-        if slot is not None and d._handleApiTarget(i_address, slot, slot, slot=slot):
+        if slot is not None and d._handleApiTarget(
+            i_address, slot, slot, slot=slot, target_kind=TARGET_PLT_STUB, target_addr=target
+        ):
             state.addCodeRef(i_address, target, by_jump=True)
         elif self._isCodeAddress(d, target):
             d.fc_manager.addTailcallCandidate(target, False)

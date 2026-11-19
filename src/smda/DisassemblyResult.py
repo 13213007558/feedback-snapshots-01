@@ -2,6 +2,7 @@ import datetime
 import struct
 
 from smda.common.BasicBlock import BasicBlock
+from smda.common.labelprovider.ElfCallEvidence import ElfCallEvidenceTable, compose_display_name
 
 _MISSING = object()
 
@@ -107,6 +108,9 @@ class DisassemblyResult:
         self.apis = {}
         # key: address of the pointer slot an API was reached through, value: (dll_name, api_name)
         self.import_slots = {}
+        # every claim made about an external call, by instruction address. Kept apart from
+        # addr_to_api so a display string never becomes the only record of an identity.
+        self.api_evidence = ElfCallEvidenceTable()
         self._api_ref_sources = {}
         self._api_refs_initialized = False
         self.addr_to_api = {}
@@ -433,9 +437,50 @@ class DisassemblyResult:
         for api_offset in self.apis:
             api = self.apis[api_offset]
             for ref in api["referencing_addr"]:
-                self.addr_to_api[ref] = "{}!{}".format(api["dll_name"], api["api_name"])
+                display_name = self._displayNameForApiRef(ref, api)
+                if display_name is None:
+                    # the call site's claims disagree or resolve to nothing: no name is
+                    # written here, so a consumer cannot read a pick as a confirmation
+                    continue
+                self.addr_to_api[ref] = display_name
 
-    def addApiReference(self, api_addr, referencing_addr, dll_name, api_name):
+    def _displayNameForApiRef(self, ref, api):
+        """Choose the display name for one call site, never by picking between claims.
+
+        Three cases, in order:
+
+        * a site whose producers disagree (or whose only declaration is weak/unresolved)
+          contributes no name at all;
+        * a site with an ELF relocation declaration is rendered from its evidence;
+        * a site that only carries a slot observation has no format-level declaration, so the
+          API resolver's own answer (a database/heuristic name, e.g. a WinAPI profile) is the
+          name there is, and it is used as before.
+        """
+        site = self.api_evidence.get(ref)
+        if site is not None:
+            if site.has_conflict():
+                return None
+            if any(claim.kind in ("relocation", "symbol_table") for claim in site.claims):
+                return site.display_name()
+        if api.get("conflicted"):
+            return None
+        return compose_display_name(api["dll_name"], api["api_name"])
+
+    def recordApiEvidence(self, call_addr, claim, target_addr=None, slot=None, target_kind=None, binding=None):
+        """Attach one producer's claim to a call site, keeping any disagreement visible."""
+        return self.api_evidence.record(
+            call_addr,
+            claim,
+            target_addr=target_addr,
+            slot=slot,
+            target_kind=target_kind,
+            binding=binding,
+        )
+
+    def addApiReference(self, api_addr, referencing_addr, dll_name, api_name, conflicted=False, evidence=None):
+        if evidence is not None:
+            site = self.recordApiEvidence(referencing_addr, evidence)
+            conflicted = conflicted or site.has_conflict()
         api_entry = self.apis.get(
             api_addr,
             {"referencing_addr": [], "dll_name": dll_name, "api_name": api_name},
@@ -449,6 +494,9 @@ class DisassemblyResult:
         if referencing_addr not in ref_sources:
             ref_sources.add(referencing_addr)
             api_entry["referencing_addr"].append(referencing_addr)
+        site = self.api_evidence.get(referencing_addr)
+        if conflicted or (site is not None and site.has_conflict()):
+            api_entry["conflicted"] = True
         self.apis[api_addr] = api_entry
         self._api_refs_initialized = False
 

@@ -7,6 +7,7 @@ from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM
 
 from smda.common.arch.ArchBackend import ArchBackend
+from smda.common.labelprovider.ElfCallEvidence import TARGET_PLT_STUB
 
 from .analyzers import AArch64IndirectCallAnalyzer, AArch64JumpTableAnalyzer, AArch64TfIdf
 from .definitions import (
@@ -316,7 +317,14 @@ class AArch64Backend(ArchBackend):
                 pass
             else:
                 got_slot = self._resolvePltGotSlot(d, target)
-                if got_slot is not None and d._handleApiTarget(i_address, got_slot, got_slot, slot=got_slot):
+                if got_slot is not None and d._handleApiTarget(
+                    i_address,
+                    got_slot,
+                    got_slot,
+                    slot=got_slot,
+                    target_kind=TARGET_PLT_STUB,
+                    target_addr=target,
+                ):
                     # case = "STUB-TAILCALL-API!"
                     state.setSanelyEnding(True)
                 elif state.isFirstInstruction():
@@ -466,7 +474,14 @@ class AArch64Backend(ArchBackend):
                 target = self._branchTarget(i_op_str)
                 if target is not None:
                     got_slot = self._resolvePltGotSlot(d, target)
-                    if got_slot is not None and d._handleApiTarget(i_address, got_slot, got_slot, slot=got_slot):
+                    if got_slot is not None and d._handleApiTarget(
+                        i_address,
+                        got_slot,
+                        got_slot,
+                        slot=got_slot,
+                        target_kind=TARGET_PLT_STUB,
+                        target_addr=target,
+                    ):
                         state.addCodeRef(i_address, target)
                     else:
                         d._handleCallTarget(state, i_address, target)
@@ -499,7 +514,14 @@ class AArch64Backend(ArchBackend):
             # whose entry is in a stub range — resolve the GOT slot and attribute the API
             # to this branch (mirrors x86 jmp [iat] thunk analysis).
             got_slot = self._resolvePltGotSlot(d, state.start_addr)
-            if got_slot is not None and d._handleApiTarget(i_address, got_slot, got_slot, slot=got_slot):
+            if got_slot is not None and d._handleApiTarget(
+                i_address,
+                got_slot,
+                got_slot,
+                slot=got_slot,
+                target_kind=TARGET_PLT_STUB,
+                target_addr=state.start_addr,
+            ):
                 state.setSanelyEnding(True)
             else:
                 jumptable_targets = d.jumptable_analyzer.getJumpTargets(instruction, state)

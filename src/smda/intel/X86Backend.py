@@ -6,6 +6,7 @@ import re
 from capstone import CS_ARCH_X86, CS_MODE_32, CS_MODE_64, Cs
 
 from smda.common.arch.ArchBackend import ArchBackend
+from smda.common.labelprovider.ElfCallEvidence import TARGET_DIRECT, TARGET_PLT_STUB, TARGET_SLOT
 from smda.utility.ElfFileLoader import ElfFileLoader
 
 from .BitnessAnalyzer import BitnessAnalyzer
@@ -254,12 +255,24 @@ class X86Backend(ArchBackend):
                 if dereferenced and d.disassembly.isAddrWithinMemoryImage(dereferenced):
                     state.addCodeRef(i_address, dereferenced)
                     d._handleCallTarget(state, i_address, dereferenced)
-                    d._handleApiTarget(i_address, call_destination, dereferenced, slot=call_destination)
+                    d._handleApiTarget(
+                        i_address,
+                        call_destination,
+                        dereferenced,
+                        slot=call_destination,
+                        target_kind=TARGET_SLOT,
+                    )
                 else:
                     # import-like case: keep the reference on the slot itself
                     state.addCodeRef(i_address, call_destination)
                     if dereferenced is not None:
-                        d._handleApiTarget(i_address, call_destination, dereferenced, slot=call_destination)
+                        d._handleApiTarget(
+                            i_address,
+                            call_destination,
+                            dereferenced,
+                            slot=call_destination,
+                            target_kind=TARGET_SLOT,
+                        )
             else:
                 # case = "DWORD-PTR-REG"
                 self._collectMemRegSlot(state, i_address, i_op_str)
@@ -272,20 +285,39 @@ class X86Backend(ArchBackend):
                 # against the real destination, like the 32-bit dword-ptr path does
                 state.addCodeRef(i_address, dereferenced)
                 d._handleCallTarget(state, i_address, dereferenced)
-                d._handleApiTarget(i_address, call_destination, dereferenced, slot=call_destination)
+                d._handleApiTarget(
+                    i_address,
+                    call_destination,
+                    dereferenced,
+                    slot=call_destination,
+                    target_kind=TARGET_SLOT,
+                )
             else:
                 # import-like case: keep the reference on the slot itself
                 state.addCodeRef(i_address, call_destination)
                 if dereferenced is not None:
-                    d._handleApiTarget(i_address, call_destination, dereferenced, slot=call_destination)
+                    d._handleApiTarget(
+                        i_address,
+                        call_destination,
+                        dereferenced,
+                        slot=call_destination,
+                        target_kind=TARGET_SLOT,
+                    )
         elif i_op_str.startswith("0x"):
             # case = "DIRECT"
             import_slot = self._resolveImportSlot(d, call_destination)
-            if import_slot is not None and d._handleApiTarget(i_address, import_slot, import_slot, slot=import_slot):
+            if import_slot is not None and d._handleApiTarget(
+                i_address,
+                import_slot,
+                import_slot,
+                slot=import_slot,
+                target_kind=TARGET_PLT_STUB,
+                target_addr=call_destination,
+            ):
                 state.addCodeRef(i_address, call_destination)
             else:
                 d._handleCallTarget(state, i_address, call_destination)
-                d._handleApiTarget(i_address, call_destination, call_destination)
+                d._handleApiTarget(i_address, call_destination, call_destination, target_kind=TARGET_DIRECT)
         elif i_op_str.lower() in REGS_32BIT or i_op_str.lower() in REGS_64BIT:
             # case = "REG"
             # this is resolved by backtracking at the end of function analysis.
@@ -534,7 +566,9 @@ class X86Backend(ArchBackend):
                 pass
             else:
                 import_slot = self._resolveImportSlot(d, jump_destination)
-                if import_slot is not None and self._handleApiJumpTarget(d, state, i_address, import_slot, import_slot):
+                if import_slot is not None and self._handleApiJumpTarget(
+                    d, state, i_address, import_slot, import_slot, target_addr=jump_destination
+                ):
                     # case = "STUB-TAILCALL-API!"
                     state.setSanelyEnding(True)
                 elif state.isFirstInstruction():
@@ -604,8 +638,15 @@ class X86Backend(ArchBackend):
         return None
 
     @staticmethod
-    def _handleApiJumpTarget(d, state, instruction_addr, import_slot, dereferenced):
-        resolved_api = d._handleApiTarget(instruction_addr, import_slot, dereferenced, slot=import_slot)
+    def _handleApiJumpTarget(d, state, instruction_addr, import_slot, dereferenced, target_addr=None):
+        resolved_api = d._handleApiTarget(
+            instruction_addr,
+            import_slot,
+            dereferenced,
+            slot=import_slot,
+            target_kind=TARGET_PLT_STUB,
+            target_addr=target_addr,
+        )
         if resolved_api and state.isFirstInstruction():
             # the entire function body is this one jmp-to-import: a thunk, not a real routine
             state.setThunkCall(True)
