@@ -22,6 +22,7 @@ Contents:
    migration-guide
    decorators
    nonce
+   error-pages
    trusted_types
    reports
    contributing
