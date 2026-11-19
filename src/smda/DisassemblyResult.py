@@ -5,6 +5,24 @@ from smda.common.BasicBlock import BasicBlock
 
 _MISSING = object()
 
+#: pipeline phases in the order the native engine runs them; a result that was cut
+#: short names the phase it was in, so a consumer can tell which parts of the
+#: analysis the report covers and which it never reached
+ANALYSIS_PHASE_CANDIDATE_DISCOVERY = "candidate_discovery"
+ANALYSIS_PHASE_FUNCTION_TRAVERSAL = "function_traversal"
+ANALYSIS_PHASE_GAP_SEARCH = "gap_search"
+ANALYSIS_PHASE_SYMBOL_COMPLETION = "symbol_completion"
+ANALYSIS_PHASES = (
+    ANALYSIS_PHASE_CANDIDATE_DISCOVERY,
+    ANALYSIS_PHASE_FUNCTION_TRAVERSAL,
+    ANALYSIS_PHASE_GAP_SEARCH,
+    ANALYSIS_PHASE_SYMBOL_COMPLETION,
+)
+#: why a phase did not finish: the cooperative time budget tripped, or the
+#: MAX_FUNCTION_CANDIDATES safeguard refused further candidates
+ANALYSIS_INCOMPLETE_TIMEOUT = "timeout"
+ANALYSIS_INCOMPLETE_CANDIDATE_CAP = "candidate_cap"
+
 
 class AddressRefs(dict):
     """Maps an address to the set of addresses it references, or is referenced by.
@@ -78,6 +96,10 @@ class DisassemblyResult:
         self.analysis_start_ts = datetime.datetime.now(datetime.timezone.utc)
         self.analysis_end_ts = self.analysis_start_ts
         self.analysis_timeout = False
+        # the pipeline phase currently running and the phases that did not finish
+        # (phase -> reason), in the order they were noted
+        self.analysis_phase = None
+        self.incomplete_phases = {}
         self.binary_info = None
         self.identified_alignment = 0
         self.oep = None
@@ -191,6 +213,53 @@ class DisassemblyResult:
         if self.analysis_timeout:
             outcome = "timeout"
         return outcome
+
+    def setAnalysisPhase(self, phase):
+        """Mark the pipeline phase the analysis is entering; the phase a safeguard
+        trips in is the phase the incomplete-status bookkeeping attributes it to.
+        A phase entered with the budget already spent cannot do its work - every
+        poll in it short-circuits on the latched verdict - so it is incomplete too."""
+        self.analysis_phase = phase
+        if self.analysis_timeout:
+            self.noteAnalysisIncomplete(ANALYSIS_INCOMPLETE_TIMEOUT, phase)
+
+    def noteAnalysisIncomplete(self, reason, phase=None):
+        """Record that a pipeline phase did not run to completion, keeping the first
+        reason a phase was noted with - a later poll must not re-attribute a trip
+        that already happened to the phase that happens to be polling now."""
+        phase = phase or self.analysis_phase
+        if phase is None:
+            return
+        self.incomplete_phases.setdefault(phase, reason)
+
+    def getAnalysisCompletion(self):
+        """The structured completion status of the analysis behind this result.
+
+        A report built from a run that a safeguard cut short is a lower bound, not a
+        complete analysis; this is the machine-readable form of that, naming each
+        unfinished phase and why it stopped. A backend that only latches the timeout
+        flag still reports incomplete, with the phase it was in when asked.
+        """
+        incomplete_phases = dict(self.incomplete_phases)
+        if self.analysis_timeout and not incomplete_phases:
+            incomplete_phases[self.analysis_phase or ANALYSIS_PHASE_FUNCTION_TRAVERSAL] = ANALYSIS_INCOMPLETE_TIMEOUT
+        ordered_incomplete = {
+            phase: incomplete_phases[phase] for phase in ANALYSIS_PHASES if phase in incomplete_phases
+        }
+        for phase, reason in incomplete_phases.items():
+            if phase not in ordered_incomplete:
+                ordered_incomplete[phase] = reason
+        reached = ()
+        if self.analysis_phase in ANALYSIS_PHASES:
+            reached = ANALYSIS_PHASES[: ANALYSIS_PHASES.index(self.analysis_phase) + 1]
+        return {
+            "status": "incomplete" if ordered_incomplete else "complete",
+            "incomplete_phases": ordered_incomplete,
+            "completed_phases": [phase for phase in reached if phase not in incomplete_phases],
+            "pending_phases": [
+                phase for phase in ANALYSIS_PHASES if phase not in reached and phase not in incomplete_phases
+            ],
+        }
 
     def getFunctions(self):
         return sorted(self.functions.keys())

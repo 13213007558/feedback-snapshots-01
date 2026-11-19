@@ -71,8 +71,20 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(report)** Structured completion status for analyses a safeguard cut short. A run that hit the analysis
+  timeout or the `MAX_FUNCTION_CANDIDATES` cap still returned a report, and nothing distinguished it from a
+  finished analysis short of the bare `status` field. `SmdaReport.completion` now records `complete` /
+  `incomplete` together with the pipeline phases that did not finish and why (`candidate_discovery`,
+  `function_traversal`, `gap_search`, `symbol_completion`; `timeout` or `candidate_cap`), and it round-trips
+  through `toDict()`/`fromDict()`; reports serialized before the field existed read as complete. The
+  message and the `INCOMPLETE` marker in `str(report)` reflect it, so a partial result can no longer be
+  presented as a full analysis. The safeguards themselves are unchanged.
 
 ### Changed
+- **(common)** A function the analysis budget cuts mid-traversal is no longer finalized into the CFG. Its
+  partial blocks were previously stored as if the function were complete; now the candidate is marked
+  aborted (landing in `failed_analysis_addr`), functions it had absorbed or reverted on its way in are
+  analyzed again on their own, and functions that finished before the budget ran out are kept as they are.
 
 ### Deprecated
 

@@ -16,6 +16,8 @@ import struct
 
 import lief
 
+from smda.common.analysis_budget import analysisTimeoutTripped
+from smda.DisassemblyResult import ANALYSIS_INCOMPLETE_CANDIDATE_CAP
 from smda.utility.BracketQueue import BracketQueue
 from smda.utility.MachoBinary import get_active_macho_binary, get_macho_address_adjustment
 from smda.utility.PriorityQueue import PriorityQueue
@@ -370,14 +372,7 @@ class FunctionCandidateManager:
         """create candidate if it does not exist yet, returns True if newly created, else False"""
         if addr not in self.candidates:
             cap = getattr(self.config, "MAX_FUNCTION_CANDIDATES", 0)
-            if cap and len(self.candidates) >= cap:
-                if not self._candidate_cap_logged:
-                    LOGGER.warning(
-                        "MAX_FUNCTION_CANDIDATES cap (%d) reached during candidate identification; "
-                        "refusing further candidates to bound memory usage.",
-                        cap,
-                    )
-                    self._candidate_cap_logged = True
+            if self._candidateCapReached(cap):
                 return False
             if self.CANDIDATE_CLASS is None:
                 return False
@@ -461,13 +456,23 @@ class FunctionCandidateManager:
 
     def _candidateTimeoutTripped(self):
         """returns True once the wall-clock analysis timeout has been hit during candidate identification."""
-        if self.disassembly is not None and self.disassembly.analysis_timeout:
-            return True
-        if self._cb_analysis_timeout is not None and self._cb_analysis_timeout():
-            if self.disassembly is not None:
-                self.disassembly.analysis_timeout = True
-            return True
-        return False
+        return analysisTimeoutTripped(self.disassembly, self._cb_analysis_timeout)
+
+    def _candidateCapReached(self, cap):
+        """Whether the candidate registry is full; logs once and marks the running phase incomplete."""
+        if not cap or len(self.candidates) < cap:
+            return False
+        if not self._candidate_cap_logged:
+            LOGGER.warning(
+                "MAX_FUNCTION_CANDIDATES cap (%d) reached during candidate identification; "
+                "refusing further candidates to bound memory usage.",
+                cap,
+            )
+            self._candidate_cap_logged = True
+        note_incomplete = getattr(self.disassembly, "noteAnalysisIncomplete", None)
+        if note_incomplete is not None:
+            note_incomplete(ANALYSIS_INCOMPLETE_CANDIDATE_CAP)
+        return True
 
     def locateCandidates(self):
         """Architecture-specific candidate discovery; implemented per backend."""

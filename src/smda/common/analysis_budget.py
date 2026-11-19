@@ -16,5 +16,10 @@ def analysisTimeoutTripped(disassembly, cbAnalysisTimeout):
     if cbAnalysisTimeout is not None and cbAnalysisTimeout():
         if disassembly is not None:
             disassembly.analysis_timeout = True
+            # the phase the budget trips in is the phase the report's completion
+            # status blames; results without phase tracking (test stubs) skip this
+            note_incomplete = getattr(disassembly, "noteAnalysisIncomplete", None)
+            if note_incomplete is not None:
+                note_incomplete("timeout")
         return True
     return False

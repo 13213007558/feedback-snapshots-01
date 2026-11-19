@@ -21,7 +21,13 @@ from smda.common.labelprovider.PeSymbolProvider import PeSymbolProvider
 from smda.common.labelprovider.RustSymbolProvider import RustSymbolProvider
 from smda.common.labelprovider.WinApiResolver import WinApiResolver
 from smda.common.TailcallAnalyzer import TailcallAnalyzer
-from smda.DisassemblyResult import DisassemblyResult
+from smda.DisassemblyResult import (
+    ANALYSIS_PHASE_CANDIDATE_DISCOVERY,
+    ANALYSIS_PHASE_FUNCTION_TRAVERSAL,
+    ANALYSIS_PHASE_GAP_SEARCH,
+    ANALYSIS_PHASE_SYMBOL_COMPLETION,
+    DisassemblyResult,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -354,10 +360,12 @@ class RecursiveDisassembler:
         # instructions per call. disasm_lite() also provides faster disassembly than disasm(), so we work with tuples.
         decode_window_size = self.decode_window_size or self.backend.max_instruction_size * 2
         blocks_processed = 0
+        timed_out = False
         reverted_gap_functions = []
         while state.hasUnprocessedBlocks():
             blocks_processed += 1
             if blocks_processed % _TIMEOUT_POLL_BLOCKS == 0 and self._analysisTimeoutTripped():
+                timed_out = True
                 break
             debug_logging = LOGGER.isEnabledFor(logging.DEBUG)
             if debug_logging:
@@ -495,6 +503,15 @@ class RecursiveDisassembler:
                         start_addr,
                         self.fc_manager.getFunctionCandidate(start_addr),
                     )
+        if timed_out:
+            # the budget ran out mid-function: the blocks decoded so far are not a
+            # self-consistent whole, so they are not finalized into the CFG. What the
+            # aborted analysis undid on its way in is analyzed again on its own, the
+            # same as on the other abort paths.
+            self._restoreRevertedGapFunctions(reverted_gap_functions)
+            self._restoreAbsorbedFunctions(state.absorbed_functions)
+            self.fc_manager.updateAnalysisAborted(start_addr, "analysis budget spent during traversal")
+            return state
         if known_table_bytes is None and not state.table_bytes.isdisjoint(state.processed_bytes):
             # blocks are taken last-in first-out, so a path that runs into a table can be decoded
             # before the dispatch that reads the table is; once more, with the tables known
@@ -578,7 +595,9 @@ class RecursiveDisassembler:
         # once we are initialized, add OEP
         if binary_info.oep is not None:
             self.fc_manager.symbol_addresses.append(binary_info.base_addr + binary_info.oep)
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_CANDIDATE_DISCOVERY)
         self.fc_manager.init(self.disassembly, cbAnalysisTimeout)
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_FUNCTION_TRAVERSAL)
         self.capstone = self.backend.createCapstone(binary_info.bitness)
         self._tfidf = self.backend.createTfIdf(binary_info.bitness)
         LOGGER.debug("Starting heuristical analysis.")
@@ -595,6 +614,7 @@ class RecursiveDisassembler:
                 break
             state = self.analyzeFunction(deferred_addr)
         # second pass, analyze remaining gaps for additional candidates in an iterative way
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_GAP_SEARCH)
         gap_candidate = self.fc_manager.nextGapCandidate()
         while gap_candidate is not None:
             if self._analysisTimeoutTripped(cbAnalysisTimeout):
@@ -615,6 +635,10 @@ class RecursiveDisassembler:
             next_gap = self.fc_manager.getNextGap(dont_skip=True)
             gap_candidate = self.fc_manager.nextGapCandidate(next_gap)
         LOGGER.debug("Finished gap analysis, functions: %d", len(self.disassembly.functions))
+        # the passes past the gap search complete what it and the primary pass found:
+        # candidates discovered during gap analysis, symbol- and metadata-driven late
+        # sources, tailcall resolution and the final report packaging
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_SYMBOL_COMPLETION)
         # candidates may have been discovered during gap analysis (e.g. tailcall targets triggered
         # by _analyzeUncondBranch); drain them before moving to the tailcall pass.
         self._drainCandidateQueue(cbAnalysisTimeout)

@@ -61,6 +61,8 @@ INTEGER_REPORT_FIELDS = frozenset(
     }
 )
 REAL_REPORT_FIELDS = frozenset({"confidence_threshold", "execution_time"})
+
+
 REQUIRED_STATISTICS_FIELDS = frozenset(
     {
         "num_functions",
@@ -74,6 +76,39 @@ REQUIRED_STATISTICS_FIELDS = frozenset(
         "num_failed_instructions",
     }
 )
+
+
+def _default_completion():
+    """The completion status of a report whose analysis ran to its natural end."""
+    return {
+        "status": "complete",
+        "incomplete_phases": {},
+        "completed_phases": [],
+        "pending_phases": [],
+    }
+
+
+def _validated_completion(completion):
+    """The completion dict of a serialized report, checked and normalized to the full shape."""
+    if not isinstance(completion, dict):
+        raise ValueError("serialized report completion must be a dictionary")
+    status = completion.get("status", "complete")
+    if status not in ("complete", "incomplete"):
+        raise ValueError("serialized report completion status must be 'complete' or 'incomplete'")
+    incomplete_phases = completion.get("incomplete_phases", {})
+    if not isinstance(incomplete_phases, dict) or any(
+        not isinstance(phase, str) or not isinstance(reason, str) for phase, reason in incomplete_phases.items()
+    ):
+        raise ValueError("serialized report completion incomplete_phases must map phase names to reasons")
+    normalized = _default_completion()
+    normalized["status"] = status
+    normalized["incomplete_phases"] = dict(incomplete_phases)
+    for field in ("completed_phases", "pending_phases"):
+        phases = completion.get(field, [])
+        if not isinstance(phases, (list, tuple)) or not all(isinstance(phase, str) for phase in phases):
+            raise ValueError(f"serialized report completion {field} must be a list of phase names")
+        normalized[field] = list(phases)
+    return normalized
 
 
 class SmdaReport:
@@ -90,6 +125,8 @@ class SmdaReport:
     # immutable-by-convention sentinel: __init__ always rebinds this to a fresh list
     code_sections: List[Any] = []
     component = None
+    # structured completion status: {"status": "complete"|"incomplete", "incomplete_phases": {...}, ...}
+    completion = None
     confidence_threshold = None
     disassembly_errors = None
     execution_time = None
@@ -145,6 +182,9 @@ class SmdaReport:
         self.xmetadata = {}
         # never leave this pointing at the shared class-level sentinel
         self.code_sections = []
+        # every construction path starts as a finished analysis; the disassembly path
+        # below overwrites this with the result's actual completion status
+        self.completion = _default_completion()
         if disassembly is not None:
             self.architecture = disassembly.binary_info.architecture
             self.abi = disassembly.binary_info.abi
@@ -175,8 +215,17 @@ class SmdaReport:
             self.smda_version = disassembly.smda_version
             self.statistics = DisassemblyStatistics(disassembly)
             self.status = disassembly.getAnalysisOutcome()
+            self.completion = disassembly.getAnalysisCompletion()
             if self.status == "timeout":
                 self.message = "Analysis was stopped when running into the timeout."
+            if self.completion["status"] == "incomplete":
+                unfinished = ", ".join(
+                    f"{phase} ({reason})" for phase, reason in self.completion["incomplete_phases"].items()
+                )
+                if self.status == "timeout":
+                    self.message = f"Analysis was stopped when running into the timeout. Incomplete: {unfinished}."
+                else:
+                    self.message = f"Analysis incomplete: {unfinished}."
             self.timestamp = datetime.datetime.now(datetime.timezone.utc)
             self.version = disassembly.binary_info.version
             self.xcfg = self._convertCfg(disassembly, config=config)
@@ -516,6 +565,10 @@ class SmdaReport:
             else []
         )
         smda_report.confidence_threshold = report_dict["confidence_threshold"]
+        # reports serialized before the completion field existed default to a finished analysis
+        smda_report.completion = (
+            _validated_completion(report_dict["completion"]) if "completion" in report_dict else _default_completion()
+        )
         smda_report.disassembly_errors = report_dict["disassembly_errors"]
         smda_report.execution_time = report_dict["execution_time"]
         smda_report.identified_alignment = report_dict["identified_alignment"]
@@ -604,6 +657,7 @@ class SmdaReport:
             "code_areas": self.code_areas,
             "code_sections": transformed_code_sections,
             "confidence_threshold": self.confidence_threshold,
+            "completion": self.completion if self.completion is not None else _default_completion(),
             "disassembly_errors": self.disassembly_errors,
             "execution_time": self.execution_time,
             "identified_alignment": self.identified_alignment,
@@ -659,7 +713,9 @@ class SmdaReport:
             return f"{duration} -> {self.message}"
         arch_str = f"{self.architecture}.{self.bitness}bit" if self.bitness else self.architecture
         base_addr = f"0x{self.base_addr:08x}" if self.base_addr is not None else "0x????????"
-        incomplete = " -- INCOMPLETE, analysis hit the timeout" if self.status == "timeout" else ""
+        incomplete = ""
+        if self.status == "timeout" or (self.completion or {}).get("status") == "incomplete":
+            incomplete = " -- INCOMPLETE, analysis did not run to completion"
         return (
             f"{duration} -> (architecture: {arch_str}, base_addr: {base_addr}): {len(self.xcfg)} functions{incomplete}"
         )

@@ -14,7 +14,7 @@ from capstone import (
 )
 
 from smda.arm.definitions import IT_MNEMONICS
-from smda.DisassemblyResult import DisassemblyResult
+from smda.DisassemblyResult import ANALYSIS_PHASE_FUNCTION_TRAVERSAL, DisassemblyResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -142,9 +142,11 @@ class Exporter:
             binary_info.bitness = self.bitness
         self.disassembly.function_symbols = self.interface.getFunctionSymbols()
         api_map = self.interface.getApiMap()
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_FUNCTION_TRAVERSAL)
         for function_offset in self.interface.getFunctions():
             if cb_analysis_timeout and cb_analysis_timeout():
                 self.disassembly.analysis_timeout = True
+                self.disassembly.noteAnalysisIncomplete("timeout")
                 break
             if self.interface.isExternalFunction(function_offset):
                 continue

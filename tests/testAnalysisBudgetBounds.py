@@ -95,9 +95,10 @@ class BlockLoopBudgetTestSuite(unittest.TestCase):
         report, functions, blocks = self._analyze(spent_inside="analyzeFunction")
 
         self.assertEqual(report.status, "timeout")
-        self.assertEqual(functions, 1)
-        self.assertGreater(blocks, 0)
-        self.assertLess(blocks, CHAIN_BLOCKS)
+        # the cut function is not hung into the CFG as if it were complete: the
+        # blocks decoded before the budget ran out are a fragment, not a function
+        self.assertEqual(functions, 0)
+        self.assertEqual(blocks, 0)
 
     def test_the_same_function_completes_within_budget(self):
         """Positive control: the cut above has to come from the budget, not from the fixture
@@ -116,7 +117,8 @@ class BudgetLatchTestSuite(unittest.TestCase):
     unclaimed when the gap scan runs. Each orchestrator loop used to ask the callback again
     rather than the recorded verdict, and a callback that answers by where it is called from
     - which is how a caller scopes a budget to one pass - said no. The gap scan then promoted
-    the remainder, and a truncated function came back as two.
+    the remainder, and a truncated function came back as two. The cut function itself is not
+    kept either: its partial blocks are a fragment, not a self-consistent CFG.
     """
 
     def _afterNthCall(self, config, calls):
@@ -141,11 +143,15 @@ class BudgetLatchTestSuite(unittest.TestCase):
         return report.status, {function.offset for function in report.getFunctions()}
 
     def test_a_function_cut_short_is_not_carved_into_two(self):
-        for calls in (0, 1, 2, 3):
+        # three in-function polls fire over the chain (every 256 of 900 blocks), so
+        # tripping after 0-2 of them cuts the function; the latched verdict then
+        # stops the gap scan from promoting the remainder next to the dropped fragment
+        for calls in (0, 1, 2):
             with self.subTest(polls_before_tripping=calls):
                 status, offsets = self._functions(calls)
 
-                self.assertEqual(offsets, {BASE + TEXT_RVA}, f"status={status}")
+                self.assertEqual(status, "timeout")
+                self.assertEqual(offsets, set(), f"status={status}")
 
     def test_the_same_image_is_one_function_with_no_budget_at_all(self):
         """Positive control: the image holds one function, so the assertion above is about

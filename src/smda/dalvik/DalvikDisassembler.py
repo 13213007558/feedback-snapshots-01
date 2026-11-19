@@ -16,7 +16,11 @@ from smda.dalvik.DalvikOpcodeDecoder import (
     read_sleb128,
     read_uleb128,
 )
-from smda.DisassemblyResult import DisassemblyResult
+from smda.DisassemblyResult import (
+    ANALYSIS_PHASE_FUNCTION_TRAVERSAL,
+    ANALYSIS_PHASE_GAP_SEARCH,
+    DisassemblyResult,
+)
 from smda.utility.DexFileLoader import DexFileLoader
 from smda.utility.lief_helper import safe_lief_parse
 
@@ -1636,6 +1640,7 @@ class DalvikDisassembler:
 
         analyzed_count = 0
         known_code_offsets = set()
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_FUNCTION_TRAVERSAL)
         for method in methods:
             if analysisTimeoutTripped(self.disassembly, cbAnalysisTimeout):
                 break
@@ -1670,6 +1675,7 @@ class DalvikDisassembler:
 
         # Recover code_items hidden from the method table (orphans).
         method_counts["orphans_discovered"] = 0
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_GAP_SEARCH)
         if not analysisTimeoutTripped(self.disassembly, cbAnalysisTimeout):
             orphan_offsets = self._discoverOrphanCodeItems(raw_for_resolver, known_code_offsets)
             for code_offset in orphan_offsets:

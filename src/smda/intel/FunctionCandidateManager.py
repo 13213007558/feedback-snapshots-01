@@ -527,14 +527,7 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         """create candidate if it does not exist yet, returns True if newly created, else False"""
         if addr not in self.candidates:
             cap = getattr(self.config, "MAX_FUNCTION_CANDIDATES", 0)
-            if cap and len(self.candidates) >= cap:
-                if not self._candidate_cap_logged:
-                    LOGGER.warning(
-                        "MAX_FUNCTION_CANDIDATES cap (%d) reached during candidate identification; "
-                        "refusing further candidates to bound memory usage.",
-                        cap,
-                    )
-                    self._candidate_cap_logged = True
+            if self._candidateCapReached(cap):
                 return False
             self.candidates[addr] = FunctionCandidate(self.disassembly.binary_info, addr)
             return True

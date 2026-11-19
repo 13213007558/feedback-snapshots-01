@@ -16,7 +16,11 @@ from dnfile.enums import MetadataTables
 from smda.common.analysis_budget import analysisTimeoutTripped
 from smda.common.ExceptionHandling import reraise_non_operational_exception
 from smda.common.labelprovider.CilSymbolProvider import CilSymbolProvider
-from smda.DisassemblyResult import DisassemblyResult
+from smda.DisassemblyResult import (
+    ANALYSIS_PHASE_CANDIDATE_DISCOVERY,
+    ANALYSIS_PHASE_FUNCTION_TRAVERSAL,
+    DisassemblyResult,
+)
 
 from .FunctionAnalysisState import FunctionAnalysisState
 
@@ -326,6 +330,7 @@ class CilDisassembler:
 
         LOGGER.debug("Starting parser-based analysis.")
         # one parse feeds both the symbol provider and the MethodDef walk below
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_CANDIDATE_DISCOVERY)
         pe = dnfile.dnPE(data=binary_info.raw_data)
         self._updateLabelProviders(binary_info, parsed=pe)
         # a corrupted metadata signature leaves dnfile with no tables at all; the symbol
@@ -334,6 +339,7 @@ class CilDisassembler:
         if not method_defs:
             LOGGER.error("No readable .NET MethodDef table, no methods to analyze")
             method_defs = []
+        self.disassembly.setAnalysisPhase(ANALYSIS_PHASE_FUNCTION_TRAVERSAL)
         for row in method_defs:
             if not row.Rva or not row.ImplFlags.miIL or any((row.Flags.mdAbstract, row.Flags.mdPinvokeImpl)):
                 continue
