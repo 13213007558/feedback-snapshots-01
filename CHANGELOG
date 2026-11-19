@@ -1,5 +1,7 @@
 === master
 
+* Add log_path and log_path_fallback options and log_path method to the common_logger plugin, allowing applications to log a safe path representation instead of the actual path, with a conservative fallback for unmatched requests (jeremyevans)
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)
