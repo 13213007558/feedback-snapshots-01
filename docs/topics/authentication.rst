@@ -123,6 +123,13 @@ the best way to do this is to ensure your consumer is wrapped in a
 
 You can logout a user with the ``logout(scope)`` async function.
 
+When several authentication backends are configured, pass the backend's dotted
+import path explicitly (or ensure the user object has a ``backend`` attribute).
+``login`` validates the backend before it modifies anything, so a login that
+fails because the backend is missing, ambiguous or not listed in
+``AUTHENTICATION_BACKENDS`` leaves the current session, its anonymous data and
+``scope["user"]`` untouched (and sends no ``user_logged_in`` signal).
+
 If you are in a WebSocket consumer, or logging-in after the first response
 has been sent in a http consumer, the session is populated
 **but will not be saved automatically** - you must call

@@ -12,10 +12,18 @@ from django.contrib.auth import (
     user_logged_in,
     user_logged_out,
 )
+from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.models import AnonymousUser
 
 from channels.auth import get_user, login, logout
 from channels.db import database_sync_to_async
+
+MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
+OTHER_BACKEND = "tests.security.test_auth.OtherBackend"
+
+
+class OtherBackend(ModelBackend):
+    """A second authentication backend, used to exercise backend selection."""
 
 
 class CatchSignal:
@@ -92,6 +100,20 @@ async def assert_is_logged_in(scope, user):
         await get_user(scope), await database_sync_to_async(get_user_model)()
     )
     assert await get_user(scope) == user
+
+
+async def get_persisted_session(session_key):
+    """
+    Load the session data stored under ``session_key`` from the session backend.
+    Returns an empty dict if the session no longer exists.
+    """
+    SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
+    return await database_sync_to_async(SessionStore(session_key).load)()
+
+
+async def save_session(session):
+    await database_sync_to_async(session.save)()
+
 
 
 @pytest.mark.django_db(transaction=True)
@@ -250,3 +272,183 @@ async def test_logout_not_logged_in(session):
 
     assert "user" not in scope
     assert isinstance(await get_user(scope), AnonymousUser)
+
+
+async def assert_anonymous_login_unchanged(scope, session_key, persisted):
+    """
+    Assert that a failed login left the anonymous session, its persisted data
+    and scope["user"] alone.
+    """
+    session = scope["session"]
+    assert session.session_key == session_key
+    assert dict(session) == persisted
+    assert SESSION_KEY not in session
+    assert BACKEND_SESSION_KEY not in session
+    assert HASH_SESSION_KEY not in session
+    # The persisted data is still there, under the same key.
+    assert await get_persisted_session(session_key) == persisted
+    # The scope user was not replaced by the attempted login.
+    assert scope["user"].is_authenticated is False
+    assert isinstance(await get_user(scope), AnonymousUser)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_ambiguous_backend_keeps_anonymous_progress(
+    session, settings, user_bob
+):
+    """
+    Test that an ambiguous backend (multiple configured, none provided) raises
+    without rotating the session key, dropping anonymous data, updating
+    scope["user"] or sending user_logged_in.
+    """
+    settings.AUTHENTICATION_BACKENDS = [MODEL_BACKEND, OTHER_BACKEND]
+    session["anonymous_progress"] = "keep-me"
+    await save_session(session)
+    session_key = session.session_key
+    persisted = await get_persisted_session(session_key)
+    scope = {"session": session, "user": AnonymousUser()}
+
+    async with CatchSignal(user_logged_in) as handler:
+        with pytest.raises(
+            ValueError,
+            match="You have multiple authentication backends configured",
+        ):
+            await login(scope, user=user_bob)
+        assert not handler.called
+
+    await assert_anonymous_login_unchanged(scope, session_key, persisted)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_ambiguous_backend_keeps_existing_login(
+    session, settings, user_bob, user_bill
+):
+    """
+    Test that an ambiguous backend failure does not log out or rotate the
+    session of an already authenticated user.
+    """
+    settings.AUTHENTICATION_BACKENDS = [MODEL_BACKEND, OTHER_BACKEND]
+    scope = {"session": session}
+    await login(scope, user=user_bob, backend=MODEL_BACKEND)
+    await save_session(session)
+    session_key = session.session_key
+    persisted = await get_persisted_session(session_key)
+    session_key_in_session = session[SESSION_KEY]
+
+    async with CatchSignal(user_logged_in) as handler:
+        with pytest.raises(
+            ValueError,
+            match="You have multiple authentication backends configured",
+        ):
+            await login(scope, user=user_bill)
+        assert not handler.called
+
+    assert session.session_key == session_key
+    assert session[SESSION_KEY] == session_key_in_session
+    assert await get_persisted_session(session_key) == persisted
+    assert scope["user"] == user_bob
+    assert await get_user(scope) == user_bob
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_invalid_backend_keeps_anonymous_progress(session, user_bob):
+    """
+    Test that a backend which is not configured in AUTHENTICATION_BACKENDS is
+    rejected without changing the session, persisted data or scope["user"].
+    """
+    session["anonymous_progress"] = "keep-me"
+    await save_session(session)
+    session_key = session.session_key
+    persisted = await get_persisted_session(session_key)
+    scope = {"session": session, "user": AnonymousUser()}
+
+    async with CatchSignal(user_logged_in) as handler:
+        with pytest.raises(
+            ValueError,
+            match="is not configured in settings.AUTHENTICATION_BACKENDS",
+        ):
+            await login(scope, user=user_bob, backend="tests.security.NoSuchBackend")
+        assert not handler.called
+
+    await assert_anonymous_login_unchanged(scope, session_key, persisted)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_non_string_backend_keeps_anonymous_progress(session, user_bob):
+    """
+    Test that a non-string backend is rejected before the session is modified.
+    """
+    session["anonymous_progress"] = "keep-me"
+    await save_session(session)
+    session_key = session.session_key
+    persisted = await get_persisted_session(session_key)
+    scope = {"session": session, "user": AnonymousUser()}
+
+    async with CatchSignal(user_logged_in) as handler:
+        with pytest.raises(
+            TypeError, match="backend must be a dotted import path string"
+        ):
+            await login(scope, user=user_bob, backend=object())
+        assert not handler.called
+
+    await assert_anonymous_login_unchanged(scope, session_key, persisted)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_switch_user_with_backend(session, settings, user_bob, user_bill):
+    """
+    Test that a successful login with an explicit backend flushes the previous
+    user's session, persists the new login, updates scope["user"] and sends
+    exactly one user_logged_in signal.
+    """
+    settings.AUTHENTICATION_BACKENDS = [MODEL_BACKEND, OTHER_BACKEND]
+    scope = {"session": session}
+    await login(scope, user=user_bob, backend=MODEL_BACKEND)
+    await save_session(session)
+    old_session_key = session.session_key
+
+    async with CatchSignal(user_logged_in) as handler:
+        await login(scope, user=user_bill, backend=OTHER_BACKEND)
+        assert handler.call_count == 1
+        assert handler.call_args.kwargs["user"] == user_bill
+
+    await save_session(session)
+    new_session_key = session.session_key
+    assert new_session_key != old_session_key
+    # The old session was flushed: its data (including the old login) is gone.
+    assert await get_persisted_session(old_session_key) == {}
+    persisted = await get_persisted_session(new_session_key)
+    assert persisted[SESSION_KEY] == str(user_bill.pk)
+    assert persisted[BACKEND_SESSION_KEY] == OTHER_BACKEND
+    await assert_is_logged_in(scope, user_bill)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_login_success_preserves_anonymous_data_once(session, user_bob):
+    """
+    Test that a successful first login cycles the session key but keeps
+    anonymous data, and that only this success emits user_logged_in.
+    """
+    session["anonymous_progress"] = "keep-me"
+    await save_session(session)
+    old_session_key = session.session_key
+    scope = {"session": session}
+
+    async with CatchSignal(user_logged_in) as handler:
+        await login(scope, user=user_bob, backend=MODEL_BACKEND)
+        assert handler.call_count == 1
+        assert handler.call_args.kwargs["user"] == user_bob
+
+    await save_session(session)
+    assert session.session_key != old_session_key
+    persisted = await get_persisted_session(session.session_key)
+    assert persisted["anonymous_progress"] == "keep-me"
+    assert persisted[SESSION_KEY] == str(user_bob.pk)
+    assert persisted[BACKEND_SESSION_KEY] == MODEL_BACKEND
+    await assert_is_logged_in(scope, user_bob)

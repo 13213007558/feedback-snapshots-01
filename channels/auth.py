@@ -76,6 +76,33 @@ def login(scope, user, backend=None):
         raise ValueError(
             "User must be passed as an argument or must be present in the scope."
         )
+
+    # Resolve and validate the backend before touching the session or the
+    # scope. Resolving the backend can fail (ambiguous or invalid backend),
+    # and a failed login must leave the existing session, including any
+    # anonymous data, and scope["user"] untouched.
+    try:
+        backend = backend or user.backend
+    except AttributeError:
+        backends = _get_backends(return_tuples=True)
+        if len(backends) == 1:
+            _, backend = backends[0]
+        else:
+            raise ValueError(
+                "You have multiple authentication backends configured and "
+                "therefore must provide the `backend` "
+                "argument or set the `backend` attribute on the user."
+            )
+    if not isinstance(backend, str):
+        raise TypeError(
+            "backend must be a dotted import path string (got %r)." % backend
+        )
+    if backend not in settings.AUTHENTICATION_BACKENDS:
+        raise ValueError(
+            "The given backend %r is not configured in "
+            "settings.AUTHENTICATION_BACKENDS." % backend
+        )
+
     if hasattr(user, "get_session_auth_hash"):
         session_auth_hash = user.get_session_auth_hash()
     if SESSION_KEY in session:
@@ -91,18 +118,6 @@ def login(scope, user, backend=None):
             session.flush()
     else:
         session.cycle_key()
-    try:
-        backend = backend or user.backend
-    except AttributeError:
-        backends = _get_backends(return_tuples=True)
-        if len(backends) == 1:
-            _, backend = backends[0]
-        else:
-            raise ValueError(
-                "You have multiple authentication backends configured and "
-                "therefore must provide the `backend` "
-                "argument or set the `backend` attribute on the user."
-            )
     session[SESSION_KEY] = user._meta.pk.value_to_string(user)
     session[BACKEND_SESSION_KEY] = backend
     session[HASH_SESSION_KEY] = session_auth_hash
