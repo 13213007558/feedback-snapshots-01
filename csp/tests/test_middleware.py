@@ -11,11 +11,30 @@ import pytest
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
 from csp.exceptions import CSPNonceError
-from csp.middleware import CheckableLazyObject, CSPMiddleware
+from csp.middleware import (
+    DECISION_DEBUG_EXEMPT,
+    DECISION_EXCLUDED,
+    DECISION_EXEMPT,
+    DECISION_GENERATED,
+    DECISION_NOT_CONFIGURED,
+    DECISION_PRESET,
+    CheckableLazyObject,
+    CSPMiddleware,
+    PolicyDecision,
+)
 from csp.tests.utils import response
 
 mw = CSPMiddleware(response())
 rf = RequestFactory()
+
+
+class DiagnosticsMiddleware(CSPMiddleware):
+    """A middleware that collects policy decisions in memory."""
+
+    def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        super().__init__(*args, **kwargs)
+        self.decisions: list[PolicyDecision] = []
+        self.diagnostics_callback = self.decisions.append
 
 
 def test_checkable_lazy_object() -> None:
@@ -287,3 +306,100 @@ def test_set_nonce_access_after_middleware_is_ok() -> None:
     mw.process_response(request, HttpResponse())
     assert bool(getattr(request, "csp_nonce", False)) is True
     assert str(getattr(request, "csp_nonce")) == nonce
+
+
+def test_diagnostics_generated_and_not_configured() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/some/path/")
+    diag_mw.process_response(request, HttpResponse())
+    assert diag_mw.decisions == [
+        PolicyDecision(header=HEADER, report_only=False, decision=DECISION_GENERATED, path="/some/path/"),
+        PolicyDecision(header=HEADER_REPORT_ONLY, report_only=True, decision=DECISION_NOT_CONFIGURED, path="/some/path/"),
+    ]
+
+
+@override_settings(CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF]}})
+def test_diagnostics_report_only_generated() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    diag_mw.process_response(request, HttpResponse())
+    assert [d.decision for d in diag_mw.decisions] == [DECISION_GENERATED, DECISION_GENERATED]
+
+
+def test_diagnostics_preset_by_view() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    resp = HttpResponse()
+    resp[HEADER] = "default-src example.com"
+    diag_mw.process_response(request, resp)
+    assert resp[HEADER] == "default-src example.com"
+    assert diag_mw.decisions[0] == PolicyDecision(
+        header=HEADER, report_only=False, decision=DECISION_PRESET, path="/"
+    )
+
+
+def test_diagnostics_exempt() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    resp = HttpResponse()
+    setattr(resp, "_csp_exempt", True)
+    diag_mw.process_response(request, resp)
+    assert HEADER not in resp
+    assert diag_mw.decisions[0].decision == DECISION_EXEMPT
+
+
+@override_settings(CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF]}})
+def test_diagnostics_report_only_exempt() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    resp = HttpResponse()
+    setattr(resp, "_csp_exempt_ro", True)
+    diag_mw.process_response(request, resp)
+    assert [d.decision for d in diag_mw.decisions] == [DECISION_GENERATED, DECISION_EXEMPT]
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}, "EXCLUDE_URL_PREFIXES": ["/excluded"]})
+def test_diagnostics_excluded_url_prefix() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/excluded/page")
+    resp = HttpResponse()
+    diag_mw.process_response(request, resp)
+    assert HEADER not in resp
+    assert diag_mw.decisions[0] == PolicyDecision(
+        header=HEADER, report_only=False, decision=DECISION_EXCLUDED, path="/excluded/page"
+    )
+
+
+@override_settings(CONTENT_SECURITY_POLICY=None, CONTENT_SECURITY_POLICY_REPORT_ONLY=None)
+def test_diagnostics_not_configured() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    resp = HttpResponse()
+    diag_mw.process_response(request, resp)
+    assert HEADER not in resp
+    assert HEADER_REPORT_ONLY not in resp
+    assert [d.decision for d in diag_mw.decisions] == [DECISION_NOT_CONFIGURED, DECISION_NOT_CONFIGURED]
+
+
+@override_settings(DEBUG=True)
+def test_diagnostics_debug_exempt() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    diag_mw.process_response(request, HttpResponseServerError())
+    assert [d.decision for d in diag_mw.decisions] == [DECISION_DEBUG_EXEMPT, DECISION_DEBUG_EXEMPT]
+
+
+def test_diagnostics_contain_no_nonce_or_header_values() -> None:
+    diag_mw = DiagnosticsMiddleware(response())
+    request = rf.get("/")
+    diag_mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    resp = HttpResponse()
+    diag_mw.process_response(request, resp)
+    # The nonce and policy made it into the real header...
+    assert nonce in resp[HEADER]
+    # ...but neither appears anywhere in the diagnostics records.
+    recorded = repr(diag_mw.decisions)
+    assert nonce not in recorded
+    assert resp[HEADER] not in recorded
+    assert "default-src" not in recorded

@@ -98,6 +98,12 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **Policy Decision Diagnostics**: `CSPMiddleware` now accepts an optional `diagnostics_callback`
+that is called with a `csp.middleware.PolicyDecision` for each of the two policies (enforced and
+report-only) of every response. Each record carries a stable decision reason (`generated`, `preset`,
+`exempt`, `excluded`, `not_configured` or `debug_exempt`) and the request path, and never contains
+the nonce or any header values, making it safe to log when diagnosing rollouts.
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 

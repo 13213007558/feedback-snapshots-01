@@ -321,6 +321,56 @@ The policy can be changed on a per-view (or even per-request) basis. See
 the :ref:`decorator documentation <decorator-chapter>` for more details.
 
 
+Diagnosing Header Decisions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When rolling out a policy it can be hard to tell why a given response did or did
+not get a header. ``CSPMiddleware`` accepts an optional ``diagnostics_callback``
+that is called with the middleware's final decision for each of the two policies
+(enforced and report-only) of every response. Set it on a subclass:
+
+.. code-block:: python
+
+    import logging
+
+    from csp.middleware import CSPMiddleware
+
+    logger = logging.getLogger(__name__)
+
+
+    class DiagnosingCSPMiddleware(CSPMiddleware):
+        def __init__(self, get_response):
+            super().__init__(get_response)
+            self.diagnostics_callback = lambda decision: logger.info("CSP decision: %r", decision)
+
+The callback receives a ``csp.middleware.PolicyDecision`` with these fields:
+
+``header``
+    The name of the header the decision applies to
+    (``Content-Security-Policy`` or ``Content-Security-Policy-Report-Only``).
+
+``report_only``
+    Whether the decision concerns the report-only policy.
+
+``decision``
+    A stable reason string, one of:
+
+    * ``"generated"`` — the middleware built the policy and set the header.
+    * ``"preset"`` — the response already contained the header, set by the view.
+    * ``"exempt"`` — the view was exempted via the ``csp_exempt`` decorator.
+    * ``"excluded"`` — the path matched ``EXCLUDE_URL_PREFIXES``.
+    * ``"not_configured"`` — no policy was configured for this header.
+    * ``"debug_exempt"`` — a debug error response (404/500 with ``DEBUG`` on).
+
+``path``
+    The request path, to help locate the route.
+
+.. note::
+
+   ``PolicyDecision`` deliberately contains neither the nonce nor any header
+   values, so records are safe to log or aggregate.
+
+
 .. _Content-Security-Policy: https://www.w3.org/TR/CSP/
 .. _Content-Security-Policy-L3: https://w3c.github.io/webappsec-csp/
 .. _spec: Content-Security-Policy_
