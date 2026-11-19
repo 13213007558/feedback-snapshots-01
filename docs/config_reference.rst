@@ -52,12 +52,40 @@ These are specific to Flask-Session.
    .. versionadded:: 0.6.0
 
 .. py:data:: SESSION_SERIALIZATION_FORMAT
-   
+
    The serialization format to use. Can be `'msgpack'`` or `'json'`. Set to `'msgpack'`` for a more efficient serialization format. Set to `'json'`` for a human-readable format.
-   
+
    Default: ``'msgpack'``
 
    .. versionadded:: 0.7.0
+
+.. py:data:: SESSION_FIELD_TTL
+
+   Optional per-field absolute retention. A mapping of session key to lifetime,
+   expressed as an integer number of seconds or a :class:`datetime.timedelta`.
+   Each listed field is removed once its lifetime has elapsed, measured from the
+   moment the application writes that field. Re-writing a field restarts only
+   that field's timer; ordinary reads and storage/cookie renewal
+   (``SESSION_REFRESH_EACH_REQUEST``) never extend it. Fields that are not listed
+   keep following the normal ``PERMANENT_SESSION_LIFETIME`` of the whole session,
+   so for example login state and page preferences can outlive a short-lived
+   field such as a contact detail kept only for filling a form.
+
+   The expiry timestamps are stored inside the serialized session record under a
+   reserved ``_field_expiry`` key, so the feature works with every backend
+   without changing its storage layout elsewhere.
+
+   .. code-block:: python
+
+      from datetime import timedelta
+
+      app.config["SESSION_FIELD_TTL"] = {
+          "contact_info": timedelta(seconds=60),
+      }
+
+   Default: ``None`` (feature disabled).
+
+   .. versionadded:: 0.8.0
 
 .. deprecated:: 0.7.0
     ``SESSION_USE_SIGNER``

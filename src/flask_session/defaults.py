@@ -10,6 +10,11 @@ class Defaults:
     SESSION_ID_LENGTH = 32
     SESSION_SERIALIZATION_FORMAT = "msgpack"
 
+    # Per-field retention (absolute time-to-live) settings.
+    # Mapping of session key -> lifetime, expressed as an int number of
+    # seconds or a datetime.timedelta. ``None`` disables the feature.
+    SESSION_FIELD_TTL = None
+
     # Clean up settings for non TTL backends (SQL, PostgreSQL, etc.)
     SESSION_CLEANUP_N_REQUESTS = None
 

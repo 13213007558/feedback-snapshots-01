@@ -1,4 +1,5 @@
 import secrets
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import suppress
@@ -10,7 +11,7 @@ except ImportError:
 
 import random
 from datetime import timedelta as TimeDelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import msgspec
 from flask import Flask, Request, Response
@@ -21,6 +22,12 @@ from werkzeug.datastructures import CallbackDict
 
 from ._utils import retry_query
 from .defaults import Defaults
+from .field_ttl import (
+    FIELD_EXPIRY_KEY,
+    normalize_field_ttl,
+    purge_expired_fields,
+    stamp_field_expiry,
+)
 
 
 class ServerSideSession(CallbackDict, SessionMixin):
@@ -63,6 +70,8 @@ class ServerSideSession(CallbackDict, SessionMixin):
         initial: Optional[Dict[str, Any]] = None,
         sid: Optional[str] = None,
         permanent: Optional[bool] = None,
+        field_ttl: Optional[Mapping[str, int]] = None,
+        field_expiry: Optional[Dict[str, float]] = None,
     ):
         def on_update(self) -> None:
             self.modified = True
@@ -70,10 +79,75 @@ class ServerSideSession(CallbackDict, SessionMixin):
 
         CallbackDict.__init__(self, initial, on_update)
         self.sid = sid
+        # Per-field retention configuration (key -> lifetime in seconds) and
+        # the absolute expiry timestamps of the fields currently being tracked.
+        # Set before ``self.permanent`` because that assignment goes through
+        # ``__setitem__`` and consults the TTL configuration.
+        self.field_ttl: Dict[str, int] = dict(field_ttl or {})
+        self.field_expiry: Dict[str, float] = dict(field_expiry or {})
         if permanent:
             self.permanent = permanent
         self.modified = False
         self.accessed = False
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key == FIELD_EXPIRY_KEY:
+            raise ValueError(
+                f"{FIELD_EXPIRY_KEY!r} is reserved for per-field TTL bookkeeping."
+            )
+        # Stamp the expiry at write time. Re-writing a field restarts its
+        # retention clock; reads never touch the timestamp.
+        if key in self.field_ttl:
+            stamp_field_expiry(
+                key, time.time(), self.field_ttl, self.field_expiry
+            )
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self.field_expiry.pop(key, None)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        # Werkzeug's implementation bypasses ``__setitem__``, so stamp and mark
+        # accessed explicitly. Only a newly inserted key starts a TTL clock.
+        self.accessed = True
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        # Werkzeug's ``update`` writes through ``dict.update`` and would skip
+        # the write-time stamping in ``__setitem__``.
+        if args:
+            if len(args) > 1:
+                raise TypeError(
+                    f"update expected at most 1 argument, got {len(args)}"
+                )
+            other = args[0]
+            items = (
+                other.items() if isinstance(other, Mapping) else other
+            )
+            for key, value in items:
+                self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    def pop(self, key: str, *args: Any) -> Any:
+        # Werkzeug's ``pop`` bypasses ``__delitem__``.
+        value = super().pop(key, *args)
+        self.field_expiry.pop(key, None)
+        return value
+
+    def popitem(self) -> Any:
+        key, value = super().popitem()
+        self.field_expiry.pop(key, None)
+        return key, value
+
+    def __ior__(self, other: Any) -> "ServerSideSession":
+        # Werkzeug's ``__ior__`` writes through ``dict.__ior__`` and would skip
+        # the write-time stamping in ``__setitem__``.
+        self.update(other)
+        return self
 
     def __getitem__(self, key: str) -> Any:
         self.accessed = True
@@ -83,14 +157,22 @@ class ServerSideSession(CallbackDict, SessionMixin):
         self.accessed = True
         return super().get(key, default)
 
-    def setdefault(self, key: str, default: Any = None) -> Any:
-        self.accessed = True
-        return super().setdefault(key, default)
+    def purge_expired_fields(self) -> set:
+        """Drop fields whose per-field retention has elapsed.
+
+        The session is marked modified when anything is removed so the pruned
+        payload is written back to storage. Returns the removed keys.
+        """
+        expired = purge_expired_fields(self, time.time(), self.field_expiry)
+        if expired:
+            self.modified = True
+        return expired
 
     def clear(self) -> None:
         """Clear the session except for the '_permanent' key."""
         permanent = self.get("_permanent", False)
         super().clear()
+        self.field_expiry.clear()
         self["_permanent"] = permanent
 
 
@@ -164,6 +246,7 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         sid_length: int = Defaults.SESSION_ID_LENGTH,
         serialization_format: str = Defaults.SESSION_SERIALIZATION_FORMAT,
         cleanup_n_requests: Optional[int] = Defaults.SESSION_CLEANUP_N_REQUESTS,
+        field_ttl: Optional[Mapping[str, Any]] = Defaults.SESSION_FIELD_TTL,
     ):
         self.app = app
         self.key_prefix = key_prefix
@@ -179,6 +262,8 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         self.sid_length = sid_length
         self.has_same_site_capability = hasattr(self, "get_cookie_samesite")
         self.cleanup_n_requests = cleanup_n_requests
+        # Per-field absolute retention, keyed by session field name.
+        self.field_ttl: Dict[str, int] = normalize_field_ttl(field_ttl)
 
         # Cleanup settings for non-TTL databases only
         if getattr(self, "ttl", None) is False:
@@ -217,6 +302,31 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
 
     def _get_store_id(self, sid: str) -> str:
         return self.key_prefix + sid
+
+    def set_field_ttl(self, field_ttl: Optional[Mapping[str, Any]]) -> None:
+        """Configure per-field absolute retention after construction.
+
+        Backends are built by the :class:`~flask_session.Session` factory, so
+        this lets the factory pass ``SESSION_FIELD_TTL`` without each backend
+        having to expose the parameter itself.
+        """
+        self.field_ttl = normalize_field_ttl(field_ttl)
+
+    def _make_session(
+        self,
+        initial: Optional[Dict[str, Any]] = None,
+        sid: Optional[str] = None,
+        permanent: Optional[bool] = None,
+        field_expiry: Optional[Dict[str, float]] = None,
+    ) -> ServerSideSession:
+        """Build a session bound to this interface's per-field TTL config."""
+        return self.session_class(
+            initial=initial,
+            sid=sid,
+            permanent=self.permanent if permanent is None else permanent,
+            field_ttl=self.field_ttl,
+            field_expiry=field_expiry,
+        )
 
     def should_set_storage(self, app: Flask, session: ServerSideSession) -> bool:
         """Used by session backends to determine if session in storage
@@ -283,6 +393,11 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         # Generate a prefixed session id
         store_id = self._get_store_id(session.sid)
 
+        # Drop any field whose per-field retention has elapsed. This is a
+        # safety net: the same purge already runs when the session is opened.
+        if getattr(session, "field_ttl", None):
+            session.purge_expired_fields()
+
         # Add a "Vary: Cookie" header if the session was accessed at all.
         # This assumes the app is checking the session values in a request that
         # behaves differently based on those values. ie. session.get("is_authenticated")
@@ -301,8 +416,18 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         if not self.should_set_storage(app, session):
             return
 
-        # Update existing or create new session in the database
-        self._upsert_session(app.permanent_session_lifetime, session, store_id)
+        # Carry the per-field expiry bookkeeping alongside the payload so it
+        # survives serialization in every backend, then restore the in-memory
+        # session untouched once persistence is done.
+        injected_expiry_metadata = FIELD_EXPIRY_KEY not in session
+        if session.field_expiry:
+            dict.__setitem__(session, FIELD_EXPIRY_KEY, session.field_expiry)
+        try:
+            # Update existing or create new session in the database
+            self._upsert_session(app.permanent_session_lifetime, session, store_id)
+        finally:
+            if injected_expiry_metadata:
+                dict.pop(session, FIELD_EXPIRY_KEY, None)
 
         if not self.should_set_cookie(app, session):
             return
@@ -336,14 +461,14 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         # If there's no session ID, generate a new one
         if not sid:
             sid = self._generate_sid(self.sid_length)
-            return self.session_class(sid=sid, permanent=self.permanent)
+            return self._make_session(sid=sid)
         # If the session ID is signed, unsign it
         if self.use_signer:
             try:
                 sid = self._unsign(app, sid)
             except BadSignature:
                 sid = self._generate_sid(self.sid_length)
-                return self.session_class(sid=sid, permanent=self.permanent)
+                return self._make_session(sid=sid)
 
         # Retrieve the session data from the database
         store_id = self._get_store_id(sid)
@@ -351,11 +476,19 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
 
         # If the saved session exists, load the session data from the document
         if saved_session_data is not None:
-            return self.session_class(saved_session_data, sid=sid)
+            # Per-field expiry bookkeeping rides along inside the payload.
+            field_expiry = saved_session_data.pop(FIELD_EXPIRY_KEY, None)
+            session = self._make_session(
+                initial=saved_session_data, sid=sid, field_expiry=field_expiry
+            )
+            # Enforce absolute per-field retention at read time. Neither the
+            # read itself nor a storage/cookie renewal can extend these fields.
+            session.purge_expired_fields()
+            return session
 
         # If the saved session does not exist, create a new session
         sid = self._generate_sid(self.sid_length)
-        return self.session_class(sid=sid, permanent=self.permanent)
+        return self._make_session(sid=sid)
 
     # METHODS TO BE IMPLEMENTED BY SUBCLASSES
 

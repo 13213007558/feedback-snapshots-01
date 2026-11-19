@@ -58,6 +58,11 @@ class Session:
             "SESSION_SERIALIZATION_FORMAT", Defaults.SESSION_SERIALIZATION_FORMAT
         )
 
+        # Per-field absolute retention settings
+        SESSION_FIELD_TTL = config.get(
+            "SESSION_FIELD_TTL", Defaults.SESSION_FIELD_TTL
+        )
+
         # Redis settings
         SESSION_REDIS = config.get("SESSION_REDIS", Defaults.SESSION_REDIS)
 
@@ -210,5 +215,9 @@ class Session:
 
         else:
             raise ValueError(f"Unrecognized value for SESSION_TYPE: {SESSION_TYPE}")
+
+        # Per-field retention is implemented centrally in the base interface, so
+        # it applies to every backend without each backend needing the option.
+        session_interface.set_field_ttl(SESSION_FIELD_TTL)
 
         return session_interface

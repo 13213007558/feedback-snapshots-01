@@ -1,3 +1,15 @@
+Unreleased
+----------
+
+Added
+~~~~~
+-   Add optional per-field absolute retention via the ``SESSION_FIELD_TTL``
+    config. Listed session keys expire on their own timer measured from the
+    moment they are written; reads and storage/cookie renewal do not extend
+    them, while unlisted keys keep following ``PERMANENT_SESSION_LIFETIME``.
+    Expiry timestamps are persisted inside the serialized session record under
+    the reserved ``_field_expiry`` key and apply to every backend.
+
 0.8.0 - 2024-03-26
 ------------------
 

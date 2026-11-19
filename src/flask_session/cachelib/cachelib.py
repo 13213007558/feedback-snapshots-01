@@ -1,6 +1,6 @@
 import warnings
 from datetime import timedelta as TimeDelta
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from cachelib.file import FileSystemCache
 from flask import Flask
@@ -23,6 +23,8 @@ class CacheLibSessionInterface(ServerSideSessionInterface):
     :param permanent: Whether to use permanent session or not.
     :param sid_length: The length of the generated session id in bytes.
     :param serialization_format: The serialization format to use for the session data.
+    :param field_ttl: Optional mapping of session key to absolute retention
+        lifetime (seconds as int/float or :class:`datetime.timedelta`).
     """
 
     session_class = CacheLibSession
@@ -37,6 +39,7 @@ class CacheLibSessionInterface(ServerSideSessionInterface):
         permanent: bool = Defaults.SESSION_PERMANENT,
         sid_length: int = Defaults.SESSION_ID_LENGTH,
         serialization_format: str = Defaults.SESSION_SERIALIZATION_FORMAT,
+        field_ttl: Optional[Mapping[str, Any]] = Defaults.SESSION_FIELD_TTL,
     ):
 
         if client is None:
@@ -50,7 +53,14 @@ class CacheLibSessionInterface(ServerSideSessionInterface):
         self.cache = client
 
         super().__init__(
-            None, key_prefix, use_signer, permanent, sid_length, serialization_format
+            None,
+            key_prefix,
+            use_signer,
+            permanent,
+            sid_length,
+            serialization_format,
+            Defaults.SESSION_CLEANUP_N_REQUESTS,
+            field_ttl,
         )
 
     def _retrieve_session_data(self, store_id: str) -> Optional[dict]:
