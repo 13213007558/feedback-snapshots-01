@@ -13,6 +13,14 @@ from urllib3 import HTTPResponse
 if TYPE_CHECKING:
     from requests import PreparedRequest
 
+# Attribute used to carry the peer-verification requirement of the request
+# that produced a cached response. It is set on a prepared request by the
+# adapter and propagated onto deserialized responses.
+VERIFY_PEER_ATTR = "_cachecontrol_verify_peer"
+
+# Prefix marking the serialization format of a cache entry.
+SERDE_PREFIX = b"cc=4,"
+
 
 class Serializer:
     serde_version = "4"
@@ -35,7 +43,7 @@ class Serializer:
             response._fp = io.BytesIO(body)  # type: ignore[assignment]
             response.length_remaining = len(body)
 
-        data = {
+        data: dict[str, Any] = {
             "response": {
                 "body": body,  # Empty bytestring if body is stored separately
                 "headers": {str(k): str(v) for k, v in response.headers.items()},
@@ -43,7 +51,12 @@ class Serializer:
                 "version": response.version,
                 "reason": str(response.reason),
                 "decode_content": response.decode_content,
-            }
+            },
+            # Whether the response was obtained over a connection that had to
+            # verify the peer's identity. Defaults to False when absent so
+            # that entries written by older versions never satisfy a
+            # peer-verifying request in protected mode.
+            "verified": bool(getattr(request, VERIFY_PEER_ATTR, False)),
         }
 
         # Construct our vary headers
@@ -57,7 +70,7 @@ class Serializer:
                     header_value = str(header_value)
                 data["vary"][header] = header_value
 
-        return b",".join([f"cc={self.serde_version}".encode(), self.serialize(data)])
+        return SERDE_PREFIX + self.serialize(data)
 
     def serialize(self, data: dict[str, Any]) -> bytes:
         return cast(bytes, msgpack.dumps(data, use_bin_type=True))
@@ -79,10 +92,10 @@ class Serializer:
 
         # Previous versions of this library supported other serialization
         # formats, but these have all been removed.
-        if not data.startswith(f"cc={self.serde_version},".encode()):
+        if not data.startswith(SERDE_PREFIX):
             return None
 
-        data = data[5:]
+        data = data[len(SERDE_PREFIX) :]
         return self._loads_v4(request, data, body_file)
 
     def prepare_response(
@@ -135,7 +148,11 @@ class Serializer:
         # Discard any `strict` parameter serialized by older version of cachecontrol.
         cached["response"].pop("strict", None)
 
-        return HTTPResponse(body=body, preload_content=False, **cached["response"])
+        response = HTTPResponse(body=body, preload_content=False, **cached["response"])
+        # Entries written by older cachecontrol versions lack the field; treat
+        # their provenance as unverified rather than guessing.
+        setattr(response, VERIFY_PEER_ATTR, bool(cached.get("verified", False)))
+        return response
 
     def _loads_v4(
         self,

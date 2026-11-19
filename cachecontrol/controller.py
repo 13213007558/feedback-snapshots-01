@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Collection, Mapping
 from requests.structures import CaseInsensitiveDict
 
 from cachecontrol.cache import DictCache, SeparateBodyBaseCache
-from cachecontrol.serialize import Serializer
+from cachecontrol.serialize import VERIFY_PEER_ATTR, Serializer
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -57,11 +57,39 @@ class CacheController:
         cache_etags: bool = True,
         serializer: Serializer | None = None,
         status_codes: Collection[int] | None = None,
+        protected: bool = False,
     ):
         self.cache = DictCache() if cache is None else cache
         self.cache_etags = cache_etags
         self.serializer = serializer or Serializer()
         self.cacheable_status_codes = status_codes or (200, 203, 300, 301, 308)
+        # When protected, a request that verifies the peer's identity may only
+        # be served from (or revalidated against) an entry obtained under the
+        # same requirement. Entries without recorded verification information
+        # are treated as unverified and therefore rejected.
+        self.protected = protected
+
+    @staticmethod
+    def _request_verifies_peer(request: PreparedRequest) -> bool:
+        return bool(getattr(request, VERIFY_PEER_ATTR, False))
+
+    def _entry_satisfies_request(
+        self, request: PreparedRequest, result: HTTPResponse
+    ) -> bool:
+        """Whether a deserialized entry is usable for this request.
+
+        In protected mode, peer-verifying requests can only use entries that
+        were themselves received while verifying the peer.
+        """
+        if not self.protected or not self._request_verifies_peer(request):
+            return True
+        if getattr(result, VERIFY_PEER_ATTR, False):
+            return True
+        logger.debug(
+            "Ignoring cached response: peer verification required but the "
+            "entry has no matching verification provenance"
+        )
+        return False
 
     @classmethod
     def _urlnorm(cls, uri: str) -> str:
@@ -171,6 +199,18 @@ class CacheController:
                 body_file.close()
         if result is None:
             logger.debug("Cache entry deserialization failed, entry ignored")
+            return None
+
+        if not self._entry_satisfies_request(request, result):
+            # The entry is not eligible for this request. Release the body it
+            # owns before forcing the caller back to the origin. The separate
+            # body file is closed explicitly because the response object does
+            # not always retain ownership of it.
+            result.close()
+            if body_file is not None:
+                body_file.close()
+            return None
+
         return result
 
     def cached_request(self, request: PreparedRequest) -> HTTPResponse | Literal[False]:

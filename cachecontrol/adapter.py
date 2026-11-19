@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import weakref
 import zlib
 from typing import TYPE_CHECKING, Any, Collection, Mapping
@@ -13,6 +14,7 @@ from requests.adapters import HTTPAdapter
 from cachecontrol.cache import DictCache
 from cachecontrol.controller import PERMANENT_REDIRECT_STATUSES, CacheController
 from cachecontrol.filewrapper import CallbackFileWrapper
+from cachecontrol.serialize import VERIFY_PEER_ATTR
 
 if TYPE_CHECKING:
     from requests import PreparedRequest, Response
@@ -34,6 +36,7 @@ class CacheControlAdapter(HTTPAdapter):
         serializer: Serializer | None = None,
         heuristic: BaseHeuristic | None = None,
         cacheable_methods: Collection[str] | None = None,
+        protected: bool = False,
         *args: Any,
         **kw: Any,
     ) -> None:
@@ -41,10 +44,32 @@ class CacheControlAdapter(HTTPAdapter):
         self.cache = DictCache() if cache is None else cache
         self.heuristic = heuristic
         self.cacheable_methods = cacheable_methods or ("GET",)
+        self.protected = protected
 
         controller_factory = controller_class or CacheController
+        controller_kwargs: dict[str, Any] = {}
+        if self._factory_accepts_protected(controller_factory):
+            controller_kwargs["protected"] = protected
         self.controller = controller_factory(
-            self.cache, cache_etags=cache_etags, serializer=serializer
+            self.cache,
+            cache_etags=cache_etags,
+            serializer=serializer,
+            **controller_kwargs,
+        )
+
+    @staticmethod
+    def _factory_accepts_protected(
+        controller_factory: type[CacheController],
+    ) -> bool:
+        try:
+            parameters = inspect.signature(controller_factory).parameters
+        except (TypeError, ValueError):
+            return False
+        if "protected" in parameters:
+            return True
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
         )
 
     def send(
@@ -61,6 +86,10 @@ class CacheControlAdapter(HTTPAdapter):
         Send a request. Use the request information to see if it
         exists in the cache and cache the response if we need to and can.
         """
+        # Record the peer-verification requirement so the controller can keep
+        # verified and unverified cache entries apart in protected mode.
+        setattr(request, VERIFY_PEER_ATTR, verify is not False)
+
         cacheable = cacheable_methods or self.cacheable_methods
         if request.method in cacheable:
             try:

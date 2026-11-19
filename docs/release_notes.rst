@@ -7,6 +7,15 @@
  Release Notes
 ===============
 
+Unreleased
+==========
+
+* Add opt-in protected mode (``protected=True``) that keeps TLS
+  peer-verifying requests from reusing cache entries obtained without peer
+  verification. Each entry now records its verification requirement, and
+  entries written by older versions are treated as unverified and rejected
+  for verifying requests.
+
 0.15.0
 ======
 

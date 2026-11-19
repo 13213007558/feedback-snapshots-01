@@ -60,6 +60,45 @@ CacheControl itself:
   request when the cached response was originally received in response
   to an authenticated request.
 
+TLS verification and protected mode
+===================================
+
+A single client is sometimes used with different TLS settings: a relaxed
+configuration that does not verify the server's identity (for example
+``requests``' ``verify=False`` while debugging) and a strict configuration
+that does. A response obtained without peer verification is only as trusted
+as the network path it traveled over, so it must not be reused by a request
+that requires verification.
+
+CacheControl therefore offers an opt-in **protected mode**. Enable it by
+passing ``protected=True`` to :func:`cachecontrol.CacheControl` or
+:class:`cachecontrol.CacheControlAdapter`:
+
+.. code-block:: python
+
+    import requests
+    from cachecontrol import CacheControl
+
+    session = CacheControl(requests.Session(), protected=True)
+
+In protected mode CacheControl records, with every cached entry, whether the
+response was received while peer verification was required. It then enforces
+the following rules:
+
+* A request that verifies the peer (``verify`` is ``True`` or a path to a CA
+  bundle) is served from, or revalidated against, only entries that were
+  themselves received while verifying the peer.
+* A request that does not verify the peer (``verify=False``) remains able to
+  use unverified entries, since it makes no stronger claim about the peer.
+* Entries written by older CacheControl versions carry no verification
+  information. They are treated as **unverified** and therefore rejected for
+  a peer-verifying request, which falls back to contacting the origin. The
+  replacement entry then records its verification setting.
+
+When protected mode is off (the default) CacheControl behaves exactly as
+before, so existing applications and on-disk caches keep working without
+changes.
+
 Reporting security issues
 =========================
 
