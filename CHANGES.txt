@@ -39,6 +39,20 @@ Backward Incompatibilities
   3333 does not allow. A request-target beginning with ``//`` is still treated
   as a path, as before.
 
+Features
+~~~~~~~~
+
+- Add a ``channel_request_buffer_max_bytes`` adjustment that bounds the number
+  of input bytes a single connection may retain while a client pipelines
+  requests faster than the application can service them. The limit is billed
+  per connection and covers the bodies of accepted requests that are queued or
+  running together with the request still being parsed. When it is reached the
+  channel stops reading from its own socket, relying on TCP backpressure to
+  slow that client down; no data is dropped, parsing resumes in order once the
+  application catches up, and a saturated connection never blocks other
+  connections. The default of ``0`` disables the limit and preserves the
+  historical behavior.
+
 Bugfix
 ~~~~~~
 

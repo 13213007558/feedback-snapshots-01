@@ -149,6 +149,7 @@ class Adjustments:
         ("unix_socket_perms", asoctal),
         ("sockets", as_socket_list),
         ("channel_request_lookahead", int),
+        ("channel_request_buffer_max_bytes", int),
         ("server_name", str),
     )
 
@@ -300,6 +301,16 @@ class Adjustments:
     # This allows detecting if a client closed the connection while its request
     # is being processed.
     channel_request_lookahead = 0
+
+    # The maximum number of bytes a single channel is allowed to retain while
+    # waiting for the application to catch up with a pipelining client. This
+    # counts the bodies of the requests that have already been accepted and are
+    # queued or running, together with the bytes of the request that is still
+    # being parsed. Once the limit is reached the channel stops reading from its
+    # own socket, which applies TCP backpressure to that client without ever
+    # blocking the event loop or touching other connections. A value of ``0``
+    # disables the limit (the historical behavior).
+    channel_request_buffer_max_bytes = 0
 
     # This setting controls the SERVER_NAME of the WSGI environment, this is
     # only ever used if the remote client sent a request without a Host header

@@ -1,4 +1,5 @@
 import io
+import threading
 import unittest
 
 
@@ -953,6 +954,196 @@ class TestHTTPChannelLookahead(TestHTTPChannel):
         self.assertEqual(len(data), 0)
 
 
+def _post_request(seq, body=b"abc"):
+    """Build a simple POST request with an in-memory body."""
+    header = (
+        b"POST /%d HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: %d\r\n\r\n" % (seq, len(body))
+    )
+    return header + body
+
+
+class PausingApplication:
+    """A WSGI application that blocks until an event is released.
+
+    Every request records the path it was served on and the request body, then
+    waits on ``gate`` so a test can keep a request executing while more data
+    arrives on the same connection.
+    """
+
+    def __init__(self, gate):
+        self.gate = gate
+        self.served_paths = []
+        self.bodies = []
+
+    def __call__(self, environ, start_response):
+        length = int(environ.get("CONTENT_LENGTH", 0))
+        self.bodies.append(environ["wsgi.input"].read(length))
+        self.served_paths.append(environ["PATH_INFO"])
+        self.gate.wait(5)
+        body = b"ok"
+        start_response(
+            "200 OK",
+            [("Content-Length", str(len(body))), ("Content-Type", "text/plain")],
+        )
+        return [body]
+
+
+class TestHTTPChannelRetainedBackpressure(unittest.TestCase):
+    """Per-connection pending byte limit and backpressure behavior."""
+
+    def _make_channel(self, max_bytes, lookahead=0, buffer_size=4096):
+        adj = DummyAdjustments()
+        adj.channel_request_buffer_max_bytes = max_bytes
+        adj.channel_request_lookahead = lookahead
+        sock = BoundedDummySock(buffer_size=buffer_size)
+        server = DummyServer()
+        self.gate = threading.Event()
+        server.application = PausingApplication(self.gate)
+        from waitress.channel import HTTPChannel
+
+        channel = HTTPChannel(server, sock, "127.0.0.1", adj=adj, map={})
+        return channel, sock, server
+
+    def _feed(self, sock, *requests):
+        # Client to server bytes go through the bounded kernel buffer.
+        sock.feed(b"".join(requests))
+
+    def test_disabled_limit_keeps_legacy_behavior(self):
+        channel, sock, server = self._make_channel(0)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        # Both requests are accepted and the byte limit never throttles them.
+        self.assertEqual(len(channel.requests), 2)
+        self.assertEqual(channel.retained_request_bytes, 118)
+
+    def test_accounting_separates_queued_and_partial(self):
+        # One request is 59 bytes; allow one but not two.
+        channel, sock, server = self._make_channel(60)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        self.assertEqual(len(channel.requests), 1)
+        self.assertEqual(channel.retained_request_bytes, 59)
+        # The second request is still being parsed and billed separately.
+        self.assertEqual(channel.retained_partial_bytes, 56)
+        self.assertEqual(channel.retained_bytes, 115)
+
+    def test_limit_pauses_reading_but_keeps_channel_writable(self):
+        channel, sock, server = self._make_channel(60)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        self.assertFalse(channel.readable())
+        # Backpressure only stops reading; flushing responses still works and
+        # the connection is not being torn down.
+        self.assertFalse(channel.will_close)
+        self.gate.set()
+        server.tasks[0].service()
+        self.assertTrue(channel.readable())
+
+    def test_consuming_a_request_releases_its_bytes_and_resumes(self):
+        channel, sock, server = self._make_channel(60, buffer_size=59)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        self.assertFalse(channel.readable())
+
+        # Finish the single in-flight request; its bytes are released.
+        self.gate.set()
+        server.tasks[0].service()
+        self.assertEqual(channel.retained_request_bytes, 0)
+        self.assertTrue(channel.readable())
+        self.assertEqual(server.application.served_paths, ["/1"])
+
+        # The second request's bytes were held at the socket level. Now that
+        # the channel made room they are delivered and parsed as a new request.
+        self.assertTrue(sock.pump())
+        channel.handle_read()
+        self.assertEqual(len(channel.requests), 1)
+        self.gate.set()
+        server.tasks[0].service()
+        self.assertEqual(server.application.served_paths, ["/1", "/2"])
+        self.assertEqual(channel.retained_bytes, 0)
+
+    def test_excess_input_is_not_re_attributed(self):
+        channel, sock, server = self._make_channel(60, buffer_size=59)
+        first = _post_request(1)
+        second = _post_request(2)
+        self._feed(sock, first, second)
+        channel.handle_read()
+
+        queued = channel.requests[0]
+        # The accepted request owns exactly the first request's bytes.
+        self.assertEqual(channel.retained_by_request[queued], len(first))
+        # The channel stopped reading, so the second request's bytes are still
+        # held at the socket level and were not assigned to the first request.
+        self.assertEqual(sock.local_sent, b"")
+        self.assertEqual(sock.pending, second)
+
+        # After the first request is consumed the channel makes room and the
+        # retained bytes are delivered and parsed as the independent request.
+        self.gate.set()
+        server.tasks[0].service()
+        self.assertTrue(sock.pump())
+        channel.handle_read()
+        self.assertEqual(len(channel.requests), 1)
+        self.assertEqual(channel.requests[0].body_rcv.__len__(), 3)
+        self.gate.set()
+        server.tasks[0].service()
+        self.assertEqual(server.application.bodies, [b"abc", b"abc"])
+
+    def test_a_full_connection_does_not_block_another_connection(self):
+        channel_a, sock_a, server_a = self._make_channel(60)
+        channel_b, sock_b, server_b = self._make_channel(60)
+
+        # Fill connection A up to the limit.
+        self._feed(sock_a, _post_request(1), _post_request(2))
+        channel_a.handle_read()
+        self.assertFalse(channel_a.readable())
+
+        # Connection B remains independently readable and serviceable.
+        self.assertTrue(channel_b.readable())
+        self._feed(sock_b, _post_request(1))
+        channel_b.handle_read()
+        self.assertEqual(len(channel_b.requests), 1)
+        self.gate.set()
+        server_b.tasks[0].service()
+        self.assertEqual(server_b.application.served_paths, ["/1"])
+        self.assertTrue(channel_b.readable())
+
+    def test_close_releases_retained_accounting(self):
+        channel, sock, server = self._make_channel(60)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        self.assertGreater(channel.retained_bytes, 0)
+        channel.handle_close()
+        self.assertEqual(channel.retained_bytes, 0)
+        self.assertEqual(channel.retained_request_bytes, 0)
+        self.assertEqual(channel.retained_partial_bytes, 0)
+        self.assertEqual(channel.retained_by_request, {})
+        self.assertTrue(sock.closed)
+
+    def test_cancel_resets_retained_accounting(self):
+        channel, sock, server = self._make_channel(60)
+        self._feed(sock, _post_request(1), _post_request(2))
+        channel.handle_read()
+        channel.cancel()
+        self.assertEqual(channel.retained_bytes, 0)
+        self.assertEqual(channel.retained_by_request, {})
+        self.assertFalse(channel.connected)
+
+    def test_partial_request_counts_toward_limit_before_acceptance(self):
+        # A limit smaller than a single request stops reading while the request
+        # is still being parsed, before it is accepted.
+        channel, sock, server = self._make_channel(10)
+        self._feed(sock, _post_request(1))
+        channel.handle_read()
+        self.assertEqual(channel.requests, [])
+        self.assertIsNotNone(channel.request)
+        self.assertGreater(channel.retained_partial_bytes, 0)
+        self.assertEqual(channel.retained_request_bytes, 0)
+        self.assertFalse(channel.readable())
+
+
 class DummySock:
     blocking = False
     closed = False
@@ -1014,6 +1205,45 @@ class DummySock:
                 return outer
 
         return LocalDummySock()
+
+
+class BoundedDummySock(DummySock):
+    """A DummySock that emulates a finite kernel receive buffer.
+
+    The client writes inbound bytes through ``feed``; only ``buffer_size``
+    unread bytes are held at once, like a non-blocking socket whose receive
+    buffer is full, so a back-pressured connection keeps its excess bytes at
+    the socket level rather than inside the channel.
+    """
+
+    def __init__(self, buffer_size=4096):
+        super().__init__()
+        self.buffer_size = buffer_size
+        self.pending = b""
+
+    def feed(self, data):
+        # Accept into the kernel buffer only while there is room; the rest is
+        # held client side. Tests call pump() once the channel has made room,
+        # mirroring the kernel accepting further segments after the
+        # application has caught up.
+        room = self.buffer_size - len(self.local_sent)
+        accepted = data[:room]
+        self.local_sent += accepted
+        self.pending += data[len(accepted):]
+        return len(accepted)
+
+    def pump(self):
+        # Move client-side pending bytes into the socket buffer if room.
+        room = self.buffer_size - len(self.local_sent)
+        accepted = self.pending[:room]
+        self.local_sent += accepted
+        self.pending = self.pending[room:]
+        return len(accepted)
+
+    def recv(self, buffer_size):
+        result = self.local_sent[:buffer_size]
+        self.local_sent = self.local_sent[buffer_size:]
+        return result
 
 
 class DummyLock:
@@ -1082,6 +1312,7 @@ class DummyAdjustments:
     max_request_header_size = 10000
     url_prefix = ""
     channel_request_lookahead = 0
+    channel_request_buffer_max_bytes = 0
     max_request_body_size = 1048576
 
 

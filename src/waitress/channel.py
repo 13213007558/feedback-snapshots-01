@@ -66,10 +66,48 @@ class HTTPChannel(wasyncore.dispatcher):
         # outbuf_lock used to access any outbuf (expected to use an RLock)
         self.outbuf_lock = threading.Condition()
 
+        # Number of request bytes currently retained on behalf of this
+        # connection. Requests that have been fully parsed and are queued in
+        # self.requests (including the one currently being serviced) are
+        # accounted in retained_request_bytes, while the request that is still
+        # being parsed is accounted in retained_partial_bytes. They are kept
+        # separate so the limit can be enforced before a request is accepted,
+        # but every byte held in memory is billed to this connection.
+        self.retained_request_bytes = 0
+        self.retained_partial_bytes = 0
+        # Bytes retained by the parser currently in flight. A request may be
+        # fed over several received() calls, so this accumulates the consumed
+        # bytes of one parser until it completes and the total is moved onto
+        # retained_request_bytes. Reset whenever a new parser is created.
+        self.retained_current_bytes = 0
+        # Exact number of bytes billed for each accepted request, keyed by the
+        # parser object. Releasing a request therefore removes precisely the
+        # bytes that were charged when it was accepted, regardless of how many
+        # of them were headers versus body bytes.
+        self.retained_by_request = {}
+
         wasyncore.dispatcher.__init__(self, sock, map=map)
         self.connected = True
         self.addr = addr
         self.requests = []
+
+    @property
+    def retained_bytes(self):
+        """Total input bytes retained for this connection right now."""
+        return self.retained_request_bytes + self.retained_partial_bytes
+
+    def _release_request_bytes(self, request):
+        """Stop billing a completed request's retained bytes to the channel."""
+        accepted = self.retained_by_request.pop(request, 0)
+        self.retained_request_bytes -= accepted
+
+        if self.retained_request_bytes < 0:  # pragma: no cover
+            self.retained_request_bytes = 0
+
+    def _reached_retained_byte_limit(self):
+        max_bytes = self.adj.channel_request_buffer_max_bytes
+
+        return max_bytes > 0 and self.retained_bytes >= max_bytes
 
     def check_client_disconnected(self):
         """
@@ -145,12 +183,16 @@ class HTTPChannel(wasyncore.dispatcher):
         # 3. There are not too many tasks already queued (if lookahead is enabled)
         # 4. There's no data in the output buffer that needs to be sent
         #    before we potentially create a new task.
+        # 5. The bytes retained on behalf of this connection have not reached
+        #    the per-channel input buffer limit. Pausing here applies
+        #    backpressure to this client only; other channels stay readable.
 
         return not (
             self.will_close
             or self.close_when_flushed
             or len(self.requests) > self.adj.channel_request_lookahead
             or self.total_outbufs_len
+            or self._reached_retained_byte_limit()
         )
 
     def handle_read(self):
@@ -210,7 +252,16 @@ class HTTPChannel(wasyncore.dispatcher):
             while data:
                 if self.request is None:
                     self.request = self.parser_class(self.adj)
+                    self.retained_current_bytes = 0
                 n = self.request.received(data)
+
+                # Every byte the parser retains is billed to this connection
+                # until the request has been serviced and its body closed. The
+                # request that is still being parsed is tracked separately from
+                # the ones that have already been accepted onto self.requests.
+                if n:
+                    self.retained_current_bytes += n
+                    self.retained_partial_bytes = self.retained_current_bytes
 
                 # if there are requests queued, we can not send the continue
                 # header yet since the responses need to be kept in order
@@ -228,6 +279,15 @@ class HTTPChannel(wasyncore.dispatcher):
                     self.sent_continue = False
 
                     if not self.request.empty:
+                        # Move the bytes of the now complete request from the
+                        # partial bucket onto the accepted-request bucket and
+                        # remember the exact total so releasing it later removes
+                        # precisely these bytes. The running total is unchanged,
+                        # the request simply changes state.
+                        accepted = self.retained_current_bytes
+                        self.retained_by_request[self.request] = accepted
+                        self.retained_request_bytes += accepted
+                        self.retained_partial_bytes = 0
                         self.requests.append(self.request)
 
                         if len(self.requests) == 1:
@@ -236,11 +296,24 @@ class HTTPChannel(wasyncore.dispatcher):
                             # service() will add a new task after each request
                             # has been processed
                             self.server.add_task(self)
+                    else:
+                        # An empty (blank line) request retains nothing.
+                        self.retained_partial_bytes = 0
+                    self.retained_current_bytes = 0
                     self.request = None
 
                 if n >= len(data):
                     break
                 data = data[n:]
+
+                # Do not start parsing another request out of the bytes we just
+                # received once the limit has been reached. The remaining data
+                # stays in the kernel socket buffer and is read on a later
+                # handle_read() after the application has drained some of the
+                # retained requests, so it can never be re-attributed to a
+                # different request and this channel never blocks the loop.
+                if self._reached_retained_byte_limit():
+                    break
 
         return True
 
@@ -317,6 +390,10 @@ class HTTPChannel(wasyncore.dispatcher):
                     )
             self.total_outbufs_len = 0
             self.connected = False
+            self.retained_request_bytes = 0
+            self.retained_partial_bytes = 0
+            self.retained_current_bytes = 0
+            self.retained_by_request = {}
             self.outbuf_lock.notify()
         wasyncore.dispatcher.close(self)
 
@@ -467,6 +544,7 @@ class HTTPChannel(wasyncore.dispatcher):
                 self.close_when_flushed = True
 
                 for request in self.requests:
+                    self._release_request_bytes(request)
                     request.close()
                 self.requests = []
         else:
@@ -490,6 +568,11 @@ class HTTPChannel(wasyncore.dispatcher):
             if self.current_outbuf_count > 0:
                 self.current_outbuf_count = self.adj.outbuf_high_watermark
 
+            # The request has been consumed, its body buffer is about to be
+            # closed so it no longer counts against this channel's retained
+            # input limit. This is what makes a paused, back-pressured channel
+            # readable again.
+            self._release_request_bytes(request)
             request.close()
 
             # Add new task to process the next request
@@ -521,3 +604,7 @@ class HTTPChannel(wasyncore.dispatcher):
         self.connected = False
         self.last_activity = time.time()
         self.requests = []
+        self.retained_request_bytes = 0
+        self.retained_partial_bytes = 0
+        self.retained_current_bytes = 0
+        self.retained_by_request = {}

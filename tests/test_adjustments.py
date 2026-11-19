@@ -366,6 +366,14 @@ class TestAdjustments(unittest.TestCase):
     def test_badvar(self):
         self.assertRaises(ValueError, self._makeOne, nope=True)
 
+    def test_channel_request_buffer_max_bytes_default_disabled(self):
+        inst = self._makeOne()
+        self.assertEqual(inst.channel_request_buffer_max_bytes, 0)
+
+    def test_channel_request_buffer_max_bytes_cast(self):
+        inst = self._makeOne(channel_request_buffer_max_bytes="4096")
+        self.assertEqual(inst.channel_request_buffer_max_bytes, 4096)
+
     def test_ipv4_disabled(self):
         self.assertRaises(
             ValueError, self._makeOne, ipv4=False, listen="127.0.0.1:8080"
@@ -474,6 +482,14 @@ class TestCLI(unittest.TestCase):
             ]
         )
         self.assertDictContainsSubset({"listen": " test:80 test:8080"}, opts)
+
+    def test_channel_request_buffer_max_bytes_param(self):
+        opts = self.parse(
+            ["--channel-request-buffer-max-bytes=4096", "tests.fixtureapps.runner:app"]
+        )
+        self.assertDictContainsSubset(
+            {"channel_request_buffer_max_bytes": "4096"}, opts
+        )
 
     def test_bad_param(self):
         import getopt

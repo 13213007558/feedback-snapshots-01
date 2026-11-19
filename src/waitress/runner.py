@@ -272,6 +272,15 @@ Tuning options:
         detecting if a client closed the connection while its request is being
         processed. Default is 0.
 
+    --channel-request-buffer-max-bytes=INT
+        Maximum number of bytes a single connection is allowed to retain while
+        waiting for the application to catch up with a pipelining client. This
+        counts the bodies of accepted requests that are queued or running
+        together with the request currently being parsed. Once the limit is
+        reached the channel stops reading from its own socket, applying TCP
+        backpressure to that client without affecting other connections. A
+        value of 0 disables the limit. Default is 0.
+
 """
 
 

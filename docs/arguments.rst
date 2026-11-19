@@ -328,3 +328,22 @@ channel_request_lookahead
     Default: ``0``
 
     .. versionadded:: 2.0.0
+
+channel_request_buffer_max_bytes
+    Maximum number of bytes a single connection is allowed to retain while
+    waiting for the application to catch up with a client that pipelines short
+    requests. This counts the bytes of the requests that have already been
+    accepted and are queued or running, together with the bytes of the request
+    that is still being parsed, so every byte held for the connection is billed
+    against the same limit.
+
+    Once the limit is reached the channel stops reading from its own socket.
+    The client's operating system then applies TCP backpressure on that
+    connection. No data is dropped: parsing resumes, in order, as soon as the
+    application has serviced enough requests to drop the retained total below
+    the limit. Pausing one connection never blocks the event loop or prevents
+    other connections from being read or written. A value of ``0`` disables the
+    limit and restores the historical behavior of reading without a per
+    connection byte bound.
+
+    Default: ``0``

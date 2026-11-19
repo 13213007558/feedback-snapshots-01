@@ -276,6 +276,17 @@ Tuning options:
 
     Default: ``0``
 
+``--channel-request-buffer-max-bytes=INT``
+    Maximum number of bytes a single connection is allowed to retain while
+    waiting for the application to catch up with a pipelining client. This
+    counts the bodies of accepted requests that are queued or running together
+    with the request that is still being parsed. Once the limit is reached the
+    channel stops reading from its own socket, applying TCP backpressure to
+    that client without blocking the event loop or affecting other
+    connections. A value of ``0`` disables the limit.
+
+    Default: ``0``
+
 ``--[no-]log-socket-errors``
     Toggle whether premature client disconnect tracebacks ought to be logged.
     On by default.
