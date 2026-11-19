@@ -900,6 +900,11 @@ class BufUD(Buf):
     
     # default encoding, required in SMS REPORT without TP-DCS
     DEFAULT_DCS = DCS_7B
+    CHARSETS = {
+        DCS_7B : 'gsm-7bit',
+        DCS_8B : '8bit',
+        DCS_UCS : 'ucs2',
+        }
     
     def set_val(self, val):
         if val is None:
@@ -940,6 +945,135 @@ class BufUD(Buf):
                 len_udh = (udh[0].get_val() + 1) << 3
                 return -len_udh % 7
     
+    def _get_udl(self):
+        # TP-UDL as present in the received TPDU, None when not available
+        try:
+            return self.get_env()['UDL']()
+        except Exception:
+            return None
+
+    def _get_truncated(self):
+        try:
+            return bool(getattr(self.get_env(), '_truncated', False))
+        except Exception:
+            return False
+
+    def _get_udh_len(self):
+        # number of bytes of the UDH part: UDHL value + the UDHL byte itself
+        try:
+            udh = self.get_env()['UDH']
+        except Exception:
+            return 0
+        if udh.get_trans():
+            return 0
+        try:
+            udhl = udh[0].get_val()
+        except Exception:
+            return 0
+        return 0 if udhl is None else udhl + 1
+
+    def decode_report(self):
+        """decode TP-UD and report how the result was obtained
+
+        Returns a dict with:
+        - charset: 'gsm-7bit', '8bit' or 'ucs2'
+        - udl: raw TP-UDL value (None if not available)
+        - header_octets: number of TP-UDH bytes, included in TP-UDL
+        - declared_units: septets (GSM 7 bit) or octets declared by TP-UDL
+        - effective_units: septets or octets actually decoded
+        - text: decoded str (or bytes for 8 bit data)
+        - pending: raw bytes of the last character(s) left undecided, never
+          dropped nor replaced; empty when the whole TP-UD was decodeable
+        - pending_bits: undecoded bits available in `raw' (incomplete septet)
+        - padding: value of a trailing septet (0x0D) which may be the 7-bit
+          padding added after the TP-UDH, and is therefore left out of `text'
+        - missing_bits: bits announced by TP-UDL but absent from `raw'
+        - complete: boolean, False when TP-UDL announces more data than present
+        - raw: raw TP-UD bytes, never modified by decoding
+        """
+        dcs = self.get_dcs()
+        charset = self.CHARSETS[dcs]
+        raw = self.get_val()
+        if not isinstance(raw, bytes_types):
+            raw = b''
+        udl = self._get_udl()
+        udh_len = self._get_udh_len()
+        rep = {
+            'charset'       : charset,
+            'udl'           : udl,
+            'header_octets' : udh_len,
+            'declared_units': None,
+            'effective_units': 0,
+            'text'          : None,
+            'pending'       : b'',
+            'pending_bits'  : 0,
+            'padding'       : None,
+            'missing_bits'  : 0,
+            'complete'      : True,
+            'raw'           : raw,
+            }
+        if self._get_truncated():
+            # the TP-UDH itself does not fit: no reliable boundary between the
+            # header and the text, therefore nothing is decoded
+            rep['declared_units'] = udl
+            rep['pending'] = raw
+            rep['complete'] = False
+            rep['text'] = '' if dcs != DCS_8B else b''
+            return rep
+        #
+        if dcs == DCS_7B:
+            off = self._get_dcs7b_off()
+            if udl is None:
+                # no TP-UDL, keep the legacy size-based heuristic
+                text, pending_bits, padding, extra = decode_7b_septets(raw, off)
+                avail_bl = max(0, (len(raw) << 3) - off)
+                rep['text'] = text
+                rep['effective_units'] = avail_bl // 7
+                rep['pending_bits'] = pending_bits
+                rep['pending'] = raw[-1:] if pending_bits else b''
+                rep['padding'] = padding
+                return rep
+            # TP-UDL counts the UDH part in septets, fill bits included
+            udh_septets = ((udh_len << 3) + 6) // 7
+            declared = max(0, udl - udh_septets)
+            avail_bl = max(0, (len(raw) << 3) - off)
+            max_septets = avail_bl // 7
+            text, pending_bits, padding, extra = decode_7b_septets(raw, off, declared)
+            rep['declared_units'] = declared
+            rep['effective_units'] = min(declared, max_septets) \
+                - (1 if padding is not None else 0)
+            rep['text'] = text
+            rep['pending_bits'] = pending_bits
+            rep['padding'] = padding
+            rep['pending'] = extra
+            rep['missing_bits'] = max(0, 7 * declared - avail_bl)
+            # a reported padding octet is part of TP-UD, not undecided data
+            rep['complete'] = declared <= max_septets \
+                and (padding is not None or not extra)
+        #
+        elif dcs == DCS_UCS:
+            avail = len(raw)
+            declared = avail if udl is None else max(0, udl - udh_len)
+            effective = min(declared, avail)
+            # UCS2 is 16 bit encoded: an odd trailing octet is undecidable
+            effective -= effective % 2
+            rep['declared_units'] = declared
+            rep['effective_units'] = effective
+            rep['text'] = str(raw[:effective], 'utf-16-be')
+            rep['pending'] = raw[effective:min(declared, avail)]
+            rep['complete'] = declared <= avail and declared % 2 == 0
+        #
+        else:
+            avail = len(raw)
+            declared = avail if udl is None else max(0, udl - udh_len)
+            effective = min(declared, avail)
+            rep['declared_units'] = declared
+            rep['effective_units'] = effective
+            rep['text'] = raw[:effective]
+            rep['pending'] = raw[effective:min(declared, avail)]
+            rep['complete'] = declared <= avail
+        return rep
+
     def encode(self, val):
         dcs = self.get_dcs()
         if dcs == DCS_7B:
@@ -951,13 +1085,7 @@ class BufUD(Buf):
             self.set_val(val)
     
     def decode(self):
-        dcs = self.get_dcs()
-        if dcs == DCS_7B:
-            return decode_7b(self.get_val(), self._get_dcs7b_off())
-        elif dcs == DCS_UCS:
-            return str(self.get_val(), 'utf-16-be')
-        else:
-            return self.get_val()
+        return self.decode_report()['text']
     
     def repr(self):
         dcs = self.get_dcs()
@@ -983,6 +1111,8 @@ class TP_UD(Envelope):
         Envelope.__init__(self, *args, **kwargs)
         self[0].set_valauto(lambda: self._set_udl())
         self[1].set_transauto(lambda: True if self.get_udhi() == 0 else False)
+        # set when TP-UDL or the TP-UDH cannot be fully parsed from the buffer
+        self._truncated = False
     
     def _set_udl(self):
         if self.get_dcs() == DCS_7B:
@@ -996,17 +1126,31 @@ class TP_UD(Envelope):
             dcs = self.get_dcs()
             self[0]._from_char(char)
             ccur, clen, charnum = char._cur, char._len_bit, self[0]()
-            self[1]._from_char(char)
-            if dcs == DCS_7B:
-                char._len_bit = ccur + 7*charnum
-                lastbit, self[2]._ENC_BL = char._len_bit%8, (char._len_bit-char._cur)
-                if lastbit:
-                    char._len_bit += 8-lastbit
+            unit_bl = 7 if dcs == DCS_7B else 8
+            declared_bl = ccur + unit_bl*charnum
+            # never read beyond the bytes actually present in the TPDU
+            char._len_bit = min(declared_bl, clen)
+            try:
+                self[1]._from_char(char)
+            except Exception:
+                # the TP-UDH does not fit in the received buffer: the whole
+                # user data becomes undecidable, keep every byte as pending
+                self._truncated = True
+                char._cur = ccur
+                char._len_bit = clen
+                self[1].set_trans(True)
                 self[2]._from_char(char)
             else:
-                char._len_bit = ccur + 8*charnum
-                self[2]._ENC_BL = 0
-                self[2]._from_char(char)
+                if dcs == DCS_7B:
+                    lastbit = declared_bl % 8
+                    self[2]._ENC_BL = declared_bl - char._cur
+                    if lastbit and declared_bl <= clen:
+                        char._len_bit = declared_bl + 8-lastbit
+                    self[2]._from_char(char)
+                else:
+                    self[2]._ENC_BL = 0
+                    char._len_bit = declared_bl
+                    self[2]._from_char(char)
             char._len_bit = clen
     
     def get_udhi(self):

@@ -592,45 +592,130 @@ def encode_7b(txt, off=0):
     return bytes(reversed(pack_val(*arr)[0])), cnt
 
 
-def decode_7b(buf, off=0):
-    """translates the GSM 7 bit characters buffer `buf' to an unicode string
-    Enables the string to be decoded to start at a non-null offset `off' as it is
-    the case with fill bits after certain SMS User-Data-Headers
+def decode_7b_septets(buf, off=0, num=None):
+    """decode `buf' as GSM 7 bit characters and report the undecided tail
+
+    Septets are read LSB first, starting right after the `off' fill bits which
+    follow a TP-UDH, exactly as they are packed by encode_7b().
     
     Args:
         buf (bytes): buffer to decode
-        off (uint): bit offset
+        off (uint): number of fill bits at the beginning of `buf'
+        num (uint or None): exact number of septets to decode. If None, the
+            legacy behaviour is kept: the septet count is derived from the
+            buffer size and a trailing '@'/'\r' is stripped as potential padding.
      
+    Returns:
+        (text, pending_bits, padding, extra): decoded utf8 str, number of trailing
+            bits which do not form a complete septet, the value of an undecided
+            trailing padding septet (0x0D) or None, and the raw bytes located
+            after the decoded septets (undecided tail).
+
+            A trailing 0x0D septet is undecided when the declared septets
+            exactly reach a byte boundary: TS 23.038 allows such a CR to be the
+            septet used when 7 spare padding bits remain, instead of a real
+            character. It is then left out of `text' and reported in `padding',
+            together with its raw octet in `extra'.
+
+            When `num' is provided and `buf' is too short, only complete septets
+            are decoded; the remaining bits stay undecoded and are counted in
+            `pending_bits'.
+    """
+    total_bl = len(buf) << 3
+    pending_bits = 0
+    padding = None
+    extra = b''
+    if num is None:
+        # legacy mode: the buffer size is the only available length information
+        num = max(0, total_bl - off) // 7
+        legacy = True
+    else:
+        if off + 7 * num > total_bl:
+            # truncated body: decode complete septets only and keep the tail
+            pending_bits = max(0, total_bl - off) % 7
+            num = max(0, total_bl - off) // 7
+        legacy = False
+    #
+    # helper to extract one septet, LSB first, at an arbitrary bit offset
+    def _septet(pos):
+        val = 0
+        for k in range(7):
+            idx = pos + k
+            val |= ((buf[idx >> 3] >> (idx & 7)) & 1) << k
+        return val
+    #
+    arr = [_septet(off + 7 * i) for i in range(num)]
+    chars = []
+    trailing_escape = False
+    i = 0
+    while i < len(arr):
+        v = arr[i]
+        if v == 27:
+            if i + 1 < len(arr) and arr[i + 1] in _GSM7bExtLUT:
+                # escape char, the next septet is an extended character
+                chars.append(_GSM7bExtLUT[arr[i + 1]])
+                i += 2
+            elif i + 1 < len(arr):
+                # undefined escape sequence: neither septet maps to a character
+                chars.append(' ')
+                i += 2
+            elif legacy:
+                # historical behaviour, when no exact septet count is known
+                chars.append(' ')
+                i += 1
+            else:
+                # dangling escape at the end: nothing safe to decode, leave the
+                # septet undecided instead of fabricating a character
+                trailing_escape = True
+                i += 1
+        else:
+            chars.append(_GSM7bLUT[v])
+            i += 1
+    #
+    if not legacy:
+        used_bl = off + 7 * num
+        if pending_bits:
+            # the last partial octet holds the undecoded bits
+            extra_start = used_bl >> 3
+        else:
+            extra_start = (used_bl + 7) >> 3
+        if extra_start < len(buf):
+            # raw bytes past the decoded septets are undecided, never decoded
+            extra = buf[extra_start:]
+        if trailing_escape:
+            # the dangling escape septet is inside the last raw octet
+            extra = buf[(off + 7 * (num - 1)) >> 3:]
+        elif not extra and used_bl % 8 == 0 and arr \
+                and arr[-1] == 0x0D and (num < 2 or arr[-2] != 27):
+            # The septets exactly reach the byte boundary and the last one is CR.
+            # Per TS 23.038, such a trailing CR may be the padding septet used
+            # when 7 spare bits remain, instead of a real character. Keep it out
+            # of the text and report both its value and its raw octet.
+            padding = arr[-1]
+            extra = buf[-1:]
+            chars = chars[:-1]
+    #
+    if legacy and chars and chars[-1] in ('@', '\r'):
+        # historical behaviour, used when no exact septet count is available:
+        # strip the trailing character seen as 7-bit padding (0x00 or 0x0D)
+        return ''.join(chars[:-1]), pending_bits, None, extra
+    return ''.join(chars), pending_bits, padding, extra
+
+
+def decode_7b(buf, off=0, num=None):
+    """translates the GSM 7 bit characters buffer `buf' to an unicode string
+    Enables the string to be decoded to start at a non-null offset `off' as it is
+    the case with fill bits after certain SMS User-Data-Headers
+
+    Args:
+        buf (bytes): buffer to decode
+        off (uint): bit offset
+        num (uint or None): exact number of septets, if known (e.g. from TP-UDL)
+
     Returns:
         decoded text string (utf8 str)
     """
-    char = Charpy(bytes(reversed(buf)))
-    #
-    # get the size and number of characters
-    buf_bl    = len(buf) << 3
-    chars_bl  = buf_bl - off
-    chars_num = chars_bl // 7
-    # jump over the fill bits (from the UDH)
-    char._cur = chars_bl - (7 * chars_num)
-    #
-    # get all chars
-    arr = [char.get_uint(7) for i in range(chars_num)]
-    chars = []
-    for i, v in enumerate(arr):
-        if v == 27:
-            # escape char, replace last char with extended content
-            try:
-                chars[-1] = _GSM7bExtLUT[arr[i-1]]
-            except KeyError:
-                chars.append(' ')
-        else:
-            chars.append(_GSM7bLUT[v])
-    #
-    if chars and chars[0] in ('@', '\r'):
-        # strip the last character corresponding to the last 7-bit padding (being 0x00 or 0x13)
-        return ''.join(reversed(chars[1:]))
-    else:
-        return ''.join(reversed(chars))
+    return decode_7b_septets(buf, off, num)[0]
 
 
 def decode_7b_gmr(buf):
