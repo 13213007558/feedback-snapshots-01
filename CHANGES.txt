@@ -42,6 +42,14 @@ Backward Incompatibilities
 Bugfix
 ~~~~~~
 
+- A malformed request method, or a malformed header line or continuation
+  line, is no longer echoed back in the body of the 400 (Bad Request)
+  response. The diagnostic is now a fixed string, so request data such as
+  credentials in those positions can not be reflected to the client. The
+  generic 500 response body and the server-side log are unchanged, and
+  ``expose_tracebacks`` remains the explicit opt-in for sending a traceback
+  to the client.
+
 - Ignore ``EBADF`` from ``select``/``poll`` when a socket is closed while
   the server is waiting for I/O, instead of crashing the worker loop.
   See https://github.com/Pylons/waitress/issues/468

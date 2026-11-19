@@ -12,6 +12,38 @@ provides `TransLogger
 Log Format <https://httpd.apache.org/docs/current/logs.html#combined>`_.
 
 
+.. _error-logging:
+
+Error Logging
+-------------
+
+Waitress does not send application tracebacks to the client unless
+``expose_tracebacks`` is enabled; see :ref:`arguments`.  It always writes the
+unhandled exception, with its traceback, to the Python logger named
+``waitress`` at ``ERROR`` level.  The log record is the server's copy of the
+failure, separate from whatever bytes the client receives: the client may see
+only a generic ``500`` response, or nothing more than a closed connection if
+the response headers had already been sent.
+
+That log record is intentionally not redacted.  Exception messages and
+tracebacks routinely contain request data, so the ``waitress`` log should be
+treated as sensitive: restrict who can read it and where it is shipped, just
+as you would the application's own error logs.
+
+Redaction is the application's responsibility.  Waitress cannot know which
+values are secret, and cannot distinguish a credential from any other part of
+an exception message.  An application that must keep credentials out of
+diagnostics should avoid interpolating them into exception messages, and can
+attach a sanitized message or a custom logging filter upstream.  If a
+diagnostic traceback is needed in production, send it to the server log this
+way rather than enabling ``expose_tracebacks``.
+
+Access logs are a separate concern: Waitress does not log request lines,
+headers, or response bodies at all.  If a proxy or middleware records request
+URLs, be aware that credentials in query strings will be recorded there by
+that component.
+
+
 .. _logging-to-the-console-using-python:
 
 Logging to the Console Using Python

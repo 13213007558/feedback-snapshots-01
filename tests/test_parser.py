@@ -799,6 +799,18 @@ class Test_get_header_lines(unittest.TestCase):
         # https://corte.si/posts/code/pathod/pythonservers/index.html
         self.assertRaises(ParsingError, self._callFUT, b" Host: localhost\r\n\r\n")
 
+    def test_get_header_lines_malformed_does_not_reflect_input(self):
+        # ParsingError messages end up in the 400 response body, so request
+        # data must not be interpolated into them.
+        secret = b"CANARY-4c1f9e2a"
+        for data in (
+            b" " + secret + b" continuation\r\n\r\n",
+            b"slim\r\nBad: value\r" + secret + b"\r\n\r\n",
+        ):
+            with self.assertRaises(ParsingError) as ctx:
+                self._callFUT(data)
+            self.assertNotIn(secret.decode("latin-1"), ctx.exception.args[0])
+
 
 class Test_crack_first_line(unittest.TestCase):
     def _callFUT(self, line):
@@ -810,6 +822,12 @@ class Test_crack_first_line(unittest.TestCase):
 
     def test_crack_first_line_lowercase_method(self):
         self.assertRaises(ParsingError, self._callFUT, b"get / HTTP/1.0")
+
+    def test_crack_first_line_bad_method_does_not_reflect_input(self):
+        secret = b"CANARY-4c1f9e2a"
+        with self.assertRaises(ParsingError) as ctx:
+            self._callFUT(b"ge" + secret + b"T / HTTP/1.0")
+        self.assertNotIn(secret.decode("latin-1"), ctx.exception.args[0])
 
     def test_crack_first_line_nomatch(self):
         result = self._callFUT(b"GET / bleh")

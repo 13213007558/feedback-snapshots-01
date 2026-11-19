@@ -290,6 +290,20 @@ expose_tracebacks
 
     Default: ``False``
 
+    This is a diagnostic switch for development, not a production setting.
+    When it is enabled, the traceback of an unhandled application exception
+    becomes the body of the ``500`` response.  A traceback commonly contains
+    request data, including credentials that the application received in the
+    WSGI environ (``HTTP_AUTHORIZATION``, ``HTTP_COOKIE``, query strings, and
+    so on), so enabling it can hand those values to any client that can cause
+    an error.
+
+    When it is disabled, the client receives only a generic ``500`` response,
+    or the connection is closed if response headers were already sent.  The
+    full traceback is still written to the ``waitress`` logger in both cases.
+    Waitress does not redact credentials from that log output; see
+    :ref:`logging`.
+
 asyncore_loop_timeout
     The ``timeout`` value (seconds) passed to ``asyncore.loop`` to run the mainloop.
 

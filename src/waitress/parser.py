@@ -535,14 +535,15 @@ def get_header_lines(header):
             continue
 
         if b"\r" in line or b"\n" in line:
-            raise ParsingError(
-                'Bare CR or LF found in header line "%s"' % str(line, "latin-1")
-            )
+            # Never echo the offending line: it is unvalidated request data and
+            # may contain credentials, which would then be reflected to the
+            # client in the 400 response body.
+            raise ParsingError("Bare CR or LF found in header line")
 
         if line.startswith((b" ", b"\t")):
             if not r:
                 # https://corte.si/posts/code/pathod/pythonservers/index.html
-                raise ParsingError('Malformed header line "%s"' % str(line, "latin-1"))
+                raise ParsingError("Malformed header line")
             r[-1] += line
         else:
             r.append(line)
@@ -578,6 +579,8 @@ def crack_first_line(line):
     # request onto the floor.
 
     if method != method.upper():
-        raise ParsingError('Malformed HTTP method "%s"' % str(method, "latin-1"))
+        # Do not echo the method: it is attacker-controlled request data, and
+        # the message becomes the body of the 400 response.
+        raise ParsingError("Malformed HTTP method")
 
     return method, uri, version
