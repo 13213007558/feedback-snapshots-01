@@ -11,7 +11,6 @@ from urllib.parse import urlencode
 
 from django.contrib.staticfiles.storage import ManifestFilesMixin
 from django.core.exceptions import ImproperlyConfigured
-from django.core.exceptions import SuspiciousOperation
 from django.core.files.base import File
 from django.utils.deconstruct import deconstructible
 from django.utils.encoding import filepath_to_uri
@@ -26,7 +25,6 @@ from storages.utils import clean_name
 from storages.utils import get_available_overwrite_name
 from storages.utils import is_seekable
 from storages.utils import lookup_env
-from storages.utils import safe_join
 from storages.utils import setting
 from storages.utils import to_bytes
 
@@ -515,17 +513,6 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             self._bucket = self.connection.Bucket(self.bucket_name)
         return self._bucket
 
-    def _normalize_name(self, name):
-        """
-        Normalizes the name so that paths like /path/to/ignored/../something.txt
-        work. We check to make sure that the path pointed to is not outside
-        the directory specified by the LOCATION setting.
-        """
-        try:
-            return safe_join(self.location, name)
-        except ValueError:
-            raise SuspiciousOperation("Attempted access to '%s' denied." % name)
-
     def _open(self, name, mode="rb"):
         name = self._normalize_name(clean_name(name))
         try:
@@ -608,10 +595,11 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             directories += [
                 posixpath.relpath(entry["Prefix"], path)
                 for entry in page.get("CommonPrefixes", ())
+                if self._is_within_root(entry["Prefix"])
             ]
             for entry in page.get("Contents", ()):
                 key = entry["Key"]
-                if key != path:
+                if key != path and self._is_within_root(key):
                     files.append(posixpath.relpath(key, path))
         return directories, files
 

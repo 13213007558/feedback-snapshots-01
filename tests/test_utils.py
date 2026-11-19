@@ -5,6 +5,7 @@ import pathlib
 
 from django.conf import settings
 from django.core.exceptions import SuspiciousFileOperation
+from django.core.exceptions import SuspiciousOperation
 from django.test import TestCase
 
 from storages import utils
@@ -116,6 +117,41 @@ class SafeJoinTest(TestCase):
     def test_with_base_url_join_nothing(self):
         path = utils.safe_join("base_url")
         self.assertEqual(path, "base_url/")
+
+
+class ValidateRelativeNameTests(TestCase):
+    def test_legal_relative_name(self):
+        path = utils.validate_relative_name("report.txt", "attachments")
+        self.assertEqual(path, "attachments/report.txt")
+
+    def test_empty_location(self):
+        path = utils.validate_relative_name("report.txt", "")
+        self.assertEqual(path, "report.txt")
+
+    def test_name_escaping_root(self):
+        with self.assertRaises(SuspiciousOperation):
+            utils.validate_relative_name(
+                "../attachments-private/passwords.txt", "attachments"
+            )
+
+
+class IsWithinRootTests(TestCase):
+    def test_own_files_and_subdirectories(self):
+        self.assertTrue(utils.is_within_root("attachments/report.txt", "attachments"))
+        self.assertTrue(
+            utils.is_within_root("attachments/2024-11/summary.txt", "attachments")
+        )
+
+    def test_adjacent_namespace_rejected(self):
+        self.assertFalse(
+            utils.is_within_root("attachments-private/passwords.txt", "attachments")
+        )
+
+    def test_trailing_slash_in_location(self):
+        self.assertTrue(utils.is_within_root("attachments/report.txt", "attachments/"))
+
+    def test_empty_location_allows_everything(self):
+        self.assertTrue(utils.is_within_root("anything/at/all.txt", ""))
 
 
 class TestGetAvailableOverwriteName(TestCase):

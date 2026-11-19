@@ -8,6 +8,21 @@ General
 -------
 
 - Add support for Django 5.2
+- Add a shared root-directory contract to ``BaseStorage``: caller-provided
+  names are validated against the storage ``location`` when opening objects,
+  and listing results are filtered so adjacent namespaces (e.g.
+  ``attachments-private`` next to ``attachments``) are never returned
+
+S3
+--
+
+- Filter ``listdir`` results to names within the storage ``location``
+
+Azure
+-----
+
+- Scope ``listdir``/``list_all`` to the storage ``location`` and filter
+  results to names within it
 
 1.14.6 (2025-04-01)
 *******************

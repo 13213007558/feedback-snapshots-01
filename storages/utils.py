@@ -5,6 +5,7 @@ import posixpath
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.exceptions import SuspiciousFileOperation
+from django.core.exceptions import SuspiciousOperation
 from django.core.files.utils import FileProxyMixin
 from django.core.files.utils import validate_file_name
 from django.utils.encoding import force_bytes
@@ -93,6 +94,33 @@ def safe_join(base, *paths):
         )
 
     return final_path.lstrip("/")
+
+
+def validate_relative_name(name, location):
+    """
+    Enforce the root-directory contract for a caller-provided name.
+
+    Joins ``name`` to the storage root (``location``), refusing anything
+    that would resolve outside of it. Returns the normalized, rooted name.
+    """
+    try:
+        return safe_join(location, name)
+    except ValueError:
+        raise SuspiciousOperation("Attempted access to '%s' denied." % name)
+
+
+def is_within_root(name, location):
+    """
+    Enforce the root-directory contract for a backend-provided name.
+
+    Only names contained in the storage root (``location``) pass. Names from
+    adjacent namespaces that merely share a string prefix with the root
+    (e.g. ``attachments-private`` vs ``attachments``) are rejected.
+    """
+    if not location:
+        return True
+    root = location.rstrip("/") + "/"
+    return name.startswith(root)
 
 
 def check_location(storage):

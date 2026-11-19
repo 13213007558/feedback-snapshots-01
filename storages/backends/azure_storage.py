@@ -13,7 +13,6 @@ from azure.storage.blob import BlobSasPermissions
 from azure.storage.blob import BlobServiceClient
 from azure.storage.blob import ContentSettings
 from azure.storage.blob import generate_blob_sas
-from django.core.exceptions import SuspiciousOperation
 from django.core.files.base import File
 from django.utils import timezone
 from django.utils.deconstruct import deconstructible
@@ -21,7 +20,6 @@ from django.utils.deconstruct import deconstructible
 from storages.base import BaseStorage
 from storages.utils import clean_name
 from storages.utils import get_available_overwrite_name
-from storages.utils import safe_join
 from storages.utils import setting
 from storages.utils import to_bytes
 
@@ -228,12 +226,6 @@ class AzureStorage(BaseStorage):
         else:
             return "http"
 
-    def _normalize_name(self, name):
-        try:
-            return safe_join(self.location, name)
-        except ValueError:
-            raise SuspiciousOperation("Attempted access to '%s' denied." % name)
-
     def _get_valid_path(self, name):
         # Must be idempotent
         return _get_valid_path(self._normalize_name(clean_name(name)))
@@ -374,6 +366,10 @@ class AzureStorage(BaseStorage):
         """Return all files for a given path"""
         if path:
             path = self._get_valid_path(path)
+        else:
+            # Scope the listing to the storage root even when no path is
+            # given so adjacent namespaces are never queried.
+            path = self._normalize_name("")
         if path and not path.endswith("/"):
             path += "/"
         # XXX make generator, add start, end
@@ -382,6 +378,7 @@ class AzureStorage(BaseStorage):
             for blob in self.client.list_blobs(
                 name_starts_with=path, timeout=self.timeout
             )
+            if self._is_within_root(blob.name)
         ]
 
     def listdir(self, path=""):
