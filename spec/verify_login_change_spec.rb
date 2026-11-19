@@ -1,6 +1,20 @@
 require_relative 'spec_helper'
 
 describe 'Rodauth verify_login_change feature' do
+  def login_change_email(to)
+    mail = Mail::TestMailer.deliveries.last
+    mail.wont_be_nil
+    mail.to.first.must_equal to
+    mail
+  end
+
+  def login_change_link(to)
+    mail = login_change_email(to)
+    link = mail.body.to_s.gsub(/ $/, '')[/(\/verify-login-change\?key=.+)$/]
+    link.must_be_kind_of(String)
+    link
+  end
+
   it "should support verifying login changes" do
     rodauth do
       enable :login, :logout, :verify_login_change
@@ -289,6 +303,203 @@ describe 'Rodauth verify_login_change feature' do
       click_button 'Close Account'
       DB[:account_login_change_keys].count.must_equal 0
     end
+  end
+
+  it "replaces a pending login change request and notifies only each requested new login" do
+    rodauth do
+      enable :login, :logout, :verify_login_change
+      change_login_requires_password? false
+    end
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>rodauth.logged_in? ? "Logged In" : "Not Logged"}
+    end
+
+    login
+    notified_logins = []
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example2.com'
+    click_button 'Change Login'
+    page.find('#notice_flash').text.must_equal "An email has been sent to you with a link to verify your login change"
+    first_mail = login_change_email('foo@example2.com')
+    first_link = first_mail.body.to_s.gsub(/ $/, '')[/(\/verify-login-change\?key=.+)$/]
+    first_mail.subject.must_equal 'Verify Login Change'
+    first_mail.body.to_s.must_include 'Old Login: foo@example.com'
+    first_mail.body.to_s.must_include 'New Login: foo@example2.com'
+    notified_logins << first_mail.to.first
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example3.com'
+    click_button 'Change Login'
+    page.find('#notice_flash').text.must_equal "An email has been sent to you with a link to verify your login change"
+    second_mail = login_change_email('foo@example3.com')
+    second_link = second_mail.body.to_s.gsub(/ $/, '')[/(\/verify-login-change\?key=.+)$/]
+    second_link.wont_equal first_link
+    second_mail.subject.must_equal 'Verify Login Change'
+    second_mail.body.to_s.must_include 'Old Login: foo@example.com'
+    second_mail.body.to_s.must_include 'New Login: foo@example3.com'
+    notified_logins << second_mail.to.first
+
+    # Only the two requested new logins are ever notified; the old login gets nothing.
+    notified_logins.sort.must_equal ['foo@example2.com', 'foo@example3.com']
+    Mail::TestMailer.deliveries.map{|mail| mail.to.first}.sort.must_equal notified_logins.sort
+    Mail::TestMailer.deliveries.clear
+
+    # The new request replaces the pending one instead of creating a second row.
+    DB[:account_login_change_keys].count.must_equal 1
+    DB[:account_login_change_keys].get(:login).must_equal 'foo@example3.com'
+    DB[:accounts].where(:email=>'foo@example.com').count.must_equal 1
+    DB[:accounts].where(:email=>'foo@example3.com').count.must_equal 0
+
+    # The old login still works while the replacement request is pending.
+    logout
+    login
+    page.body.must_include('Logged In')
+    Mail::TestMailer.deliveries.must_be_empty
+  end
+
+  it "does not let the old verify link change the account after the request is replaced" do
+    rodauth do
+      enable :login, :logout, :verify_login_change
+      change_login_requires_password? false
+    end
+    roda(:no_csrf) do |r|
+      r.rodauth
+      r.root{view :content=>rodauth.logged_in? ? "Logged In" : "Not Logged"}
+    end
+
+    login
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example2.com'
+    click_button 'Change Login'
+    old_link = login_change_link('foo@example2.com')
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example3.com'
+    click_button 'Change Login'
+    new_link = login_change_link('foo@example3.com')
+    Mail::TestMailer.deliveries.clear
+
+    logout
+
+    # Even though the link was delivered to a seemingly correct mailbox, the replaced
+    # request must no longer carry authority over the account on either GET or POST.
+    visit old_link
+    page.current_path.must_equal '/login'
+    page.find('#error_flash').text.must_equal "There was an error verifying your login change: invalid verify login change key"
+
+    old_key = old_link.split('key=').last
+    page.driver.browser.post('/verify-login-change', 'key'=>old_key)
+    page.driver.status_code.must_equal 302
+    page.driver.response_headers['Location'].must_equal '/'
+    visit '/'
+    page.find('#error_flash').text.must_equal "Unable to verify login change"
+
+    DB[:accounts].where(:email=>'foo@example.com').count.must_equal 1
+    DB[:accounts].where(:email=>'foo@example2.com').count.must_equal 0
+    DB[:account_login_change_keys].count.must_equal 1
+    DB[:account_login_change_keys].get(:login).must_equal 'foo@example3.com'
+    Mail::TestMailer.deliveries.must_be_empty
+
+    # The current request's link is still the only one that can change the account.
+    visit new_link
+    page.title.must_equal 'Verify Login Change'
+    click_button 'Verify Login Change'
+    page.find('#notice_flash').text.must_equal "Your login change has been verified"
+    DB[:accounts].where(:email=>'foo@example3.com').count.must_equal 1
+    Mail::TestMailer.deliveries.must_be_empty
+
+    login(:login=>'foo@example2.com')
+    page.find('#error_flash').text.must_equal "There was an error logging in"
+    login(:login=>'foo@example3.com')
+    page.body.must_include('Logged In')
+  end
+
+  it "verifies the replacement request from the newest email and leaves the old login unusable" do
+    rodauth do
+      enable :login, :logout, :verify_login_change
+      change_login_requires_password? false
+    end
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>rodauth.logged_in? ? "Logged In" : "Not Logged"}
+    end
+
+    login
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example2.com'
+    click_button 'Change Login'
+    old_link = login_change_link('foo@example2.com')
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example3.com'
+    click_button 'Change Login'
+    new_link = login_change_link('foo@example3.com')
+    Mail::TestMailer.deliveries.clear
+
+    logout
+
+    visit new_link
+    page.title.must_equal 'Verify Login Change'
+    click_button 'Verify Login Change'
+    page.find('#notice_flash').text.must_equal "Your login change has been verified"
+    page.body.must_include('Not Logged')
+
+    DB[:accounts].where(:email=>'foo@example3.com').count.must_equal 1
+    DB[:accounts].where(:email=>'foo@example.com').count.must_equal 0
+    DB[:accounts].where(:email=>'foo@example2.com').count.must_equal 0
+    DB[:account_login_change_keys].count.must_equal 0
+    Mail::TestMailer.deliveries.must_be_empty
+
+    # Confirming the newest request consumes the key, so the old link is dead as well.
+    visit old_link
+    page.find('#error_flash').text.must_equal "There was an error verifying your login change: invalid verify login change key"
+
+    login(:login=>'foo@example.com')
+    page.find('#error_flash').text.must_equal "There was an error logging in"
+    login(:login=>'foo@example3.com')
+    page.body.must_include('Logged In')
+  end
+
+  it "keeps the existing key and resends the same link when resubmitting the same pending login" do
+    rodauth do
+      enable :login, :logout, :verify_login_change
+      change_login_requires_password? false
+    end
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>rodauth.logged_in? ? "Logged In" : "Not Logged"}
+    end
+
+    login
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example2.com'
+    click_button 'Change Login'
+    original_link = login_change_link('foo@example2.com')
+
+    visit '/change-login'
+    fill_in 'Login', :with=>'foo@example2.com'
+    click_button 'Change Login'
+    page.find('#notice_flash').text.must_equal "An email has been sent to you with a link to verify your login change"
+    login_change_link('foo@example2.com').must_equal original_link
+
+    DB[:account_login_change_keys].count.must_equal 1
+    DB[:account_login_change_keys].get(:login).must_equal 'foo@example2.com'
+    DB[:accounts].where(:email=>'foo@example.com').count.must_equal 1
+    # Both notices go to the same pending new login, and the old login is never emailed.
+    Mail::TestMailer.deliveries.map{|mail| mail.to.first}.uniq.must_equal ['foo@example2.com']
+    Mail::TestMailer.deliveries.length.must_equal 2
+    Mail::TestMailer.deliveries.clear
+
+    visit original_link
+    click_button 'Verify Login Change'
+    page.find('#notice_flash').text.must_equal "Your login change has been verified"
+    DB[:accounts].where(:email=>'foo@example2.com').count.must_equal 1
+    DB[:account_login_change_keys].count.must_equal 0
   end
 
   [:jwt, :json].each do |json|
