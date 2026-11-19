@@ -523,6 +523,10 @@
 <span class="ul__span">Supports automatically adding comments to queries to show which class, instance, dataset, or association method triggered the query.</span>
 </li>
 <li class="ul__li ul__li--grid">
+<a class="a" href="rdoc-plugins/classes/Sequel/Plugins/SqlLogRedaction.html">sql_log_redaction </a>
+<span class="ul__span">Allows models to declare columns and SQL comment fields that should be redacted from SQL log messages.</span>
+</li>
+<li class="ul__li ul__li--grid">
 <a class="a" href="rdoc-plugins/classes/Sequel/Plugins/Subclasses.html">subclasses </a>
 <span class="ul__span">Allows easy access all model subclasses and descendent classes, without using ObjectSpace.</span>
 </li>
@@ -830,6 +834,10 @@
 <li class="ul__li ul__li--grid">
 <a class="a" href="rdoc-plugins/files/lib/sequel/extensions/sql_log_normalizer_rb.html">sql_log_normalizer </a>
 <span class="ul__span">Normalizes SQL before logging, helpful for analytics and sensitive data.</span>
+</li>
+<li class="ul__li ul__li--grid">
+<a class="a" href="rdoc-plugins/files/lib/sequel/extensions/sql_log_redaction_rb.html">sql_log_redaction </a>
+<span class="ul__span">Redacts sensitive column values and SQL comment fields from SQL log messages, without changing the SQL sent to the database.</span>
 </li>
 <li class="ul__li ul__li--grid">
 <a class="a" href="rdoc-plugins/files/lib/sequel/extensions/temporarily_release_connection_rb.html">temporarily_release_connection </a>

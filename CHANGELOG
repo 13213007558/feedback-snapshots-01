@@ -1,5 +1,7 @@
 === master
 
+* Add sql_log_redaction extension and model plugin for redacting sensitive values from SQL log messages, without changing the SQL or arguments sent to the database
+
 * Use the proleptic gregorian calendar for Date and DateTime (jeremyevans)
 
 * Avoid duplicating table when adding/dropping CHECK or NOT NULL constraints on SQLite 3.53+ (jeremyevans)
