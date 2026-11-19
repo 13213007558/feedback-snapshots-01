@@ -448,6 +448,14 @@ class WSGITask(Task):
                             self.remove_content_length_header()
                         self.content_length = size
                     self.write(b"")  # generate headers
+                    if self.request.command == "HEAD":
+                        # A HEAD response advertises the representation
+                        # metadata (including Content-Length) but must not
+                        # carry a message body.  Do not hand the wrapper to
+                        # the channel: nothing may be read from the
+                        # underlying file for output, and we retain ownership
+                        # of closing it in the finally block below.
+                        return
                     # if the write_soon below succeeds then the channel will
                     # take over closing the underlying file via the channel's
                     # _flush_some or handle_close so we intentionally avoid

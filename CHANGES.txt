@@ -46,6 +46,12 @@ Bugfix
   the server is waiting for I/O, instead of crashing the worker loop.
   See https://github.com/Pylons/waitress/issues/468
 
+- A ``HEAD`` request whose WSGI application returns a ``wsgi.file_wrapper``
+  no longer reads or sends the wrapped file's body. The response still
+  advertises the representation metadata, including ``Content-Length``, but
+  the message body is omitted as required by RFC 9110, and the underlying
+  file is closed by the task instead of being handed to the channel.
+
 - Renamed the HTTP header "Trailers" to "Trailer" to fix a typo and comply with
   the correct header name as specified in RFC 7230.
 
