@@ -185,12 +185,23 @@ def H( hash_class, *args, **kwargs ):
 
     for s in args:
         if s is not None:
-            data = long_to_bytes(s) if isinstance(s, int) else s
-            if width is not None and _rfc5054_compat:
-                h.update( bytes(width - len(data)))
-            h.update( data )
+            h.update( hash_input_bytes(s, width) )
 
     return h.digest()
+
+
+def hash_input_bytes( value, width=None ):
+    """Byte string that H() feeds to the hash for *value*.
+
+    In RFC5054 mode every integer in a hash transcript is left-padded to
+    ``width`` (the byte length of N); the pysrp-specific default keeps the
+    minimal big-endian encoding.  Keeping this in one place ensures the
+    same width policy is used for k, u, M and H_AMK.
+    """
+    data = long_to_bytes(value) if isinstance(value, int) else value
+    if width is not None and _rfc5054_compat:
+        return b'\0' * (width - len(data)) + data
+    return data
 
 
 
@@ -235,21 +246,23 @@ def create_salted_verification_key( username, password, hash_alg=SHA1, ng_type=N
 
 def calculate_M( hash_class, N, g, I, s, A, B, K ):
     I = I.encode() if hasattr(I, 'encode') else I
+    width = len( long_to_bytes(N) )
     h = hash_class()
     h.update( HNxorg( hash_class, N, g ) )
     h.update( hash_class(I).digest() )
     if isinstance(s, int):
         s = long_to_bytes(s)
     h.update( s )
-    h.update( long_to_bytes(A) )
-    h.update( long_to_bytes(B) )
+    h.update( hash_input_bytes(A, width) )
+    h.update( hash_input_bytes(B, width) )
     h.update( K )
     return h.digest()
 
 
-def calculate_H_AMK( hash_class, A, M, K ):
+def calculate_H_AMK( hash_class, A, M, K, N=None ):
+    width = len( long_to_bytes(N) ) if N is not None else None
     h = hash_class()
-    h.update( long_to_bytes(A) )
+    h.update( hash_input_bytes(A, width) )
     h.update( M )
     h.update( K )
     return h.digest()
@@ -341,7 +354,7 @@ class Verifier:
         self.S = pow(self.A*pow(self.v, self.u, self.N ), self.b, self.N)
         self.K = self.hash_class( long_to_bytes(self.S) ).digest()
         self.M = calculate_M( self.hash_class, self.N, self.g, self.I, self.s, self.A, self.B, self.K )
-        self.H_AMK = calculate_H_AMK( self.hash_class, self.A, self.M, self.K )
+        self.H_AMK = calculate_H_AMK( self.hash_class, self.A, self.M, self.K, self.N )
 
 
 
@@ -431,7 +444,7 @@ class User:
 
         self.K     = hash_class( long_to_bytes(self.S) ).digest()
         self.M     = calculate_M( hash_class, N, g, self.I, self.s, self.A, self.B, self.K )
-        self.H_AMK = calculate_H_AMK(hash_class, self.A, self.M, self.K)
+        self.H_AMK = calculate_H_AMK(hash_class, self.A, self.M, self.K, N)
 
         return self.M
 
