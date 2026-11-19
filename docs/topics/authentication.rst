@@ -61,6 +61,40 @@ To access the user, just use ``self.scope["user"]`` in your consumer code:
             self.accept()
 
 
+Stale session invalidation
+--------------------------
+
+When the authentication state stored in a session can no longer be resolved
+to a user, ``get_user`` (and therefore ``AuthMiddleware``) returns an
+``AnonymousUser`` and records a concise reason in
+``scope["auth_failure_reason"]`` so your application can react to it. The
+possible values are exposed as ``channels.auth.AuthFailureReason``:
+
+* ``"backend_removed"``: the backend that authenticated the session is no
+  longer in ``AUTHENTICATION_BACKENDS`` (for example, it was decommissioned).
+  The session is flushed so the user can log in again cleanly on a
+  still-supported backend.
+* ``"user_not_found"``: the backend is configured but no user matches the
+  session's user id (for example, the account was deleted). The stale
+  authentication keys are removed from the session; other session data is
+  kept.
+* ``"backend_error"``: the user lookup itself failed (for example, a
+  transient storage outage). This is never treated as a successful
+  authentication, and the session is left untouched so the user stays
+  logged in once the backend recovers.
+* ``"session_hash_mismatch"``: the session auth hash did not match the
+  user's current hash; the session is flushed.
+
+The cleanup is persisted immediately, so it survives the next session load,
+and re-resolution always replaces any user already cached in the scope.
+``scope["auth_failure_reason"]`` is ``None`` when authentication succeeds
+or the session holds no authentication state.
+
+The cleanup of stale sessions can be turned off by setting
+``CHANNELS_AUTH_INVALIDATE_STALE_SESSIONS`` to ``False`` in your Django
+settings (it defaults to ``True``); the failure reason is still reported.
+
+
 Custom Authentication
 ---------------------
 

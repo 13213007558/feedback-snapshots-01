@@ -1,6 +1,21 @@
 Full release notes, with more details and upgrade information, are available at:
 https://channels.readthedocs.io/en/latest/releases
 
+Unreleased
+----------
+
+* Session authentication resolution now reports a concise failure reason in
+  ``scope["auth_failure_reason"]`` (see ``channels.auth.AuthFailureReason``)
+  and cleans up stale sessions when the session's authentication backend was
+  removed from ``AUTHENTICATION_BACKENDS`` or the user no longer exists.
+  Cleanup is configurable via the ``CHANNELS_AUTH_INVALIDATE_STALE_SESSIONS``
+  setting (default ``True``). Transient backend lookup failures are no longer
+  raised nor treated as successful authentication, and leave the session
+  untouched.
+
+* ``AuthMiddleware`` now replaces a user already cached in the scope on
+  re-resolution instead of keeping the stale identity.
+
 4.3.2 (2025-11-20)
 ------------------
 
