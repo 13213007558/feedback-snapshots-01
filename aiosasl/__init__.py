@@ -80,11 +80,11 @@ To implement SASL on an existing protocol, you need to subclass
 SASL mechanisms
 ===============
 
-.. autoclass:: PLAIN
+.. autoclass:: PLAIN(credential_provider[, authzid=None])
 
-.. autoclass:: SCRAM(credential_provider, *[, after_scram_plus=False][, enforce_minimum_iteration_count=True])
+.. autoclass:: SCRAM(credential_provider[, authzid=None], *[, after_scram_plus=False][, enforce_minimum_iteration_count=True])
 
-.. autoclass:: SCRAMPLUS(credential_provider, cb_provider, *[, enforce_minimum_iteration_count=True])
+.. autoclass:: SCRAMPLUS(credential_provider, cb_provider[, authzid=None], *[, enforce_minimum_iteration_count=True])
 
 .. autoclass:: ANONYMOUS
 
@@ -107,6 +107,39 @@ SASL state machine
 ==================
 
 .. autoclass:: SASLStateMachine
+
+Authorization identities
+========================
+
+The password-based mechanisms accept an optional `authzid` argument.  It
+requests that the authenticated account act as another identity.  The request
+is encoded according to the mechanism (NUL-separated field for PLAIN, GS2
+header for SCRAM and SCRAM-PLUS) and is only ever a request:
+
+.. autofunction:: resolve_authorization
+
+.. autoclass:: AuthorizationResult
+
+.. autoclass:: AuthorizationFailure
+
+The helpers below are exposed so that applications and tests can read and
+validate the wire values independently:
+
+.. autofunction:: encode_plain_payload
+
+.. autofunction:: build_gs2_header
+
+.. autofunction:: encode_scram_authcid
+
+.. autofunction:: encode_scram_authzid
+
+.. autofunction:: parse_plain_client_response
+
+.. autofunction:: parse_gs2_header
+
+.. autofunction:: parse_scram_client_first
+
+.. autofunction:: parse_scram_client_final
 
 Exception classes
 =================
@@ -145,6 +178,24 @@ from .scram import (  # noqa:F401
 
 from .plain import (  # noqa:F401
     PLAIN,
+)
+
+from .authzid import (  # noqa:F401
+    AuthorizationFailure,
+    AuthorizationResult,
+    GS2Header,
+    PlainClientResponse,
+    SCRAMClientFirst,
+    SCRAMClientFinal,
+    build_gs2_header,
+    encode_plain_payload,
+    encode_scram_authcid,
+    encode_scram_authzid,
+    parse_gs2_header,
+    parse_plain_client_response,
+    parse_scram_client_final,
+    parse_scram_client_first,
+    resolve_authorization,
 )
 
 from .anonymous import (  # noqa:F401

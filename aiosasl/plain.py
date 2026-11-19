@@ -22,7 +22,7 @@
 import logging
 import typing
 
-from . import common, statemachine
+from . import authzid, common, statemachine
 
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,25 @@ class PLAIN(statemachine.SASLMechanism):
 
     `credential_provider` must be coroutine which returns a ``(user,
     password)`` tuple.
+
+    If `authzid` is given, the client asks to act as that identity after
+    authenticating as the identity returned by `credential_provider`.
+    The request is encoded in the leading field of the PLAIN payload
+    (``authzid NUL authcid NUL password``).  It is only a request: the
+    caller must resolve the effective identity from a trusted server
+    result or an explicit mapping (see :func:`.resolve_authorization`).
+
+    .. versionadded:: 0.4
+
+       The `authzid` argument was added.
     """
-    def __init__(self, credential_provider: common.CredentialProvider):
+    def __init__(
+            self,
+            credential_provider: common.CredentialProvider,
+            authzid: typing.Optional[str] = None):
         super().__init__()
         self._credential_provider = credential_provider
+        self._authzid = authzid
 
     @classmethod
     def any_supported(
@@ -62,15 +77,15 @@ class PLAIN(statemachine.SASLMechanism):
             ) -> None:
         logger.info("attempting PLAIN mechanism")
         username, password = await self._credential_provider()
-        encoded_username = username.encode("utf8")
-        encoded_password = password.encode("utf8")
-
-        if b"\0" in encoded_username or b"\0" in encoded_password:
-            raise ValueError("NUL byte in username or password is disallowed")
+        payload = authzid.encode_plain_payload(
+            username,
+            password,
+            self._authzid,
+        )
 
         state, _ = await sm.initiate(
             mechanism="PLAIN",
-            payload=b"\0" + encoded_username + b"\0" + encoded_password,
+            payload=payload,
         )
 
         if state != common.SASLState.SUCCESS:

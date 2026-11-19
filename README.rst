@@ -30,6 +30,18 @@ Documentation
 Official documentation can be built with sphinx and is available online
 `on our servers <https://docs.zombofant.net/aiosasl/devel/>`_.
 
+Authorization identities (``authzid``)
+--------------------------------------
+
+``PLAIN``, ``SCRAM`` and ``SCRAM-PLUS`` accept an optional ``authzid``
+argument.  It asks the server to let the authenticated account act as another
+identity.  The value is a request only; the identity used after a successful
+exchange must come from a trusted server result or an explicit application
+mapping (see ``aiosasl.resolve_authorization``).  Omitting ``authzid`` keeps
+the existing wire format.
+
+See ``examples/authzid_demo.py`` for allowed and refused delegation cases.
+
 Supported channel binding methods
 ---------------------------------
 

@@ -1290,3 +1290,594 @@ class TestANONYMOUS(unittest.TestCase):
         run_coroutine(run())
 
         smmock.interface.finalize()
+
+
+class TestAuthzidEncoding(unittest.TestCase):
+    def test_plain_without_authzid_is_unchanged(self):
+        self.assertEqual(
+            aiosasl.encode_plain_payload("tim", "tanstaaftanstaaf"),
+            b"\0tim\0tanstaaftanstaaf",
+        )
+
+    def test_plain_with_authzid_uses_leading_nul_field(self):
+        self.assertEqual(
+            aiosasl.encode_plain_payload(
+                "svc",
+                "geheim",
+                "alice",
+            ),
+            b"alice\0svc\0geheim",
+        )
+
+    def test_plain_rejects_nul_in_authzid(self):
+        with self.assertRaisesRegex(ValueError, "authzid"):
+            aiosasl.encode_plain_payload("svc", "geheim", "alice\0admin")
+
+    def test_plain_rejects_nul_in_authcid(self):
+        with self.assertRaisesRegex(ValueError, "authcid"):
+            aiosasl.encode_plain_payload("sv\0c", "geheim", "alice")
+
+    def test_plain_rejects_nul_in_password(self):
+        with self.assertRaisesRegex(ValueError, "password"):
+            aiosasl.encode_plain_payload("svc", "ge\0heim", "alice")
+
+    def test_plain_reader_separates_identities(self):
+        parsed = aiosasl.parse_plain_client_response(
+            b"alice\0svc\0geheim"
+        )
+        self.assertEqual(parsed.authzid, b"alice")
+        self.assertEqual(parsed.authcid, b"svc")
+        self.assertEqual(parsed.password, b"geheim")
+
+    def test_plain_reader_legacy_shape_has_no_authzid(self):
+        parsed = aiosasl.parse_plain_client_response(
+            b"\0svc\0geheim"
+        )
+        self.assertIsNone(parsed.authzid)
+        self.assertEqual(parsed.authcid, b"svc")
+
+    def test_plain_reader_rejects_extra_separator(self):
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            aiosasl.parse_plain_client_response(
+                b"alice\0svc\0ge\0heim"
+            )
+
+    def test_gs2_header_escapes_comma_and_equals(self):
+        header = aiosasl.build_gs2_header(b"n", "a,b=c")
+        self.assertEqual(header, b"n,a=a=2Cb=3Dc,")
+        parsed = aiosasl.parse_gs2_header(header)
+        self.assertEqual(parsed.flag, b"n")
+        self.assertEqual(parsed.authzid, b"a,b=c")
+
+    def test_gs2_header_preserves_literal_escape_lookalike(self):
+        header = aiosasl.build_gs2_header(b"n", "a=2Cb")
+        self.assertEqual(header, b"n,a=a=3D2Cb,")
+        self.assertEqual(
+            aiosasl.parse_gs2_header(header).authzid,
+            b"a=2Cb",
+        )
+
+    def test_gs2_header_without_authzid_is_legacy_shape(self):
+        self.assertEqual(aiosasl.build_gs2_header(b"n"), b"n,,")
+        self.assertEqual(aiosasl.build_gs2_header(b"y"), b"y,,")
+        self.assertEqual(
+            aiosasl.build_gs2_header(b"p=tls-unique"),
+            b"p=tls-unique,,",
+        )
+
+    def test_gs2_reader_rejects_bad_separator_or_escape(self):
+        with self.assertRaisesRegex(ValueError, "GS2"):
+            aiosasl.parse_gs2_header(b"n,a=alice")
+        with self.assertRaisesRegex(ValueError, "escape"):
+            aiosasl.parse_gs2_header(b"n,a=al=ZZice,")
+
+    def test_scram_authzid_is_prepared_as_stored_string(self):
+        with self.assertRaisesRegex(ValueError, "unassigned"):
+            aiosasl.encode_scram_authzid("\U0001f916")
+
+    def test_scram_authcid_allows_unassigned_codepoints(self):
+        self.assertEqual(
+            aiosasl.encode_scram_authcid("user\U0001f916"),
+            "user\U0001f916".encode("utf-8"),
+        )
+
+    def test_scram_reader_keeps_both_identities_separate(self):
+        payload = (
+            b"n,a=a=2Cadmin,"
+            b"n=svc,r=Zm9v"
+        )
+        parsed = aiosasl.parse_scram_client_first(payload)
+        self.assertEqual(parsed.gs2.authzid, b"a,admin")
+        self.assertEqual(parsed.authcid, b"svc")
+        self.assertEqual(parsed.nonce, b"Zm9v")
+        self.assertEqual(parsed.bare, b"n=svc,r=Zm9v")
+
+    def test_scram_reader_rejects_swapped_fields(self):
+        with self.assertRaisesRegex(ValueError, "authentication identity"):
+            aiosasl.parse_scram_client_first(b"n,,r=Zm9v,n=svc")
+
+    def test_scram_client_final_reads_authzid_from_channel_binding(self):
+        gs2 = aiosasl.build_gs2_header(b"p=tls-unique", "alice")
+        channel_binding = gs2 + b"channel binding data"
+        payload = (
+            b"c=" + base64.b64encode(channel_binding) +
+            b",r=Zm9v,p=cHJvb2Y="
+        )
+
+        parsed = aiosasl.parse_scram_client_final(payload)
+        self.assertEqual(parsed.gs2.authzid, b"alice")
+        self.assertEqual(parsed.channel_binding_data, b"channel binding data")
+        self.assertEqual(parsed.nonce, b"Zm9v")
+        self.assertEqual(parsed.proof, b"cHJvb2Y=")
+
+    def test_scram_client_final_rejects_duplicate_fields(self):
+        gs2 = aiosasl.build_gs2_header(b"n")
+        payload = (
+            b"c=" + base64.b64encode(gs2) +
+            b",r=a,r=b,p=cHJvb2Y="
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            aiosasl.parse_scram_client_final(payload)
+
+
+class TestAuthzidResolution(unittest.TestCase):
+    def test_no_request_uses_authcid(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            None,
+            mapping={"svc": {"alice"}},
+        )
+        self.assertEqual(result.effective_identity, "svc")
+        self.assertFalse(result.delegated)
+        self.assertEqual(result.source, "implicit")
+
+    def test_request_without_trusted_grant_is_refused(self):
+        with self.assertRaises(aiosasl.AuthorizationFailure) as ctx:
+            aiosasl.resolve_authorization("svc", "alice")
+        self.assertEqual(ctx.exception.authcid, "svc")
+        self.assertEqual(ctx.exception.authzid, "alice")
+
+    def test_request_not_in_mapping_is_refused(self):
+        with self.assertRaises(aiosasl.AuthorizationFailure):
+            aiosasl.resolve_authorization(
+                "svc",
+                "alice",
+                mapping={"svc": {"bob"}},
+            )
+
+    def test_mapping_is_scoped_to_authcid(self):
+        with self.assertRaises(aiosasl.AuthorizationFailure):
+            aiosasl.resolve_authorization(
+                "other-svc",
+                "alice",
+                mapping={"svc": {"alice"}},
+            )
+
+    def test_mapping_grants_delegation(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            mapping={"svc": {"alice"}},
+        )
+        self.assertEqual(result.authcid, "svc")
+        self.assertEqual(result.requested_authzid, "alice")
+        self.assertEqual(result.effective_identity, "alice")
+        self.assertTrue(result.delegated)
+        self.assertEqual(result.source, "mapping")
+
+    def test_server_identity_grants_delegation(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            server_identity="alice",
+        )
+        self.assertEqual(result.effective_identity, "alice")
+        self.assertEqual(result.source, "server")
+
+    def test_server_identity_wins_over_mapping(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            server_identity="alice",
+            mapping={"svc": set()},
+        )
+        self.assertEqual(result.source, "server")
+
+    def test_server_may_report_another_effective_identity(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            server_identity="role-operator",
+        )
+        self.assertEqual(result.effective_identity, "role-operator")
+        self.assertEqual(result.source, "server")
+
+    def test_server_may_map_request_to_role(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            server_identity="role-operator",
+            mapping={"svc": set()},
+        )
+        self.assertEqual(result.effective_identity, "role-operator")
+        self.assertTrue(result.delegated)
+        self.assertEqual(result.source, "server")
+
+    def test_callable_mapping_grants_delegation(self):
+        seen = []
+
+        def grant(authcid, authzid):
+            seen.append((authcid, authzid))
+            return authzid == "alice"
+
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            mapping=grant,
+        )
+        self.assertEqual(result.effective_identity, "alice")
+        self.assertEqual(result.source, "mapping")
+        self.assertEqual(seen, [("svc", "alice")])
+
+    def test_callable_mapping_can_refuse(self):
+        with self.assertRaises(aiosasl.AuthorizationFailure):
+            aiosasl.resolve_authorization(
+                "svc",
+                "alice",
+                mapping=lambda authcid, authzid: False,
+            )
+
+    def test_empty_request_is_treated_as_absent(self):
+        result = aiosasl.resolve_authorization("svc", "")
+        self.assertIsNone(result.requested_authzid)
+        self.assertEqual(result.effective_identity, "svc")
+        self.assertFalse(result.delegated)
+
+    def test_failure_is_a_sasl_error_but_not_authentication_failure(self):
+        exc = aiosasl.AuthorizationFailure("svc", "alice")
+        self.assertIsInstance(exc, aiosasl.SASLError)
+        self.assertNotIsInstance(exc, aiosasl.AuthenticationFailure)
+        self.assertIn("authorization failed", str(exc))
+
+    def test_server_decline_does_not_delegate(self):
+        result = aiosasl.resolve_authorization(
+            "svc",
+            "alice",
+            server_identity="svc",
+            mapping={"svc": {"alice"}},
+        )
+        self.assertEqual(result.effective_identity, "svc")
+        self.assertFalse(result.delegated)
+
+
+class TestPLAINAuthzid(unittest.TestCase):
+    def test_wire_payload_with_authzid(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;PLAIN",
+                 b"alice\0tim\0tanstaaftanstaaf",
+                 "success",
+                 None)
+            ]))
+
+        async def provide_credentials():
+            return "tim", "tanstaaftanstaaf"
+
+        run_coroutine(
+            aiosasl.PLAIN(
+                provide_credentials,
+                authzid="alice",
+            ).authenticate(smmock, "PLAIN")
+        )
+
+        smmock.interface.finalize()
+
+    def test_reader_sees_distinct_identities(self):
+        parsed = aiosasl.parse_plain_client_response(
+            aiosasl.encode_plain_payload("svc", "secret", "alice")
+        )
+        self.assertEqual(parsed.authcid, b"svc")
+        self.assertEqual(parsed.authzid, b"alice")
+        self.assertNotEqual(parsed.authcid, parsed.authzid)
+
+    def test_without_authzid_wire_shape_is_unchanged(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;PLAIN",
+                 b"\0tim\0tanstaaftanstaaf",
+                 "success",
+                 None)
+            ]))
+
+        async def provide_credentials():
+            return "tim", "tanstaaftanstaaf"
+
+        run_coroutine(
+            aiosasl.PLAIN(provide_credentials).authenticate(
+                smmock,
+                "PLAIN",
+            )
+        )
+
+        smmock.interface.finalize()
+
+    def test_plain_authzid_is_literal_and_not_gs2_escaped(self):
+        parsed = aiosasl.parse_plain_client_response(
+            aiosasl.encode_plain_payload("svc", "secret", "a,b=c")
+        )
+        self.assertEqual(parsed.authzid, b"a,b=c")
+
+    def test_reject_nul_authzid_before_sending(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(self, []))
+
+        async def provide_credentials():
+            return "svc", "secret"
+
+        with self.assertRaisesRegex(ValueError, "authzid"):
+            run_coroutine(
+                aiosasl.PLAIN(
+                    provide_credentials,
+                    authzid="alice\0admin",
+                ).authenticate(smmock, "PLAIN")
+            )
+
+        self.assertEqual(smmock._state, aiosasl.SASLState.INITIAL)
+
+    def test_empty_authzid_keeps_legacy_payload(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;PLAIN",
+                 b"\0svc\0secret",
+                 "success",
+                 None)
+            ]))
+
+        async def provide_credentials():
+            return "svc", "secret"
+
+        run_coroutine(
+            aiosasl.PLAIN(
+                provide_credentials,
+                authzid="",
+            ).authenticate(smmock, "PLAIN")
+        )
+
+        smmock.interface.finalize()
+
+
+class TestSCRAMAuthzid(TestSCRAMImpl, unittest.TestCase):
+    _scram_plus = "no"
+
+    def _expected_final(self, gs2_header):
+        client_final = (
+            b"c=" + base64.b64encode(gs2_header) +
+            b",r=Zm9vAAAAAAAAAAAAAAAA3rfcNHYJY1ZVvWVs7j"
+        )
+        auth_message = b",".join([
+            self.client_first_message_bare,
+            self.server_first_message,
+            client_final,
+        ])
+        client_signature = hmac.new(
+            self.stored_key,
+            auth_message,
+            self.hashfun_factory,
+        ).digest()
+        proof = xor_bytes(client_signature, self.client_key)
+        server_signature = hmac.new(
+            self.server_key,
+            auth_message,
+            self.hashfun_factory,
+        ).digest()
+        return (
+            client_final + b",p=" + base64.b64encode(proof),
+            b"v=" + base64.b64encode(server_signature),
+        )
+
+    def test_fixed_transcript_with_authzid(self):
+        gs2_header = b"n,a=alice,"
+        expected_response, expected_success = self._expected_final(gs2_header)
+
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 gs2_header + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 expected_response,
+                 "success",
+                 expected_success),
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAM(
+                self._provide_credentials,
+                authzid="alice",
+            )
+        )
+
+    def test_reader_sees_both_identities_in_fixed_transcript(self):
+        first = aiosasl.parse_scram_client_first(
+            aiosasl.build_gs2_header(b"n", "alice") +
+            self.client_first_message_bare
+        )
+        self.assertEqual(first.gs2.authzid, b"alice")
+        self.assertEqual(first.authcid, b"user")
+
+        final, _ = self._expected_final(first.gs2.raw)
+        parsed_final = aiosasl.parse_scram_client_final(final)
+        self.assertEqual(parsed_final.gs2.authzid, b"alice")
+        self.assertEqual(parsed_final.gs2.raw, first.gs2.raw)
+        self.assertEqual(
+            parsed_final.nonce,
+            first.nonce + b"3rfcNHYJY1ZVvWVs7j",
+        )
+
+    def test_authzid_is_gs2_escaped_in_transcript(self):
+        gs2_header = b"n,a=a=2Cadmin=3Dops,"
+        expected_response, expected_success = self._expected_final(gs2_header)
+
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 gs2_header + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 expected_response,
+                 "success",
+                 expected_success),
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAM(
+                self._provide_credentials,
+                authzid="a,admin=ops",
+            )
+        )
+
+        parsed = aiosasl.parse_scram_client_first(
+            gs2_header + self.client_first_message_bare
+        )
+        self.assertEqual(parsed.gs2.authzid, b"a,admin=ops")
+
+    def test_without_authzid_transcript_is_unchanged(self):
+        # The legacy fixed transcript from TestSCRAM.test_rfc.
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,," + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self.client_final_message_without_proof +
+                 b",p=" + base64.b64encode(self.client_proof),
+                 "success",
+                 b"v=" + base64.b64encode(self.server_signature)),
+            ]))
+
+        self._run(smmock, aiosasl.SCRAM(self._provide_credentials))
+
+    def test_empty_authzid_keeps_legacy_gs2_header(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1",
+                 b"n,," + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self.client_final_message_without_proof +
+                 b",p=" + base64.b64encode(self.client_proof),
+                 "success",
+                 b"v=" + base64.b64encode(self.server_signature)),
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAM(
+                self._provide_credentials,
+                authzid="",
+            ),
+        )
+
+    def test_reject_unassigned_authzid_before_sending(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(self, []))
+
+        with self.assertRaisesRegex(ValueError, "unassigned"):
+            self._run(
+                smmock,
+                aiosasl.SCRAM(
+                    self._provide_credentials,
+                    authzid="\U0001f916",
+                ),
+            )
+
+
+class TestSCRAMPLUSAuthzid(TestSCRAMImpl, unittest.TestCase):
+    _scram_plus = "active"
+
+    def test_fixed_transcript_with_authzid_and_channel_binding(self):
+        gs2_header = b"p=tls-unique,a=alice,"
+        cb_data = b"channel binding data"
+        client_final = (
+            b"c=" + base64.b64encode(gs2_header + cb_data) +
+            b",r=Zm9vAAAAAAAAAAAAAAAA3rfcNHYJY1ZVvWVs7j"
+        )
+        auth_message = b",".join([
+            self.client_first_message_bare,
+            self.server_first_message,
+            client_final,
+        ])
+        client_signature = hmac.new(
+            self.stored_key,
+            auth_message,
+            self.hashfun_factory,
+        ).digest()
+        proof = xor_bytes(client_signature, self.client_key)
+        server_signature = hmac.new(
+            self.server_key,
+            auth_message,
+            self.hashfun_factory,
+        ).digest()
+
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1-PLUS",
+                 gs2_header + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 client_final + b",p=" + base64.b64encode(proof),
+                 "success",
+                 b"v=" + base64.b64encode(server_signature)),
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAMPLUS(
+                self._provide_credentials,
+                TLSUnique(self._tls_connection),
+                authzid="alice",
+            )
+        )
+
+        parsed = aiosasl.parse_scram_client_final(
+            client_final + b",p=" + base64.b64encode(proof)
+        )
+        self.assertEqual(parsed.gs2.authzid, b"alice")
+        self.assertEqual(parsed.gs2.flag, b"p=tls-unique")
+        self.assertEqual(parsed.channel_binding_data, cb_data)
+
+    def test_without_authzid_transcript_is_unchanged(self):
+        smmock = aiosasl.SASLStateMachine(SASLInterfaceMock(
+            self,
+            [
+                ("auth;SCRAM-SHA-1-PLUS",
+                 b"p=tls-unique,," + self.client_first_message_bare,
+                 "challenge",
+                 self.server_first_message),
+                ("response",
+                 self.client_final_message_without_proof +
+                 b",p=" + base64.b64encode(self.client_proof),
+                 "success",
+                 b"v=" + base64.b64encode(self.server_signature)),
+            ]))
+
+        self._run(
+            smmock,
+            aiosasl.SCRAMPLUS(
+                self._provide_credentials,
+                TLSUnique(self._tls_connection),
+            )
+        )

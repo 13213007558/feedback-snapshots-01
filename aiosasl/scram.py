@@ -32,7 +32,8 @@ import typing
 
 from hashlib import pbkdf2_hmac as pbkdf2
 
-from . import channel_binding, common, statemachine, stringprep, utils
+from . import authzid, channel_binding, common, statemachine, stringprep
+from . import utils
 
 
 logger = logging.getLogger(__name__)
@@ -61,11 +62,13 @@ class Base:
     def __init__(
             self,
             credential_provider: common.CredentialProvider,
+            authzid: typing.Optional[str] = None,
             *,
             nonce_length: int = 15,
             enforce_minimum_iteration_count: bool = True):
         super().__init__()
         self._credential_provider = credential_provider
+        self._authzid = authzid
         self.nonce_length = nonce_length
         self.enforce_minimum_iteration_count = enforce_minimum_iteration_count
 
@@ -133,9 +136,14 @@ class Base:
 
             yield key, value
 
-    @abc.abstractmethod
-    def _get_gs2_header(self) -> bytes:
+    def _get_gs2_channel_binding_flag(self) -> bytes:
         raise NotImplementedError
+
+    def _get_gs2_header(self) -> bytes:
+        return authzid.build_gs2_header(
+            self._get_gs2_channel_binding_flag(),
+            self._authzid,
+        )
 
     @abc.abstractmethod
     def _get_cb_data(self) -> bytes:
@@ -156,10 +164,7 @@ class Base:
 
         gs2_header = self._get_gs2_header()
         username, password = await self._credential_provider()
-        encoded_username = stringprep.saslprep(
-            username,
-            allow_unassigned=True,
-        ).encode("utf-8")
+        encoded_username = authzid.encode_scram_authcid(username)
         encoded_password = stringprep.saslprep(password).encode("utf-8")
 
         our_nonce = base64.b64encode(_system_random.getrandbits(
@@ -299,6 +304,14 @@ class SCRAM(Base, statemachine.SASLMechanism):
     `credential_provider` must be coroutine function which returns a ``(user,
     password)`` tuple.
 
+    If `authzid` is given, the client asks to act as that identity after
+    authenticating as the identity returned by `credential_provider`.
+    The request is carried in the GS2 header (``a=<authzid>``) and is
+    consequently covered by the SCRAM transcript and channel binding
+    data.  It is only a request: the caller must resolve the effective
+    identity from a trusted server result or an explicit mapping (see
+    :func:`.resolve_authorization`).
+
     If this is used after :class:`SCRAMPLUS` in a method list, the
     keyword argument `after_scram_plus` should be set to
     :data:`True`. Then we will use the gs2 header ``y,,`` to prevent
@@ -322,17 +335,18 @@ class SCRAM(Base, statemachine.SASLMechanism):
     def __init__(
             self,
             credential_provider: common.CredentialProvider,
+            authzid: typing.Optional[str] = None,
             *,
             after_scram_plus: bool = False,
             **kwargs: typing.Any):
-        super().__init__(credential_provider, **kwargs)
+        super().__init__(credential_provider, authzid, **kwargs)
         self._after_scram_plus = after_scram_plus
 
-    def _get_gs2_header(self) -> bytes:
+    def _get_gs2_channel_binding_flag(self) -> bytes:
         if self._after_scram_plus:
-            return b"y,,"
+            return b"y"
         else:
-            return b"n,,"
+            return b"n"
 
     def _get_cb_data(self) -> bytes:
         return self._get_gs2_header()
@@ -360,6 +374,10 @@ class SCRAMPLUS(Base, statemachine.SASLMechanism):
     :class:`.ChannelBindingProvider`, which specifies and implements
     the channel binding type to use.
 
+    If `authzid` is given, it is encoded in the GS2 header just like for
+    :class:`SCRAM`.  Because the GS2 header is part of the channel
+    binding data, the request is bound to the TLS channel.
+
     `enforce_minimum_iteration_count` controls the enforcement of the specified
     minimum iteration count for the key derivation function used in SCRAM. By
     default, this enforcement is enabled, and you are strongly advised to not
@@ -381,12 +399,13 @@ class SCRAMPLUS(Base, statemachine.SASLMechanism):
     def __init__(self,
                  credential_provider: common.CredentialProvider,
                  cb_provider: channel_binding.ChannelBindingProvider,
+                 authzid: typing.Optional[str] = None,
                  **kwargs: typing.Any):
-        super().__init__(credential_provider, **kwargs)
+        super().__init__(credential_provider, authzid, **kwargs)
         self._cb_provider = cb_provider
 
-    def _get_gs2_header(self) -> bytes:
-        return b"p=" + self._cb_provider.cb_name + b",,"
+    def _get_gs2_channel_binding_flag(self) -> bytes:
+        return b"p=" + self._cb_provider.cb_name
 
     def _get_cb_data(self) -> bytes:
         gs2_header = self._get_gs2_header()

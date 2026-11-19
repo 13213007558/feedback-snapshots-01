@@ -22,6 +22,8 @@ API Reference
 
 .. automodule:: aiosasl.channel_binding
 
+.. automodule:: aiosasl.authzid
+
 Indices and tables
 ==================
 
