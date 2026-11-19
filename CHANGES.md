@@ -164,6 +164,8 @@ middleware returns a PolicyParts dataclass that can be modified before the polic
 - Added support for Django 5.1 and 5.2.
 - Documentation improvements including fixed trusted_types links and clarification on NONE vs Python's None.
 - Documentation note that reporting percentage needs rate limiting middleware.
+- Fixed `RateLimitedCSPMiddleware` mutating a view's shared `csp_replace` config when throttling
+reports, which permanently removed `report-uri`/`report-to` from subsequent responses.
 - Expanded ruff configuration and moved into pyproject.toml.
 
 

@@ -1,9 +1,13 @@
-from django.http import HttpResponse
+import copy
+from unittest import mock
+
+from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory
 from django.test.utils import override_settings
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.contrib.rate_limiting import RateLimitedCSPMiddleware
+from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.decorators import csp_replace
 from csp.tests.utils import response
 
 mw = RateLimitedCSPMiddleware(response())
@@ -81,3 +85,53 @@ def test_no_csp_ro() -> None:
     response = HttpResponse()
     mw.process_response(request, response)
     assert HEADER_REPORT_ONLY not in response
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"REPORT_PERCENTAGE": 50, "DIRECTIVES": {"report-uri": "/report/", "report-to": "csp"}},
+)
+def test_shared_replace_config_not_mutated() -> None:
+    shared_config: dict = {"default-src": [SELF], "report-to": "csp-endpoint"}
+    snapshot = copy.deepcopy(shared_config)
+
+    @csp_replace(shared_config)
+    def view_one(request: HttpRequest) -> HttpResponse:
+        return HttpResponse()
+
+    @csp_replace(shared_config)
+    def view_two(request: HttpRequest) -> HttpResponse:
+        return HttpResponse()
+
+    # First request is not sampled: reporting directives are omitted for this response only.
+    with mock.patch("csp.contrib.rate_limiting.random.random", return_value=0.9):
+        request = rf.get("/")
+        response = view_one(request)
+        mw.process_response(request, response)
+    assert "report-uri" not in response[HEADER]
+    assert "report-to" not in response[HEADER]
+    assert f"default-src {SELF}" in response[HEADER]
+
+    # Second request is sampled: the full reporting directives come from the original policy.
+    with mock.patch("csp.contrib.rate_limiting.random.random", return_value=0.1):
+        request = rf.get("/")
+        response = view_two(request)
+        mw.process_response(request, response)
+    assert "report-uri /report/" in response[HEADER]
+    assert "report-to csp-endpoint" in response[HEADER]
+
+    # The decorator config shared by both views is unchanged.
+    assert shared_config == snapshot
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"REPORT_PERCENTAGE": 50, "DIRECTIVES": {"report-uri": "/enforce/"}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"REPORT_PERCENTAGE": 50, "DIRECTIVES": {"report-uri": "/report-only/"}},
+)
+def test_report_percentage_independent_per_policy() -> None:
+    # The enforced policy is not sampled while the report-only policy is.
+    with mock.patch("csp.contrib.rate_limiting.random.random", side_effect=[0.9, 0.1]):
+        request = rf.get("/")
+        response = HttpResponse()
+        mw.process_response(request, response)
+    assert "report-uri" not in response[HEADER]
+    assert "report-uri /report-only/" in response[HEADER_REPORT_ONLY]

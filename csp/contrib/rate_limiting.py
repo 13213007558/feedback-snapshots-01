@@ -26,17 +26,16 @@ class RateLimitedCSPMiddleware(CSPMiddleware):
         # `random.random` returns a value in the range [0.0, 1.0) so all values will be < 100.0.
         remove_report = random.random() * 100 >= policy.get("REPORT_PERCENTAGE", 100)
         if remove_report:
-            if policy_parts.replace is None:
-                policy_parts.replace = {
+            # Copy any existing replace config rather than mutating it: it may be
+            # a shared object (e.g. a dict reused by view decorators across requests),
+            # and the omission must only apply to this response.
+            replace = dict(policy_parts.replace) if policy_parts.replace else {}
+            replace.update(
+                {
                     "report-uri": None,
                     "report-to": None,
                 }
-            else:
-                policy_parts.replace.update(
-                    {
-                        "report-uri": None,
-                        "report-to": None,
-                    }
-                )
+            )
+            policy_parts.replace = replace
 
         return policy_parts
