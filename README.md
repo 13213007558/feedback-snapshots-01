@@ -220,6 +220,7 @@ The knobs most callers touch:
 | `MAX_IMAGE_SIZE` | `100 MB` | refuse to allocate more than this while loading |
 | `STORE_BUFFER` | `False` | keep the raw buffer in the report, so data refs can be carved later |
 | `WITH_STRINGS` | `False` | extract referenced strings |
+| `WITH_STRING_SCAN` | `False` | inventory every string occurrence by content scan, with provenance and reference evidence |
 | `API_COLLECTION_FILES` | `{}` | ApiScout WinAPI databases for API resolution in dumps |
 | `CALCULATE_HASHING` / `CALCULATE_NESTING` / `CALCULATE_SCC` | `True` | optional per-function metadata (PIC hashes, nesting depth, SCCs) |
 | `RESOLVE_TAILCALLS` | `False` | promote tailcall targets to functions of their own |
@@ -289,6 +290,36 @@ is a choice; a DEX carries no load address at all, so the file offset is the onl
 Either way, adding `base_addr` to one of them produces a number that means nothing. This is recorded
 rather than corrected: the offsets are a public compatibility surface that downstream consumers index
 on, so changing which space they are in is a deliberate decision and not a bug fix.
+
+### Strings: scan findings versus references
+
+`WITH_STRINGS` answers "which strings did recovered code reach, and through which
+instruction?" (`SmdaFunction.stringrefs`). `WITH_STRING_SCAN` answers a different question:
+"which string bytes exist in the mapped image, where do they live, and is any of them
+actually used?" It populates `SmdaReport.xstrings` (also `report.getStringInventory()`), a
+list of occurrences ordered by address. Each entry carries:
+
+- `string`, `byte_range` (virtual addresses, terminator excluded) and `data_addr`;
+- `type` / `encoding` (`ascii`, `utf-8`, `utf-16-le`) and `terminator_bytes` (`1` or `2`),
+  following the same NUL-termination rule as the reference extractor;
+- `provenance` and `section`: `code`, `rodata`, `data`, `padding` (mapped bytes outside every
+  declared section) or `unmapped` (a section no loader maps, e.g. ELF `.comment`);
+- `references`: the recovered instructions that name this exact start, each with `ins_addr`,
+  `function`, `mnemonic`, `operands` and `via` (`direct`, `pointer` through one stored word, or
+  `string-header`).
+
+An occurrence with an empty `references` list is a scan finding only. A string that occurs in
+`.rodata`, in `.text` and in inter-section padding is therefore three entries, at most one of
+which is linked. Reference evidence requires an address-shaped operand (`[rip + disp]`, an
+absolute memory operand, `lea`, `adr`); an immediate or a stored word that merely equals the
+address is a numeric resemblance and never creates an edge. `report.getStringBytes(entry)`
+returns the bytes themselves (from the retained buffer, or re-encoded from the entry), so an
+association can be checked across base addresses rather than trusted by address alone.
+
+The scan is independent of `WITH_STRINGS`: it reports what the bytes are even when reference
+extraction is off, and turning it off leaves `xstrings` as `None` (serialized key absent), so
+an older report and an unscanned one are distinguishable. It costs a walk over the mapped
+image; on the bundled 1 MB Go fixture that is about 0.6 s on top of a 3.3 s analysis.
 
 ### Labels and language
 

@@ -61,6 +61,7 @@ INTEGER_REPORT_FIELDS = frozenset(
     }
 )
 REAL_REPORT_FIELDS = frozenset({"confidence_threshold", "execution_time"})
+_INVENTORY_ENCODINGS = {"ascii": "ascii", "utf8": "utf-8", "unicode": "utf-16-le"}
 REQUIRED_STATISTICS_FIELDS = frozenset(
     {
         "num_functions",
@@ -116,6 +117,9 @@ class SmdaReport:
     pe_header_hash = None
     data_refs_from: Optional[Dict[int, List[int]]] = None
     data_refs_to = None
+    # content-scan inventory of string bytes with provenance and reference evidence; None when
+    # WITH_STRING_SCAN was off, [] when it ran on an image with nothing to scan
+    xstrings: Optional[List[Dict[str, Any]]] = None
     _string_cache: Dict[Any, Optional[Tuple[str, str]]]
     _derefs_cache: Dict[int, List[int]]
     _rustc_path_seen: Optional[bool] = None
@@ -135,6 +139,7 @@ class SmdaReport:
         self._string_cache: Dict[Any, Optional[Tuple[str, str]]] = {}
         self._derefs_cache: Dict[int, List[int]] = {}
         self._length_registers: Dict[str, Dict[str, str]] = {}
+        self.xstrings = None
         # start every construction path with an empty CFG so accessors like
         # num_functions/getFunction work on reports without a disassembly
         # (e.g. controlled error reports for unsupported architectures);
@@ -244,6 +249,40 @@ class SmdaReport:
 
     def getBuffer(self) -> Optional[bytes]:
         return self.buffer
+
+    def getStringBytes(self, entry: Dict[str, Any]) -> Optional[bytes]:
+        """The exact bytes an inventory entry occupies, terminator excluded.
+
+        Reads the mapped image at the entry's recorded ``byte_range``. A report loaded from JSON
+        without STORE_BUFFER keeps no buffer, so the entry's recorded ``string`` is re-encoded
+        under its own ``encoding`` instead: the bytes are derived from the entry, never from a
+        file offset. Either way the range is a virtual address pair, so a caller can compare
+        bytes to verify an association across base addresses.
+        """
+        byte_range = entry.get("byte_range")
+        text = entry.get("string")
+        if text is None or not byte_range or len(byte_range) != 2:
+            return None
+        encoding = entry.get("encoding") or _INVENTORY_ENCODINGS.get(entry.get("type"), "ascii")
+        expected = text.encode(encoding, errors="replace")
+        if self.buffer is not None and self.base_addr is not None:
+            start, end = int(byte_range[0]), int(byte_range[1])
+            rva_start = start - self.base_addr
+            rva_end = end - self.base_addr
+            if 0 <= rva_start < rva_end <= len(self.buffer):
+                return self.buffer[rva_start:rva_end]
+            # a retained buffer that does not cover the range belongs to another address space
+            # (e.g. a mutated report); do not guess the bytes from a file offset
+            return None
+        return expected
+
+    def getStringInventory(self) -> List[Dict[str, Any]]:
+        """The content-scan inventory (see StringInventory), or [] when the scan did not run."""
+        return list(self.xstrings or [])
+
+    def getStringOccurrences(self, text: str) -> List[Dict[str, Any]]:
+        """Every scanned occurrence of ``text`` regardless of whether code references it."""
+        return [entry for entry in self.xstrings or [] if entry.get("string") == text]
 
     def getFunction(self, function_addr) -> Optional["SmdaFunction"]:
         return self.xcfg.get(function_addr, None)
@@ -489,6 +528,11 @@ class SmdaReport:
             and not isinstance(report_dict["xmetadata"], dict)
         ):
             raise ValueError("serialized report xmetadata must be a dictionary")
+        xstrings = report_dict.get("xstrings")
+        if xstrings is not None and (
+            not isinstance(xstrings, list) or any(not isinstance(entry, dict) for entry in xstrings)
+        ):
+            raise ValueError("serialized report xstrings must be a list of dictionaries")
         if report_dict.get("smda_version") is not None and not isinstance(report_dict["smda_version"], str):
             raise ValueError("serialized report smda_version must be a string")
         for field in INTEGER_REPORT_FIELDS:
@@ -575,6 +619,7 @@ class SmdaReport:
         # fromDict mirrors __init__'s xmetadata = {} (not None) so downstream
         # consumers (e.g. BinarySynthesizer) never hit a TypeError on xmetadata["..."].
         smda_report.xmetadata = report_dict.get("xmetadata") or {}
+        smda_report.xstrings = report_dict.get("xstrings")
         # buffer is only present when the report was serialized with STORE_BUFFER enabled;
         # older reports omit it and keep buffer == None for backward compatibility.
         if report_dict.get("buffer") is not None:
@@ -633,6 +678,11 @@ class SmdaReport:
             "pe_header_hash": self.pe_header_hash if self.pe_header_hash else "",
             "xmetadata": self.xmetadata,
         }
+        # only emit the inventory when the scan actually ran; an older report without the key
+        # loads with xstrings = None, which is exactly "not scanned" and keeps prior reports
+        # byte-identical
+        if self.xstrings is not None:
+            report_dict["xstrings"] = self.xstrings
         # only emit the (compressed) buffer when one was retained, e.g. via STORE_BUFFER;
         # keeps serialized reports unchanged for the default file/memory analysis path.
         # `is not None` so an intentionally stored empty buffer survives as b"" (not dropped).

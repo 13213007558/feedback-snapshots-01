@@ -21,6 +21,75 @@ LOGGER = logging.getLogger(__name__)
 # than raising in the middle of an analysis
 _ELF_TYPE_EXEC = getattr(getattr(lief.ELF.Header, "FILE_TYPE", None), "EXEC", None)
 
+# PE section characteristics (COFF): execute, write.
+_PE_MEM_EXECUTE = 0x20000000
+_PE_MEM_WRITE = 0x80000000
+# ELF: SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR.
+_ELF_SHF_WRITE = 0x1
+_ELF_SHF_ALLOC = 0x2
+_ELF_SHF_EXECINSTR = 0x4
+# Mach-O: VM protection bits and section flags marking instructions.
+_MACHO_VM_WRITE = 0x2
+_MACHO_VM_EXECUTE = 0x4
+_MACHO_S_ATTR_PURE_INSTRUCTIONS = 0x80000000
+_MACHO_S_ATTR_SOME_INSTRUCTIONS = 0x00000400
+
+
+def _section_kind(section, lief_type):
+    """Classify a section as code, read-only data, writable data or unmapped from its flags."""
+    if lief_type == "PE":
+        characteristics = getattr(section, "characteristics", 0) or 0
+        if characteristics & _PE_MEM_EXECUTE:
+            return "code"
+        if getattr(section, "characteristics_lists", None) and any(
+            "MEM_EXECUTE" in str(flag) for flag in section.characteristics_lists
+        ):
+            return "code"
+        if characteristics & _PE_MEM_WRITE:
+            return "data"
+        return "rodata"
+    if lief_type == "ELF":
+        try:
+            flags = int(section.flags)
+        except (TypeError, ValueError):
+            flags = 0
+        if not flags and getattr(section, "flags", None) is not None:
+            # older lief returns the enum rather than the integer
+            flags = sum(
+                mask
+                for name, mask in (
+                    ("WRITE", _ELF_SHF_WRITE),
+                    ("ALLOC", _ELF_SHF_ALLOC),
+                    ("EXECINSTR", _ELF_SHF_EXECINSTR),
+                )
+                if name in str(section.flags)
+            )
+        if flags & _ELF_SHF_EXECINSTR:
+            return "code"
+        if not flags & _ELF_SHF_ALLOC:
+            return "unmapped"
+        return "data" if flags & _ELF_SHF_WRITE else "rodata"
+    if lief_type == "MACH_O":
+        segment = getattr(section, "segment", None)
+        protections = getattr(segment, "init_protection", None) if segment is not None else None
+        if protections is None:
+            protections = getattr(segment, "max_protection", None) if segment is not None else None
+        try:
+            protections = int(protections or 0)
+        except (TypeError, ValueError):
+            protections = 0
+        try:
+            flags = int(getattr(section, "flags", 0) or 0)
+        except (TypeError, ValueError):
+            flags = 0
+        if (
+            flags & (_MACHO_S_ATTR_PURE_INSTRUCTIONS | _MACHO_S_ATTR_SOME_INSTRUCTIONS)
+            or protections & _MACHO_VM_EXECUTE
+        ):
+            return "code"
+        return "data" if protections & _MACHO_VM_WRITE else "rodata"
+    return "rodata"
+
 
 class BinaryInfo:
     """simple DTO to contain most information related to the binary/buffer to be analyzed
@@ -270,6 +339,53 @@ class BinaryInfo:
                 section_start = section.virtual_address + adjustment
                 section_size = section.size
                 yield lief_name(section), section_start, section_start + section_size
+
+    def getSectionKinds(self):
+        """(name, start_addr, end_addr, kind) for each section, with the access it declares.
+
+        ``kind`` is one of ``code``, ``rodata``, ``data`` and ``unmapped``: the first three
+        follow the section's own flags (executable, allocated but not writable, writable),
+        while a section at address 0 is one no loader maps (ELF ``.comment``, ``.debug_*``,
+        ``.shstrtab``) and is reported as ``unmapped``. Addresses follow the same convention
+        as ``getSections``.
+        """
+        parsed_binary = self.getLiefBinary()
+        if not parsed_binary:
+            return
+        lief_type = self._getLiefType()
+        symbol_provider = self._symbol_provider
+        if symbol_provider is None:
+            return
+        if lief_type == "MACH_O":
+            parsed_binary = symbol_provider._get_macho_binary(parsed_binary)
+        if (
+            not parsed_binary
+            or lief_type not in ("PE", "ELF", "MACH_O")
+            or not hasattr(parsed_binary, "sections")
+            or not parsed_binary.sections
+        ):
+            return
+        adjustment = 0
+        if lief_type == "MACH_O":
+            adjustment = symbol_provider._get_address_adjustment(parsed_binary)
+        for section in parsed_binary.sections:
+            if lief_type == "PE":
+                section_start = self.base_addr + section.virtual_address
+                section_size = section.virtual_size or section.sizeof_raw_data
+                if section_size % 0x1000 != 0:
+                    section_size += 0x1000 - (section_size % 0x1000)
+            else:
+                section_start = section.virtual_address + adjustment
+                section_size = section.size
+            if not section_start or section_size <= 0:
+                yield lief_name(section), section_start, section_start + max(section_size, 0), "unmapped"
+                continue
+            yield (
+                lief_name(section),
+                section_start,
+                section_start + section_size,
+                _section_kind(section, lief_type),
+            )
 
     def getExceptionDirectory(self):
         """(start, end) of the PE exception table as the image's own directory names it.

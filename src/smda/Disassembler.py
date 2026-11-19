@@ -27,6 +27,7 @@ from smda.utility.MachoFileLoader import MachoFileLoader
 from smda.utility.MemoryFileLoader import MemoryFileLoader
 from smda.utility.PeFileLoader import PeFileLoader
 from smda.utility.StringExtractor import extract_strings
+from smda.utility.StringInventory import build_string_inventory
 
 LOGGER = logging.getLogger(__name__)
 
@@ -160,7 +161,7 @@ class Disassembler:
             LOGGER.debug("Current analysis callback time %s", time_diff)
         return False
 
-    def _addStringsToReport(self, smda_report, buffer, mode=None):
+    def _addStringsToReport(self, smda_report, buffer, mode=None, binary_info=None):
         # StringExtractor reads the buffer off the report, so set it only for the duration of
         # extraction and then restore the previous value. This keeps a buffer captured purely for
         # string extraction from being serialized later (persisting it is gated by STORE_BUFFER,
@@ -169,12 +170,51 @@ class Disassembler:
         smda_report.buffer = buffer
         try:
             self._extractStrings(smda_report, mode=mode)
+            if self.config.WITH_STRING_SCAN:
+                smda_report.xstrings = self._scanStrings(smda_report, binary_info)
         finally:
             smda_report.buffer = previous_buffer
             # both are built from this buffer and would otherwise live as long as the report
             smda_report._referenced_targets = None
             smda_report._string_cache.clear()
             smda_report._string_cache_chars = 0
+
+    def _scanStrings(self, smda_report, binary_info=None):
+        """Content-scan the mapped image into the report's string inventory.
+
+        Independent of WITH_STRINGS: the scan reports what bytes exist and where they live,
+        while function.stringrefs reports what the extractor could tie to an instruction.
+        """
+        return build_string_inventory(smda_report, binary_info)
+
+    def _recordStringInventory(self, smda_report, binary_info):
+        """Run the string scan when enabled, independent of the reference extraction switch.
+
+        The scan needs the mapped image; when STORE_BUFFER already retained it the report
+        carries the right bytes, otherwise they are attached for the scan only. A failure to
+        inventory one image leaves the inventory unset rather than failing a recovered report.
+        """
+        if not self.config.WITH_STRING_SCAN:
+            return
+        if smda_report.xstrings is not None:
+            # _addStringsToReport already scanned this report while the extraction buffer was set
+            return
+        previous_buffer = smda_report.buffer
+        if previous_buffer is None:
+            smda_report.buffer = binary_info.binary
+        try:
+            smda_report.xstrings = self._scanStrings(smda_report, binary_info)
+        except Exception as exc:
+            reraise_non_operational_exception(exc)
+            LOGGER.warning("String inventory failed, leaving it unset: %s", exc)
+        finally:
+            smda_report.buffer = previous_buffer
+            # the scan fills the same per-report caches the reference extractor uses; drop them
+            # so a retained buffer does not keep lookups that no later consumer asked for
+            smda_report._referenced_targets = None
+            smda_report._string_cache.clear()
+            smda_report._string_cache_chars = 0
+            smda_report._length_registers.clear()
 
     #: backends that record non-buffer-backed strings via disassembly.addStringRef
     #: (the string only exists as a runtime/decode-time side effect, e.g. CIL's
@@ -270,9 +310,10 @@ class Disassembler:
             if self.config.WITH_STRINGS:
                 go_pclntab_offset = GoSymbolProvider(None).getPcLntabOffset(binary_info)
                 string_mode = "go" if go_pclntab_offset is not None else None
-                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode)
+                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode, binary_info=binary_info)
             if self.config.STORE_BUFFER:
                 smda_report.buffer = binary_info.binary
+            self._recordStringInventory(smda_report, binary_info)
         except Exception as exc:
             smda_report = self._handleDisassemblyException(
                 start,
@@ -291,9 +332,10 @@ class Disassembler:
             if self.config.WITH_STRINGS:
                 go_pclntab_offset = GoSymbolProvider(None).getPcLntabOffset(binary_info)
                 string_mode = "go" if go_pclntab_offset is not None else None
-                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode)
+                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode, binary_info=binary_info)
             if self.config.STORE_BUFFER:
                 smda_report.buffer = binary_info.binary
+            self._recordStringInventory(smda_report, binary_info)
         except Exception as exc:
             smda_report = self._handleDisassemblyException(
                 start,
@@ -371,9 +413,10 @@ class Disassembler:
             if self.config.WITH_STRINGS:
                 go_pclntab_offset = GoSymbolProvider(None).getPcLntabOffset(binary_info)
                 string_mode = "go" if go_pclntab_offset is not None else None
-                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode)
+                self._addStringsToReport(smda_report, binary_info.binary, mode=string_mode, binary_info=binary_info)
             if self.config.STORE_BUFFER:
                 smda_report.buffer = binary_info.binary
+            self._recordStringInventory(smda_report, binary_info)
         except Exception as exc:
             smda_report = self._handleDisassemblyException(
                 start,

@@ -36,6 +36,9 @@ class SmdaConfig:
     STORE_BUFFER = False
     # extract strings during disassembly
     WITH_STRINGS = False
+    # inventory every string occurrence by content scan, independent of function references;
+    # off by default because it walks the whole mapped image in addition to the reference pass
+    WITH_STRING_SCAN = False
     # the options named USE_*, RESOLVE_*, RECORD_*, CANDIDATE_QUEUE and HIGH_ACCURACY steer
     # recursive candidate discovery and are read by the intel, aarch64 and arm backends only; the
     # cil and dalvik backends run their own analysis pipelines and ignore them

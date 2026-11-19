@@ -71,8 +71,21 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(utility)** Distinguish string scan findings from recovered references. New opt-in
+  `SmdaConfig.WITH_STRING_SCAN` populates `SmdaReport.xstrings` (and `getStringInventory()`) with
+  every NUL-terminated ASCII/UTF-8 or UTF-16LE occurrence in the mapped image, each carrying its
+  virtual `byte_range`, encoding assumption, terminator width, section provenance (`code`,
+  `rodata`, `data`, `padding`, `unmapped`) and the instructions that reference its exact start.
+  Evidence requires an address-shaped operand (`[rip + disp]`, absolute memory, `lea`, `adr`); an
+  immediate or stored word that equals the address never creates an edge, and a section's flags
+  outrank a broad executable segment so `.rodata` inside an `R-X` `PT_LOAD` stays read-only data.
+  `WITH_STRINGS` and its `stringrefs` output are unchanged and remain independent.
 
 ### Changed
+- **(common)** `BinaryInfo.getSectionKinds()` exposes each section's declared access (code,
+  read-only data, writable data or unmapped) alongside the existing `getSections()` ranges. A
+  section at address 0 is reported as unmapped, and the classification follows the section's own
+  flags rather than a covering segment's, so `.rodata` inside an `R-X` `PT_LOAD` stays read-only.
 
 ### Deprecated
 
