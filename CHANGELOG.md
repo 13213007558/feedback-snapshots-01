@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- Documented the AEAD/KDF plugin contract (input lengths, return values, failure behavior, input ownership and async behavior) in the docstrings of `doubleratchet.aead.AEAD` and `doubleratchet.kdf.KDF` and on a new documentation page
+- Validate the type and length of KDF output in `KDFChain.step` and the type of AEAD return values in `DoubleRatchet`, rejecting contract-violating plugins before any state change is applied
+- Tests exercising the plugin contract with the real recommended implementations, controlled failure implementations and contract-violating implementations
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed
+- `DoubleRatchet.encrypt_message` and `DoubleRatchet.encrypt_initial_message` now only commit the advanced ratchet state after the AEAD has returned a valid ciphertext, keeping the internal state untouched when a plugin fails
 
 ## [1.3.0] - 29th of January 2026
 

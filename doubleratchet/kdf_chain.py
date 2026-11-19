@@ -115,11 +115,33 @@ class KDFChain:
 
         Returns:
             ``length`` bytes of output data, derived from the internal KDF key and the input data.
+
+        Raises:
+            ValueError: if the configured KDF violates the plugin contract by not returning exactly the
+                requested number of bytes as :class:`bytes`. In this case the internal state of this KDF
+                chain is left unchanged.
+
+        Note:
+            The internal state of this KDF chain is only updated after the KDF has returned valid output.
+            If the KDF raises an exception or violates the plugin contract, the exception propagates to the
+            caller and the chain does not advance, making it safe to retry or to replace the KDF.
         """
 
         key_length = len(self.__key)
 
         output_data = await self.__kdf.derive(self.__key, data, key_length + length)
+
+        if not isinstance(output_data, bytes) or len(output_data) != key_length + length:
+            raise ValueError(
+                "Plugin contract violation: the KDF was asked to derive"
+                f" {key_length + length} bytes, but returned"
+                + (
+                    f" a value of type {type(output_data).__name__}."
+                    if not isinstance(output_data, bytes)
+                    else f" {len(output_data)} bytes."
+                )
+                + " The state of the KDF chain was left unchanged."
+            )
 
         self.__length += 1
         self.__key = output_data[:key_length]

@@ -23,6 +23,25 @@ __all__ = [
 DoubleRatchetTypeT = TypeVar("DoubleRatchetTypeT", bound="DoubleRatchet")
 
 
+def _validate_aead_result(result: bytes, method: str) -> None:
+    """
+    Validate a value returned by the configured AEAD implementation against the plugin contract.
+
+    Args:
+        result: The value returned by the AEAD implementation.
+        method: The name of the AEAD method that produced the value, for the error message.
+
+    Raises:
+        TypeError: if the AEAD implementation did not return the result as :class:`bytes`.
+    """
+
+    if not isinstance(result, bytes):
+        raise TypeError(
+            f"Plugin contract violation: AEAD.{method} must return its result as bytes, got a value of type"
+            f" {type(result).__name__}."
+        )
+
+
 class DoubleRatchet(ABC):
     """
     Combining the symmetric-key ratchet and the Diffie-Hellman ratchet gives the Double Ratchet.
@@ -105,12 +124,21 @@ class DoubleRatchet(ABC):
             dos_protection_threshold
         )
 
-        message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
+        # As in decrypt_message, only keep changes to the internal state on encryption success. To do so,
+        # work with a clone of the Diffie-Hellman ratchet, discard the clone on failure or replace the
+        # original with the clone on success.
+        diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
+
+        message_key, header = await diffie_hellman_ratchet.next_encryption_key()
         ciphertext = await self.__aead.encrypt(
             message,
             message_key,
             self._build_associated_data(associated_data, header)
         )
+        _validate_aead_result(ciphertext, "encrypt")
+
+        # Following encryption success, commit the advanced ratchet state.
+        self.__diffie_hellman_ratchet = diffie_hellman_ratchet
 
         return (self, EncryptedMessage(header=header, ciphertext=ciphertext))
 
@@ -188,11 +216,14 @@ class DoubleRatchet(ABC):
         # thus no FIFO discarding required.
         self.__skipped_message_keys = skipped_message_keys
 
-        return (self, await self.__aead.decrypt(
+        plaintext = await self.__aead.decrypt(
             message.ciphertext,
             message_key,
             self._build_associated_data(associated_data, message.header)
-        ))
+        )
+        _validate_aead_result(plaintext, "decrypt")
+
+        return (self, plaintext)
 
     @property
     def sending_chain_length(self) -> int:
@@ -393,14 +424,29 @@ class DoubleRatchet(ABC):
 
         Returns:
             The encrypted message including the header to send to the recipient.
+
+        Note:
+            The internal state of this instance is only updated after the AEAD implementation has returned
+            a valid ciphertext. If the AEAD implementation raises an exception or violates the plugin
+            contract, the exception propagates to the caller and the internal state remains untouched,
+            making it safe to retry.
         """
 
-        message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
+        # As in decrypt_message, only keep changes to the internal state on encryption success. To do so,
+        # work with a clone of the Diffie-Hellman ratchet, discard the clone on failure or replace the
+        # original with the clone on success.
+        diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
+
+        message_key, header = await diffie_hellman_ratchet.next_encryption_key()
         ciphertext = await self.__aead.encrypt(
             message,
             message_key,
             self._build_associated_data(associated_data, header)
         )
+        _validate_aead_result(ciphertext, "encrypt")
+
+        # Following encryption success, commit the advanced ratchet state.
+        self.__diffie_hellman_ratchet = diffie_hellman_ratchet
 
         return EncryptedMessage(header=header, ciphertext=ciphertext)
 
@@ -420,6 +466,12 @@ class DoubleRatchet(ABC):
             DoSProtectionException: if a huge number of message keys were skipped that have to be calculated
                 first before decrypting the message.
             DuplicateMessageException: if this message appears to be a duplicate.
+
+        Note:
+            The internal state of this instance is only updated after the AEAD implementation has returned
+            a valid plaintext. If the AEAD implementation raises an exception or violates the plugin
+            contract, the exception propagates to the caller and the internal state remains untouched,
+            making it safe to retry.
         """
 
         # Be careful to only keep changes to the internal state on decryption success. To do so, work with a
@@ -446,6 +498,7 @@ class DoubleRatchet(ABC):
             message_key,
             self._build_associated_data(associated_data, message.header)
         )
+        _validate_aead_result(plaintext, "decrypt")
 
         # Following decryption success, apply relevant changes to the internal state.
 
