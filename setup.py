@@ -48,6 +48,7 @@ setup(
         "tools/pycrate_gtp_type_info.py",
         "tools/pycrate_map_op_info.py",
         "tools/pycrate_extnas_demo.py",
+        "tools/pycrate_tcap_reassemble.py",
         ],
     
     # potential dependencies

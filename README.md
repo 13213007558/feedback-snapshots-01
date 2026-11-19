@@ -338,6 +338,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *TS24501_UEPOL*, *TS24526_UEPOL* and *TS24588_UEPOL*: structures for the 5G UE policy protocol from TS 24.501, 526 and 588
 * *TS29002_MAPAppCtx*: functions that relies on the Pycrate_TCAP_MAPv2v3 ASN.1 module, dealing mostly with MAP application-contexts
 * *TS29002_MAPIE*: structure for the MAP AddressString object from TS 29.002
+* *TCAPReassembly*: offline TCAP dialogue reassembly keyed on endpoint-owned transaction IDs, using the TCAP-MAP and TCAP ASN.1 objects
 * *TS29244_PFCP*: structure for PFCP messages from TS 29.244
 * *TS0960_GTPv0*: structures for 2G GTP version 0 from TS 09.60
 * *TS29060_GTP*: structures for 2G/3G GTP-C version 1 from TS 29.060
@@ -453,6 +454,9 @@ Four different tools are provided (yet):
 * *pycrate_map_op_info.py* prints prototypes and various information related to TCAP-MAP (Mobile Application Part) 
    and CAMEL operations and application-contexts.
 * *pycrate_gtp_type_info.py* prints prototypes and various information related to GTP messages and transactions as in version 0, 1 or 2.
+* *pycrate_tcap_reassemble.py* reassembles offline TCAP dialogues from a tshark EK JSON capture (or its built-in `--demo` scenario),
+   scoping the short transaction IDs by endpoint pair, reporting the evidence behind every association, the messages left
+   unresolved when the capture is incomplete, and the mistakes a single-ID dictionary would make.
 
 
 Examples
