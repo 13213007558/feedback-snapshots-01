@@ -20,6 +20,8 @@ API Reference
 
 .. automodule:: aiosasl
 
+.. automodule:: aiosasl.policy
+
 .. automodule:: aiosasl.channel_binding
 
 Indices and tables

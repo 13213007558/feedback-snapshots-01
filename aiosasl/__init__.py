@@ -67,6 +67,47 @@ below:
    SCRAM
    SCRAMPLUS
 
+Transport-aware mechanism selection
+===================================
+
+The loop above trusts the server advertisement and the surrounding code to
+avoid sending passwords over unsafe transports.  :mod:`aiosasl` also ships an
+explicit, policy-driven selector in :mod:`aiosasl.policy` which keeps the
+server advertisement, client capabilities, verified-TLS state and channel
+binding availability apart.  It refuses password-bearing mechanisms on an
+untrusted transport (so a server advertising only ``PLAIN`` over cleartext
+never triggers the credential callback), prefers SCRAM-PLUS when channel
+binding is available and preserves the SCRAM downgrade signal otherwise.
+
+A single coroutine performs the whole, policy-governed exchange::
+
+    from aiosasl import (
+        ClientCapabilities,
+        SASLPolicy,
+        TransportSecurity,
+        authenticate,
+    )
+
+    transport = TransportSecurity(
+        tls_established=True,
+        tls_verified=True,
+        channel_binding=cb_provider,  # or None
+    )
+    capabilities = ClientCapabilities(credential_provider=provide_creds)
+
+    candidate = await authenticate(
+        intf,
+        sasl_mechanisms,            # what the server advertised
+        capabilities,               # what the client can do
+        transport,                  # verified TLS / channel binding
+        SASLPolicy(),               # the trusted policy
+    )
+
+See :mod:`aiosasl.policy` for the full reference, including
+:class:`~aiosasl.policy.MechanismCandidates`,
+:class:`~aiosasl.policy.NoAcceptableMechanism` and the
+:data:`~aiosasl.policy.SASLMechanismSelector` hook.
+
 Interface for protocols using SASL
 ==================================
 
@@ -149,6 +190,18 @@ from .plain import (  # noqa:F401
 
 from .anonymous import (  # noqa:F401
     ANONYMOUS,
+)
+
+from .policy import (  # noqa:F401
+    ClientCapabilities,
+    MechanismCandidate,
+    MechanismCandidates,
+    NoAcceptableMechanism,
+    SASLMechanismSelector,
+    SASLPolicy,
+    TransportSecurity,
+    authenticate,
+    select_mechanism,
 )
 
 from .version import version, __version__, version_info  # noqa:F401
