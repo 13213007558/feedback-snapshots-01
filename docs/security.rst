@@ -60,6 +60,45 @@ CacheControl itself:
   request when the cached response was originally received in response
   to an authenticated request.
 
+Shared caches
+=============
+
+By default CacheControl acts as a **private** cache, suitable for a single
+process and a single logical user. When several workers need to share one
+cache store (for example, multiple processes configured with the same
+``FileCache`` directory), construct the adapter or wrapper with
+``shared=True``: ::
+
+  from cachecontrol import CacheControl
+  from cachecontrol.caches import FileCache
+
+  sess = CacheControl(
+      requests.Session(),
+      cache=FileCache("/var/cache/workers"),
+      shared=True,
+  )
+
+In shared mode CacheControl follows `RFC 9111 section 3.2`_ for responses to
+requests that carry an ``Authorization`` header:
+
+* An authenticated response is stored **only** when the origin explicitly
+  permits sharing it, using a ``Cache-Control: public`` or
+  ``Cache-Control: s-maxage`` directive.
+* An authenticated response without one of those directives is never written
+  to the shared cache, and any previously stored entry for the same URL is
+  removed.
+* Public resources requested without credentials are cached and shared as
+  usual.
+
+Each entry written in shared mode records whether its originating request was
+authenticated. Entries that lack this record — such as files left behind by an
+older CacheControl version or another writer — cannot be proven shareable and
+are therefore treated as a cache miss in shared mode, forcing a revalidation
+against the origin. Leave ``shared`` at its default (``False``) to keep the
+traditional private-cache behavior, where these restrictions do not apply.
+
+.. _RFC 9111 section 3.2: https://www.rfc-editor.org/rfc/rfc9111#section-3.2
+
 Reporting security issues
 =========================
 

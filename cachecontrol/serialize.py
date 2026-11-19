@@ -13,6 +13,13 @@ from urllib3 import HTTPResponse
 if TYPE_CHECKING:
     from requests import PreparedRequest
 
+# Attribute recording whether a cached response was produced by an
+# authenticated request. The controller sets it at write time and reads it at
+# lookup time when the cache is used in shared mode. It is persisted as an
+# optional top-level msgpack field, so entries from older versions or other
+# serializers simply lack the record instead of failing to load.
+AUTHENTICATED_ATTR = "_cachecontrol_authenticated"
+
 
 class Serializer:
     serde_version = "4"
@@ -45,6 +52,12 @@ class Serializer:
                 "decode_content": response.decode_content,
             }
         }
+
+        # Persist the authenticated provenance only when the controller has
+        # recorded it. Its absence on read is meaningful for shared caches.
+        authenticated = getattr(response, AUTHENTICATED_ATTR, None)
+        if authenticated is not None:
+            data["authenticated"] = bool(authenticated)
 
         # Construct our vary headers
         data["vary"] = {}
@@ -135,7 +148,17 @@ class Serializer:
         # Discard any `strict` parameter serialized by older version of cachecontrol.
         cached["response"].pop("strict", None)
 
-        return HTTPResponse(body=body, preload_content=False, **cached["response"])
+        response = HTTPResponse(
+            body=body, preload_content=False, **cached["response"]
+        )
+
+        # Restore the authenticated provenance recorded at write time. An entry
+        # lacking the field leaves the attribute unset, which shared caches
+        # interpret as "not proven shareable".
+        if "authenticated" in cached:
+            setattr(response, AUTHENTICATED_ATTR, bool(cached["authenticated"]))
+
+        return response
 
     def _loads_v4(
         self,

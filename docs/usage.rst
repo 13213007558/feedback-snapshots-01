@@ -77,5 +77,24 @@ The `FileCache` will create a directory called `.webcache` and store a
 file for each cached request.
 
 
+Sharing a cache between workers
+===============================
+
+When more than one process (for example, several background workers) uses the
+same cache store, pass ``shared=True``. In that mode a response to an
+authenticated request is retained only when the origin explicitly allows
+sharing it (``Cache-Control: public`` or ``s-maxage``); other authenticated
+responses stay private and are not written to the shared store. ::
+
+  sess = CacheControl(
+      requests.Session(),
+      cache=FileCache('/var/cache/shared-workers'),
+      shared=True,
+  )
+
+See the :doc:`security` page for the full rules and the treatment of cache
+entries that pre-date shared mode.
+
+
 
 .. _Transport Adapter: http://docs.python-requests.org/en/latest/user/advanced/#transport-adapters

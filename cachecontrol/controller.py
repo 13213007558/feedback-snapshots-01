@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Collection, Mapping
 from requests.structures import CaseInsensitiveDict
 
 from cachecontrol.cache import DictCache, SeparateBodyBaseCache
-from cachecontrol.serialize import Serializer
+from cachecontrol.serialize import AUTHENTICATED_ATTR, Serializer
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -57,11 +57,38 @@ class CacheController:
         cache_etags: bool = True,
         serializer: Serializer | None = None,
         status_codes: Collection[int] | None = None,
+        shared: bool = False,
     ):
         self.cache = DictCache() if cache is None else cache
         self.cache_etags = cache_etags
         self.serializer = serializer or Serializer()
         self.cacheable_status_codes = status_codes or (200, 203, 300, 301, 308)
+        # A shared cache is accessible to more than one logical user (for
+        # example, several worker processes using the same cache store). In
+        # that mode an authenticated response may only be retained when the
+        # origin explicitly allows sharing it. The default private-cache
+        # behavior is unchanged.
+        self.shared = shared
+
+    @staticmethod
+    def _is_authenticated(request: PreparedRequest) -> bool:
+        """Whether the request carries end-user credentials.
+
+        RFC 9111 section 3.2 treats requests containing an Authorization
+        header as authenticated for the purposes of shared caching.
+        """
+        return "Authorization" in request.headers
+
+    def _allows_shared(self, headers: Mapping[str, str]) -> bool:
+        """Whether the origin explicitly permits a shared cache to store this
+        response.
+
+        Per RFC 9111 section 3.2, a shared cache MAY store a response to an
+        authenticated request only when it carries a ``public`` or
+        ``s-maxage`` Cache-Control directive.
+        """
+        directives = self.parse_cache_control(headers)
+        return "public" in directives or "s-maxage" in directives
 
     @classmethod
     def _urlnorm(cls, uri: str) -> str:
@@ -171,7 +198,48 @@ class CacheController:
                 body_file.close()
         if result is None:
             logger.debug("Cache entry deserialization failed, entry ignored")
+            return None
+
+        if self.shared and not self._is_entry_shareable(result):
+            logger.debug(
+                "Shared cache: entry cannot be proven shareable, "
+                "treating it as a cache miss"
+            )
+            result.close()
+            return None
+
         return result
+
+    def _is_entry_shareable(self, response: HTTPResponse) -> bool:
+        """Decide whether a loaded entry may be served from a shared cache.
+
+        Entries written by CacheControl record whether the originating request
+        was authenticated. Entries without that record (for example, cache
+        files left behind by an older version) cannot be proven shareable and
+        are therefore treated as a miss in shared mode. An entry stored from
+        an authenticated request additionally needs the origin's explicit
+        sharing permission (``public`` or ``s-maxage``).
+        """
+        authenticated = getattr(response, AUTHENTICATED_ATTR, None)
+        if authenticated is None:
+            logger.debug(
+                "Shared cache: entry has no shareability record, "
+                "treating it as a miss"
+            )
+            return False
+
+        if not authenticated:
+            # Stored from a request that carried no credentials.
+            return True
+
+        if not self._allows_shared(response.headers):
+            logger.debug(
+                'Shared cache: authenticated response lacks "public" or '
+                '"s-maxage", entry ignored'
+            )
+            return False
+
+        return True
 
     def cached_request(self, request: PreparedRequest) -> HTTPResponse | Literal[False]:
         """
@@ -410,6 +478,34 @@ class CacheController:
             self.cache.delete(cache_url)
         if no_store:
             return
+
+        # RFC 9111 section 3.2: a shared cache must not store a response to an
+        # authenticated request unless the origin explicitly permits sharing
+        # it. Such a response is treated like "no-store" for this cache.
+        if (
+            self.shared
+            and self._is_authenticated(request)
+            and not self._allows_shared(response_headers)
+        ):
+            logger.debug(
+                'Shared cache: authenticated response without "public" or '
+                '"s-maxage" is not stored'
+            )
+            if self.cache.get(cache_url):
+                logger.debug(
+                    "Purging existing cache entry that is no longer shareable"
+                )
+                self.cache.delete(cache_url)
+            return
+
+        # Record whether the request that produced this entry was
+        # authenticated. Shared caches rely on this record to prove that an
+        # entry is shareable; entries lacking the record are treated as misses.
+        setattr(
+            response,
+            AUTHENTICATED_ATTR,
+            self._is_authenticated(request),
+        )
 
         # https://tools.ietf.org/html/rfc7234#section-4.1:
         # A Vary header field-value of "*" always fails to match.

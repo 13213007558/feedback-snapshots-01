@@ -34,6 +34,7 @@ class CacheControlAdapter(HTTPAdapter):
         serializer: Serializer | None = None,
         heuristic: BaseHeuristic | None = None,
         cacheable_methods: Collection[str] | None = None,
+        shared: bool = False,
         *args: Any,
         **kw: Any,
     ) -> None:
@@ -44,7 +45,10 @@ class CacheControlAdapter(HTTPAdapter):
 
         controller_factory = controller_class or CacheController
         self.controller = controller_factory(
-            self.cache, cache_etags=cache_etags, serializer=serializer
+            self.cache,
+            cache_etags=cache_etags,
+            serializer=serializer,
+            shared=shared,
         )
 
     def send(
