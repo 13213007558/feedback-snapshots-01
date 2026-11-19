@@ -15,7 +15,7 @@ import time
 import weakref
 from contextlib import closing
 from email.utils import parsedate_tz
-from typing import TYPE_CHECKING, Collection, Mapping
+from typing import TYPE_CHECKING, Any, Collection, Mapping, cast
 
 from requests.structures import CaseInsensitiveDict
 
@@ -35,6 +35,56 @@ logger = logging.getLogger(__name__)
 URI = re.compile(r"^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?")
 
 PERMANENT_REDIRECT_STATUSES = (301, 308)
+
+
+def _split_quoted_list(value: str) -> tuple[list[str], bool]:
+    """Split a comma-separated list, respecting quoted strings.
+
+    Returns the pieces and whether an unterminated quoted string was found
+    (which makes the input ambiguous to the caller).
+    """
+    pieces: list[str] = []
+    current: list[str] = []
+    quoted = False
+    escaped = False
+    for char in value:
+        if quoted:
+            if escaped:
+                current.append(char)
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            else:
+                current.append(char)
+        elif char == '"':
+            quoted = True
+        elif char == ",":
+            pieces.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    pieces.append("".join(current).strip())
+    return pieces, quoted
+
+
+def _split_cache_control_directives(cc_header: str) -> list[str]:
+    directives, unterminated = _split_quoted_list(cc_header)
+    if unterminated:
+        # Refuse to interpret an unterminated quoted string; the caller's
+        # conservative handling takes over.
+        return [cc_header]
+    return directives
+
+
+def _has_private_directive(cc_header: str) -> bool:
+    # Fallback used on malformed (e.g. unterminated quote) input: look for a
+    # "private" token at a directive boundary without trusting comma splits.
+    return any(
+        match.group(1).lower() == "private"
+        for match in re.finditer(r"(?:^|,)\s*([A-Za-z][A-Za-z\-]*)", cc_header)
+    )
 
 
 def parse_uri(uri: str) -> tuple[str, str, str, str, str]:
@@ -57,11 +107,16 @@ class CacheController:
         cache_etags: bool = True,
         serializer: Serializer | None = None,
         status_codes: Collection[int] | None = None,
+        shared_cache: bool = False,
     ):
         self.cache = DictCache() if cache is None else cache
         self.cache_etags = cache_etags
         self.serializer = serializer or Serializer()
         self.cacheable_status_codes = status_codes or (200, 203, 300, 301, 308)
+        # A private cache (the default, per RFC 9111) may store responses
+        # marked ``private``. A shared cache must not, except for the fields
+        # that the origin explicitly leaves out of the ``private`` directive.
+        self.shared_cache = shared_cache
 
     @classmethod
     def _urlnorm(cls, uri: str) -> str:
@@ -141,6 +196,89 @@ class CacheController:
                     )
 
         return retval
+
+    # RFC 9110 section 5.6.2: a field name is a token made of tchars.
+    _TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+    def _private_fields(
+        self, headers: Mapping[str, str]
+    ) -> tuple[bool, Collection[str] | None]:
+        """Inspect the ``private`` cache-control directive.
+
+        Returns ``(present, fields)`` where ``present`` says whether the
+        response carries a ``private`` directive and ``fields`` is the set of
+        header field names it marks private. ``fields`` is ``None`` when the
+        whole response is private: either a bare ``private`` directive, an
+        empty field list, or a list that cannot be parsed. Ambiguous input is
+        therefore treated as conservatively as possible.
+        """
+        cc_header = headers.get("cache-control", headers.get("Cache-Control", ""))
+        if not cc_header:
+            return False, None
+
+        directives, unterminated = _split_quoted_list(cc_header)
+        if unterminated:
+            # An unterminated quoted string could hide a private field list.
+            if _has_private_directive(cc_header):
+                return True, None
+            return False, None
+
+        present = False
+        fields: list[str] | None = None
+        for raw_directive in directives:
+            parts = raw_directive.split("=", 1)
+            directive = parts[0].strip().lower()
+            if directive != "private":
+                continue
+
+            present = True
+            if len(parts) != 2:
+                # A bare "private" applies to the whole response.
+                return True, None
+
+            value = parts[1].strip()
+            quoted = len(value) >= 2 and value[0] == '"' and value[-1] == '"'
+            if quoted:
+                value = value[1:-1]
+            elif '"' in value:
+                # An unterminated quote is ambiguous: do not guess.
+                return True, None
+
+            parsed_fields, field_list_unterminated = _split_quoted_list(value)
+            if field_list_unterminated:
+                return True, None
+            fields = [field.strip() for field in parsed_fields]
+            if not fields or any(
+                not field or self._TOKEN_RE.match(field) is None
+                for field in fields
+            ):
+                # An empty or malformed field list is unambiguous about
+                # nothing; refuse to guess which fields are shareable.
+                return True, None
+
+        return present, fields
+
+    def _shared_cache_response(
+        self,
+        response: HTTPResponse,
+        response_headers: CaseInsensitiveDict[str],
+    ) -> HTTPResponse | None:
+        """Return a shareable view of ``response`` for a shared cache.
+
+        ``None`` means the response must not be stored at all. When the origin
+        names specific private fields, a proxy is returned that exposes the
+        response with those fields (and the field list on ``private``) removed
+        without touching the live response.
+        """
+        present, private_fields = self._private_fields(response_headers)
+        if not present:
+            return response
+
+        if private_fields is None:
+            logger.debug('Shared cache skipping fully "private" response')
+            return None
+
+        return cast("HTTPResponse", _SanitizedResponse(response, private_fields))
 
     def _load_from_cache(self, request: PreparedRequest) -> HTTPResponse | None:
         """
@@ -420,6 +558,20 @@ class CacheController:
             logger.debug('Response header has "Vary: *"')
             return
 
+        # A shared cache honors the response's "private" directive: either
+        # drop the whole response or store a copy with the named private
+        # fields removed. The live response is never modified.
+        stored_response = response
+        if self.shared_cache:
+            stored_response = self._shared_cache_response(response, response_headers)
+            if stored_response is None:
+                if self.cache.get(cache_url):
+                    logger.debug(
+                        'Purging existing cache entry to honor "private"'
+                    )
+                    self.cache.delete(cache_url)
+                return
+
         # If we've been given an etag, then keep the response
         if self.cache_etags and "etag" in response_headers:
             expires_time = 0
@@ -432,13 +584,13 @@ class CacheController:
 
             logger.debug(f"etag object cached for {expires_time} seconds")
             logger.debug("Caching due to etag")
-            self._cache_set(cache_url, request, response, body, expires_time)
+            self._cache_set(cache_url, request, stored_response, body, expires_time)
 
         # Add to the cache any permanent redirects. We do this before looking
         # that the Date headers.
         elif int(response.status) in PERMANENT_REDIRECT_STATUSES:
             logger.debug("Caching permanent redirect")
-            self._cache_set(cache_url, request, response, b"")
+            self._cache_set(cache_url, request, stored_response, b"")
 
         # Add to the cache if the response headers demand it. If there
         # is no date header then we can't do anything about expiring
@@ -456,7 +608,7 @@ class CacheController:
                 self._cache_set(
                     cache_url,
                     request,
-                    response,
+                    stored_response,
                     body,
                     expires_time,
                 )
@@ -483,7 +635,7 @@ class CacheController:
                     self._cache_set(
                         cache_url,
                         request,
-                        response,
+                        stored_response,
                         body,
                         expires_time,
                     )
@@ -515,9 +667,63 @@ class CacheController:
                 }
             )
             cached_response.status = 200
+            if self.shared_cache:
+                present, private_fields = self._private_fields(
+                    CaseInsensitiveDict(cached_response.headers)
+                )
+                if present and private_fields is None:
+                    self.cache.delete(cache_url)
+                    return response
+                if present:
+                    _strip_private_headers(cached_response.headers, private_fields)
             self._cache_set(cache_url, request, cached_response)
         except BaseException:
             cached_response.close()
             raise
 
         return cached_response
+
+
+def _strip_private_headers(
+    headers: CaseInsensitiveDict[str], private_fields: Collection[str]
+) -> None:
+    """Remove private fields from a header collection in place.
+
+    The ``private`` directive is rebuilt without its field list so that the
+    stored copy does not still advertise the fields it no longer contains.
+    """
+    for field in private_fields:
+        headers.pop(field, None)
+
+    cc_header = headers.get("cache-control")
+    if cc_header is None:
+        return
+
+    remaining = []
+    for directive in _split_cache_control_directives(cc_header):
+        if directive.split("=", 1)[0].strip().lower() != "private":
+            remaining.append(directive)
+    if remaining:
+        headers["Cache-Control"] = ",".join(remaining)
+    else:
+        headers.pop("Cache-Control", None)
+
+
+class _SanitizedResponse:
+    """A read-only view of a response with private fields hidden.
+
+    Only the data serialized into the shared cache is affected: the wrapped
+    live response keeps its original headers and body. Attribute access other
+    than ``headers`` is delegated straight to the wrapped response.
+    """
+
+    def __init__(
+        self, response: HTTPResponse, private_fields: Collection[str]
+    ) -> None:
+        object.__setattr__(self, "_response", response)
+        sanitized_headers = CaseInsensitiveDict(response.headers)
+        _strip_private_headers(sanitized_headers, private_fields)
+        object.__setattr__(self, "headers", sanitized_headers)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_response"), name)

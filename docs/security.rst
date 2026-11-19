@@ -26,6 +26,16 @@ CacheControl's security model is based on the following assumptions:
   different logical users. **Do not** use CacheControl for this;
   it **will** end badly for you.
 
+* CacheControl can alternatively be configured as a **shared cache** by
+  passing ``shared_cache=True`` to ``CacheControl``, ``CacheControlAdapter``
+  or ``CacheController``. In this mode the ``Cache-Control: private``
+  directive is honored: a response marked ``private`` in its entirety is not
+  stored (and any existing entry for its URL is purged), while a response
+  that names specific private fields (``private="Set-Cookie, ..."``) is
+  stored with those fields removed from the cached copy only. Directives
+  that cannot be parsed unambiguously are treated as fully ``private``.
+  The response returned to the online caller is never modified.
+
 * You **must** treat cached data as potentially sensitive. CacheControl
   does not natively encrypt or otherwise protect cached data. If an attacker
   can read your cache, they can read all cached responses. You must

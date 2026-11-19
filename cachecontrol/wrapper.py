@@ -26,6 +26,7 @@ def CacheControl(
     controller_class: type[CacheController] | None = None,
     adapter_class: type[CacheControlAdapter] | None = None,
     cacheable_methods: Collection[str] | None = None,
+    shared_cache: bool = False,
 ) -> requests.Session:
     cache = DictCache() if cache is None else cache
     adapter_class = adapter_class or CacheControlAdapter
@@ -36,6 +37,7 @@ def CacheControl(
         heuristic=heuristic,
         controller_class=controller_class,
         cacheable_methods=cacheable_methods,
+        shared_cache=shared_cache,
     )
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
