@@ -123,4 +123,164 @@ describe "AssociationDependencies plugin" do
     c2.load(:id=>1, :name=>'Al', :artist_id=>2).destroy
     DB.sqls.must_equal ['DELETE FROM albums WHERE id = 1', 'SELECT * FROM artists WHERE (artists.id = 2) LIMIT 1', 'DELETE FROM artists WHERE id = 2']
   end
+
+  describe "with instance_filters" do
+    before do
+      @Artist.plugin :instance_filters
+      @Artist.add_association_dependencies :albums=>:delete
+      @Album.columns :id, :name, :artist_id, :tenant_id
+      @Artist.columns :id, :name, :tenant_id
+      @orig_artist_dataset = @Artist.dataset
+      @orig_album_dataset = @Album.dataset
+    end
+
+    after do
+      @Artist.dataset = @orig_artist_dataset
+      @Album.dataset = @orig_album_dataset
+      @orig_album_dataset.db.numrows = 1
+    end
+
+    # Set the row returned when querying artists, and load an artist object
+    # with the given tenant.
+    def load_artist(rows, tenant=1)
+      @Artist.dataset = @orig_artist_dataset.with_fetch(rows)
+      @artist = @Artist.load(:id=>2, :name=>'Ar', :tenant_id=>tenant)
+    end
+
+    it "should check that the object matches its filters before deleting associated objects" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_dependency_filter(:tenant_id=>1)
+      @artist.destroy
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 1)) LIMIT 1',
+        'DELETE FROM albums WHERE ((albums.artist_id = 2) AND (tenant_id = 1))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 1))',
+        'COMMIT'
+      ]
+    end
+
+    it "should not modify associated objects when the object does not match its filters" do
+      load_artist([], 1)
+      @artist.instance_dependency_filter(:tenant_id=>2)
+
+      proc{@artist.destroy}.must_raise(Sequel::Plugins::InstanceFilters::Error)
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 2)) LIMIT 1',
+        'ROLLBACK'
+      ]
+
+      @artist.send(:instance_filters).wont_be_empty
+    end
+
+    it "should check filters again when retrying after a failed destroy" do
+      load_artist([], 1)
+      @artist.instance_dependency_filter(:tenant_id=>2)
+      proc{@artist.destroy}.must_raise(Sequel::Plugins::InstanceFilters::Error)
+      DB.sqls
+
+      # Still belongs to tenant 1, so a tenant 2 filter still doesn't match.
+      @Artist.dataset = @orig_artist_dataset.with_fetch([])
+      proc{@artist.destroy}.must_raise(Sequel::Plugins::InstanceFilters::Error)
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 2)) LIMIT 1',
+        'ROLLBACK'
+      ]
+
+      # The object really is tenant 2, and the retry is now authorized.
+      # The failed attempt did not consume the filters.
+      @Artist.dataset = @orig_artist_dataset.with_fetch(:id=>2, :name=>'Ar', :tenant_id=>2)
+      @artist = @Artist.load(:id=>2, :name=>'Ar', :tenant_id=>2)
+      @artist.instance_dependency_filter(:tenant_id=>2)
+      @artist.destroy
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 2)) LIMIT 1',
+        'DELETE FROM albums WHERE ((albums.artist_id = 2) AND (tenant_id = 2))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 2))',
+        'COMMIT'
+      ]
+    end
+
+    it "should apply dependency filters to associated objects but not to the object itself" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_dependency_filter(:tenant_id=>2)
+      @artist.destroy
+      # The object check uses tenant_id = 2 for both the object and the
+      # associated objects.  The important part is the associated object
+      # delete uses the dependency filter.
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 2)) LIMIT 1',
+        'DELETE FROM albums WHERE ((albums.artist_id = 2) AND (tenant_id = 2))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 2))',
+        'COMMIT'
+      ]
+    end
+
+    it "should not apply instance filters that were not added as dependency filters to associated objects" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_filter(:tenant_id=>1)
+      @artist.destroy
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 1)) LIMIT 1',
+        'DELETE FROM albums WHERE (albums.artist_id = 2)',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 1))',
+        'COMMIT'
+      ]
+    end
+
+    it "should apply dependency filters when nullifying associated objects" do
+      @Artist.association_dependencies[:before_delete].clear
+      @Artist.add_association_dependencies :albums=>:nullify
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_dependency_filter(:tenant_id=>1)
+      @artist.destroy
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 1)) LIMIT 1',
+        'UPDATE albums SET artist_id = NULL WHERE ((albums.artist_id = 2) AND (tenant_id = 1))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 1))',
+        'COMMIT'
+      ]
+    end
+
+    it "should force a transaction for destroy so dependent writes are rolled back if the object delete fails" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_dependency_filter(:tenant_id=>1)
+      DB.numrows = [1, 0]
+
+      proc{@artist.destroy}.must_raise(Sequel::NoExistingObject)
+      DB.sqls.must_equal [
+        'BEGIN',
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 1)) LIMIT 1',
+        'DELETE FROM albums WHERE ((albums.artist_id = 2) AND (tenant_id = 1))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 1))',
+        'ROLLBACK'
+      ]
+    end
+
+    it "should not force a transaction if an explicit transaction option is given" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.instance_dependency_filter(:tenant_id=>1)
+      @artist.destroy(:transaction=>false)
+      DB.sqls.must_equal [
+        'SELECT 1 AS v FROM artists WHERE ((id = 2) AND (tenant_id = 1)) LIMIT 1',
+        'DELETE FROM albums WHERE ((albums.artist_id = 2) AND (tenant_id = 1))',
+        'DELETE FROM artists WHERE ((id = 2) AND (tenant_id = 1))'
+      ]
+    end
+
+    it "should not check filters for dependent writes if the object has no instance filters" do
+      load_artist(:id=>2, :name=>'Ar', :tenant_id=>1)
+      @artist.destroy
+      DB.sqls.must_equal [
+        'DELETE FROM albums WHERE (albums.artist_id = 2)',
+        'DELETE FROM artists WHERE id = 2'
+      ]
+    end
+  end
 end

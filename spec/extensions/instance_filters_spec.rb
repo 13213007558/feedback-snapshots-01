@@ -112,5 +112,43 @@ describe "instance_filters plugin" do
     @p.instance_filter(:name=>'Joe')
     @p.dup.send(:instance_filters).must_equal @p.send(:instance_filters)
     @p.dup.send(:instance_filters).wont_be_same_as(@p.send(:instance_filters))
-  end 
+  end
+
+  it "should treat filters without the dependent option as only applying to the object" do
+    @p.instance_filter(:name=>'Joe')
+    @p.send(:instance_filter_dependents?).must_equal true
+    @p.send(:instance_filter_dependency_filters?).must_equal false
+    @p.instance_filter_dataset(DB[:people]).sql.must_equal "SELECT * FROM people WHERE (name = 'Joe')"
+  end
+
+  it "should track instance dependency filters separately" do
+    @p.instance_filter(:name=>'Joe')
+    @p.instance_dependency_filter(:tenant_id=>1)
+    @p.send(:instance_filter_dependents?).must_equal true
+    @p.send(:instance_filter_dependency_filters?).must_equal true
+    @p.instance_filter_dataset(DB[:people]).sql.must_equal "SELECT * FROM people WHERE ((name = 'Joe') AND (tenant_id = 1))"
+    @p.instance_filter_dependency_dataset(DB[:people]).sql.must_equal "SELECT * FROM people WHERE (tenant_id = 1)"
+  end
+
+  it "should query the database to check if the object matches the filters" do
+    @p.instance_filter_matches?.must_equal true
+    @p.instance_filter(:name=>'Joe')
+    DB.fetch = {:one=>1}
+    @p.instance_filter_matches?.must_equal true
+    DB.sqls.must_equal ["SELECT 1 AS v FROM people WHERE ((id = 1) AND (name = 'Joe')) LIMIT 1"]
+    DB.fetch = []
+    @p.instance_filter_matches?.must_equal false
+  ensure
+    DB.fetch = {:id=>1, :x=>1}
+  end
+
+  it "should raise an error when checking filters and the object does not match" do
+    @p.instance_filter(:name=>'Joe')
+    @p.instance_filter_check!.must_equal true
+    DB.fetch = []
+    proc{@p.instance_filter_check!}.must_raise(Sequel::Plugins::InstanceFilters::Error)
+    @p.send(:instance_filters).wont_be_empty
+  ensure
+    DB.fetch = {:id=>1, :x=>1}
+  end
 end

@@ -1,5 +1,7 @@
 === master
 
+* Support using instance filters for dependent writes in the association_dependencies plugin, checking object authorization before modifying associated objects and rolling back dependent changes if the object cannot be destroyed (jeremyevans)
+
 * Use the proleptic gregorian calendar for Date and DateTime (jeremyevans)
 
 * Avoid duplicating table when adding/dropping CHECK or NOT NULL constraints on SQLite 3.53+ (jeremyevans)

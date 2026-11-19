@@ -40,6 +40,20 @@ module Sequel
     # This plugin sets the require_modification flag on the model,
     # so if the model's dataset doesn't provide an accurate number
     # of matched rows, this could result in invalid exceptions being raised.
+    #
+    # The filters are also usable for dependent writes.  The
+    # association_dependencies plugin checks that the object still matches
+    # its instance filters before running dependent operations, and can
+    # apply filters registered with #instance_dependency_filter to the
+    # dependent datasets.  This allows a tenant/permission filter to be
+    # enforced in the same way for the object and for objects that are
+    # deleted or destroyed because of it.
+    #
+    # A dependent write is authorized only if the object still matches all
+    # instance filters.  If it does not, the dependent writes are not run and
+    # a Sequel::NoExistingObject exception is raised.  The filters are not
+    # cleared when a destroy fails, so retrying the destroy requires the
+    # filters to match again.
     module InstanceFilters
       # Exception class raised when updating or deleting an object does
       # not affect exactly one row.
@@ -76,8 +90,90 @@ module Sequel
         # Add an instance filter to the array of instance filters
         # Both the arguments given and the block are passed to the
         # dataset's filter method.
+        #
+        # Filters added with this method are only applied to writes on the
+        # object itself.  See #instance_dependency_filter for filters that
+        # are also applied to dependent writes.
         def instance_filter(*args, &block)
-          instance_filters << [args, block]
+          instance_filters << [args, block, false]
+        end
+
+        # Add an instance filter that is also applied to the datasets used
+        # for dependent writes performed by the association_dependencies
+        # plugin (deleting or destroying associated objects).  Arguments and
+        # block are handled the same as #instance_filter.
+        #
+        # This is useful for permission filters shared by an object and its
+        # associated objects, such as a tenant filter:
+        #
+        #   obj.instance_dependency_filter(tenant_id: 1)
+        #   obj.destroy # only deletes associated objects matching tenant_id = 1
+        #
+        # Filters applied to dependent datasets must use columns that exist
+        # in the associated table.  The filter is applied on top of the
+        # association dataset, so the dependent write is still restricted to
+        # the objects associated with this object.
+        #
+        # Regardless of whether a filter is added with this method,
+        # dependent writes check that the object itself matches all instance
+        # filters before modifying associated objects.  See
+        # #instance_filter_check!.
+        def instance_dependency_filter(*args, &block)
+          instance_filters << [args, block, true]
+        end
+
+        # Whether the object has any instance filters.  Dependent writes use
+        # this to determine whether the object's authorization needs to be
+        # checked before modifying associated objects.
+        def instance_filter_dependents?
+          !instance_filters.empty?
+        end
+
+        # Whether any instance filters should be applied to dependent
+        # datasets.
+        def instance_filter_dependency_filters?
+          instance_filters.any?{|i| i[2]}
+        end
+
+        # Whether the object's row currently matches all instance filters.
+        # This is the query dependent writes should use to determine if the
+        # object is currently authorized.  Returns true if there are no
+        # instance filters.  Note that this queries the database, it does not
+        # use the cached values in the object.
+        #
+        # The dataset given should be a dataset restricted to the object, and
+        # defaults to the object's dataset.
+        def instance_filter_matches?(dataset=this)
+          instance_filters.empty? || !apply_instance_filters(dataset).get(1).nil?
+        end
+
+        # Check that the object's row currently matches all instance filters,
+        # raising a Sequel::NoExistingObject exception if it does not.
+        # Dependent writes call this before modifying associated objects, so
+        # associated objects are not modified if the object is not currently
+        # authorized.  Returns true if the object matches all instance
+        # filters.
+        #
+        # The instance filters are not cleared when this raises, so a later
+        # retry checks the permissions again.
+        def instance_filter_check!
+          return true if instance_filter_matches?
+          raise Error, "Attempt to modify dependent objects for an object that does not match the instance filters"
+        end
+
+        # Return the given dataset with all instance filters applied.  This
+        # allows dependent writes to use the same restrictions as writes to
+        # the object, when the dataset uses the same columns as the object.
+        def instance_filter_dataset(dataset)
+          apply_instance_filters(dataset)
+        end
+
+        # Return the given dataset with instance filters applicable to
+        # dependent writes applied.  This is the dataset the
+        # association_dependencies plugin uses for dependent deletes and
+        # destroys.
+        def instance_filter_dependency_dataset(dataset)
+          apply_instance_dependency_filters(dataset)
         end
       
         # Clear instance filters when saving changes even if the
@@ -106,15 +202,25 @@ module Sequel
           @instance_filters = other.send(:instance_filters).dup
           self
         end
-      
+
         # Lazily initialize the instance filter array.
         def instance_filters
           @instance_filters ||= []
         end
-        
+
         # Apply the instance filters to the given dataset
         def apply_instance_filters(ds)
           instance_filters.inject(ds) do |ds1, i|
+            block = i[1]
+            ds1.where(*i[0], &block)
+          end
+        end
+
+        # Apply the instance filters usable for dependent datasets to the
+        # given dataset.
+        def apply_instance_dependency_filters(ds)
+          instance_filters.inject(ds) do |ds1, i|
+            next ds1 unless i[2]
             block = i[1]
             ds1.where(*i[0], &block)
           end
