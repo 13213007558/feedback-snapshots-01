@@ -48,6 +48,7 @@ Topics
    topics/sessions
    topics/authentication
    topics/security
+   topics/websocket_subprotocol_design
    topics/testing
    topics/worker
    deploying
