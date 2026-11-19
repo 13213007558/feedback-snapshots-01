@@ -15,6 +15,27 @@ from uefi_firmware import AutoParser
 from uefi_firmware.utils import safe_path
 import uefi_firmware.utils # import nocolor
 
+def _show_coverage(summary):
+    '''Print a human-readable parse coverage summary.'''
+    if not summary:
+        return
+    print("%s %s" % (blue("Coverage:"), green(summary["status"])))
+    for key in summary["spaceOrder"]:
+        space = summary["spaces"][key]
+        counts = space["counts"]
+        print("%s %s total= 0x%x parsed= 0x%x preserved= 0x%x unknown= 0x%x "
+              "failed= 0x%x padding= 0x%x" % (
+                  blue("  Space:"), key, counts["total"], counts["parsed"],
+                  counts["preserved"], counts["unknown"], counts["failed"],
+                  counts["padding"]))
+    for kind, items in (("unresolved", summary["unresolved"]),
+                        ("unverified", summary["unverified"])):
+        for region in items:
+            print("%s %s %s offset= 0x%x size= 0x%x (%s)" % (
+                "  ", red(kind), region["kind"], region["offset"] or 0,
+                region["size"], region["reason"] or ""))
+
+
 def _process_show_extract(parsed_object):
     if parsed_object is None:
         return
@@ -142,8 +163,15 @@ def _process_file(file_name, input_data):
 
     if args.json:
         res = firmware.to_dict()
+        if isinstance(res, dict) and args.coverage:
+            # A machine-readable account of what was and was not explained.
+            res = dict(res)
+            res["coverage"] = firmware.coverage()
         print(json.dumps(res))
         return 0
+
+    if args.coverage:
+        _show_coverage(firmware.coverage())
 
     _process_show_extract(firmware)
     if args.generate is not None:
@@ -204,6 +232,10 @@ if __name__ == "__main__":
     argparser.add_argument(
         '-j', "--json", default=False, action='store_true',
         help="Output in JSON format")
+    argparser.add_argument(
+        '--coverage', default=False, action='store_true',
+        help="Report how much of the input was parsed; with -j, adds a "
+             "machine-readable 'coverage' member")
     argparser.add_argument(
         "--test", default=False, action='store_true',
         help="Test file parsing, output name/success.")

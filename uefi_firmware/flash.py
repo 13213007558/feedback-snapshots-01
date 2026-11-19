@@ -37,6 +37,8 @@ class FlashRegion(FirmwareObject, BaseObject):
         self.data = data
         self.attrs = region_details
         self.name = region_name
+        # Where this region starts in the flash image, when it is known.
+        self.base = region_details.get("offset") if region_details else None
 
     @property
     def objects(self):
@@ -148,6 +150,7 @@ class FlashDescriptor(FirmwareObject):
 
         bios_region = FlashRegion(bios, "bios", {
             "base": bios_base,
+            "offset": _region_offset(bios_base),
             "limit": bios_limit,
             "id": self.master.structure.BiosId,
             "read": self.master.structure.BiosRead,
@@ -163,6 +166,7 @@ class FlashDescriptor(FirmwareObject):
 
         me_region = FlashRegion(me, "me", {
             "base": me_base,
+            "offset": _region_offset(me_base),
             "limit": me_limit,
             "id": self.master.structure.MeId,
             "read": self.master.structure.MeRead,
@@ -178,6 +182,7 @@ class FlashDescriptor(FirmwareObject):
 
         gbe_region = FlashRegion(gbe, "gbe", {
             "base": gbe_base,
+            "offset": _region_offset(gbe_base),
             "limit": gbe_limit,
             "id": self.master.structure.GbeId,
             "read": self.master.structure.GbeRead,
@@ -193,6 +198,7 @@ class FlashDescriptor(FirmwareObject):
 
         pdr_region = FlashRegion(pdr, "pdr", {
             "base": pdr_base,
+            "offset": _region_offset(pdr_base),
             "limit": pdr_limit,
         })
         pdr_region.process()

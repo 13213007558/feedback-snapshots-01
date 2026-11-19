@@ -4,8 +4,23 @@
 
 import os
 import ctypes
+import functools
 
 from .utils import dump_data, sguid, blue, utf8_decode_safe, is_erased
+
+
+def record_process_status(method):
+    '''Record the value a parse method returns on the object it parsed.
+
+    The object tree keeps the result even where a caller ignores it, so a
+    coverage summary can report a failure that a parent swallowed.
+    '''
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        status = method(self, *args, **kwargs)
+        self.process_status = status
+        return status
+    return wrapper
 
 
 class BaseObject(object):
@@ -19,6 +34,9 @@ class FirmwareObject(object):
         self._name = None
         self.attrs = None
         self.guid = None
+        # The value process() returned, when it has been called. None means
+        # the object was never parsed, as with raw containers.
+        self.process_status = None
 
     @property
     def name(self):
@@ -92,6 +110,24 @@ class FirmwareObject(object):
             "content": self.content if include_content else "",
             "attrs": self.attrs_label
         }
+
+    def coverage(self):
+        '''Return a machine-readable summary of how much of this object's
+        original bytes were explained by the parse.
+
+        The summary is built from the object tree, not from the boolean
+        returned by process(), so a parent that recognized its own header
+        does not hide a child that failed or was left uninterpreted. Byte
+        counts are kept per coordinate space, so bytes read from an
+        object and bytes decompressed from it are never added together.
+
+        Return:
+            dict: A summary with a 'status' of 'complete', 'partial' or
+                'header-only', per-space byte counts, the regions that
+                make them up, and a flat list of unresolved issues.
+        '''
+        from .coverage import build_coverage
+        return build_coverage(self)
 
     def iterate_objects(self, include_content=False):
         '''Flatten this object's children into a list.

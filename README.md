@@ -67,6 +67,8 @@ options:
   -g, --generate GENERATE
                         Generate a FDF, implies extraction (volumes only)
   -j, --json            Output in JSON format
+  --coverage            Report how much of the input was parsed; with -j,
+                        adds a machine-readable 'coverage' member
   --test                Test file parsing, output name/success.
   --verbose             Enable verbose logging while parsing
 ```
@@ -130,7 +132,44 @@ class takes the raw file contents in its constructor and implements:
 - `process()` parses the data and returns `True` on success, `False` otherwise.
 - `showinfo()` prints the object hierarchy.
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
+- `coverage()` returns a machine-readable account of what was parsed.
 - `dump()` walks the hierarchy and writes each object to a file.
+
+### Parse coverage
+
+`process()` returns one boolean per object, and a parent often continues when a
+child fails. A tree can therefore look parsed even when a security-relevant
+region inside it was never expanded. `coverage()` summarizes the tree instead:
+
+```python
+summary = parser.parse().coverage()
+summary["status"]   # "complete", "partial" or "header-only"
+summary["spaces"]   # per-coordinate-space byte counts and regions
+```
+
+Every non-padding byte is classified as `parsed`, `preserved` (kept verbatim as
+evidence), `unknown` or `failed`. Compressed and decompressed data are separate
+*coordinate spaces*: their sizes are reported one space at a time and are never
+added together, and each transformation records its input and output sizes.
+`parsedRatio` is per space; there is deliberately no combined byte total.
+Padding is reported but excluded from the denominator, so erased or alignment
+bytes cannot raise the score.
+
+`status` is `complete` only when nothing is unresolved or unverified, `partial`
+when some body content was interpreted but gaps remain, and `header-only` when
+only headers were recognized. The `unresolved` and `unverified` lists give the
+path, offset, size and reason for each such region, so a failed child is visible
+even though its parent returned `True`.
+
+The command line exposes the same summary:
+
+```console
+$ uefi-firmware-parser --coverage firmware.rom     # human-readable
+$ uefi-firmware-parser -j --coverage firmware.rom  # adds a "coverage" member
+```
+
+A file can still parse to `None` when no supported object was found; coverage
+describes the tree that `parse()` returned.
 
 ## Features
 

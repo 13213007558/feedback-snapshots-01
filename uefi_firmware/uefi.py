@@ -9,7 +9,7 @@ import struct
 import zlib
 
 from .base import FirmwareObject, StructuredObject, RawObject, AutoRawObject, \
-    PaddingObject
+    PaddingObject, record_process_status
 from .utils import *
 from .guids import get_guid_name
 from .structs.uefi_structs import *
@@ -421,6 +421,7 @@ class NVARVariableStore(FirmwareVariableStore):
             return
         self.valid_header = True
 
+    @record_process_status
     def process(self):
         dlog(self, 'NVRAM')
         if not self.valid_header:
@@ -489,6 +490,7 @@ class EfiSection(FirmwareObject):
     def objects(self):
         return self.subsections
 
+    @record_process_status
     def process_subsections(self):
         self.subsections = []
 
@@ -588,6 +590,7 @@ class CompressedSection(EfiSection):
         self.attrs = {
             "decompressed_size": self.decompressed_size, "type": self.type}
 
+    @record_process_status
     @limit_nesting(False)
     def process(self):
         dlog(self, sguid(self.guid))
@@ -754,11 +757,14 @@ class GuidDefinedSection(EfiSection):
         self.attrs = {"attrs": self.attr_mask}
         self.subsections = []
         self._body = bytes(data)
+        # Why the content could not be interpreted, when process fails.
+        self.failure_reason = None
 
     @property
     def objects(self):
         return self.subsections
 
+    @record_process_status
     @limit_nesting(False)
     def process(self):
         dlog(self, sguid(self.guid))
@@ -768,6 +774,8 @@ class GuidDefinedSection(EfiSection):
                 fv.process()
                 self.subsections = [fv]
                 return True
+            self.failure_reason = "GUID-defined section content is not a " \
+                "firmware volume"
             return False
 
         def decompress_guid(alg):
@@ -777,6 +785,9 @@ class GuidDefinedSection(EfiSection):
                 # Attempt to recover by skipping the preamble.
                 results = decompress([alg], self.data)
                 if results is None:
+                    self.failure_reason = \
+                        "GUID-defined compressed data could not be " \
+                        "decompressed"
                     return False
             self.subtype = results[0] + 1
             self.data = results[1]
@@ -791,11 +802,14 @@ class GuidDefinedSection(EfiSection):
             body = self.preamble + self.data
             if len(body) < 0x100:
                 dlog(self, sguid(self.guid), 'error, invalid AMD zlib section header size')
+                self.failure_reason = "AMD zlib section header is too short"
                 return False
             header = EfiAmdZlibSectionHeader.from_buffer_copy(body[:0x100])
             compressed_data = body[0x100:]
             if len(compressed_data) != header.CompressedSize:
                 dlog(self, sguid(self.guid), 'error, invalid AMD zlib section header')
+                self.failure_reason = "AMD zlib compressed size is " \
+                    "inconsistent with its header"
                 return False
             try:
                 data = zlib_decompress(compressed_data)
@@ -808,6 +822,7 @@ class GuidDefinedSection(EfiSection):
                     dlog(self, sguid(self.guid), 'error, empty zlib decompress')
             except zlib.error as err:
                 status = False
+                self.failure_reason = "AMD zlib error: %s" % str(err)
                 dlog(self, sguid(self.guid), 'zlib error: %s' % str(err))
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["GZIP_COMPRESSED_QC"]:
             try:
@@ -822,6 +837,7 @@ class GuidDefinedSection(EfiSection):
                     dlog(self, sguid(self.guid), 'error, empty gzip decompress')
             except Exception as err:
                 status = False
+                self.failure_reason = "gzip error: %s" % str(err)
                 dlog(self, sguid(self.guid), 'gzip error: %s' % str(err))
         # Todo: check for processing required attribute
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["STATIC_GUID"]:
@@ -966,6 +982,8 @@ class FirmwareFileSystemSection(EfiSection):
         else:
             self.data = self._data[0x4:]
         self.name = None
+        # The object a failed process left behind, kept for the summary.
+        self.failed_object = None
 
     @property
     def objects(self):
@@ -975,11 +993,13 @@ class FirmwareFileSystemSection(EfiSection):
         '''Replace this section with data, a section and its header.'''
         self.__init__(data, self.guid)
 
+    @record_process_status
     @limit_nesting(False)
     def process(self):
         # section types, see PI spec v1.7 Errata A Volume 3, 2.1.5.1, table 3-4
         dlog(self, sguid(self.guid))
         self.parsed_object = None
+        self.failed_object = None
         raw_object = False
         self.attrs = {"type": self.type, "size": self.size}
         self.attrs["type_name"] = _get_section_type(self.type)[0]
@@ -991,6 +1011,8 @@ class FirmwareFileSystemSection(EfiSection):
 
         if self.type == 0x01:  # compression
             compressed_section = CompressedSection(self.data, self.guid)
+            # Set before processing, so the coverage summary can find the
+            # decompressed coordinate space even if it fails.
             self.parsed_object = compressed_section
 
         elif self.type == 0x02:  # GUID-defined
@@ -1045,6 +1067,12 @@ class FirmwareFileSystemSection(EfiSection):
             # If we failed to unpack/parse one of the GuidDefinedSections
             # we can skip it and continue parsing the rest of the objects
             elif isinstance(self.parsed_object, GuidDefinedSection):
+                # Keep the failed object, and why, so a coverage summary can
+                # report the GUID section that was skipped.
+                self.failed_object = self.parsed_object
+                if getattr(self.parsed_object, "failure_reason", None) is None:
+                    self.parsed_object.failure_reason = \
+                        "GUID-defined section could not be parsed"
                 self.parsed_object = None
                 return True
 
@@ -1195,6 +1223,7 @@ class FirmwareFile(FirmwareObject):
         # Transitional method, should be adopted by other objects.
         self.__init__(data)
 
+    @record_process_status
     def process(self):
         '''Parse the file and file sections if appropriate.'''
 
@@ -1427,6 +1456,7 @@ class FirmwareFileSystem(FirmwareObject):
     def objects(self):
         return self.files or []
 
+    @record_process_status
     def process(self):
         '''Search for a 24-byte header that does not contain all 0xFF.'''
 
@@ -1633,6 +1663,7 @@ class FirmwareVolume(FirmwareObject):
     def objects(self):
         return self.firmware_filesystems or []
 
+    @record_process_status
     @limit_nesting(False)
     def process(self):
         dlog(self, self.name)
@@ -1914,6 +1945,7 @@ class MultiVolumeContainer(FirmwareObject):
         self.volumes = [volume] + self.volumes
         self.objs = [volume] + self.objs
 
+    @record_process_status
     def process(self):
         view = memoryview(self.data)
         # Bytes before this offset belong to a volume that was already parsed.
@@ -2085,6 +2117,7 @@ class FirmwareCapsule(FirmwareObject):
     def objects(self):
         return [self.capsule_body]
 
+    @record_process_status
     def process(self):
         if not self.valid_header:
             # The capsule GUID matched but its header is truncated.

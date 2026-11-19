@@ -65,6 +65,18 @@ class AutoParser(object):
         '''
         return self.data_type
 
+    def coverage(self):
+        '''Return a coverage summary for the object parse() returned.
+
+        Return:
+            dict: The summary from FirmwareObject.coverage, or None when the
+                input has not produced any parsed object.
+        '''
+        firmware = self.firmware
+        if firmware is None:
+            return None
+        return firmware.coverage()
+
     @limit_nesting(None)
     def parse(self):
         '''Call the 'process' method for the discovered type using the input
