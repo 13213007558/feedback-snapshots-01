@@ -287,6 +287,8 @@ class TestPycrate(unittest.TestCase):
     def test_sms(self):
         print('[<>] testing SMS TP-UDH in pycrate_mobile')
         test_tpudh()
+        print('[<>] testing SMS concatenation reassembly in pycrate_mobile')
+        test_sms_concat()
     
     # GMR-1 RR protocol
     def test_gmr(self):

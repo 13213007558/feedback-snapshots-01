@@ -320,6 +320,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *TS102225*: structures for SIM card's Secured Packets from ETSI TS 102.225
 * *TS23038*: structures and routines for SMS encoding from TS 23.038
 * *TS23040_SMS*: structures for the SMS transport protocol from TS 23.040
+* *TS23040_SMS_Concat*: read-only reassembly of concatenated SMS TP-DUs, keyed on the full group identity (direction, addresses, DCS, ports, 8/16-bit reference) and preserving each original TP-DU
 * *TS23041_CBS*: structures for the Cell Broadcast Service protocol from TS 23.041
 * *TS24007*: basic structures from the TS 24.007 specification, reused in most of the NAS protocols
 * *TS24008_CC* : structures for call control messages from TS 24.008
