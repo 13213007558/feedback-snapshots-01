@@ -38,6 +38,49 @@ prevent unauthorized access to verification keys for applications in
 which the client side relies on the server being genuine.
 
 
+Untrusted handshake parameters
+------------------------------
+
+The handshake carries several large integers as opaque byte strings. In
+the pure Python backend, ``A``, ``B`` and the stored verifier ``v`` are
+treated as untrusted until they have passed a bounded acceptance
+contract:
+
+* Each value is length checked against the selected group before it is
+  converted to a Python integer: at most the byte width of ``N`` plus a
+  small allowance of leading zero octets.
+* Up to eight leading zero octets are accepted as a non-canonical padded
+  encoding. A longer declaration is rejected even when every extra octet
+  is zero, so a huge all-zero claim cannot force an expensive conversion.
+* After decoding, a value outside ``1 .. N-1`` is rejected as a
+  parameter error.
+* Zero and multiples of ``N`` keep the SRP-6a abort semantics: the
+  verifier marks the handshake failed and ``get_challenge()`` returns
+  ``(None, None)``; the user side returns ``None`` from
+  ``process_challenge()``. Both happen before any modular exponentiation.
+* Rejections raise ``srp.ParameterError`` (a ``ValueError``)
+  whose message names only the parameter category (``A``, ``B``,
+  ``verifier``, ``N``, ``g`` or ``k``). Passwords, salts, verifier
+  bytes and the rejected challenge are never echoed.
+
+The acceptance checks are cheap range checks performed before the first
+``pow()`` call of the affected step. They are not a substitute for the
+full safe-prime validation described at the end of this document.
+
+Caller-supplied groups (``NG_CUSTOM``)
+--------------------------------------
+
+``n_hex`` and ``g_hex`` must come from trusted local configuration, never
+from a value received over the network. The pure Python backend bounds
+the declaration length, requires a bit length between 1024 and 16384,
+requires an odd ``N`` congruent to 3 modulo 4 (consistent with a safe
+prime ``N = 2q+1``), and requires ``2 <= g <= N-2``. These are cheap
+structural checks only. They do not prove that ``N`` is prime or that
+``g`` generates the expected subgroup; that mathematical validation is
+the responsibility of the application that supplies the group, and the
+fixed ``NG_*`` constants remain the recommended choice.
+
+
 
 Usage
 -----
@@ -172,9 +215,14 @@ user.
     authentication failed or has not yet completed.
     
   .. method:: Verifier.get_challenge()
-  
+
     Return (bytes_s, bytes_B) on success or (None, None) if
     authentication has failed.
+
+    .. versionchanged::
+        The pure Python backend raises ``srp.ParameterError`` for an
+        ``A``, ``B`` or verifier that is over-long or outside the selected
+        group, instead of passing it to modular exponentiation.
     
   .. method:: Verifier.verify_session( user_M[, user_A=None] )
   
@@ -220,12 +268,17 @@ the user's password.
     constructor of the remote :class:`Verifer`
     
   .. method:: User.process_challenge( bytes_s, bytes_B )
-  
+
     Processe the challenge returned
     by :meth:`Verifier.get_challenge` on success this method
     returns bytes_M that should be sent
     to :meth:`Verifier.verify_session` if authentication failed,
     it returns None.
+
+  .. versionchanged::
+        The pure Python backend raises ``srp.ParameterError`` for an
+        over-long or out-of-group ``B`` instead of attempting modular
+        exponentiation with it.
     
   .. method:: User.verify_session( bytes_H_AMK )
   
@@ -395,5 +448,8 @@ SRP 6a requires the two parties to use the following safeguards (all of which th
 Additionally, if the server provides N and g to the user, the user
 should verify the safe prime bit length is as expected, that its
 highest bit is 1 to ensure it is large, and that it is indeed a safe
-prime with the expected generator. These N and g checks are not
-currently provided by this library.
+prime with the expected generator. The pure Python backend applies the
+bounded structural checks described in the caller-supplied group section
+above but does not prove primality or generator order; that
+validation remains the responsibility of the application supplying a
+custom group.

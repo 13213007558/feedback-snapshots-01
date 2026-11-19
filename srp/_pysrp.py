@@ -50,6 +50,160 @@ _hash_map = { SHA1   : hashlib.sha1,
               SHA512 : hashlib.sha512 }
 
 
+# ---------------------------------------------------------------------------
+# Network parameter acceptance contract.
+#
+# A, B and v arrive as untrusted big-endian octet strings.  They are bounded
+# before being converted to integers or used as modular-exponentiation
+# operands.  The fixed NG_* groups are trusted constants.  A caller-supplied
+# NG_CUSTOM group must come from local configuration, never from the network,
+# and is only checked for cheap structural properties here.
+# ---------------------------------------------------------------------------
+
+_MAX_LEADING_ZERO_BYTES = 8
+_MIN_CUSTOM_GROUP_BITS  = 1024
+_MAX_CUSTOM_GROUP_BITS  = 16384
+
+_HEX_DIGITS = '0123456789abcdefABCDEF'
+
+
+class ParameterError(ValueError):
+    """Rejected network parameter.
+
+    The exception text deliberately contains only the parameter category
+    (for example ``A``, ``B`` or ``verifier``).  Values, passwords and full
+    challenges are never echoed.
+    """
+
+    def __init__(self, category, reason=None):
+        self.category = category
+        self.reason   = reason
+        ValueError.__init__(self, 'invalid SRP parameter: %s' % category)
+
+
+def _mod_exp(base, exponent, modulus):
+    """Single choke point for modular exponentiation in this module."""
+    return pow(base, exponent, modulus)
+
+
+def _byte_length(n):
+    return (n.bit_length() + 7) // 8
+
+
+def _bounded_bytes(value, category, max_len):
+    """Return *value* as bytes without copying or converting oversized input."""
+    if isinstance(value, six.text_type):
+        raise ParameterError(category, 'not a byte string')
+    if not isinstance(value, (six.binary_type, bytearray, memoryview)):
+        raise ParameterError(category, 'not a byte string')
+    length = value.nbytes if isinstance(value, memoryview) else len(value)
+    if length > max_len:
+        raise ParameterError(category, 'encoded length')
+    return bytes(value)
+
+
+def _decode_bounded_int(value, category, N):
+    """Decode a big-endian integer bounded by the width of group element N.
+
+    Up to _MAX_LEADING_ZERO_BYTES zero octets of non-canonical padding are
+    accepted.  A declaration longer than that is rejected before any integer
+    conversion, even if all of its extra octets are zero.
+    """
+    max_len = _byte_length(N) + _MAX_LEADING_ZERO_BYTES
+    return bytes_to_long(_bounded_bytes(value, category, max_len))
+
+
+def _decode_group_element(value, category, N, safety_on_multiple=False):
+    """Decode and range-check a member of the group selected by N.
+
+    Returns (value, safety_failed).  A zero or a multiple of N is a protocol
+    safety failure when *safety_on_multiple* is true (the legacy SRP-6a
+    abort path); otherwise it is rejected as a parameter error.  Any other
+    value outside 1..N-1 is always a parameter error.
+    """
+    n = _decode_bounded_int(value, category, N)
+    if n == 0 or n % N == 0:
+        if safety_on_multiple:
+            return n, True
+        raise ParameterError(category, 'zero or multiple of modulus')
+    if n >= N:
+        raise ParameterError(category, 'outside group')
+    return n, False
+
+
+def _parse_hex_argument(value, category, max_chars):
+    """Parse a bounded ASCII hexadecimal configuration value.
+
+    Returns (value, number_of_hex_digits).  The raw declaration is length
+    checked before any base conversion.
+    """
+    if isinstance(value, six.text_type):
+        text = value
+    elif isinstance(value, six.binary_type):
+        if len(value) > max_chars + 256:
+            raise ParameterError(category, 'encoded length')
+        try:
+            text = value.decode('ascii')
+        except UnicodeDecodeError:
+            raise ParameterError(category, 'not hexadecimal text')
+    else:
+        raise ParameterError(category, 'not hexadecimal text')
+
+    if len(text) > max_chars + 256:
+        raise ParameterError(category, 'encoded length')
+
+    # Permit formatting whitespace, but only within the bounded raw length.
+    text = ''.join(text.split())
+    if text[:2].lower() == '0x':
+        text = text[2:]
+
+    if not text or len(text) > max_chars:
+        raise ParameterError(category, 'encoded length')
+    for ch in text:
+        if ch not in _HEX_DIGITS:
+            raise ParameterError(category, 'not hexadecimal text')
+    return int(text, 16), len(text)
+
+
+def _check_hex_padding(digits, value, category):
+    """Allow limited non-canonical leading zeros, reject long declarations."""
+    significant = max(1, (value.bit_length() + 3) // 4)
+    if digits > significant + 2 * _MAX_LEADING_ZERO_BYTES:
+        raise ParameterError(category, 'encoded length')
+
+
+def _custom_group(n_hex, g_hex):
+    """Parse a caller-supplied group from trusted local configuration.
+
+    The checks below are cheap and deliberately do not attempt to prove that
+    N is a safe prime or that g has the expected order.  That mathematical
+    boundary is documented in srp/doc/srp.rst.
+    """
+    if n_hex is None or g_hex is None:
+        raise ParameterError('group', 'missing custom N or g')
+
+    n_max_chars = ((_MAX_CUSTOM_GROUP_BITS + 3) // 4) + 2 * _MAX_LEADING_ZERO_BYTES
+    N, n_digits = _parse_hex_argument(n_hex, 'N', n_max_chars)
+
+    bits = N.bit_length()
+    if bits < _MIN_CUSTOM_GROUP_BITS or bits > _MAX_CUSTOM_GROUP_BITS:
+        raise ParameterError('N', 'bit length')
+    _check_hex_padding(n_digits, N, 'N')
+    if N < 5 or N % 2 == 0:
+        raise ParameterError('N', 'not an odd modulus')
+    # A safe prime N = 2q+1 with odd prime q satisfies N = 3 (mod 4).
+    if N % 4 != 3:
+        raise ParameterError('N', 'not consistent with a safe prime')
+
+    g_max_chars = _byte_length(N) * 2 + 2 * _MAX_LEADING_ZERO_BYTES
+    g, g_digits = _parse_hex_argument(g_hex, 'g', g_max_chars)
+    _check_hex_padding(g_digits, g, 'g')
+    if g < 2 or g > N - 2:
+        raise ParameterError('g', 'outside group')
+
+    return N, g
+
+
 _ng_const = (
 # 1024-bit
 ('''\
@@ -133,8 +287,11 @@ FC026E479558E4475677E9AA9E3050E2765694DFC81F56E880B96E71\
 )
 
 def get_ng( ng_type, n_hex, g_hex ):
-    if ng_type < NG_CUSTOM:
-        n_hex, g_hex = _ng_const[ ng_type ]
+    if ng_type == NG_CUSTOM:
+        return _custom_group(n_hex, g_hex)
+    if not isinstance(ng_type, int) or not 0 <= ng_type < NG_CUSTOM:
+        raise ParameterError('group', 'unknown ng_type')
+    n_hex, g_hex = _ng_const[ ng_type ]
     return int(n_hex,16), int(g_hex,16)
 
 
@@ -227,7 +384,7 @@ def create_salted_verification_key( username, password, hash_alg=SHA1, ng_type=N
     hash_class = _hash_map[ hash_alg ]
     N,g = get_ng( ng_type, n_hex, g_hex )
     _s = long_to_bytes( get_random( salt_len ) )
-    _v = long_to_bytes( pow(g,  gen_x( hash_class, _s, username, password ), N) )
+    _v = long_to_bytes( _mod_exp(g,  gen_x( hash_class, _s, username, password ), N) )
 
     return _s, _v
 
@@ -265,7 +422,6 @@ class Verifier:
         if bytes_b and len(bytes_b) != 256:
             raise ValueError("256 bytes required for bytes_b")
         self.s = bytes_s
-        self.v = bytes_to_long(bytes_v)
         self.I = username
         self.K = None
         self._authenticated = False
@@ -274,10 +430,17 @@ class Verifier:
 
         N,g        = get_ng( ng_type, n_hex, g_hex )
         hash_class = _hash_map[ hash_alg ]
+
+        # The verifier is a stored secret supplied from trusted local state,
+        # but it still must be a canonical group element: 1 <= v < N.
+        self.v = _decode_group_element(bytes_v, 'verifier', N)[0]
+
         if k_hex is None:
             k          = bytes_to_long( H( hash_class, N, g, width=len(long_to_bytes(N)) ))
         else:
-            k          = int(k_hex, 16)
+            k, k_digits = _parse_hex_argument(
+                k_hex, 'k', _byte_length(N) * 2 + 2 * _MAX_LEADING_ZERO_BYTES)
+            _check_hex_padding(k_digits, k, 'k')
 
         self.hash_class = hash_class
         self.N          = N
@@ -292,7 +455,7 @@ class Verifier:
                 self.b = bytes_to_long(bytes_b)
             else:
                 self.b = get_random_of_length( 256 )
-            self.B = (k*self.v + pow(g, self.b, N)) % N
+            self.B = (k*self.v + _mod_exp(g, self.b, N)) % N
 
 
     def authenticated(self):
@@ -325,20 +488,22 @@ class Verifier:
             raise ValueError("bytes_A must be provided through Verifier constructor or verify_session parameter.")
         if not self.safety_failed:
             self._derive_H_AMK()
-            if user_M == self.M:
+            if self.M is not None and user_M == self.M:
                 self._authenticated = True
                 return self.H_AMK
 
 
     def _set_A(self, bytes_A):
-        self.A = bytes_to_long(bytes_A)
-        # SRP-6a safety check
-        self.safety_failed = self.A % self.N == 0
+        # SRP-6a safety check: A == 0 (mod N) aborts the handshake.  Other
+        # out-of-range declarations are parameter errors rather than a
+        # protocol-level abort.  Both are decided before any exponentiation.
+        self.A, self.safety_failed = _decode_group_element(
+            bytes_A, 'A', self.N, safety_on_multiple=True)
 
 
     def _derive_H_AMK(self):
         self.u = bytes_to_long(H(self.hash_class, self.A, self.B, width=len(long_to_bytes(self.N))))
-        self.S = pow(self.A*pow(self.v, self.u, self.N ), self.b, self.N)
+        self.S = _mod_exp(self.A*_mod_exp(self.v, self.u, self.N ), self.b, self.N)
         self.K = self.hash_class( long_to_bytes(self.S) ).digest()
         self.M = calculate_M( self.hash_class, self.N, self.g, self.I, self.s, self.A, self.B, self.K )
         self.H_AMK = calculate_H_AMK( self.hash_class, self.A, self.M, self.K )
@@ -357,7 +522,9 @@ class User:
         if k_hex is None:
             k          = bytes_to_long(H( hash_class, N, g, width=len(long_to_bytes(N)) ))
         else:
-            k          = int(k_hex, 16)
+            k, k_digits = _parse_hex_argument(
+                k_hex, 'k', _byte_length(N) * 2 + 2 * _MAX_LEADING_ZERO_BYTES)
+            _check_hex_padding(k_digits, k, 'k')
 
         self.I     = username
         self.p     = password
@@ -366,9 +533,9 @@ class User:
         else:
             self.a = get_random_of_length( 256 )
         if bytes_A:
-            self.A = bytes_to_long(bytes_A)
+            self.A = _decode_group_element(bytes_A, 'A', N)[0]
         else:
-            self.A = pow(g, self.a, N)
+            self.A = _mod_exp(g, self.a, N)
         self.v     = None
         self.M     = None
         self.K     = None
@@ -405,7 +572,6 @@ class User:
     def process_challenge(self, bytes_s, bytes_B):
 
         self.s = bytes_s
-        self.B = bytes_to_long( bytes_B )
 
         N = self.N
         g = self.g
@@ -413,8 +579,11 @@ class User:
 
         hash_class = self.hash_class
 
-        # SRP-6a safety check
-        if (self.B % N) == 0:
+        # Bound and range-check B before any integer conversion, hashing or
+        # exponentiation.  B == 0 (mod N) keeps the legacy None/abort result.
+        self.B, reject = _decode_group_element(
+            bytes_B, 'B', N, safety_on_multiple=True)
+        if reject:
             return None
 
         self.u = bytes_to_long(H( hash_class, self.A, self.B, width=len(long_to_bytes(N)) ))
@@ -425,9 +594,9 @@ class User:
 
         self.x = gen_x( hash_class, self.s, self.I, self.p )
 
-        self.v = pow(g, self.x, N)
+        self.v = _mod_exp(g, self.x, N)
 
-        self.S = pow((self.B - k*self.v), (self.a + self.u*self.x), N)
+        self.S = _mod_exp((self.B - k*self.v), (self.a + self.u*self.x), N)
 
         self.K     = hash_class( long_to_bytes(self.S) ).digest()
         self.M     = calculate_M( hash_class, N, g, self.I, self.s, self.A, self.B, self.K )
@@ -437,5 +606,5 @@ class User:
 
 
     def verify_session(self, host_HAMK):
-        if self.H_AMK == host_HAMK:
+        if self.H_AMK is not None and self.H_AMK == host_HAMK:
             self._authenticated = True

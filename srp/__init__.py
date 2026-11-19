@@ -27,5 +27,8 @@ NG_4096   = _mod.NG_4096
 NG_8192   = _mod.NG_8192
 NG_CUSTOM = _mod.NG_CUSTOM
 
+# Only defined by the pure Python backend; other backends keep ValueError.
+ParameterError = getattr(_mod, 'ParameterError', ValueError)
+
 rfc5054_enable   = _mod.rfc5054_enable
 no_username_in_x = _mod.no_username_in_x
