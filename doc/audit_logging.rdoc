@@ -26,19 +26,56 @@ for that action:
 To skip audit logging for a particular action, you can set the
 log message for the action to nil.
 
+== Committed Changes, Attempts, and Failures
+
+Each audit log entry has a status, stored in the
++audit_logging_status_column+ (default: +status+).  The default
+statuses are:
+
++committed+ :: The audited action completed and its transaction
+              committed.  This is the only status written inside the
+              action's transaction.
++attempted+ :: The audited action's transaction was rolled back.
+              The audit entry is written after the rollback, so the
+              attempted change is recorded even though it was not
+              committed.
++failed+ :: The audited action failed without making a change, such
+           as an invalid login attempt.
+
+The message identifies the action (for example, +change_password+),
+and the metadata identifies the account.  Audit logging must not store
+secrets in the message or metadata.  In particular, do not include
+passwords, OTP/recovery codes, tokens, or session identifiers.
+
+If the audit logging table does not have the status column (for
+example, when upgrading an existing application), audit entries are
+written without a status.  Add the column to use status tracking:
+
+  alter_table(:account_authentication_audit_logs) do
+    add_column :status, String, :null=>false, :default=>'committed'
+  end
+
+Audit logging errors are ignored, so a failure to write an audit log
+entry never changes the result of the action being audited.
+
 == Auth Value Methods
 
 audit_logging_account_id_column :: The id column in the +audit_logging_table+, should be a foreign key referencing the accounts table.
 audit_logging_message_column :: The message column in the +audit_logging_table+, containing the log message.
 audit_logging_metadata_column :: The metadata column in the +audit_logging_table+, storing metadata for the log (if any).
+audit_logging_status_column :: The status column in the +audit_logging_table+, storing whether the action was committed, attempted, or failed. Set to nil to not write a status.
 audit_logging_table :: The name of the audit logging table.
 audit_log_metadata_default :: The default metadata to use for logs that do not have custom metadata specified by +audit_log_metadata_for+.
+audit_log_status_attempted :: The status to use for actions whose transaction was rolled back, +attempted+ by default.
+audit_log_status_committed :: The status to use for committed actions, +committed+ by default.
+audit_log_status_failed :: The status to use for failed actions, +failed+ by default.
 
 == Auth Methods
 
-add_audit_log(account_id, action) :: Add an appropriate audit log entry for the account id and action.
-audit_log_insert_hash(account_id, action) :: A hash to use when inserting into the +audit_logging_table+.
+add_audit_log(account_id, action, metadata=audit_log_metadata(action)) :: Add an appropriate audit log entry for the account id and action.
+audit_log_insert_hash(account_id, action, metadata=audit_log_metadata(action)) :: A hash to use when inserting into the +audit_logging_table+.
 audit_log_message(action) :: The log message to use when logging the action, by default using +audit_log_message_for+ and +audit_log_message_default+.
 audit_log_message_default(action) :: The log message to use when logging the action for logs that do not have custom metadata specified by +audit_log_message_for+
 audit_log_metadata(action) :: The metadata to use when logging the action, by default using +audit_log_metadata_for+ and +audit_log_metadata_default+.
+audit_log_metadata_for_action(action, status, account_id) :: The metadata to use for the action and status. By default, returns +audit_log_metadata(action)+.
 serialize_audit_log_metadata(metadata) :: Serialize the metadata for insertion into the database.  By default, this converts the metadata using +to_json+, unless the metadata is nil.

@@ -68,6 +68,7 @@ Sequel.migration do
       foreign_key :account_id, :accounts, :null=>false, :type=>primary_key_type
       DateTime :at, :null=>false, :default=>Sequel::CURRENT_TIMESTAMP
       String :message, :null=>false
+      String :status, :null=>false, :default=>'committed'
       column :metadata, json_type
       index [:account_id, :at], :name=>:audit_account_at_idx
       index :at, :name=>:audit_at_idx

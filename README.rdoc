@@ -557,6 +557,7 @@ Note that these migrations require Sequel 4.35.0+.
         # Bignum :account_id, null: false 
         DateTime :at, null: false, default: Sequel::CURRENT_TIMESTAMP
         String :message, null: false
+        String :status, null: false, default: 'committed'
         column :metadata, json_type
         index [:account_id, :at], name: :audit_account_at_idx
         index :at, name: :audit_at_idx

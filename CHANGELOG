@@ -1,5 +1,7 @@
 === 2.51.0 (2026-11-17)
 
+* Record rollbacks as attempted audit log entries, and failed actions as failed entries, in the audit_logging feature, and never let audit logging change the result of the audited action (jeremyevans)
+
 * Disallow submission of webauthn challenge more than 10 minutes after challenge provided by default (jeremyevans)
 
 * [SECURITY] Disallow reuse of webauthn authentication requests with sign count of 0 (jeremyevans)
