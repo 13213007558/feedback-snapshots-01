@@ -1,17 +1,27 @@
 import logging
 import os
+import struct
 import tempfile
 import unittest
 from unittest import mock
 
-from purepdb import Function
+from purepdb import Function, PdbInfo
 
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.labelprovider import PdbSymbolProvider as pdb_module
-from smda.common.labelprovider.PdbSymbolProvider import PdbSymbolProvider, _demangleSymbolName
+from smda.common.labelprovider.PdbSymbolProvider import (
+    IDENTITY_MISMATCH,
+    IDENTITY_NOT_LOADED,
+    IDENTITY_UNVERIFIABLE,
+    IDENTITY_VERIFIED,
+    PDB_MAGIC,
+    PdbSymbolProvider,
+    _demangleSymbolName,
+)
 from smda.common.labelprovider.rust_demangler import demangle
 from smda.common.labelprovider.rust_demangler.rust_legacy import UnableToLegacyDemangle
 from smda.Disassembler import Disassembler
+from smda.utility.PeDebugIdentity import PeSectionLayout
 
 BASE_ADDR = 0x400000
 FIXTURE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +30,9 @@ PDB_FIXTURE = os.path.join(FIXTURE_DIR, "rust_pe_msvc_i686_pdb_xored")
 # entry point and code size of "main::digest" in the i686 fixture
 DIGEST_RVA = 0x1000
 DIGEST_CODE_SIZE = 299
+TARGET_GUID = bytes(range(16))
+FOREIGN_GUID = bytes(range(16, 32))
+PDB_AGE = 1
 # read out of real PDBs: the Rust names from a rust-lld/MSVC x64 image, the
 # rest from sqlite3 x86/x64. The non-Rust names all begin with "_R", which is
 # why the dispatch parses a name before it rewrites it
@@ -53,18 +66,41 @@ def decode_fixture(path):
         return bytes(byte ^ (index % 256) for index, byte in enumerate(fin.read()))
 
 
+def strip_debug_directory(pe_data):
+    """Zero the PE debug data-directory entry, producing a target that carries no
+    CodeView identity while leaving its code and section layout untouched."""
+    data = bytearray(pe_data)
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    optional_header = e_lfanew + 24
+    magic = struct.unpack_from("<H", data, optional_header)[0]
+    # IMAGE_DIRECTORY_ENTRY_DEBUG is data-directory index 6; directories start at
+    # optional-header offset 96 (PE32) or 112 (PE32+)
+    debug_entry = optional_header + (96 if magic == 0x10B else 112) + 6 * 8
+    struct.pack_into("<II", data, debug_entry, 0, 0)
+    return bytes(data)
+
+
 class FakeDiagnostics:
     def __init__(self, warnings):
         self.warnings = warnings
 
 
 class FakePdb:
-    def __init__(self, functions, warnings=()):
+    def __init__(self, functions, warnings=(), info=None, sections=None):
         self._functions = functions
         self._warnings = list(warnings)
+        self._info = info or PdbInfo(version=20000404, signature=0, age=PDB_AGE, guid=TARGET_GUID)
+        self._sections = sections if sections is not None else []
 
     def functions(self):
         return self._functions
+
+    def info(self):
+        return self._info
+
+    @property
+    def sections(self):
+        return self._sections
 
     def diagnose(self):
         return FakeDiagnostics(self._warnings)
@@ -82,12 +118,38 @@ def make_function(name, rva, code_size=None, source="proc", module=None):
     )
 
 
+def make_section(name, rva, size, executable=True):
+    section = mock.Mock()
+    section.name = name
+    section.virtual_address = rva
+    section.virtual_size = size
+    section.executable = executable
+    return section
+
+
 def make_binary_info(file_path, raw_data=b""):
     binary_info = BinaryInfo(b"")
     binary_info.raw_data = raw_data
     binary_info.file_path = file_path
     binary_info.base_addr = BASE_ADDR
     return binary_info
+
+
+class FakeTarget:
+    """A stand-in for the analyzed sample.
+
+    ``identity`` is the CodeView record the target itself carries; None means the
+    target has no identity evidence at all. ``sections`` are what its own headers say.
+    """
+
+    def __init__(self, identity=None, sections=None, file_path="sample.exe"):
+        self.identity = identity
+        self.sections = sections if sections is not None else [PeSectionLayout(".text", 0x1000, 0x1000, True)]
+        self.file_path = file_path
+        self.base_addr = BASE_ADDR
+
+    def getLiefBinary(self):
+        return object()
 
 
 class PdbFragmentAttributionTestSuite(unittest.TestCase):
@@ -101,6 +163,9 @@ class PdbFragmentAttributionTestSuite(unittest.TestCase):
     def _providerWith(self, functions):
         provider = PdbSymbolProvider(None)
         provider._base_addr = BASE_ADDR
+        # these tests exercise fragment attribution after a PDB has already been accepted,
+        # so bind a target whose section spans every RVA the fixtures use
+        provider.bindTargetBinary(FakeTarget(sections=[PeSectionLayout(".text", 0x1000, 0x2000, True)]))
         provider._parseSymbols(FakePdb(functions))
         return provider
 
@@ -253,10 +318,18 @@ class PdbUpdateTestSuite(unittest.TestCase):
             fout.write(data)
         return path
 
+    def _targetInfo(self, pe_fixture=PE_FIXTURE):
+        target_path = self._writeFixture("target.exe", decode_fixture(pe_fixture))
+        target_info = make_binary_info(target_path)
+        target_info.raw_data = decode_fixture(pe_fixture)
+        return target_info
+
     def test_a_pdb_on_disk_is_parsed_into_symbols(self):
         pdb_path = self._writeFixture("sample.pdb", decode_fixture(PDB_FIXTURE))
         provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(self._targetInfo())
         provider.update(make_binary_info(pdb_path))
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
         self.assertEqual(provider.getSymbol(BASE_ADDR + DIGEST_RVA), "main::digest")
         self.assertEqual(
             provider.getSymbol(BASE_ADDR + DIGEST_RVA + DIGEST_CODE_SIZE - 1),
@@ -266,7 +339,9 @@ class PdbUpdateTestSuite(unittest.TestCase):
 
     def test_a_pdb_already_in_memory_is_parsed_without_reading_the_file(self):
         provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(self._targetInfo())
         provider.update(make_binary_info("sample.pdb", raw_data=decode_fixture(PDB_FIXTURE)))
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
         self.assertEqual(provider.getSymbol(BASE_ADDR + DIGEST_RVA), "main::digest")
 
     def test_a_target_without_a_file_path_yields_no_symbols(self):
@@ -312,6 +387,7 @@ class PdbUpdateTestSuite(unittest.TestCase):
         pdb_path = self._writeFixture("sample.pdb", decode_fixture(PDB_FIXTURE))
         exe_path = self._writeFixture("sample.exe", decode_fixture(PE_FIXTURE))
         provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(self._targetInfo())
         provider.update(make_binary_info(pdb_path))
         with self.assertNoLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING):
             provider.update(make_binary_info(exe_path))
@@ -345,6 +421,345 @@ class PdbReportIntegrationTestSuite(unittest.TestCase):
         os.remove(self.pdb_path)
         named = {name for name in self._analyze("").values() if name}
         self.assertNotIn("main::digest", named)
+
+
+class PdbIdentityGateTestSuite(unittest.TestCase):
+    """Offline regression for the rule that a PDB may only label the sample whose own
+    CodeView record asks for it. Everything here uses bundled fixtures or in-memory fakes,
+    so no symbol server is contacted."""
+
+    def setUp(self):
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, previous_disable)
+
+    def _provider(self, target, pdb, pdb_path="sample.pdb"):
+        provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(target)
+        with (
+            mock.patch.object(pdb_module, "extract_codeview_identity", side_effect=lambda bound: target.identity),
+            mock.patch.object(pdb_module, "extract_section_layout", side_effect=lambda bound: target.sections),
+            mock.patch.object(pdb_module.purepdb.PDB, "from_bytes", return_value=pdb),
+        ):
+            provider.update(make_binary_info(pdb_path, raw_data=PDB_MAGIC + b" rest"))
+        return provider
+
+    def test_a_matching_guid_and_age_verify_the_pairing(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("own_function", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
+        self.assertTrue(provider.is_active())
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "own_function")
+
+    def test_a_foreign_guid_is_rejected_however_readable_its_names_are(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("convincing_foreign_name", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, FOREIGN_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs:
+            provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertFalse(provider.is_active())
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "")
+        self.assertIn("different PDB", logs.output[0])
+        self.assertIn(FOREIGN_GUID.hex(), provider.identity_reason)
+
+    def test_a_matching_guid_with_a_stale_age_is_rejected(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("stale_build", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE + 1, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertFalse(provider.is_active())
+        self.assertIn("age", provider.identity_reason)
+
+    def test_a_target_without_identity_evidence_keeps_the_pdb_unverifiable(self):
+        # the target cannot speak for itself: no CodeView record, only the caller's word
+        target = FakeTarget(
+            identity=None,
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("unverified_claim", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs:
+            provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_UNVERIFIABLE)
+        self.assertFalse(provider.is_active())
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "")
+        self.assertIn("no CodeView identity record", logs.output[0])
+
+    def test_an_unbound_provider_never_treats_a_pdb_as_evidence(self):
+        pdb = FakePdb([make_function("orphan", 0x1000, 0x40)])
+        provider = PdbSymbolProvider(None)
+        with (
+            mock.patch.object(pdb_module.purepdb.PDB, "from_bytes", return_value=pdb),
+            self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs,
+        ):
+            provider.update(make_binary_info("sample.pdb", raw_data=PDB_MAGIC + b" rest"))
+        self.assertEqual(provider.identity_status, IDENTITY_UNVERIFIABLE)
+        self.assertFalse(provider.is_active())
+        self.assertIn("no target binary is bound", logs.output[0])
+
+    def test_a_matching_pdb_file_name_is_only_a_claim_and_never_verifies(self):
+        # the target's CodeView record names a path that happens to equal the supplied file,
+        # but its GUID still belongs to another build: the readable name must not be accepted
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE, pdb_path="sample.pdb"),
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("named_like_the_right_one", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, FOREIGN_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb, pdb_path="sample.pdb")
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertFalse(provider.is_active())
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "")
+
+    def test_a_section_address_mismatch_rejects_an_otherwise_matching_pdb(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x2000, 0x1000, True)],
+        )
+        pdb = FakePdb(
+            [make_function("mapped_elsewhere", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs:
+            provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertFalse(provider.is_active())
+        self.assertIn("RVA", provider.identity_reason)
+        self.assertIn("section", logs.output[0])
+
+    def test_a_section_size_mismatch_is_reported_as_the_reason(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x1000, 0x800, True)],
+        )
+        pdb = FakePdb(
+            [make_function("grown_function", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertIn("size", provider.identity_reason)
+
+    def test_a_section_count_mismatch_keeps_the_pairing_pending(self):
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[
+                PeSectionLayout(".text", 0x1000, 0x1000, True),
+                PeSectionLayout(".rdata", 0x2000, 0x1000, False),
+            ],
+        )
+        pdb = FakePdb(
+            [make_function("one_section_build", 0x1000, 0x40)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertIn("section count differs", provider.identity_reason)
+
+    def test_a_symbol_outside_every_target_section_is_withheld(self):
+        # identical section tables, so the PDB verifies; the symbol nonetheless lands at an RVA
+        # no target section spans, which is the function-range/section evidence gap handled per symbol
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[
+                PeSectionLayout(".text", 0x1000, 0x1000, True),
+                PeSectionLayout(".data", 0x4000, 0x1000, False),
+            ],
+        )
+        pdb = FakePdb(
+            [
+                make_function("inside", 0x1000, 0x40),
+                make_function("beyond_image", 0x8000, 0x40),
+            ],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[
+                make_section(".text", 0x1000, 0x1000),
+                make_section(".data", 0x4000, 0x1000, executable=False),
+            ],
+        )
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs:
+            provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "inside")
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x8000), "")
+        self.assertTrue(any("outside the target" in line for line in logs.output))
+
+    def test_relocation_to_a_different_base_keeps_rva_relative_labels(self):
+        # changing the load address slides every VA by the same delta; RVA-relative PDB
+        # resolution must follow it instead of reading the move as a mismatch
+        target = FakeTarget(
+            identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE),
+            sections=[PeSectionLayout(".text", 0x1000, 0x1000, True)],
+        )
+        target.base_addr = 0x10000000
+        pdb = FakePdb(
+            [make_function("relocated", 0x1000, 0x100)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        pdb_info = make_binary_info("sample.pdb", raw_data=PDB_MAGIC + b" rest")
+        pdb_info.base_addr = target.base_addr
+        provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(target)
+        with (
+            mock.patch.object(pdb_module, "extract_codeview_identity", side_effect=lambda bound: target.identity),
+            mock.patch.object(pdb_module, "extract_section_layout", side_effect=lambda bound: target.sections),
+            mock.patch.object(pdb_module.purepdb.PDB, "from_bytes", return_value=pdb),
+        ):
+            provider.update(pdb_info)
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
+        self.assertEqual(provider.getSymbol(0x10000000 + 0x1000), "relocated")
+        self.assertEqual(provider.getSymbol(0x10000000 + 0x1060), "relocated$+0x60")
+
+    def test_rejection_is_queryable_through_the_status_not_only_the_log(self):
+        target = FakeTarget(identity=mock.Mock(guid=TARGET_GUID, age=PDB_AGE))
+        pdb = FakePdb(
+            [make_function("foreign", 0x1000)],
+            info=PdbInfo(20000404, 0, PDB_AGE, FOREIGN_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        provider = self._provider(target, pdb)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertTrue(provider.identity_reason)
+        # a later, correct update must clear the stale rejection
+        good_pdb = FakePdb(
+            [make_function("own", 0x1000)],
+            info=PdbInfo(20000404, 0, PDB_AGE, TARGET_GUID),
+            sections=[make_section(".text", 0x1000, 0x1000)],
+        )
+        with (
+            mock.patch.object(pdb_module, "extract_codeview_identity", side_effect=lambda bound: target.identity),
+            mock.patch.object(pdb_module, "extract_section_layout", side_effect=lambda bound: target.sections),
+            mock.patch.object(pdb_module.purepdb.PDB, "from_bytes", return_value=good_pdb),
+        ):
+            provider.update(make_binary_info("good.pdb", raw_data=PDB_MAGIC + b" rest"))
+        self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
+        self.assertEqual(provider.getSymbol(BASE_ADDR + 0x1000), "own")
+
+    def test_a_fresh_provider_starts_in_the_not_loaded_state(self):
+        provider = PdbSymbolProvider(None)
+        self.assertEqual(provider.identity_status, IDENTITY_NOT_LOADED)
+        self.assertEqual(provider.identity_reason, "")
+        self.assertFalse(provider.is_active())
+
+
+class PdbRealFixtureIdentityTestSuite(unittest.TestCase):
+    """The same PDB paired with its own build and with a foreign target, end to end."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, previous_disable)
+
+    def _write(self, name, data):
+        path = os.path.join(self.tempdir.name, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    def _providerFor(self, pe_fixture, pdb_fixture):
+        pe_data = decode_fixture(pe_fixture)
+        pdb_data = decode_fixture(pdb_fixture)
+        target_info = make_binary_info(self._write("target.exe", pe_data))
+        target_info.raw_data = pe_data
+        provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(target_info)
+        provider.update(make_binary_info(self._write("candidate.pdb", pdb_data)))
+        return provider
+
+    def test_each_bundled_pdb_verifies_against_its_own_pe(self):
+        for pe_fixture, pdb_fixture in (
+            (PE_FIXTURE, PDB_FIXTURE),
+            (MSVC_PE_FIXTURE, MSVC_PDB_FIXTURE),
+        ):
+            with self.subTest(pair=os.path.basename(pdb_fixture)):
+                provider = self._providerFor(pe_fixture, pdb_fixture)
+                self.assertEqual(provider.identity_status, IDENTITY_VERIFIED)
+                self.assertTrue(provider.is_active())
+
+    def test_a_pdb_built_for_another_sample_is_rejected_for_this_target(self):
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING):
+            provider = self._providerFor(PE_FIXTURE, MSVC_PDB_FIXTURE)
+        self.assertEqual(provider.identity_status, IDENTITY_MISMATCH)
+        self.assertFalse(provider.is_active())
+        self.assertEqual(provider.getFunctionSymbols(), {})
+
+    def test_a_foreign_pdb_leaves_the_report_with_the_sample_own_labels(self):
+        own_exe = self._write("sample.exe", decode_fixture(PE_FIXTURE))
+        own_pdb = self._write("own.pdb", decode_fixture(PDB_FIXTURE))
+        foreign_pdb = self._write("foreign.pdb", decode_fixture(MSVC_PDB_FIXTURE))
+        labels_with_own = {
+            function.offset: function.function_name
+            for function in Disassembler(backend="intel").disassembleFile(own_exe, pdb_path=own_pdb).getFunctions()
+        }
+        labels_with_foreign = {
+            function.offset: function.function_name
+            for function in Disassembler(backend="intel").disassembleFile(own_exe, pdb_path=foreign_pdb).getFunctions()
+        }
+        labels_without_pdb = {
+            function.offset: function.function_name
+            for function in Disassembler(backend="intel").disassembleFile(own_exe, pdb_path="").getFunctions()
+        }
+        self.assertIn("main::digest", labels_with_own.values())
+        # the foreign PDB contributes nothing: labels are exactly those the sample earns on its own
+        self.assertNotIn("main::digest", labels_with_foreign.values())
+        self.assertEqual(labels_with_foreign, labels_without_pdb)
+        # and where both label an address, the foreign PDB's readable name never overrode the sample's
+        for offset, sample_name in labels_without_pdb.items():
+            if sample_name:
+                self.assertEqual(labels_with_foreign.get(offset), sample_name)
+
+    def test_a_target_without_codeview_evidence_keeps_a_matching_pdb_unapplied(self):
+        # even a PDB that is the right one cannot be confirmed once the target's own evidence
+        # is gone, so its readable names must still stay off the sample
+        pe_data = strip_debug_directory(decode_fixture(PE_FIXTURE))
+        exe_path = self._write("stripped.exe", pe_data)
+        pdb_path = self._write("candidate.pdb", decode_fixture(PDB_FIXTURE))
+        target_info = make_binary_info(exe_path)
+        target_info.raw_data = pe_data
+        provider = PdbSymbolProvider(None)
+        provider.bindTargetBinary(target_info)
+        with self.assertLogs("smda.common.labelprovider.PdbSymbolProvider", level=logging.WARNING) as logs:
+            provider.update(make_binary_info(pdb_path))
+        self.assertEqual(provider.identity_status, IDENTITY_UNVERIFIABLE)
+        self.assertIn("no CodeView identity record", logs.output[0])
+        self.assertFalse(provider.is_active())
+        report = Disassembler(backend="intel").disassembleFile(exe_path, pdb_path=pdb_path)
+        self.assertEqual(report.status, "ok")
+        self.assertNotIn("main::digest", {function.function_name for function in report.getFunctions()})
 
 
 class PdbSymbolDemanglingTestSuite(unittest.TestCase):
@@ -418,6 +833,9 @@ class MsvcPdbFixtureTestSuite(unittest.TestCase):
 
     def _provider(self):
         provider = PdbSymbolProvider(None)
+        target_info = make_binary_info(self.exe_path)
+        target_info.raw_data = decode_fixture(MSVC_PE_FIXTURE)
+        provider.bindTargetBinary(target_info)
         provider.update(make_binary_info(self.pdb_path))
         return provider
 

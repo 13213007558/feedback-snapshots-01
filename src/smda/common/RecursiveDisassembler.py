@@ -100,6 +100,9 @@ class RecursiveDisassembler:
                 LOGGER.error("Label provider %s failed to update: %r", provider.__class__.__name__, exc)
 
     def _updateLabelProviders(self, binary_info):
+        for provider in self.label_providers:
+            if isinstance(provider, PdbSymbolProvider):
+                provider.bindTargetBinary(binary_info)
         self._runLabelProviderUpdate(binary_info)
         # a provider clears its symbol map at the top of update(), so a PDB supplied before
         # analysis would be wiped by this pass; re-apply it afterwards instead
@@ -116,6 +119,9 @@ class RecursiveDisassembler:
             pdb_info.file_path = pdb_path
             pdb_info.base_addr = binary_info.base_addr
             self._pdb_info = pdb_info
+            for provider in self.symbol_providers:
+                if isinstance(provider, PdbSymbolProvider):
+                    provider.bindTargetBinary(binary_info)
             self._runLabelProviderUpdate(pdb_info, pdb_only=True)
             self.active_api_providers = [p for p in self.api_providers if p.is_active()]
             self.active_symbol_providers = [p for p in self.symbol_providers if p.is_active()]

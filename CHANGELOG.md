@@ -71,6 +71,17 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(labels)** `PdbSymbolProvider` now verifies a supplied PDB against the analyzed sample before treating its
+  symbols as evidence. The sample's own CodeView record is the only primary identity: a matching GUID and age
+  verify the pairing, a conflicting record rejects the PDB outright, and a sample or PDB without an identity record
+  leaves the pairing `unverifiable` so no names are applied. A PDB whose section table disagrees with the target's
+  own layout is rejected rather than relocated across the mismatch; individual symbols that resolve outside every
+  target section are withheld with a warning. The verdict and its reason are queryable on the provider
+  (`identity_status`, `identity_reason`), not only in the log, and a rejected PDB contributes nothing so labels the
+  sample earns itself are never overwritten by a readable foreign name. *Measured on the bundled `rust_pe_msvc_i686`
+  and `msvc_cxx_pdb` fixture pairs plus the three `msvc_smda384` pairs:* each own PDB verifies and labels as before,
+  each cross-pairing is rejected, and a foreign-PDB report is label-identical to the no-PDB run; no true positive
+  lost on matched pairs. Fully offline -- no symbol service is contacted.
 
 ### Changed
 
