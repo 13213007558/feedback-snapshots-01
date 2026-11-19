@@ -133,6 +133,16 @@ class DiffieHellmanRatchet(ABC):
 
         return self.__symmetric_key_ratchet.receiving_chain_length
 
+    @property
+    def other_ratchet_pub(self) -> bytes:
+        """
+        Returns:
+            The public ratchet key of the other party for the current receiving chain. This value is public
+            and is carried in message headers; it never reveals private ratchet state.
+        """
+
+        return self.__other_ratchet_pub
+
     ####################
     # abstract methods #
     ####################

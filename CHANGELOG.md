@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- Secret-free receive diagnostics (`ReceiveDiagnostics`, `decrypt_message_with_diagnostics`) that
+  distinguish accepted, already processed, missing historical key and authentication failure outcomes,
+  including explicit cache eviction reasons and exact positions of evicted skipped message keys
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed

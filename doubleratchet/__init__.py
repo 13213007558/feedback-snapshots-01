@@ -5,6 +5,14 @@ from .aead import (
     AuthenticationFailedException as AuthenticationFailedException,
     DecryptionFailedException as DecryptionFailedException
 )
+from .diagnostics import (
+    EvictionReason as EvictionReason,
+    MessagePosition as MessagePosition,
+    ReceiveDiagnostic as ReceiveDiagnostic,
+    ReceiveDiagnostics as ReceiveDiagnostics,
+    ReceiveResult as ReceiveResult,
+    ReceiveStatus as ReceiveStatus
+)
 from .diffie_hellman_ratchet import (
     DiffieHellmanRatchet as DiffieHellmanRatchet,
     DoSProtectionException as DoSProtectionException,

@@ -7,8 +7,9 @@ import itertools
 import json
 from typing import Optional, Tuple, Type, TypeVar, cast
 
-from .aead import AEAD
-from .diffie_hellman_ratchet import DiffieHellmanRatchet
+from .aead import AEAD, AuthenticationFailedException, DecryptionFailedException
+from .diagnostics import MessagePosition, ReceiveDiagnostic, ReceiveDiagnostics, ReceiveResult
+from .diffie_hellman_ratchet import DiffieHellmanRatchet, DuplicateMessageException
 from .kdf import KDF
 from .migrations import parse_double_ratchet_model
 from .models import DoubleRatchetModel, SkippedMessageKeyModel
@@ -42,6 +43,7 @@ class DoubleRatchet(ABC):
         self.__skipped_message_keys: SkippedMessageKeys
         self.__aead: Type[AEAD]
         self.__diffie_hellman_ratchet: DiffieHellmanRatchet
+        self.__diagnostics: Optional[ReceiveDiagnostics]
 
     @classmethod
     async def encrypt_initial_message(
@@ -56,7 +58,8 @@ class DoubleRatchet(ABC):
         shared_secret: bytes,
         recipient_ratchet_pub: bytes,
         message: bytes,
-        associated_data: bytes
+        associated_data: bytes,
+        diagnostics: Optional[ReceiveDiagnostics] = None
     ) -> Tuple[DoubleRatchetTypeT, EncryptedMessage]:
         """
         Args:
@@ -77,6 +80,8 @@ class DoubleRatchet(ABC):
             recipient_ratchet_pub: The ratchet public key of the recipient.
             message: The initial message.
             associated_data: Additional data to authenticate without including it in the ciphertext.
+            diagnostics: Optional receive diagnostics to attach to the new instance. Diagnostics are local
+                operational metadata and are never part of the serialized state.
 
         Returns:
             A configured instance of :class:`DoubleRatchet` ready to send and receive messages together with
@@ -104,6 +109,7 @@ class DoubleRatchet(ABC):
             message_chain_constant,
             dos_protection_threshold
         )
+        self.__attach_diagnostics(diagnostics)
 
         message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
         ciphertext = await self.__aead.encrypt(
@@ -127,7 +133,8 @@ class DoubleRatchet(ABC):
         shared_secret: bytes,
         own_ratchet_priv: bytes,
         message: EncryptedMessage,
-        associated_data: bytes
+        associated_data: bytes,
+        diagnostics: Optional[ReceiveDiagnostics] = None
     ) -> Tuple[DoubleRatchetTypeT, bytes]:
         """
         Args:
@@ -147,6 +154,8 @@ class DoubleRatchet(ABC):
             own_ratchet_priv: The ratchet private key to use initially.
             message: The encrypted initial message.
             associated_data: Additional data to authenticate without including it in the ciphertext.
+            diagnostics: Optional receive diagnostics to attach to the new instance. Diagnostics are local
+                operational metadata and are never part of the serialized state.
 
         Returns:
             A configured instance of :class:`DoubleRatchet` ready to send and receive messages together with
@@ -180,19 +189,31 @@ class DoubleRatchet(ABC):
             message_chain_constant,
             dos_protection_threshold
         )
-
         message_key, skipped_message_keys = \
             await self.__diffie_hellman_ratchet.next_decryption_key(message.header)
 
         # Even the first message might have skipped message keys. The number of keys can't cross thresholds,
         # thus no FIFO discarding required.
         self.__skipped_message_keys = skipped_message_keys
+        self.__attach_diagnostics(diagnostics)
+        if self.__diagnostics is not None:
+            for ratchet_pub, _ in self.__skipped_message_keys:
+                self.__diagnostics.register_chain(ratchet_pub)
 
-        return (self, await self.__aead.decrypt(
+        plaintext = await self.__aead.decrypt(
             message.ciphertext,
             message_key,
             self._build_associated_data(associated_data, message.header)
-        ))
+        )
+
+        if self.__diagnostics is not None:
+            self.__diagnostics.record_accepted(
+                MessagePosition.from_header(message.header),
+                cache_size=len(self.__skipped_message_keys),
+                cache_limit=max_num_skipped_message_keys
+            )
+
+        return (self, plaintext)
 
     @property
     def sending_chain_length(self) -> int:
@@ -231,6 +252,49 @@ class DoubleRatchet(ABC):
         Returns:
             A byte sequence encoding the associated data and the header in a unique, reversible way.
         """
+
+    ########################
+    # receive diagnostics  #
+    ########################
+
+    @property
+    def receive_diagnostics(self) -> Optional[ReceiveDiagnostics]:
+        """
+        Returns:
+            The receive diagnostics attached to this instance, if any. Diagnostics are local operational
+            metadata; they are never part of :attr:`model` or :attr:`json` and are never used for
+            cryptographic decisions.
+        """
+
+        return self.__diagnostics
+
+    def set_receive_diagnostics(self, diagnostics: Optional[ReceiveDiagnostics]) -> None:
+        """
+        Attach or detach receive diagnostics.
+
+        Args:
+            diagnostics: The diagnostics instance to attach, or ``None`` to disable diagnostics.
+
+        Note:
+            Attaching diagnostics does not alter the ratchet state. Detaching them makes
+            :meth:`decrypt_message_with_diagnostics` unavailable. Regular
+            :meth:`decrypt_message` calls are never affected, whether diagnostics are attached or not.
+        """
+
+        self.__attach_diagnostics(diagnostics)
+
+    def __attach_diagnostics(self, diagnostics: Optional[ReceiveDiagnostics]) -> None:
+        self.__diagnostics = diagnostics
+        if diagnostics is None:
+            return
+
+        # Remember only public, already observed receiving chains: the current receiving chain and the
+        # chains that still have cached skipped message keys. The sender side has no receiving chain, so
+        # nothing is registered there.
+        if self.__diffie_hellman_ratchet.receiving_chain_length is not None:
+            diagnostics.register_chain(self.__diffie_hellman_ratchet.other_ratchet_pub)
+        for ratchet_pub, _ in self.__skipped_message_keys:
+            diagnostics.register_chain(ratchet_pub)
 
     #################
     # serialization #
@@ -271,7 +335,8 @@ class DoubleRatchet(ABC):
         message_chain_constant: bytes,
         dos_protection_threshold: int,
         max_num_skipped_message_keys: int,
-        aead: Type[AEAD]
+        aead: Type[AEAD],
+        diagnostics: Optional[ReceiveDiagnostics] = None
     ) -> DoubleRatchetTypeT:
         """
         Args:
@@ -289,6 +354,8 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            diagnostics: Optional receive diagnostics to attach to the new instance. Diagnostics are local
+                operational metadata and are never part of the serialized state.
 
         Returns:
             A configured instance of :class:`DoubleRatchet`, with internal state restored from the model.
@@ -326,6 +393,7 @@ class DoubleRatchet(ABC):
             message_chain_constant,
             dos_protection_threshold
         )
+        self.__attach_diagnostics(diagnostics)
 
         return self
 
@@ -339,7 +407,8 @@ class DoubleRatchet(ABC):
         message_chain_constant: bytes,
         dos_protection_threshold: int,
         max_num_skipped_message_keys: int,
-        aead: Type[AEAD]
+        aead: Type[AEAD],
+        diagnostics: Optional[ReceiveDiagnostics] = None
     ) -> DoubleRatchetTypeT:
         """
         Args:
@@ -357,6 +426,8 @@ class DoubleRatchet(ABC):
             max_num_skipped_message_keys: The maximum number of skipped message keys to store in case the lost
                 or out-of-order message comes in later. Older keys are discarded to make space for newer keys.
             aead: The AEAD implementation to use for message en- and decryption.
+            diagnostics: Optional receive diagnostics to attach to the new instance. Diagnostics are local
+                operational metadata and are never part of the serialized state.
 
         Returns:
             A configured instance of :class:`DoubleRatchet`, with internal state restored from the serialized
@@ -378,7 +449,8 @@ class DoubleRatchet(ABC):
             message_chain_constant,
             dos_protection_threshold,
             max_num_skipped_message_keys,
-            aead
+            aead,
+            diagnostics
         )
 
     #########################
@@ -420,6 +492,31 @@ class DoubleRatchet(ABC):
             DoSProtectionException: if a huge number of message keys were skipped that have to be calculated
                 first before decrypting the message.
             DuplicateMessageException: if this message appears to be a duplicate.
+
+        Note:
+            This method has the exact same behavior whether receive diagnostics are attached or not:
+            diagnostics never influence key selection, state changes or raised exceptions, and the
+            serialized state never contains diagnostic data. If diagnostics are attached, successful
+            attempts are additionally recorded so that later diagnostic calls remain accurate even when
+            both receive APIs are mixed.
+        """
+
+        plaintext, _, _ = await self.__decrypt_message(message, associated_data)
+        return plaintext
+
+    async def __decrypt_message(
+        self,
+        message: EncryptedMessage,
+        associated_data: bytes
+    ) -> Tuple[bytes, Tuple[MessagePosition, ...], Optional[ReceiveDiagnostic]]:
+        """
+        Perform the regular decryption path and additionally report which skipped message key positions were
+        evicted by the successful attempt. The eviction list is only informational; on failure the state is
+        untouched and the list is never observed.
+
+        If diagnostics are attached, a successful attempt is recorded (including observed evictions) before
+        returning. This keeps diagnostics accurate when callers mix :meth:`decrypt_message` and
+        :meth:`decrypt_message_with_diagnostics`, without changing any key state or exceptions.
         """
 
         # Be careful to only keep changes to the internal state on decryption success. To do so, work with a
@@ -453,15 +550,159 @@ class DoubleRatchet(ABC):
         self.__skipped_message_keys.pop(skipped_message_key_key, None)
 
         # Store new skipped message keys and limit their number.
+        evicted: Tuple[MessagePosition, ...] = ()
         if skipped_message_keys is not None:
             self.__skipped_message_keys.update(skipped_message_keys)
+            num_entries_to_discard = max(
+                len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys,
+                0
+            )
+            if self.__diagnostics is not None:
+                evicted = tuple(
+                    MessagePosition.from_key(key)
+                    for key in itertools.islice(self.__skipped_message_keys, num_entries_to_discard)
+                )
             self.__skipped_message_keys = OrderedDict(itertools.islice(
                 self.__skipped_message_keys.items(),
-                max(len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys, 0),
+                num_entries_to_discard,
                 None
             ))
 
         # Store the clone.
         self.__diffie_hellman_ratchet = diffie_hellman_ratchet
 
-        return plaintext
+        diagnostic: Optional[ReceiveDiagnostic] = None
+        if self.__diagnostics is not None:
+            diagnostic = self.__diagnostics.record_accepted(
+                MessagePosition.from_header(message.header),
+                evicted=evicted,
+                cache_size=len(self.__skipped_message_keys),
+                cache_limit=self.__max_num_skipped_message_keys
+            )
+
+        return plaintext, evicted, diagnostic
+
+    async def decrypt_message_with_diagnostics(
+        self,
+        message: EncryptedMessage,
+        associated_data: bytes
+    ) -> ReceiveResult:
+        """
+        Attempt to decrypt a message and explain the outcome using secret-free receive diagnostics.
+
+        Unlike :meth:`decrypt_message`, this method does not raise for authentication failures or duplicate
+        deliveries. It returns a :class:`~doubleratchet.diagnostics.ReceiveResult` whose diagnostic reports
+        exactly one of :attr:`~doubleratchet.diagnostics.ReceiveStatus.ACCEPTED`,
+        :attr:`~doubleratchet.diagnostics.ReceiveStatus.ALREADY_PROCESSED`,
+        :attr:`~doubleratchet.diagnostics.ReceiveStatus.MISSING_HISTORICAL_KEY` or
+        :attr:`~doubleratchet.diagnostics.ReceiveStatus.AUTHENTICATION_FAILED`.
+
+        The classification follows these boundaries:
+
+        * A key is only consumed, and skipped keys are only evicted, after successful authentication. A
+          failed attempt therefore never advances the ratchet and never pushes an eviction.
+        * For messages from a chain that has since been superseded, the diagnostics check whether the exact
+          ``(ratchet_pub, sending_chain_length)`` key still exists. A high chain index elsewhere is never
+          used as a proxy for key availability.
+        * If diagnostics have not observed the exact position (for example because they were attached after
+          the position was processed or evicted), no eviction is claimed. If the chain was observed before,
+          the missing key is reported with
+          :attr:`~doubleratchet.diagnostics.EvictionReason.NOT_RETAINED`; otherwise the actual
+          authentication outcome is reported.
+
+        Args:
+            message: The encrypted message.
+            associated_data: Additional data to authenticate without including it in the ciphertext.
+
+        Returns:
+            The decryption result and its diagnostic. The plaintext is ``None`` unless the message was
+            authenticated and decrypted successfully.
+
+        Raises:
+            RuntimeError: if no receive diagnostics are attached.
+            DoSProtectionException: if a huge number of message keys were skipped that have to be calculated
+                first before decrypting the message. This is propagated because it is a rate/DoS boundary,
+                not a message classification.
+        """
+
+        if self.__diagnostics is None:
+            raise RuntimeError(
+                "Receive diagnostics are not attached. Pass a `ReceiveDiagnostics` instance to the factory"
+                " or call `set_receive_diagnostics` first."
+            )
+
+        diagnostics = self.__diagnostics
+        position = MessagePosition.from_header(message.header)
+        cache_size = len(self.__skipped_message_keys)
+        cache_limit = self.__max_num_skipped_message_keys
+
+        exact_key_available = position.key in self.__skipped_message_keys
+        current_chain = self.__diffie_hellman_ratchet.other_ratchet_pub
+        receiving_chain_length = self.__diffie_hellman_ratchet.receiving_chain_length
+
+        # A message is stale if its chain was observed on receive before and is not the current receiving
+        # chain anymore. Never infer staleness from a single maximum chain index.
+        stale_chain = (
+            not exact_key_available
+            and message.header.ratchet_pub != current_chain
+            and diagnostics.sees_chain(message.header.ratchet_pub)
+        )
+
+        if not exact_key_available:
+            if diagnostics.was_processed(position):
+                return ReceiveResult(None, diagnostics.record_already_processed(
+                    position,
+                    cache_size=cache_size,
+                    cache_limit=cache_limit
+                ))
+
+            if stale_chain:
+                diagnostic = diagnostics.record_missing_historical_key(
+                    position,
+                    cache_size=cache_size,
+                    cache_limit=cache_limit
+                )
+                return ReceiveResult(None, diagnostic)
+
+            if (
+                message.header.ratchet_pub == current_chain
+                and receiving_chain_length is not None
+                and message.header.sending_chain_length < receiving_chain_length
+            ):
+                # The position lies before the current receiving chain and has no exact cached key. It was
+                # either processed directly before or its skipped key was evicted. If diagnostics didn't
+                # observe it, do not claim a stronger reason.
+                diagnostic = diagnostics.record_missing_historical_key(
+                    position,
+                    cache_size=cache_size,
+                    cache_limit=cache_limit
+                )
+                return ReceiveResult(None, diagnostic)
+
+        try:
+            plaintext, _, diagnostic = await self.__decrypt_message(message, associated_data)
+        except (AuthenticationFailedException, DecryptionFailedException):
+            diagnostic = diagnostics.record_authentication_failed(
+                position,
+                cache_size=len(self.__skipped_message_keys),
+                cache_limit=cache_limit
+            )
+            return ReceiveResult(None, diagnostic)
+        except DuplicateMessageException:
+            # Defensive mapping; the checks above normally catch this before the ratchet is touched.
+            if diagnostics.was_processed(position):
+                return ReceiveResult(None, diagnostics.record_already_processed(
+                    position,
+                    cache_size=len(self.__skipped_message_keys),
+                    cache_limit=cache_limit
+                ))
+            diagnostic = diagnostics.record_missing_historical_key(
+                position,
+                cache_size=len(self.__skipped_message_keys),
+                cache_limit=cache_limit
+            )
+            return ReceiveResult(None, diagnostic)
+
+        # The shared decryption path recorded the accepted position (and any evictions) already.
+        assert diagnostic is not None
+        return ReceiveResult(plaintext, diagnostic)

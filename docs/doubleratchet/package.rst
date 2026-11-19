@@ -4,6 +4,7 @@ Package: doubleratchet
 .. toctree::
     Module: aead <aead>
     Module: diffie_hellman_ratchet <diffie_hellman_ratchet>
+    Module: diagnostics <diagnostics>
     Module: double_ratchet <double_ratchet>
     Module: kdf_chain <kdf_chain>
     Module: kdf <kdf>
