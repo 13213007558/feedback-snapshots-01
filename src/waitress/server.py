@@ -175,6 +175,21 @@ class MultiSocketServer:
         self.task_dispatcher.shutdown()
         wasyncore.close_all(self.map)
 
+    def graceful_shutdown(self, timeout=30.0, time=None, poll_interval=0.1):
+        """Controlled shutdown across every listening socket.
+
+        Delegates to a :class:`waitress.graceful.GracefulShutdown` built over
+        the shared socket map so all listeners stop accepting and all channels
+        drain together under a single deadline.
+        """
+        from waitress.graceful import GracefulShutdown
+
+        controller = GracefulShutdown(
+            self, timeout=timeout, time=time, poll_interval=poll_interval
+        )
+        controller.wait()
+        return controller
+
 
 class BaseWSGIServer(wasyncore.dispatcher):
     channel_class = HTTPChannel
@@ -332,6 +347,23 @@ class BaseWSGIServer(wasyncore.dispatcher):
 
     def pull_trigger(self):
         self.trigger.pull_trigger()
+
+    def graceful_shutdown(self, timeout=30.0, time=None, poll_interval=0.1):
+        """Perform a controlled, bounded shutdown and return a controller.
+
+        Stops accepting new connections, drains queued/running requests and
+        buffered output for at most ``timeout`` seconds, then aborts anything
+        still outstanding so clients observe an incomplete transfer.  The
+        returned :class:`waitress.graceful.GracefulShutdown` exposes ``state``
+        and ``status()`` for callers that want to observe each stage.
+        """
+        from waitress.graceful import GracefulShutdown
+
+        controller = GracefulShutdown(
+            self, timeout=timeout, time=time, poll_interval=poll_interval
+        )
+        controller.wait()
+        return controller
 
     def set_socket_options(self, conn):
         pass

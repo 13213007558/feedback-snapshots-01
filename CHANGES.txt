@@ -74,6 +74,20 @@ Bugfix
   https://github.com/Pylons/waitress/issues/466 and
   https://github.com/Pylons/waitress/pull/488
 
+Features
+~~~~~~~~
+
+- Add a controlled, re-runnable graceful shutdown via
+  ``server.graceful_shutdown(timeout=...)`` and the
+  ``waitress.graceful.GracefulShutdown`` controller. Shutdown is split into
+  observable stop-accepting, drain-queue, drain-running and drain-output stages
+  under a single deadline. Listeners stop accepting and existing channels
+  refuse new requests before any worker winds down. If the deadline expires,
+  remaining channels are aborted by discarding their output buffer and closing
+  the socket without appending the normal response terminator, so clients
+  observe an incomplete transfer rather than a response that appears to have
+  finished normally.
+
 3.0.2 (2024-11-16)
 ------------------
 

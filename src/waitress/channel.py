@@ -45,6 +45,7 @@ class HTTPChannel(wasyncore.dispatcher):
     last_activity = 0  # Time of last activity
     will_close = False  # set to True to close the socket.
     close_when_flushed = False  # set to True to close the socket when flushed
+    shutting_down = False  # set to True during a controlled shutdown
     sent_continue = False  # used as a latch after sending 100 continue
     total_outbufs_len = 0  # total bytes ready to send
     current_outbuf_count = 0  # total bytes written to current outbuf
@@ -145,10 +146,13 @@ class HTTPChannel(wasyncore.dispatcher):
         # 3. There are not too many tasks already queued (if lookahead is enabled)
         # 4. There's no data in the output buffer that needs to be sent
         #    before we potentially create a new task.
+        # 5. The server is not shutting down (no new sensitive requests are
+        #    admitted once the drain period begins).
 
         return not (
             self.will_close
             or self.close_when_flushed
+            or self.shutting_down
             or len(self.requests) > self.adj.channel_request_lookahead
             or self.total_outbufs_len
         )
@@ -204,7 +208,7 @@ class HTTPChannel(wasyncore.dispatcher):
             # flag, and we read data but our service thread is attempting to
             # shut down the connection due to an error. We want to make sure we
             # do this while holding the request_lock so that we can't race
-            if self.will_close or self.close_when_flushed:
+            if self.will_close or self.close_when_flushed or self.shutting_down:
                 return False
 
             while data:
@@ -420,7 +424,14 @@ class HTTPChannel(wasyncore.dispatcher):
         """Execute one request. If there are more, we add another task to the
         server at the end."""
 
-        request = self.requests[0]
+        with self.requests_lock:
+            if not self.requests:
+                # A forced shutdown (abort) cleared the request queue while
+                # this task was waiting to run.  There is nothing left to
+                # service and the socket is already closing, so stop here
+                # rather than indexing an empty queue.
+                return
+            request = self.requests[0]
 
         if request.error:
             task = self.error_task_class(self, request)
@@ -521,3 +532,34 @@ class HTTPChannel(wasyncore.dispatcher):
         self.connected = False
         self.last_activity = time.time()
         self.requests = []
+
+    def abort(self):
+        """Forcefully terminate the channel during a shutdown timeout.
+
+        Unlike :meth:`cancel` followed by a normal flush, ``abort`` discards
+        every buffered outbuf and closes the underlying socket immediately.
+        The response is therefore left without its normal terminator (no
+        chunked ``0\\r\\n\\r`` footer, no Content-Length-satisfying final
+        chunk): a client that has only received part of the body sees an
+        incomplete transfer instead of a response that appears to have ended
+        normally.
+        """
+        with self.outbuf_lock:
+            for outbuf in self.outbufs:
+                try:
+                    outbuf.close()
+                except Exception:
+                    self.logger.exception(
+                        "Unknown exception while aborting an outbuf"
+                    )
+            self.outbufs = []
+            self.total_outbufs_len = 0
+            self.current_outbuf_count = 0
+            self.will_close = True
+            self.close_when_flushed = False
+            self.connected = False
+            self.requests = []
+            self.outbuf_lock.notify_all()
+        # Bypass handle_write(): there must be no chance for a terminator or
+        # leftover bytes to be appended before the socket goes away.
+        wasyncore.dispatcher.close(self)
