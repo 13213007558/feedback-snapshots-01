@@ -47,6 +47,19 @@ class Roda
     #                      submitted as a hash, keyed by path, with CSRF token values.
     # :header :: HTTP header name for CSRF token (default: 'X-CSRF-Token')
     # :key :: Session key for CSRF secret (default: '_roda_csrf_secret')
+    # :secret :: Server secret used when :secret_cookie is set, to derive the
+    #            per-browser CSRF secret.  Must be a string of at least 32 bytes,
+    #            and should be kept private.  Not used without :secret_cookie.
+    # :secret_cookie :: Store the CSRF secret in a dedicated cookie instead of the
+    #                   session.  This allows CSRF protection for requests where
+    #                   sessions are disabled, such as login forms before a visitor
+    #                   has consented to session storage.  +true+ uses the default
+    #                   cookie name, a String sets the cookie name, and a Hash can
+    #                   set :name and :cookie_options.  When this option is used,
+    #                   the cookie contains only a random nonce; the actual CSRF
+    #                   secret is derived from that nonce using the :secret option.
+    #                   Requests that generate a token without an existing CSRF
+    #                   cookie receive one in the response.
     # :require_request_specific_tokens :: Whether request-specific tokens are required (default: true).
     #                                     A false value will allow tokens that are not request-specific
     #                                     to also work.  You should only set this to false if it is
@@ -98,6 +111,12 @@ class Roda
     #                                             for placing in an HTML form that has inputs that use formaction
     #                                             attributes to change the endpoint to which the form is submitted.
     #                                             Takes the same arguments as csrf_token.
+    # use_csrf_secret_cookie? :: Whether the current request uses the dedicated CSRF cookie for its CSRF
+    #                            state.  This is true when the :secret_cookie option is used, and either the
+    #                            conditional_sessions plugin is not used, or the request is in :csrf mode.
+    # delete_csrf_secret_cookie :: Delete the dedicated CSRF cookie set when the :secret_cookie option is used.
+    #                              Returns true if the cookie deletion header was added, and false if
+    #                              the :secret_cookie option is not used.  Useful when withdrawing consent.
     # csrf_field :: The field name to use for the hidden tag containing the CSRF token.
     # csrf_path(action) :: This takes an argument that would be the value of the HTML form's
     #                      action attribute, and returns a path you can pass to csrf_token
@@ -161,6 +180,31 @@ class Roda
     # By including random data in the HMAC for all tokens, different tokens are generated
     # each time, mitigating compression ratio attacks such as BREACH.
     #
+    # == CSRF Without Sessions
+    #
+    # By default, the CSRF secret is stored in the session, so CSRF protection
+    # requires a session.  This is a problem for applications that do not store
+    # sessions until a visitor consents, but still need to protect forms such as
+    # a login form before consent.  The :secret_cookie option stores the CSRF
+    # state in a separate cookie instead:
+    #
+    #   plugin :route_csrf,
+    #     secret: ENV['CSRF_SECRET'],
+    #     secret_cookie: true
+    #
+    # The CSRF secret cookie contains a random nonce, not the CSRF secret itself.
+    # The actual CSRF secret is derived from the nonce using the :secret plugin
+    # option, so the cookie is only useful together with the server secret.
+    # Applications using the sessions plugin can use the same value for the
+    # session secret and the :secret option.
+    #
+    # This option can be combined with the conditional_sessions plugin, so
+    # requests that only need form protection do not load or persist the normal
+    # session.  See the conditional_sessions plugin documentation for a full
+    # example covering sessionless pages, form-only pages, and consented pages.
+    # When used without the conditional_sessions plugin, the CSRF secret cookie
+    # is always used, and the session is not used for CSRF state.
+    #
     # == REQUEST_METHOD modifications
     #
     # It's possible to use Rack middleware that modify REQUEST_METHOD in the env hash,
@@ -183,9 +227,17 @@ class Roda
         :require_request_specific_tokens => true,
         :csrf_failure => :raise,
         :check_header => false,
+        :secret => nil,
+        :secret_cookie => false,
         # RODA4: Remove and set :exempt_request_methods by default
         :check_request_methods => %w'POST DELETE PATCH PUT'.freeze.each(&:freeze)
       }.freeze
+
+      # Default cookie options used for the CSRF cookie when :secret_cookie is used.
+      DEFAULT_COOKIE_OPTIONS = {:httponly=>true, :path=>'/'.freeze, :same_site=>:lax}.freeze
+
+      # Default name for the CSRF cookie when :secret_cookie is used.
+      DEFAULT_COOKIE_NAME = '_roda_csrf'.freeze
 
       # Exception class raised when :csrf_failure option is :raise and
       # a valid CSRF token was not provided.
@@ -209,6 +261,34 @@ class Roda
           RodaPlugins.warn "Passing :clear_session as the :csrf_failure option to the route_csrf plugin is deprecated"
         end
         options[:env_header] = "HTTP_#{options[:header].to_s.tr('-', '_').upcase}".freeze
+
+        if sc = options[:secret_cookie]
+          secret = options[:secret]
+          unless secret.is_a?(String) && secret.bytesize >= 32
+            raise RodaError, "the route_csrf plugin :secret option must be a string of at least 32 bytes when :secret_cookie is used"
+          end
+
+          case sc
+          when Hash
+            cookie_name = sc[:name] || DEFAULT_COOKIE_NAME
+            cookie_options = sc[:cookie_options] || OPTS
+          when String
+            cookie_name = sc
+            cookie_options = OPTS
+          else
+            cookie_name = DEFAULT_COOKIE_NAME
+            cookie_options = OPTS
+          end
+
+          unless cookie_name.is_a?(String) && !cookie_name.empty?
+            raise RodaError, "invalid route_csrf plugin :secret_cookie name: #{cookie_name.inspect}"
+          end
+
+          options[:secret_cookie] = true
+          options[:secret_cookie_name] = cookie_name.freeze
+          options[:secret_cookie_options] = DEFAULT_COOKIE_OPTIONS.merge(cookie_options).freeze
+        end
+
         options.freeze
       end
 
@@ -322,6 +402,37 @@ class Roda
           csrf_invalid_message(opts).nil?
         end
 
+        # Delete the dedicated CSRF secret cookie, if the :secret_cookie option
+        # is used.  This allows withdrawing the token state together with the
+        # normal session when a visitor withdraws consent.  Returns true if a
+        # cookie deletion header was added, false if :secret_cookie is not used.
+        def delete_csrf_secret_cookie
+          return false unless csrf_options[:secret_cookie]
+
+          cookie = Hash[csrf_options[:secret_cookie_options]]
+          cookie.delete(:max_age)
+          cookie.delete(:expires)
+          cookie[:secure] = true if !cookie.key?(:secure) && request.ssl?
+          Rack::Utils.delete_cookie_header!(response.headers, csrf_options[:secret_cookie_name], cookie)
+          true
+        end
+
+        # Whether the request should use the dedicated CSRF cookie for its CSRF
+        # secret.  This is true when the :secret_cookie plugin option is used and
+        # either there is no conditional_sessions integration, or the
+        # conditional_sessions integration has disabled sessions while still
+        # allowing form protection.  Requests marked as not using sessions at all
+        # never get a CSRF cookie.
+        def use_csrf_secret_cookie?
+          return false unless csrf_options[:secret_cookie]
+
+          if respond_to?(:session_mode)
+            session_mode == :csrf
+          else
+            true
+          end
+        end
+
         private
 
         # The request method to use to determine whether to perform a CSRF check.
@@ -357,11 +468,19 @@ class Roda
             end
           end
 
+          if respond_to?(:use_csrf?) && !use_csrf?
+            return "CSRF protection is not available for requests that do not use sessions"
+          end
+
           unless encoded_token.is_a?(String)
             return "encoded token is not a string"
           end
 
-          if (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
+          if use_csrf_secret_cookie? && !_csrf_cookie_nonce
+            return "no CSRF secret cookie"
+          end
+
+          if !use_csrf_secret_cookie? && (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
             # RODA4: Remove :upgrade_from_rack_csrf_key support
             return
           end
@@ -413,9 +532,60 @@ class Roda
         # If a secret has not already been specified, generate a random 32-byte
         # secret, stored base64 encoded in the session (to handle cases where
         # JSON is used for session serialization).
+        #
+        # If the request uses the dedicated CSRF cookie, derive the secret from
+        # the random nonce stored in that cookie instead, and issue the cookie
+        # if it is not already present.
         def csrf_secret
-          key = session[csrf_options[:key]] ||= SecureRandom.base64(32)
-          Base64_.decode64(key)
+          if use_csrf_secret_cookie?
+            _csrf_secret_from_cookie
+          else
+            if respond_to?(:use_csrf?) && !use_csrf?
+              raise RodaError, "CSRF protection is not available for requests that do not use sessions"
+            end
+            if respond_to?(:session_mode) && session_mode == :csrf
+              raise RodaError, "the route_csrf plugin requires the :secret_cookie option to support requests not using sessions"
+            end
+
+            key = session[csrf_options[:key]] ||= SecureRandom.base64(32)
+            Base64_.decode64(key)
+          end
+        end
+
+        # Derive the CSRF secret from the nonce in the dedicated CSRF cookie,
+        # issuing a new cookie if one is not present.
+        def _csrf_secret_from_cookie
+          nonce = _csrf_cookie_nonce || @_roda_csrf_generated_nonce
+
+          unless nonce
+            nonce = @_roda_csrf_generated_nonce = SecureRandom.random_bytes(32)
+            cookie = Hash[csrf_options[:secret_cookie_options]]
+            cookie[:value] = Base64_.urlsafe_encode64(nonce)
+            cookie[:secure] = true if !cookie.key?(:secure) && request.ssl?
+            Rack::Utils.set_cookie_header!(response.headers, csrf_options[:secret_cookie_name], cookie)
+          end
+
+          OpenSSL::HMAC.digest(OpenSSL::Digest::SHA256.new, csrf_options[:secret], nonce)
+        end
+
+        # Return the 32-byte nonce from the dedicated CSRF cookie sent in the
+        # request, or nil if the cookie is missing or invalid.  This does not
+        # consider a nonce generated earlier in the current request.
+        def _csrf_cookie_nonce
+          return @_roda_csrf_cookie_nonce if defined?(@_roda_csrf_cookie_nonce)
+
+          @_roda_csrf_cookie_nonce = begin
+            name = csrf_options[:secret_cookie_name]
+
+            if (value = request.cookies[name]) && !value.empty?
+              begin
+                nonce = Base64_.urlsafe_decode64(value)
+              rescue ArgumentError
+                nil
+              end
+              nonce if nonce && nonce.bytesize == 32
+            end
+          end
         end
       end
     end

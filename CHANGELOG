@@ -1,5 +1,9 @@
 === master
 
+* Add :secret_cookie option to route_csrf plugin, to store CSRF state in a dedicated cookie, allowing CSRF protection for requests where sessions are not used (jeremyevans)
+
+* Add three-mode support to conditional_sessions plugin, using :sessions, :csrf, and :none return values from the plugin block, and add session_mode, use_csrf?, and expire_session methods (jeremyevans)
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)

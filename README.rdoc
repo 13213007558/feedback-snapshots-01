@@ -851,6 +851,12 @@ By default, Roda doesn't turn on sessions, and if you don't need sessions, you c
 skip this section.  If you do need sessions, Roda offers two recommended ways to
 implement cookie-based sessions.
 
+If you only need sessions for some requests, for example requests from visitors
+that have consented to session storage, you can use the +conditional_sessions+
+plugin.  See the conditional_sessions plugin documentation for an example that
+keeps public pages sessionless and protects a login form using a dedicated CSRF
+cookie.
+
 If you do not need any session support in middleware, and only need session support
 in the Roda application, then use the sessions plugin:
 
@@ -903,6 +909,19 @@ but before handling other requests:
 
     # ...
   end
+
+By default, the +route_csrf+ plugin stores the CSRF state in the session.  If you
+need CSRF protection for requests where sessions are not used, such as a login
+form before a visitor has consented to session storage, you can use the
+<tt>:secret_cookie</tt> option to store the CSRF state in a dedicated cookie:
+
+  plugin :route_csrf,
+    secret: ENV['CSRF_SECRET'],
+    secret_cookie: true
+
+This can be combined with the +conditional_sessions+ plugin, which controls
+whether a request uses the normal session, only the dedicated CSRF cookie, or
+neither.  See the conditional_sessions plugin documentation for a full example.
 
 
 === Cross Site Scripting (XSS)
