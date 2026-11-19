@@ -498,6 +498,14 @@ def test_gtpu(gtpu_pdu=gtpu_pdu):
             assert( m.get_val() == v )
 
 
+def test_gtpu_ext_hdr():
+    # adversarial regression for GTP-U extension headers
+    from test import test_gtpu_ext_hdr as _adv
+    for _name in dir(_adv):
+        if _name.startswith('test_'):
+            getattr(_adv, _name)()
+
+
 def test_gtpc(gtpc_pdu=gtpc_pdu):
     for pdu in gtpc_pdu:
         m, e = parse_GTPC(pdu)

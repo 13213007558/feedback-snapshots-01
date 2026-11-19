@@ -40,9 +40,12 @@ __all__ = [
     'GTPUType',
     'GTPUDispatcher',
     'parse_GTPU',
+    'gtpu_layers',
     'ERR_GTPU_BUF_TOO_SHORT',
     'ERR_GTPU_BUF_INVALID',
-    'ERR_GTPU_TYPE_NONEXIST'
+    'ERR_GTPU_TYPE_NONEXIST',
+    'ERR_GTPU_LEN_MISMATCH',
+    'ERR_GTPU_EXT_HDR'
     ]
 
 
@@ -63,6 +66,7 @@ from pycrate_mobile.TS29060_GTP     import (
     BufAligned,
     GTPHdrExtCont,
     GTPHdrExt,
+    GTPExtHdrErr,
     # header
     GTPHdrExtList,
     GTPHdrOpt,
@@ -408,24 +412,148 @@ GTPUDispatcher = {
 ERR_GTPU_BUF_TOO_SHORT = 1
 ERR_GTPU_BUF_INVALID   = 2
 ERR_GTPU_TYPE_NONEXIST = 3
+ERR_GTPU_LEN_MISMATCH  = 4
+ERR_GTPU_EXT_HDR       = 5
 
 
-def parse_GTPU(buf):
+def gtpu_layers(msg, buf_len=None):
+    """Returns the byte ranges actually consumed by each GTP-U layer.
+
+    The result is a dict with:
+    - `header`: (start, end) of the 8-byte mandatory header
+    - `opt`: (start, end) of the 4-byte optional header, or None
+    - `exts`: list of dicts, one per extension header, with `type`, `known`,
+      `len`, `start` and `end` (the whole 4-octet aligned extension)
+    - `payload`: (start, end) of the payload
+    - `trailing`: number of bytes in `buf_len` beyond the declared message end
+
+    This is meant to be used on a message returned by parse_GTPU(); it reads
+    back the ranges from the parsed structure instead of guessing them.
+    """
+    hdr = msg[0]
+    lay = {'header': (0, 8), 'opt': None, 'exts': [], 'payload': None,
+           'trailing': 0}
+    off = 8
+    opt = hdr[9]
+    if not opt.get_trans():
+        lay['opt'] = (off, off+4)
+        off += 4
+    exts = hdr[10]
+    if not exts.get_trans():
+        for i, ext in enumerate(exts._content):
+            size = 4 * ext[0].get_val()
+            cont = ext[1]
+            etype = getattr(ext, '_ExtType', None)
+            if etype is None:
+                etype = getattr(cont, '_ID', None)
+            lay['exts'].append({
+                'index': i,
+                'type': etype,
+                'known': getattr(cont, '_ExtKnown', False),
+                'len': ext[0].get_val(),
+                'start': off,
+                'end': off+size,
+                'next': ext[2].get_val(),
+                })
+            off += size
+    end = _gtpu_payload_end(msg, off)
+    lay['payload'] = (off, end)
+    if buf_len is not None:
+        lay['trailing'] = max(0, buf_len-end)
+    return lay
+
+
+def _gtpu_payload_end(msg, off):
+    for name in ('TPDU',):
+        try:
+            return off + msg[name].get_len()
+        except Exception:
+            pass
+    # for control plane messages, the payload range is the remaining IEs
+    try:
+        return off + sum(e.get_len() for e in msg._content[1:]
+                         if not e.get_trans())
+    except Exception:
+        return off
+
+
+def _gtpu_len_check(msg, buf_len):
+    """Check the GTP header length field against the actual buffer length."""
+    try:
+        hdr = msg[0]
+        declared = hdr[7].get_val()
+    except Exception:
+        return ERR_GTPU_BUF_INVALID, {'error': 'missing GTP length field'}
+    if declared is None:
+        return ERR_GTPU_BUF_INVALID, {'error': 'missing GTP length field'}
+    expected = 8 + declared
+    if buf_len < expected:
+        return ERR_GTPU_BUF_TOO_SHORT, {
+            'error': 'GTP length declares %d bytes but buffer has %d'\
+                     % (expected, buf_len),
+            'declared_total': expected, 'buffer_len': buf_len}
+    if buf_len > expected:
+        return ERR_GTPU_LEN_MISMATCH, {
+            'error': 'GTP length declares %d bytes but buffer has %d'\
+                     % (expected, buf_len),
+            'declared_total': expected, 'buffer_len': buf_len}
+    return 0, None
+
+
+def parse_GTPU(buf, with_diag=False):
     """parses the buffer `buf' for GTP-U message and returns a 2-tuple:
     - GTP-U message structure, or None if parsing failed
     - parsing error code, 0 if parsing succeeded, > 0 otherwise
+
+    If `with_diag' is True, a third element is returned: a dict locating the
+    error (extension index, byte offset, extension type) or, on success, the
+    layer layout as computed by gtpu_layers().
     """
+    def _ret(msg, err, diag=None):
+        if with_diag:
+            return msg, err, diag
+        return msg, err
+
     if len(buf) < 8:
-        return None, ERR_GTPU_BUF_TOO_SHORT
+        return _ret(None, ERR_GTPU_BUF_TOO_SHORT,
+                    {'error': 'buffer shorter than 8 bytes',
+                     'buffer_len': len(buf)})
     typ = buf[1]
     try:
         Msg = GTPUDispatcher[typ]()
     except KeyError:
-        return None, ERR_GTPU_TYPE_NONEXIST
+        return _ret(None, ERR_GTPU_TYPE_NONEXIST,
+                    {'error': 'unknown GTP-U message type %d' % typ,
+                     'type': typ, 'buffer_len': len(buf)})
+    # GTP length counts every byte after the 8-byte mandatory header. It is
+    # checked before parsing so a truncated optional header cannot be read
+    # from whatever bytes happen to follow.
+    declared_total = 8 + ((buf[2] << 8) | buf[3])
+    if len(buf) < declared_total:
+        return _ret(None, ERR_GTPU_BUF_TOO_SHORT,
+                    {'error': 'GTP length declares %d bytes but buffer has %d'\
+                              % (declared_total, len(buf)),
+                     'declared_total': declared_total,
+                     'buffer_len': len(buf)})
     try:
         Msg.from_bytes(buf)
-    except Exception:
-        return None, ERR_GTPU_BUF_INVALID
-    else:
-        return Msg, 0
+    except GTPExtHdrErr as err:
+        return _ret(None, ERR_GTPU_EXT_HDR,
+                    {'error': str(err), 'ext_index': err.ext_index,
+                     'offset': err.offset, 'ext_type': err.ext_type,
+                     'buffer_len': len(buf),
+                     'declared_total': declared_total})
+    except Exception as err:
+        return _ret(None, ERR_GTPU_BUF_INVALID,
+                    {'error': '%s: %s' % (type(err).__name__, err),
+                     'buffer_len': len(buf),
+                     'declared_total': declared_total})
+    err, ldiag = _gtpu_len_check(Msg, len(buf))
+    if err:
+        return _ret(None, err,
+                    {'error': ldiag['error'], 'buffer_len': len(buf),
+                     'declared_total': ldiag.get('declared_total')})
+    if with_diag:
+        return Msg, 0, gtpu_layers(Msg, len(buf))
+    return Msg, 0
 

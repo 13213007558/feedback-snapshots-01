@@ -271,6 +271,7 @@ class TestPycrate(unittest.TestCase):
         test_gtpv0()
         test_gtp()
         test_gtpu()
+        test_gtpu_ext_hdr()
         test_gtpc()
         test_diameter()
         test_pfcp()

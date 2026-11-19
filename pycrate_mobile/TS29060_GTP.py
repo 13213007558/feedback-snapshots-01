@@ -2335,6 +2335,21 @@ class GTPIEs(Envelope):
 #------------------------------------------------------------------------------#
 # GTPNextExtHeader_dict: defined in 7.7.40 for the ExtHeaderTypeList IE
 
+
+class GTPExtHdrErr(EltErr):
+    """Error raised when an Extension Header cannot be parsed safely.
+
+    The location of the offending extension is carried along, so callers do
+    not have to guess which item of an extension chain failed.
+    """
+
+    def __init__(self, msg, ext_index=None, offset=None, ext_type=None):
+        EltErr.__init__(self, msg)
+        self.ext_index = ext_index
+        self.offset = offset
+        self.ext_type = ext_type
+
+
 # buffer that makes the Extension Header 32-bit-aligned
 class BufAligned(Buf):
     
@@ -2384,52 +2399,105 @@ GTPHdrExtCont_dict = {
 
 class GTPHdrExt(Envelope):
     _ExtCont = GTPHdrExtCont_dict
-    
+
     _GEN  = (
         Uint8('Len'),
         GTPHdrExtCont('Content', rep=REPR_HEX),
         Uint8('NextExt', dic=GTPNextExtHeader_dict)
         )
-    
+
+    # set by GTPHdrExtList before parsing one item of the chain
+    _ExtType   = None
+    _ExtIndex  = None
+    _ExtOffset = None
+
     def __init__(self, *args, **kwargs):
         Envelope.__init__(self, *args, **kwargs)
         self[0].set_valauto(lambda: (2 + self[1].get_len()) >> 2)
         self[1].set_blauto(lambda: self._get_cont_len())
         self[2].set_valauto(lambda: self._get_ne())
-    
+
     def _get_cont_len(self):
         return max(0, (self[0].get_val()*32) - 16)
-    
+
     def _get_ne(self):
+        # when decoding, NextExt is consumed from the buffer and must not be
+        # recomputed from what follows (the next item may be a payload, not an
+        # extension header)
+        if self[2]._val is not None:
+            return self[2]._val
         n = self.get_next()
-        if n:
-            return n[1]._ID
+        if isinstance(n, GTPHdrExt):
+            if n._ExtType is not None:
+                return n._ExtType
+            try:
+                return n[1]._ID
+            except Exception:
+                return 0
         else:
             return 0
-    
+
     def set_val(self, val):
         self._set_cont_cls()
         Envelope.set_val(self, val)
-    
+
     def _from_char(self, char):
         if self.get_trans():
             return
         self._set_cont_cls()
-        Envelope._from_char(self, char)
-    
+        start = char._cur
+        try:
+            Envelope._from_char(self, char)
+        except Exception as err:
+            raise(GTPExtHdrErr(
+                'extension header {0} type {1} at byte {2}: {3}'\
+                .format(self._ExtIndex, self._ExtType, start >> 3, err),
+                ext_index=self._ExtIndex, offset=start >> 3,
+                ext_type=self._ExtType))
+        # a zero-length extension header would nest the following bytes into
+        # the chain without consuming anything: reject it explicitly
+        if self[0].get_val() is not None and self[0].get_val() == 0:
+            raise(GTPExtHdrErr(
+                'extension header {0} type {1} at byte {2} has invalid zero length'\
+                .format(self._ExtIndex, self._ExtType, start >> 3),
+                ext_index=self._ExtIndex, offset=start >> 3,
+                ext_type=self._ExtType))
+        # the declared length must match the total size actually consumed
+        consumed = (char._cur - start) >> 3
+        declared = 4 * self[0].get_val()
+        if consumed != declared:
+            raise(GTPExtHdrErr(
+                'extension header {0} type {1} at byte {2} declares {3} bytes '
+                'but consumed {4}'\
+                .format(self._ExtIndex, self._ExtType, start >> 3, declared,
+                        consumed),
+                ext_index=self._ExtIndex, offset=start >> 3,
+                ext_type=self._ExtType))
+
     def _set_cont_cls(self):
-        ne = 1
-        if self._env:
-            p = self.get_prev()
-            if p:
-                # get NextExt from previous GTPHdrExt
-                ne = p['NextExt'].get_val()
-            elif self._env._env:
-                # get NextExt from GTPHdrOpt
-                ne = self._env._env[9]['NextExt'].get_val()
+        ne = self._ExtType
+        if ne is None:
+            ne = 1
+            if self._env:
+                p = self.get_prev()
+                if p:
+                    # get NextExt from previous GTPHdrExt
+                    ne = p['NextExt'].get_val()
+                elif self._env._env:
+                    # get NextExt from GTPHdrOpt
+                    ne = self._env._env[9]['NextExt'].get_val()
         if ne in self._ExtCont:
             Cont = self._ExtCont[ne].clone()
             Cont.set_blauto(lambda: self._get_cont_len())
+            Cont._ExtKnown = True
+            self.replace(self[1], Cont)
+        else:
+            # Unknown extension type: keep the declared bytes verbatim, do not
+            # try to interpret them with any known structure (e.g. QFI).
+            Cont = GTPHdrExtCont('Content', rep=REPR_HEX)
+            Cont[0].set_blauto(lambda: self._get_cont_len())
+            Cont._ID = ne
+            Cont._ExtKnown = False
             self.replace(self[1], Cont)
 
 
@@ -2440,22 +2508,74 @@ class GTPHdrExt(Envelope):
 
 class GTPHdrExtList(Sequence):
     _GEN = GTPHdrExt()
-    
+
     def _from_char(self, char):
         if self.get_trans():
             return
-        self.set_val(None)
-        l = 0
+        self._content = []
+        self.set_num(None)
         p = self.get_prev()
         if not p:
             return
-        l += 1
-        self.set_num(l)
-        self[-1]._from_char(char)
-        while self[-1]['NextExt'].get_val() != 0:
-            l += 1
-            self.set_num(l)
-            self[-1]._from_char(char)
+        # The first extension type comes from the previous header: either the
+        # optional GTP header (NextExt field) or the previous extension header.
+        if isinstance(p, GTPHdrOpt):
+            ne = p[2].get_val()
+        elif isinstance(p, GTPHdrExt):
+            ne = p[2].get_val()
+        else:
+            return
+        # The extension chain is bounded by the message length declared in the
+        # GTP header, never by the amount of bytes available in the buffer:
+        # trailing user payload must never be parsed as another header level.
+        hdr = self._get_gtp_hdr()
+        if hdr is not None and hdr[7].get_val() is not None:
+            char_lb = char._len_bit
+            try:
+                # GTP length counts everything after the 8-byte mandatory header
+                declared_end = (8 + hdr[7].get_val()) << 3
+            except Exception:
+                declared_end = None
+            if declared_end is not None and declared_end < char_lb:
+                char._len_bit = declared_end
+        else:
+            char_lb = None
+        index = 0
+        try:
+            while ne != 0:
+                if char.len_bit() < 32:
+                    raise(GTPExtHdrErr(
+                        'extension header {0} type {1}: truncated, no room for '
+                        'a 4-byte header'\
+                        .format(index, ne),
+                        ext_index=index, offset=char._cur >> 3, ext_type=ne))
+                ext = self._tmpl.clone()
+                ext._env = self
+                ext._ExtType = ne
+                ext._ExtIndex = index
+                ext._ExtOffset = char._cur >> 3
+                ext._from_char(char)
+                self.append(ext)
+                ne = ext[2].get_val()
+                index += 1
+        except GTPExtHdrErr:
+            raise
+        except Exception as err:
+            raise(GTPExtHdrErr(
+                'extension header {0} type {1} at byte {2}: {3}'\
+                .format(index, ne, char._cur >> 3, err),
+                ext_index=index, offset=char._cur >> 3, ext_type=ne))
+        finally:
+            if char_lb is not None:
+                char._len_bit = char_lb
+
+    def _get_gtp_hdr(self):
+        env = self._env
+        while env is not None:
+            if isinstance(env, GTPHdr):
+                return env
+            env = env._env
+        return None
 
 
 class GTPHdrOpt(Envelope):
