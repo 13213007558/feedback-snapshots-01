@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from django import template
 from django.template.base import token_kwargs
 
-from csp.utils import build_script_tag
+from csp.utils import build_script_tag, build_style_tag, validate_style_nonce_configured
 
 if TYPE_CHECKING:
     from django.template.base import FilterExpression, NodeList, Parser, Token
@@ -50,3 +50,37 @@ class NonceScriptNode(template.Node):
         self.script_attrs.update({"nonce": nonce, "content": output})
 
         return build_script_tag(**self.script_attrs)
+
+
+@register.tag(name="style")
+def style(parser: Parser, token: Token) -> NonceStyleNode:
+    # Parse out any keyword args
+    token_args = token.split_contents()
+    kwargs = token_kwargs(token_args[1:], parser)
+
+    nodelist = parser.parse(("endstyle",))
+    parser.delete_first_token()
+
+    return NonceStyleNode(nodelist, **kwargs)
+
+
+class NonceStyleNode(template.Node):
+    def __init__(self, nodelist: NodeList, **kwargs: FilterExpression) -> None:
+        self.nodelist = nodelist
+        self.style_attrs = {}
+        for k, v in kwargs.items():
+            self.style_attrs[k] = self._get_token_value(v)
+
+    def _get_token_value(self, t: FilterExpression) -> str | None:
+        if hasattr(t, "token") and t.token:
+            return _unquote(t.token)
+        return None
+
+    def render(self, context: Context) -> str:
+        validate_style_nonce_configured()
+        output = self.nodelist.render(context).strip()
+        request = context.get("request")
+        nonce = str(getattr(request, "csp_nonce", ""))
+        self.style_attrs.update({"nonce": nonce, "content": output})
+
+        return build_style_tag(**self.style_attrs)

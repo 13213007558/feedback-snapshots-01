@@ -1,3 +1,9 @@
+from django.test.utils import override_settings
+
+import pytest
+
+from csp.constants import NONCE, SELF
+from csp.exceptions import CSPNonceError
 from csp.tests.utils import ScriptExtensionTestBase
 
 
@@ -85,3 +91,51 @@ class TestJinjaExtension(ScriptExtensionTestBase):
         expected = '<script nonce="{}">let capture_text = "<script></script>"</script>'
 
         self.assert_template_eq(*self.process_templates(tpl, expected))
+
+
+class TestJinjaStyleExtension(ScriptExtensionTestBase):
+    def test_style_tag_injects_nonce(self) -> None:
+        tpl = """
+            {% style %}
+                .hello { color: red; }
+            {% endstyle %}
+        """
+
+        expected = """<style nonce="{}">.hello {{ color: red; }}</style>"""
+
+        self.assert_template_eq(*self.process_templates(tpl, expected))
+
+    def test_style_tag_sets_attrs_correctly(self) -> None:
+        tpl = """
+            {% style id="inline" media="print" %}
+                .hello { color: red; }
+            {% endstyle %}
+            """
+        expected = '<style nonce="{}" id="inline" media="print">.hello {{ color: red; }}</style>'
+
+        self.assert_template_eq(*self.process_templates(tpl, expected))
+
+    def test_nested_style_tags_are_removed(self) -> None:
+        """Let users wrap their code in style tags for the sake of their
+        development environment"""
+        tpl = """
+            {% style %}
+                <style media="print">
+                .hello { color: red; }
+                </style>
+            {% endstyle %}"""
+
+        expected = '<style nonce="{}">.hello {{ color: red; }}</style>'
+
+        self.assert_template_eq(*self.process_templates(tpl, expected))
+
+    @override_settings(
+        CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF, NONCE]}},
+    )
+    def test_style_tag_raises_when_nonce_only_configured_for_scripts(self) -> None:
+        """A config that only allows script nonces must produce a clear diagnostic"""
+        tpl = """
+            {% style %}.hello { color: red; }{% endstyle %}"""
+
+        with pytest.raises(CSPNonceError, match="NONCE sentinel"):
+            self.render(tpl, self.make_request())

@@ -186,3 +186,74 @@ Both templates output the following with a different nonce:
 .. code-block:: html
 
 	<script nonce='123456' type="application/javascript" async=false>var hello='world';</script>
+
+
+``Style Tag``
+=============
+
+A sibling ``style`` tag is available for the few inline styles that need to be kept. It mirrors
+the ``script`` tag: any valid ``style`` element attributes (``id``, ``media``, ``title``,
+``type``) are forwarded, and content wrapped in ``<style>`` html tags is unwrapped in the rendered
+output.
+
+Django Templates
+----------------
+
+.. code-block:: jinja
+
+	{% load csp %}
+	{% style media="print" %}
+		<style>
+			.hello { color: red; }
+		</style>
+	{% endstyle %}
+
+Jinja
+-----
+
+Add ``csp.extensions.NoncedStyle`` to the TEMPLATES section of your settings file:
+
+.. code-block:: python
+
+    TEMPLATES = [
+        {
+            "BACKEND": "django.template.backends.jinja2.Jinja2",
+            "OPTIONS": {
+                "extensions": [
+                    "csp.extensions.NoncedStyle",
+                ],
+            },
+        }
+    ]
+
+.. code-block:: jinja
+
+	{% style media="print" %}
+		<style>
+			.hello { color: red; }
+		</style>
+	{% endstyle %}
+
+Both output the following:
+
+.. code-block:: html
+
+	<style nonce="123456" media="print">.hello { color: red; }</style>
+
+.. Note::
+
+   The ``style`` tag requires the ``NONCE`` sentinel in the effective style directive
+   (``style-src-elem``, falling back to ``style-src``, then ``default-src``) of
+   ``CONTENT_SECURITY_POLICY`` or ``CONTENT_SECURITY_POLICY_REPORT_ONLY``. If the configuration
+   only allows script nonces, rendering the tag raises a ``csp.exceptions.CSPNonceError``
+   explaining which directive needs the sentinel.
+
+
+Mixing Scripts and Styles in One Response
+=========================================
+
+Both the ``script`` and ``style`` tags read ``request.csp_nonce``, which the middleware generates
+lazily and memoizes on the request. Every tag rendered during a single request therefore shares
+one nonce value, and the middleware adds that same value to every directive containing the
+``NONCE`` sentinel (e.g. both ``script-src`` and ``style-src``) when it writes the CSP header.
+A fresh value is generated for each new request.

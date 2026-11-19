@@ -31,7 +31,7 @@ TEMPLATES = [
         "APP_DIRS": True,
         "OPTIONS": {
             "environment": "csp.tests.environment.environment",
-            "extensions": ["csp.extensions.NoncedScript"],
+            "extensions": ["csp.extensions.NoncedScript", "csp.extensions.NoncedStyle"],
         },
     },
     {

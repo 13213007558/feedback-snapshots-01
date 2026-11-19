@@ -36,9 +36,13 @@ class ScriptTestBase(ABC):
         bbb = tpl2.replace("\n", "").replace("  ", "")
         assert aaa == bbb, f"{aaa} != {bbb}"
 
-    def process_templates(self, tpl: str, expected: str) -> tuple[str, str]:
+    def make_request(self) -> HttpRequest:
         request = rf.get("/")
         mw.process_request(request)
+        return request
+
+    def process_templates(self, tpl: str, expected: str) -> tuple[str, str]:
+        request = self.make_request()
         nonce = getattr(request, "csp_nonce")
         assert isinstance(nonce, SimpleLazyObject)
         return (self.render(tpl, request).strip(), expected.format(nonce))

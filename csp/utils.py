@@ -9,6 +9,7 @@ from django.conf import settings
 from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
+from csp.exceptions import CSPNonceError
 
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
@@ -216,3 +217,89 @@ def build_script_tag(content: str | None = None, **kwargs: Any) -> str:
     c = _unwrap_script(content) if content and not kwargs.get("src") else ""
     attrs = ATTR_FORMAT_STR.format(**data).rstrip()
     return f"<script{attrs}>{c}</script>".strip()
+
+
+# Allow per-attribute customization of returned string template
+STYLE_ATTRS: dict[str, Callable[[str, Any], str]] = {
+    "nonce": _default_attr_mapper,
+    "id": _default_attr_mapper,
+    "media": _default_attr_mapper,
+    "title": _default_attr_mapper,
+    "type": _default_attr_mapper,
+}
+
+# Generates an interpolatable string of valid attrs eg - '{nonce}{id}...'
+STYLE_ATTR_FORMAT_STR = "".join([f"{{{a}}}" for a in STYLE_ATTRS])
+
+
+_style_tag_contents_re = re.compile(
+    r"""<style         # match the opening style tag
+            [\s|\S]*?> # minimally match attrs and spaces in opening style tag
+    ([\s|\S]+)         # greedily capture the style tag contents
+    </style>           # match the closing style tag
+""",
+    re.VERBOSE,
+)
+
+
+def _unwrap_style(text: str) -> str:
+    """Extract content defined between style tags"""
+    matches = re.search(_style_tag_contents_re, text)
+    if matches and len(matches.groups()):
+        return matches.group(1).strip()
+
+    return text
+
+
+def build_style_tag(content: str | None = None, **kwargs: Any) -> str:
+    data = {}
+    # Iterate all possible style attrs instead of kwargs to make
+    # interpolation as easy as possible below
+    for attr_name, mapper in STYLE_ATTRS.items():
+        data[attr_name] = mapper(attr_name, kwargs.get(attr_name))
+
+    c = _unwrap_style(content) if content else ""
+    attrs = STYLE_ATTR_FORMAT_STR.format(**data).rstrip()
+    return f"<style{attrs}>{c}</style>".strip()
+
+
+# Fallback chain for `<style>` elements, per the CSP spec: the first directive
+# present in this chain is the effective one for style elements.
+STYLE_ELEMENT_DIRECTIVE_CHAIN = ("style-src-elem", "style-src", "default-src")
+
+
+def style_nonce_configured() -> bool:
+    """
+    Return True if the effective style-element directive of any configured
+    policy contains the ``NONCE`` sentinel, meaning a nonced ``<style>``
+    element would be allowed by the CSP header.
+    """
+    for setting_name in ("CONTENT_SECURITY_POLICY", "CONTENT_SECURITY_POLICY_REPORT_ONLY"):
+        policy = getattr(settings, setting_name, None) or {}
+        directives = policy.get("DIRECTIVES", {}) or {}
+        for directive in STYLE_ELEMENT_DIRECTIVE_CHAIN:
+            value = directives.get(directive)
+            if value is None:
+                continue
+            if NONCE in value:
+                return True
+            # The first defined directive in the chain is the effective one;
+            # later directives in the chain are not consulted.
+            break
+    return False
+
+
+def validate_style_nonce_configured() -> None:
+    """
+    Raise a ``CSPNonceError`` if no configured policy would allow a nonced
+    ``<style>`` element, i.e. the ``NONCE`` sentinel is missing from the
+    effective style-element directive.
+    """
+    if not style_nonce_configured():
+        raise CSPNonceError(
+            "The {% style %} tag requires a style nonce, but the NONCE sentinel "
+            "(csp.constants.NONCE) is not present in the effective style directive "
+            "('style-src-elem', 'style-src', or 'default-src') of CONTENT_SECURITY_POLICY "
+            "or CONTENT_SECURITY_POLICY_REPORT_ONLY. Add NONCE to one of these directives, "
+            "or remove the {% style %} tag."
+        )
