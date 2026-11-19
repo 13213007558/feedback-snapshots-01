@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from urllib3 import HTTPResponse
 
     from cachecontrol.cache import BaseCache
+    from cachecontrol.controller import AuthorizationRedirectCallback
     from cachecontrol.heuristics import BaseHeuristic
     from cachecontrol.serialize import Serializer
 
@@ -34,6 +35,7 @@ class CacheControlAdapter(HTTPAdapter):
         serializer: Serializer | None = None,
         heuristic: BaseHeuristic | None = None,
         cacheable_methods: Collection[str] | None = None,
+        authorization_redirect: AuthorizationRedirectCallback | None = None,
         *args: Any,
         **kw: Any,
     ) -> None:
@@ -44,7 +46,10 @@ class CacheControlAdapter(HTTPAdapter):
 
         controller_factory = controller_class or CacheController
         self.controller = controller_factory(
-            self.cache, cache_etags=cache_etags, serializer=serializer
+            self.cache,
+            cache_etags=cache_etags,
+            serializer=serializer,
+            authorization_redirect=authorization_redirect,
         )
 
     def send(

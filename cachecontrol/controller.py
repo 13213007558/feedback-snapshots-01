@@ -15,7 +15,7 @@ import time
 import weakref
 from contextlib import closing
 from email.utils import parsedate_tz
-from typing import TYPE_CHECKING, Collection, Mapping
+from typing import TYPE_CHECKING, Callable, Collection, Mapping
 
 from requests.structures import CaseInsensitiveDict
 
@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 URI = re.compile(r"^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?")
 
 PERMANENT_REDIRECT_STATUSES = (301, 308)
+
+# A user supplied predicate that decides whether a redirect response points at
+# an application-defined, short-lived authorization URL (for example a
+# presigned download). Such redirects are passed through to the caller but are
+# never written to the cache as reusable entries.
+if TYPE_CHECKING:
+    AuthorizationRedirectCallback = Callable[["PreparedRequest", "HTTPResponse"], bool]
+else:
+    AuthorizationRedirectCallback = object
 
 
 def parse_uri(uri: str) -> tuple[str, str, str, str, str]:
@@ -57,11 +66,37 @@ class CacheController:
         cache_etags: bool = True,
         serializer: Serializer | None = None,
         status_codes: Collection[int] | None = None,
+        authorization_redirect: AuthorizationRedirectCallback | None = None,
     ):
         self.cache = DictCache() if cache is None else cache
         self.cache_etags = cache_etags
         self.serializer = serializer or Serializer()
         self.cacheable_status_codes = status_codes or (200, 203, 300, 301, 308)
+        self.authorization_redirect = authorization_redirect
+
+    def is_authorization_redirect(
+        self, request: PreparedRequest, response: HTTPResponse
+    ) -> bool:
+        """Return whether ``response`` is a non-cacheable authorization redirect.
+
+        Redirects explicitly marked ``Cache-Control: public`` remain cacheable
+        even when they match the application's authorization-redirect rule, so
+        the public check always takes precedence. When no
+        ``authorization_redirect`` callback is configured every redirect is
+        handled by the ordinary caching rules.
+        """
+        headers: CaseInsensitiveDict[str] = CaseInsensitiveDict(response.headers)
+        if not (300 <= int(response.status) < 400) or "location" not in headers:
+            return False
+
+        response_cc = self.parse_cache_control(headers)
+        if "public" in response_cc:
+            return False
+
+        if self.authorization_redirect is None:
+            return False
+
+        return bool(self.authorization_redirect(request, response))
 
     @classmethod
     def _urlnorm(cls, uri: str) -> str:
@@ -310,8 +345,7 @@ class CacheController:
         body: bytes | None = None,
         expires_time: int | None = None,
     ) -> None:
-        """Store the data in the cache.
-        """
+        """Store the data in the cache."""
         if expires_time is not None and expires_time <= 0:
             # Already stale on arrival
             logger.debug("Purging cached response: expires in the past")
@@ -409,6 +443,17 @@ class CacheController:
             logger.debug('Purging existing cache entry to honor "no-store"')
             self.cache.delete(cache_url)
         if no_store:
+            return
+
+        # Authorization redirects resolve a stable entry point to a short-lived
+        # authorized URL. The redirect is still returned to the online caller,
+        # but it must not be stored as a reusable (and quickly stale) cache
+        # entry. Explicitly public redirects are exempt and cached normally.
+        if self.is_authorization_redirect(request, response):
+            logger.debug("Refusing to cache authorization redirect")
+            if self.cache.get(cache_url):
+                logger.debug("Purging existing cache entry for authorization redirect")
+                self.cache.delete(cache_url)
             return
 
         # https://tools.ietf.org/html/rfc7234#section-4.1:

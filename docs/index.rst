@@ -78,6 +78,7 @@ Contents
    storage
    etags
    custom_heuristics
+   authorization_redirects
    tips
    security
 
