@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- Explicit concurrency entry point `DoubleRatchet.session()` and serialized state exports `export_model()`/`export_json()`
+- Per-instance serialization of send, receive and export operations, with clone-then-commit semantics for `encrypt_message`
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed
+- `decrypt_message` and `encrypt_message` now serialize themselves, so one instance can be shared by
+  concurrent tasks without lost updates or duplicate delivery
 
 ## [1.3.0] - 29th of January 2026
 

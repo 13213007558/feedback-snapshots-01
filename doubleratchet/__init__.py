@@ -10,7 +10,10 @@ from .diffie_hellman_ratchet import (
     DoSProtectionException as DoSProtectionException,
     DuplicateMessageException as DuplicateMessageException
 )
-from .double_ratchet import DoubleRatchet as DoubleRatchet
+from .double_ratchet import (
+    DoubleRatchet as DoubleRatchet,
+    DoubleRatchetSession as DoubleRatchetSession
+)
 from .kdf import KDF as KDF
 from .kdf_chain import KDFChain as KDFChain
 from .migrations import InconsistentSerializationException as InconsistentSerializationException

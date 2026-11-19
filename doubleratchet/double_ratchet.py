@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from collections import OrderedDict
+import contextlib
 import copy
 import itertools
 import json
-from typing import Optional, Tuple, Type, TypeVar, cast
+from types import TracebackType
+from typing import AsyncIterator, Optional, Tuple, Type, TypeVar, cast
 
 from .aead import AEAD
 from .diffie_hellman_ratchet import DiffieHellmanRatchet
@@ -16,11 +19,53 @@ from .types import EncryptedMessage, Header, JSONObject, SkippedMessageKeys
 
 
 __all__ = [
-    "DoubleRatchet"
+    "DoubleRatchet",
+    "DoubleRatchetSession"
 ]
 
 
 DoubleRatchetTypeT = TypeVar("DoubleRatchetTypeT", bound="DoubleRatchet")
+
+
+class _ReentrantLock:
+    """
+    An asyncio lock that may be re-acquired by the task that already holds it.
+
+    Reentrancy is required because the public message en-/decryption methods serialize themselves, while a
+    :class:`DoubleRatchetSession` allows grouping multiple of these calls into a single critical section.
+    """
+
+    def __init__(self) -> None:
+        self.__lock = asyncio.Lock()
+        self.__owner: Optional["asyncio.Task[object]"] = None
+        self.__depth = 0
+
+    async def acquire(self) -> None:
+        """
+        Acquire the lock, or increase the reentrancy depth if the current task already holds it.
+        """
+
+        task = asyncio.current_task()
+        if task is not None and self.__owner is task:
+            self.__depth += 1
+            return
+
+        await self.__lock.acquire()
+        self.__owner = task
+        self.__depth = 1
+
+    def release(self) -> None:
+        """
+        Decrease the reentrancy depth and release the lock once it reaches zero.
+        """
+
+        if self.__depth == 0:
+            raise RuntimeError("The operation lock is not held.")
+
+        self.__depth -= 1
+        if self.__depth == 0:
+            self.__owner = None
+            self.__lock.release()
 
 
 class DoubleRatchet(ABC):
@@ -42,6 +87,55 @@ class DoubleRatchet(ABC):
         self.__skipped_message_keys: SkippedMessageKeys
         self.__aead: Type[AEAD]
         self.__diffie_hellman_ratchet: DiffieHellmanRatchet
+
+    @property
+    def _operation_lock(self) -> _ReentrantLock:
+        """
+        Returns:
+            The per-instance operation lock, created lazily on first use.
+
+        Note:
+            Lazy creation keeps the lock available even if a subclass overrides ``__init__`` without calling
+            ``super().__init__()``. One instance is used per ratchet, so all operations on the same instance
+            share the same critical section.
+        """
+
+        lock = self.__dict__.get("_operation_lock_instance")
+        if lock is None:
+            lock = _ReentrantLock()
+            self.__dict__["_operation_lock_instance"] = lock
+
+        return cast(_ReentrantLock, lock)
+
+    @contextlib.asynccontextmanager
+    async def _operation(self) -> AsyncIterator[None]:
+        """
+        Run the enclosed block as one serialized operation on this instance.
+
+        Every send, receive and state export takes this lock, which makes concurrent use of a single
+        instance safe: one operation at a time derives keys from and commits to the ratchet state. The lock
+        is reentrant for the owning task, so operations may be grouped using :meth:`session`.
+        """
+
+        await self._operation_lock.acquire()
+        try:
+            yield
+        finally:
+            self._operation_lock.release()
+
+    def session(self) -> "DoubleRatchetSession":
+        """
+        Returns:
+            A context manager that groups multiple operations into a single serialized critical section.
+
+        Note:
+            This is the explicit concurrency entry point of :class:`DoubleRatchet`. All public operations
+            are serialized individually even without a session. Use a session when a caller needs several
+            operations (for example a receive and a subsequent state export) to happen without another task
+            interleaving.
+        """
+
+        return DoubleRatchetSession(self._operation_lock)
 
     @classmethod
     async def encrypt_initial_message(
@@ -241,6 +335,12 @@ class DoubleRatchet(ABC):
         """
         Returns:
             The internal state of this :class:`DoubleRatchet` as a pydantic model.
+
+        Note:
+            The internal state is only ever replaced at operation boundaries, after either a complete send,
+            a complete receive, or a restore. Reading this property never observes a partially applied
+            operation. When other tasks may use the instance concurrently, prefer :meth:`export_model` or
+            :meth:`export_json`, which wait for a completed operation boundary explicitly.
         """
 
         return DoubleRatchetModel(
@@ -251,6 +351,34 @@ class DoubleRatchet(ABC):
                 message_key=message_key
             ) for (ratchet_pub, index), message_key in self.__skipped_message_keys.items() ]
         )
+
+    async def export_model(self) -> DoubleRatchetModel:
+        """
+        Returns:
+            The internal state of this :class:`DoubleRatchet` as a pydantic model, captured at a completed
+            operation boundary.
+
+        Note:
+            This method waits until no operation is in progress on this instance (or joins the current
+            operation if called from the owning task inside a :meth:`session`). The returned state always
+            corresponds to a state in which all preceding sends and receives have been committed completely.
+        """
+
+        async with self._operation():
+            return self.model
+
+    async def export_json(self) -> JSONObject:
+        """
+        Returns:
+            The internal state of this :class:`DoubleRatchet` as a JSON-serializable Python object, captured
+            at a completed operation boundary.
+
+        Note:
+            See :meth:`export_model`. The same consistency guarantee applies.
+        """
+
+        async with self._operation():
+            return self.json
 
     @property
     def json(self) -> JSONObject:
@@ -393,16 +521,28 @@ class DoubleRatchet(ABC):
 
         Returns:
             The encrypted message including the header to send to the recipient.
+
+        Note:
+            This operation is serialized with all other operations on this instance. The sending chain is
+            advanced on a clone and only committed after the AEAD operation succeeded, so a failed or
+            cancelled call leaves the ratchet state untouched.
         """
 
-        message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
-        ciphertext = await self.__aead.encrypt(
-            message,
-            message_key,
-            self._build_associated_data(associated_data, header)
-        )
+        async with self._operation():
+            # Work on a clone so that a failed or cancelled encryption does not consume a message key.
+            diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
 
-        return EncryptedMessage(header=header, ciphertext=ciphertext)
+            message_key, header = await diffie_hellman_ratchet.next_encryption_key()
+            ciphertext = await self.__aead.encrypt(
+                message,
+                message_key,
+                self._build_associated_data(associated_data, header)
+            )
+
+            # Commit only after the ciphertext has been produced successfully.
+            self.__diffie_hellman_ratchet = diffie_hellman_ratchet
+
+            return EncryptedMessage(header=header, ciphertext=ciphertext)
 
     async def decrypt_message(self, message: EncryptedMessage, associated_data: bytes) -> bytes:
         """
@@ -420,6 +560,13 @@ class DoubleRatchet(ABC):
             DoSProtectionException: if a huge number of message keys were skipped that have to be calculated
                 first before decrypting the message.
             DuplicateMessageException: if this message appears to be a duplicate.
+
+        Note:
+            This operation is serialized with all other operations on this instance. Each call starts from
+            the most recently committed state, so when the same ciphertext is submitted concurrently, only
+            the first successful decryption delivers the plaintext. Subsequent calls observe the committed
+            state and raise :class:`DuplicateMessageException` (or an authentication error, depending on the
+            ratchet position) instead of re-delivering the message.
         """
 
         # Be careful to only keep changes to the internal state on decryption success. To do so, work with a
@@ -427,41 +574,87 @@ class DoubleRatchet(ABC):
         # clone on success.
         # https://signal.org/docs/specifications/doubleratchet/#decrypting-messages
 
-        diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
-        skipped_message_keys: Optional[SkippedMessageKeys] = None
-        skipped_message_key_key = (message.header.ratchet_pub, message.header.sending_chain_length)
+        async with self._operation():
+            diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
+            skipped_message_keys: Optional[SkippedMessageKeys] = None
+            skipped_message_key_key = (message.header.ratchet_pub, message.header.sending_chain_length)
 
-        # Get the message key, either from the skipped message keys or from the Diffie-Hellman ratchet clone
-        message_key: bytes
-        try:
-            message_key = self.__skipped_message_keys[skipped_message_key_key]
-        except KeyError:
-            message_key, skipped_message_keys = \
-                await diffie_hellman_ratchet.next_decryption_key(message.header)
+            # Get the message key, either from the skipped message keys or from the Diffie-Hellman ratchet
+            # clone.
+            message_key: bytes
+            try:
+                message_key = self.__skipped_message_keys[skipped_message_key_key]
+            except KeyError:
+                message_key, skipped_message_keys = \
+                    await diffie_hellman_ratchet.next_decryption_key(message.header)
 
-        # Decrypt the message (or at least attempt to do so). At this point, the internal state of this
-        # instance remains untouched.
-        plaintext = await self.__aead.decrypt(
-            message.ciphertext,
-            message_key,
-            self._build_associated_data(associated_data, message.header)
-        )
+            # Decrypt the message (or at least attempt to do so). At this point, the internal state of this
+            # instance remains untouched.
+            plaintext = await self.__aead.decrypt(
+                message.ciphertext,
+                message_key,
+                self._build_associated_data(associated_data, message.header)
+            )
 
-        # Following decryption success, apply relevant changes to the internal state.
+            # Following decryption success, apply relevant changes to the internal state.
 
-        # In case a skipped message key was used, remove it.
-        self.__skipped_message_keys.pop(skipped_message_key_key, None)
+            # In case a skipped message key was used, remove it.
+            self.__skipped_message_keys.pop(skipped_message_key_key, None)
 
-        # Store new skipped message keys and limit their number.
-        if skipped_message_keys is not None:
-            self.__skipped_message_keys.update(skipped_message_keys)
-            self.__skipped_message_keys = OrderedDict(itertools.islice(
-                self.__skipped_message_keys.items(),
-                max(len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys, 0),
-                None
-            ))
+            # Store new skipped message keys and limit their number.
+            if skipped_message_keys is not None:
+                self.__skipped_message_keys.update(skipped_message_keys)
+                self.__skipped_message_keys = OrderedDict(itertools.islice(
+                    self.__skipped_message_keys.items(),
+                    max(len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys, 0),
+                    None
+                ))
 
-        # Store the clone.
-        self.__diffie_hellman_ratchet = diffie_hellman_ratchet
+            # Store the clone.
+            self.__diffie_hellman_ratchet = diffie_hellman_ratchet
 
-        return plaintext
+            return plaintext
+
+
+class DoubleRatchetSession:
+    """
+    A context manager grouping multiple operations on a :class:`DoubleRatchet` into one serialized critical
+    section.
+
+    All operations on a :class:`DoubleRatchet` instance are serialized individually. A session additionally
+    guarantees that no other task may interleave between the operations performed inside the ``async with``
+    block. This is the explicit concurrency entry point: instead of optimistically deriving keys from a
+    shared snapshot and resolving conflicts later, the session commits one operation at a time, so two
+    operations can never both succeed from the same starting state and overwrite each other.
+
+    The lock is reentrant for the owning task: calling :meth:`DoubleRatchet.encrypt_message`,
+    :meth:`DoubleRatchet.decrypt_message`, :meth:`DoubleRatchet.export_model` or
+    :meth:`DoubleRatchet.export_json` inside a session does not deadlock. A task that is cancelled while
+    waiting for the session never observes or modifies the ratchet state.
+
+    Example:
+        ::
+
+            async with ratchet.session():
+                plaintext = await ratchet.decrypt_message(message, associated_data)
+                snapshot = await ratchet.export_json()
+    """
+
+    def __init__(self, lock: _ReentrantLock) -> None:
+        self.__lock = lock
+        self.__entered = False
+
+    async def __aenter__(self) -> "DoubleRatchetSession":
+        await self.__lock.acquire()
+        self.__entered = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType]
+    ) -> None:
+        if self.__entered:
+            self.__entered = False
+            self.__lock.release()
