@@ -62,3 +62,40 @@ entirely.
 Periodic maintenance is done by the main thread (the thread handling I/O).
 If a channel hasn't sent or received any data in a while, the channel's
 connection is closed, and the channel is destroyed.
+
+Request body buffering and ``wsgi.input`` lifetime
+--------------------------------------------------
+
+When a client sends a request body, Waitress buffers it before the WSGI
+application runs.  Small bodies are kept in memory.  Once the buffered
+data grows past the ``inbuf_overflow`` adjustment, the buffer spills over
+into an unnamed temporary file created with
+:func:`tempfile.TemporaryFile`; the file has no directory entry and is
+deleted by the operating system as soon as its file handle is closed.
+
+``environ["wsgi.input"]`` is a read handle onto that buffer.  It is valid
+only while the request is being serviced: once the task for the request
+has finished, Waitress closes the buffer.  Any reference the application
+keeps to ``wsgi.input`` beyond that point is dead, and reading it raises
+``ValueError``.  Applications that need the body later must copy the
+bytes they need while the request is being serviced.
+
+Each request gets its own buffer.  Buffers are never shared or reused
+between requests, including pipelined requests on a single connection,
+and including requests that are rejected while being parsed: a rejected
+request's buffer is closed along with the connection, and its contents
+are never handed to a later request.
+
+Two caveats about the temporary file are worth stating explicitly:
+
+- If a connection is torn down abruptly (the client disconnects in the
+  middle of an upload, or the channel is cancelled), the partially
+  filled buffer is not closed explicitly; its file handle is released
+  only when the garbage collector finalizes it.
+
+- Even when the buffer is closed promptly, Waitress does not overwrite
+  the data.  The bytes may persist in unallocated disk blocks (or in
+  swap) until the operating system reuses them.  Deployments that must
+  not let request bodies touch persistent storage should point the
+  system temporary directory at a ``tmpfs`` or encrypted volume, or
+  raise ``inbuf_overflow`` so that bodies stay in memory.
