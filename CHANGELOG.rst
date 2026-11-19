@@ -7,6 +7,16 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.1...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Add ``jwt.IssuerRegistry`` and ``jwt.IssuerConfig`` for a closed set of
+  trusted issuers. Tokens are routed by their ``iss`` claim to the matching
+  registration and verified with that registration's audience, algorithm
+  allowlist and key source. An unregistered issuer is rejected before any key
+  lookup or JWKS request, and ``IssuerRegistry.decode()`` returns a
+  ``VerifiedToken`` whose ``issuer`` is only populated after validation.
+
 Changed
 ~~~~~~~
 

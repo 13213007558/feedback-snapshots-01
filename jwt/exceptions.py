@@ -101,6 +101,22 @@ class PyJWKClientConnectionError(PyJWKClientError):
     pass
 
 
+class IssuerConfigurationError(PyJWTError):
+    """Raised when an issuer registration is incomplete or contradictory"""
+
+    pass
+
+
+class UnregisteredIssuerError(InvalidIssuerError):
+    """Raised when a token's ``iss`` claim has no registered configuration.
+
+    The token has not been verified when this is raised, and no key source
+    for the claimed issuer has been contacted.
+    """
+
+    pass
+
+
 class InvalidSubjectError(InvalidTokenError):
     """Raised when a token's ``sub`` claim is not a string or doesn't match the expected ``subject``"""
 

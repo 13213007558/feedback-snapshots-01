@@ -518,6 +518,64 @@ an error.
 requests. See :class:`~jwt.PyJWKClient` in the API reference for details on
 the caching parameters.
 
+Multiple Trusted Issuers
+------------------------
+
+An API that accepts identities from several OpenID Connect providers can
+register each trusted issuer with its own audience, algorithm allowlist and
+key source. ``IssuerRegistry`` routes a token to the registration named by its
+``iss`` claim and verifies it with that registration only:
+
+.. code-block:: python
+
+    import jwt
+
+    registry = jwt.IssuerRegistry()
+    registry.register(
+        issuer="https://idp.example.com/company",
+        audience="https://api.example.com/company",
+        algorithms=["RS256"],
+        jwks_uri="https://idp.example.com/.well-known/jwks.json",
+    )
+    registry.register(
+        issuer="https://partner.example.net/oidc",
+        audience="https://api.example.com/partner",
+        algorithms=["ES256"],
+        jwks_uri="https://partner.example.net/oidc/jwks",
+    )
+
+Pass a fixed public key with ``key=`` instead of ``jwks_uri=`` when the issuer's
+keys are pinned:
+
+.. code-block:: python
+
+    registry.register(
+        issuer="https://idp.example.com/company",
+        audience="https://api.example.com/company",
+        algorithms=["RS256"],
+        key=company_public_key,
+    )
+
+A token is never verified with another registration's audience, algorithms or
+keys. The ``iss`` claim is only used to choose a registration: if it is not
+registered, :class:`~jwt.UnregisteredIssuerError` is raised before any key
+lookup or JWKS request. If it is registered, the token is verified with that
+registration, including its issuer and audience checks, and only then is the
+issuer returned to the caller:
+
+.. code-block:: python
+
+    verified = registry.decode(token)
+    principal = verified.issuer       # configured issuer, after verification
+    claims = verified.payload         # verified claims
+    header = verified.header          # verified JOSE header
+
+``IssuerConfig`` can be constructed directly and passed to
+``IssuerRegistry.register()`` or the ``IssuerRegistry(configs)`` constructor.
+Each registration must have exactly one key source (``key``, ``jwks_uri`` or a
+pre-built ``jwks_client``) and cannot disable signature, issuer or (when an
+audience is configured) audience verification.
+
 OIDC Login Flow
 ---------------
 
