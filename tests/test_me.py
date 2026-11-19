@@ -4,7 +4,7 @@ import struct
 import tempfile
 import unittest
 
-from uefi_firmware import AutoParser
+from uefi_firmware import AutoParser, efi_compressor
 from uefi_firmware.me import (
     COMP_TYPE_HUFFMAN, COMP_TYPE_NOT_COMPRESSED, CPDManifestHeader,
     MeContainer, MeLLUT, MeManifestHeader)
@@ -109,6 +109,18 @@ class CPDManifestHeaderTest(unittest.TestCase):
         self.assertEqual(len(modules), 2)
         self.assertEqual(modules[1].compression, COMP_TYPE_HUFFMAN)
         self.assertEqual(modules[1].data, b"huffman")
+
+    def test_lzma_entry_with_padding_is_decompressed(self):
+        # A CPD entry holds a stream followed by alignment padding. The
+        # strict section checks would reject the padding; module data is
+        # decoded without them.
+        payload = b"kernel payload" * 8
+        stream = efi_compressor.LzmaCompress(payload, len(payload))
+        padded = stream + b"\xff" * (-len(stream) % 16)
+        manifest = CPDManifestHeader(make_cpd([(b"kernel", padded, 0)]))
+        self.assertTrue(manifest.process())
+        self.assertEqual(manifest.modules[0].compression, 2)
+        self.assertEqual(manifest.modules[0].decompressed, payload)
 
     def test_version_2_header(self):
         modules = self.entries(make_cpd(

@@ -4,6 +4,7 @@ extracting, and rebuilding UEFI data.
 '''
 import gzip
 import logging
+import lzma
 import os
 import struct
 import zlib
@@ -149,10 +150,55 @@ def compare(data1, data2):
 _MAX_EXTENSION_OUTPUT = 100000000
 
 
+# The extension exposes one decompressor per format. The formats are told
+# apart by identity so a stream is never decoded with the wrong algorithm and
+# reported as success.
+_EFI_DECOMPRESSOR = efi_compressor.EfiDecompress
+_TIANO_DECOMPRESSOR = efi_compressor.TianoDecompress
+_LZMA_DECOMPRESSOR = efi_compressor.LzmaDecompress
+
+_DECOMPRESSOR_NAMES = {
+    id(_EFI_DECOMPRESSOR): "efi",
+    id(_TIANO_DECOMPRESSOR): "tiano",
+    id(_LZMA_DECOMPRESSOR): "lzma",
+}
+
+# A recompression only reproduces a stream encoded by the same algorithm.
+_COMPRESSORS = {
+    id(_EFI_DECOMPRESSOR): efi_compressor.EfiCompress,
+    id(_TIANO_DECOMPRESSOR): efi_compressor.TianoCompress,
+}
+
+# Failures are ordered from the header inwards. A section reports the
+# furthest stage any algorithm reached, which says what was actually wrong
+# rather than that every algorithm was tried.
+_STAGE_RANKS = (
+    "header",
+    "decode",
+    "truncated-stream",
+    "empty-output",
+    "declared-size",
+    "trailing-bytes",
+    "budget",
+    "roundtrip",
+    "subsections",
+    "unsupported-type",
+)
+
+
+def _further_stage(first, second):
+    '''The stage of two that failed later in the conversion.'''
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return max(first, second, key=lambda stage: _STAGE_RANKS.index(stage))
+
+
 def _claimed_size(algorithm, compressed_data):
     '''The output size a compressed header claims, which bounds the work an
     efi_compressor call does whether or not it succeeds.'''
-    if algorithm is efi_compressor.LzmaDecompress:
+    if algorithm is _LZMA_DECOMPRESSOR:
         header = compressed_data[5:13]
         size = struct.unpack("<Q", header)[0] if len(header) == 8 else 0
     else:
@@ -161,31 +207,263 @@ def _claimed_size(algorithm, compressed_data):
     return size if size <= _MAX_EXTENSION_OUTPUT else 0
 
 
-def decompress(algorithms, compressed_data):
-    '''Attempt to decompress using a set of algorithms.
+def _declared_size(algorithm, compressed_data):
+    '''The output size the stream's own header claims, or None.'''
+    if algorithm is _LZMA_DECOMPRESSOR:
+        header = compressed_data[5:13]
+        if len(header) != 8:
+            return None
+        return struct.unpack("<Q", header)[0]
+    header = compressed_data[4:8]
+    if len(header) != 4:
+        return None
+    return struct.unpack("<I", header)[0]
 
-    Each attempt is charged against the parse's decompression budget.
+
+def _alignment_tail(tail):
+    '''Whether tail is only the padding that aligns a section.
+
+    Sections are 4-byte aligned, and vendors fill the alignment with either
+    0x00 or 0xFF, so up to three bytes of one fill value are not stream data.
+    '''
+    return len(tail) <= 3 and (not tail.strip(b"\x00") or
+                               not tail.strip(b"\xff"))
+
+
+def _stream_extent(algorithm, compressed_data):
+    '''Where the stream ends, and the stage it fails at if it does not.
+
+    EFI and Tiano streams carry their compressed body size. An LZMA stream
+    ends at its end marker; the extension does not report where that was, so
+    the standard library decoder is used to find the first unused byte.
+
+    Return:
+        pair (int, str): The stream length and None, or 0 and a stage.
+    '''
+    if algorithm is _LZMA_DECOMPRESSOR:
+        if len(compressed_data) < 13:
+            return (0, "header")
+        try:
+            decoder = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
+            decoder.decompress(compressed_data)
+        except (lzma.LZMAError, EOFError):
+            return (0, "decode")
+        if not decoder.eof:
+            # The end marker was not reached, so the stream ended before it
+            # produced the size its header claims.
+            return (0, "truncated-stream")
+        return (len(compressed_data) - len(decoder.unused_data), None)
+
+    if len(compressed_data) < 8:
+        return (0, "header")
+    compressed_size = struct.unpack("<I", compressed_data[:4])[0]
+    end = compressed_size + 8
+    if end > len(compressed_data):
+        return (0, "truncated-stream")
+    return (end, None)
+
+
+def _stream_layout(algorithm, compressed_data):
+    '''Check the stream header and the bytes after the stream.
+
+    Return:
+        pair (int, str): The trailing byte count and None, or 0 and a stage.
+    '''
+    end, stage = _stream_extent(algorithm, compressed_data)
+    if stage is not None:
+        return (0, stage)
+    tail = compressed_data[end:]
+    if tail and not _alignment_tail(tail):
+        return (0, "trailing-bytes")
+    return (len(tail), None)
+
+
+def _roundtrips(algorithm, compressed_data, output):
+    '''Whether compressing output with the same algorithm gives the stream.
+
+    EFI and Tiano share a header layout and are both Huffman decoders, so the
+    other decoder often returns bytes for a stream it did not encode. Those
+    bytes rarely recompress to the original stream; the decoder that made
+    them does. LZMA streams are verified by their end marker and declared
+    size instead, since the bundled encoder's dictionary settings can differ
+    from the image's.
+    '''
+    compress = _COMPRESSORS.get(id(algorithm))
+    if compress is None:
+        return True
+    try:
+        rebuilt = compress(output, len(output))
+    except Exception:
+        return False
+    end, _ = _stream_extent(algorithm, compressed_data)
+    return rebuilt == compressed_data[:end]
+
+
+def _decode_attempt(algorithm, compressed_data, declared_size, strict):
+    '''Decode with one algorithm, reporting the first failing stage.
+
+    In strict mode the stream layout, the declared sizes and a recompression
+    of the result must all agree. Otherwise only the decode itself is
+    checked, as for a module whose data may include padding.
+
+    Return:
+        tuple (int, str, binary, int): Trailing bytes, failure stage, output
+        and the stream's declared size. Exactly one of stage and output is
+        set.
+    '''
+    if strict:
+        trailing, stage = _stream_layout(algorithm, compressed_data)
+        if stage is not None:
+            return (trailing, stage, None, None)
+    else:
+        trailing = 0
+
+    claim = _claimed_size(algorithm, compressed_data)
+    if not reserve_decompression(claim):
+        # The claimed output does not fit in what remains of the parse's
+        # decompression budget.
+        return (trailing, "budget", None, None)
+
+    try:
+        output = algorithm(compressed_data, len(compressed_data))
+    except Exception:
+        return (trailing, "decode", None, None)
+    if output is None:
+        return (trailing, "decode", None, None)
+
+    stream_size = _declared_size(algorithm, compressed_data)
+    if not output:
+        # An empty stream is only meaningful when the container, and the
+        # stream's own header, declare an empty result.
+        if declared_size not in (None, 0) or stream_size not in (None, 0):
+            return (trailing, "empty-output", None, None)
+        return (trailing, None, b"", stream_size)
+
+    if not strict:
+        return (trailing, None, output, stream_size)
+
+    if stream_size is not None and stream_size != len(output):
+        return (trailing, "declared-size", None, None)
+    if declared_size is not None and declared_size != len(output):
+        return (trailing, "declared-size", None, None)
+    if not _roundtrips(algorithm, compressed_data, output):
+        return (trailing, "roundtrip", None, None)
+    return (trailing, None, output, stream_size)
+
+
+def _sections_layout(data):
+    '''Whether data is a run of sections, without parsing them.
+
+    Used to choose between decoder candidates whose round-trip checks both
+    pass: EFI and Tiano encoders can emit each other's bytes for some very
+    short inputs, and only one result usually holds the section the caller
+    meant. Bytes too few for a header, or zero padding, may end the run.
+    '''
+    if not data:
+        return False
+    view = memoryview(data)
+    offset = 0
+    while offset < len(data):
+        if offset % 4:
+            offset += 4 - (offset % 4)
+        remaining = len(data) - offset
+        if remaining < 4:
+            return not data[offset:].strip(b"\x00")
+        size = int.from_bytes(view[offset:offset + 3], "little")
+        section_type = data[offset + 3]
+        header_size = 4
+        if size == 0xFFFFFF:
+            if remaining < 8:
+                return False
+            size = int.from_bytes(view[offset + 4:offset + 8], "little")
+            header_size = 8
+        if size < header_size or size > remaining or section_type == 0:
+            return False
+        offset += size
+    return True
+
+
+def decode_stream(algorithms, compressed_data, declared_size=None,
+                  validate=None, strict=True):
+    '''Decode a stream, choosing the algorithm that produced it.
+
+    A successful call does not mean the algorithm matches the stream: EFI and
+    Tiano share a header layout, and the other decoder can return bytes that
+    are not the compressed ones. Candidates must pass the stream layout, the
+    declared sizes and, where a compressor is bundled, a recompression of the
+    result. When more than one candidate remains, validate chooses between
+    them; without it, the first is used.
 
     Args:
         algorithms (list): A set of decompression methods.
         compressed_data (binary): A compressed data stream.
+        declared_size (Optional[int]): The size the container declares.
+        validate (Optional[callable]): Returns True for a preferred output.
+        strict (Optional[bool]): Require the stream layout, declared sizes
+            and a recompression to agree. Off for data that may be padded.
 
     Return:
-        pair (int, binary): Return the algorithm index, and decompressed stream.
+        tuple (int, binary, dict): Algorithm index, output and decode details,
+        or (None, None, details) when every algorithm failed.
     '''
+    candidates = []
+    stage = None
+    details = {
+        "declared_size": declared_size,
+        "trailing_bytes": 0,
+        "decoder": None,
+        "decoded_size": None,
+    }
     for i, algorithm in enumerate(algorithms):
-        if not reserve_decompression(
-                _claimed_size(algorithm, compressed_data)):
-            return None
-        try:
-            data = algorithm(compressed_data, len(compressed_data))
-            if data:
-                return (i, data)
-            else:
-                raise Exception
-        except Exception:
+        trailing, failure, output, stream_size = _decode_attempt(
+            algorithm, compressed_data, declared_size, strict)
+        if failure is not None:
+            stage = _further_stage(stage, failure)
             continue
-    return None
+        candidates.append((i, algorithm, output, stream_size, trailing))
+
+    if not candidates:
+        details["failure_stage"] = stage
+        return (None, None, details)
+
+    preferred = candidates[0]
+    if len(candidates) > 1 and validate is not None:
+        for candidate in candidates:
+            if validate(candidate[2]):
+                preferred = candidate
+                break
+    i, algorithm, output, stream_size, trailing = preferred
+    details.update({
+        "decoder": _DECOMPRESSOR_NAMES.get(id(algorithm)),
+        "decoded_size": len(output),
+        "declared_size": declared_size if declared_size is not None
+                         else stream_size,
+        "trailing_bytes": trailing,
+    })
+    return (i, output, details)
+
+
+def decompress(algorithms, compressed_data, declared_size=None):
+    '''Attempt to decompress using a set of algorithms.
+
+    Each attempt is charged against the parse's decompression budget. This
+    does not require the layout checks decode_stream makes, since a caller
+    such as an ME module may hand over data with padding after the stream.
+
+    Args:
+        algorithms (list): A set of decompression methods.
+        compressed_data (binary): A compressed data stream.
+        declared_size (Optional[int]): The size the container declares.
+
+    Return:
+        pair (int, binary): Return the algorithm index and decompressed
+        stream.
+    '''
+    index, output, _ = decode_stream(
+        algorithms, compressed_data, declared_size, strict=False)
+    if index is None:
+        return None
+    return (index, output)
 
 
 def find_volumes(data, process=True):
@@ -585,18 +863,45 @@ class CompressedSection(EfiSection):
         # The bytes before an Intel type 2 stream, and the section as parsed.
         self.prefix = b""
         self._body = bytes(data)
+        # The result of the decode: which decoder produced the data, and the
+        # stage a rejected stream failed at. These are kept after parsing so
+        # a caller can tell a format that was not compressed from a stream
+        # that could not be decoded.
+        self.decoder = None
+        self.declared_size = None
+        self.decode_size = None
+        self.trailing_bytes = 0
+        self.failure_stage = None
         self.attrs = {
             "decompressed_size": self.decompressed_size, "type": self.type}
+
+    def _decode(self, data, algorithms, validate=None):
+        '''Decode data, recording the decoder and the failure stage.
+
+        Return:
+            pair (int, binary) or None: As decompress().
+        '''
+        index, output, details = decode_stream(
+            algorithms, data, declared_size=self.decompressed_size,
+            validate=validate)
+        self.decoder = details["decoder"]
+        self.declared_size = details["declared_size"]
+        self.decode_size = details["decoded_size"]
+        self.trailing_bytes = details["trailing_bytes"]
+        self.failure_stage = details.get("failure_stage")
+        if index is None:
+            return None
+        return (index, output)
 
     @limit_nesting(False)
     def process(self):
         dlog(self, sguid(self.guid))
-        def bf_decompress(data):
-            return decompress([
+        def bf_decompress(data, validate=None):
+            return self._decode(data, [
                 efi_compressor.LzmaDecompress,
                 efi_compressor.TianoDecompress,
                 efi_compressor.EfiDecompress,
-            ], data)
+            ], validate)
 
         if self.type == 0x00:
             '''No compression.'''
@@ -606,18 +911,28 @@ class CompressedSection(EfiSection):
         if self.type == 0x01:
             # Tiano or Efi compression, unfortunately these are identified by
             # the same byte
-            results = decompress([
-                efi_compressor.EfiDecompress,
-                efi_compressor.TianoDecompress,
-            ], self.compressed_data)
+            results = self._decode(
+                self.compressed_data, [
+                    efi_compressor.EfiDecompress,
+                    efi_compressor.TianoDecompress,
+                ], _sections_layout)
         if self.type == 0x02:
-            results = bf_decompress(self.compressed_data)
+            results = bf_decompress(self.compressed_data, _sections_layout)
             if results is None and len(self.compressed_data) > 4:
                 # The type=2 is not spec-defined, may have an additional int
                 # (Intel).
-                results = bf_decompress(self.compressed_data[4:])
+                # The 4-byte skip is a vendor compatibility guess. If it
+                # does not work either, report what the section's own bytes
+                # failed at, not how far the guess happened to get.
+                staged = self.failure_stage
+                results = bf_decompress(
+                    self.compressed_data[4:], _sections_layout)
                 if results is not None:
                     self.prefix = self.compressed_data[:4]
+                else:
+                    self.failure_stage = staged
+        elif self.type not in (0x00, 0x01):
+            self.failure_stage = "unsupported-type"
 
         if self.type > 0x00:
             if results is not None:
@@ -625,10 +940,12 @@ class CompressedSection(EfiSection):
                 self.data = results[1]
             else:
                 print_error(
-                    "Cannot EFI decompress GUID (%s), type (%d), size (%d)" % (
+                    "Cannot EFI decompress GUID (%s), type (%d), size (%d), "
+                    "failed at %s" % (
                         sguid(self.guid),
                         self.type,
-                        self.decompressed_size
+                        self.decompressed_size,
+                        self.failure_stage,
                     )
                 )
                 raw = AutoRawObject(self.compressed_data)
@@ -640,8 +957,9 @@ class CompressedSection(EfiSection):
             return True
 
         status = self.process_subsections()
+        if not status:
+            self.failure_stage = "subsections"
         return status
-        pass
 
     def build(self, generate_checksum=False, debug=False):
         if self.data is None:
@@ -754,6 +1072,14 @@ class GuidDefinedSection(EfiSection):
         self.attrs = {"attrs": self.attr_mask}
         self.subsections = []
         self._body = bytes(data)
+        self.subtype = 0
+        # Which decoder produced the body, what it claimed, and where a
+        # rejected body failed.
+        self.decoder = None
+        self.declared_size = None
+        self.decode_size = None
+        self.trailing_bytes = 0
+        self.failure_stage = None
 
     @property
     def objects(self):
@@ -771,16 +1097,21 @@ class GuidDefinedSection(EfiSection):
             return False
 
         def decompress_guid(alg):
-            # Try to decompress the body of the section.
-            results = decompress([alg], self.preamble + self.data)
-            if results is None:
-                # Attempt to recover by skipping the preamble.
-                results = decompress([alg], self.data)
-                if results is None:
-                    return False
-            self.subtype = results[0] + 1
-            self.data = results[1]
-            return self.process_subsections()
+            # The stream may start in the preamble, or after it. A rejected
+            # body is left as the stream bytes, as it was parsed.
+            stream = self.data
+            for body in (self.preamble + stream, stream):
+                index, output, details = decode_stream([alg], body)
+                self.decoder = details["decoder"]
+                self.declared_size = details["declared_size"]
+                self.decode_size = details["decoded_size"]
+                self.trailing_bytes = details["trailing_bytes"]
+                self.failure_stage = details.get("failure_stage")
+                if index is not None:
+                    self.subtype = index + 1
+                    self.data = output
+                    return self.process_subsections()
+            return False
 
         status = True
         if sguid(self.guid) in [FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED"], FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED_HP"]]:
@@ -791,23 +1122,32 @@ class GuidDefinedSection(EfiSection):
             body = self.preamble + self.data
             if len(body) < 0x100:
                 dlog(self, sguid(self.guid), 'error, invalid AMD zlib section header size')
+                self.failure_stage = "header"
                 return False
             header = EfiAmdZlibSectionHeader.from_buffer_copy(body[:0x100])
             compressed_data = body[0x100:]
             if len(compressed_data) != header.CompressedSize:
                 dlog(self, sguid(self.guid), 'error, invalid AMD zlib section header')
+                self.failure_stage = "trailing-bytes"
                 return False
             try:
                 data = zlib_decompress(compressed_data)
                 if data:
                     self.subtype = 0
+                    self.decoder = "zlib"
+                    # The header holds the compressed size, not the
+                    # uncompressed one, so there is no declared result size.
+                    self.declared_size = None
+                    self.decode_size = len(data)
                     self.data = data
                     self.process_subsections()
                 else:
                     status = False
+                    self.failure_stage = "empty-output"
                     dlog(self, sguid(self.guid), 'error, empty zlib decompress')
             except zlib.error as err:
                 status = False
+                self.failure_stage = "decode"
                 dlog(self, sguid(self.guid), 'zlib error: %s' % str(err))
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["GZIP_COMPRESSED_QC"]:
             try:
@@ -815,16 +1155,21 @@ class GuidDefinedSection(EfiSection):
                     self.preamble + self.data, wbits=16 + zlib.MAX_WBITS)
                 if data:
                     self.subtype = 0
+                    self.decoder = "gzip"
+                    self.decode_size = len(data)
                     self.data = data
                     self.process_subsections()
                 else:
                     status = False
+                    self.failure_stage = "empty-output"
                     dlog(self, sguid(self.guid), 'error, empty gzip decompress')
             except Exception as err:
                 status = False
+                self.failure_stage = "decode"
                 dlog(self, sguid(self.guid), 'gzip error: %s' % str(err))
         # Todo: check for processing required attribute
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["STATIC_GUID"]:
+            self.decoder = "none"
             status = self.process_subsections()
             if len(self.subsections) == 0:
                 # There were no subsections parsed, treat as a firmware volume
@@ -835,12 +1180,16 @@ class GuidDefinedSection(EfiSection):
                     self.subsections.append(raw)
             pass
         elif sguid(self.guid) == FIRMWARE_GUIDED_GUIDS["FIRMWARE_VOLUME"]:
+            self.decoder = "none"
             status = parse_volume()
         else:
             # Undefined GUIDed-Section GUID, treat as a FV, don't require
             # status
+            self.decoder = "none"
             parse_volume()
         if not status:
+            if self.failure_stage is None:
+                self.failure_stage = "subsections"
             dlog(self, sguid(self.guid), 'Could not parse GUID object')
         return status
 
