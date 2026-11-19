@@ -145,6 +145,9 @@ dirty_workers = 2          # Number of dirty workers
 dirty_timeout = 300        # Task timeout in seconds
 dirty_threads = 1          # Threads per worker
 dirty_graceful_timeout = 30  # Shutdown timeout
+dirty_capabilities = {     # Optional per-app public action overrides
+    "myapp.ml:MLApp": ["predict", "embed"],
+}
 ```
 
 Or via command line:
@@ -166,6 +169,7 @@ gunicorn myapp:app \
 | `dirty_timeout` | `300` | Task timeout in seconds |
 | `dirty_threads` | `1` | Threads per dirty worker |
 | `dirty_graceful_timeout` | `30` | Graceful shutdown timeout |
+| `dirty_capabilities` | `{}` | Per-app overrides of the public actions callers may invoke |
 
 ## Per-App Worker Allocation
 
@@ -356,9 +360,53 @@ class MLApp(DirtyApp):
 | Method/Attribute | Description |
 |------------------|-------------|
 | `workers` | Class attribute. Number of workers to load this app (`None` = all workers). |
+| `capabilities` | Class attribute. Actions callers may invoke (`None` = every public action). |
 | `init()` | Called once when dirty worker starts, after instantiation. Load resources here. |
 | `__call__(action, *args, **kwargs)` | Handle requests from HTTP workers. |
 | `close()` | Called when dirty worker shuts down. Cleanup resources. |
+
+### Public Actions
+
+A dirty app can restrict which of its actions callers may invoke by
+declaring `capabilities` on the class:
+
+```python
+from gunicorn.dirty import DirtyApp
+
+class MLApp(DirtyApp):
+    # Only these actions are reachable from an HTTP worker.
+    capabilities = {"predict", "embed"}
+
+    def predict(self, data):
+        ...
+
+    def embed(self, text):
+        ...
+
+    def retrain(self):
+        ...
+```
+
+A request for a `retrain` is answered with `DirtyCapabilityError` by the
+dirty arbiter before a worker is selected, so the call never occupies a
+worker queue. With no declaration (`None`) the app keeps the historical
+behaviour of exposing every public action; an empty set exposes nothing.
+
+The `dirty_capabilities` setting overrides the class attribute per app, so
+a configuration reload can change the public surface:
+
+```python
+dirty_capabilities = {
+    "myapp.ml:MLApp": ["embed"],  # withdraw "predict" for now
+}
+```
+
+On `SIGHUP` the main arbiter rebuilds the policy from the reloaded
+configuration and sends it to the dirty arbiter, which replaces its
+snapshot in one step. A request already being processed finishes normally;
+requests received after the swap are checked against the new set, and a
+withdrawn action is refused before it reaches any worker. If the new
+snapshot cannot be delivered, the old one stays in place.
 
 ### Initialization Sequence
 
@@ -1154,6 +1202,7 @@ from gunicorn.dirty.errors import (
     DirtyAppError,
     DirtyAppNotFoundError,
     DirtyNoWorkersAvailableError,
+    DirtyCapabilityError,
 )
 
 try:
@@ -1167,6 +1216,9 @@ except DirtyAppNotFoundError:
 except DirtyNoWorkersAvailableError as e:
     # No workers have this app (all crashed or app limited to 0 workers)
     print(f"No workers for app: {e.app_path}")
+except DirtyCapabilityError as e:
+    # The app does not expose this action: it never reached a worker
+    print(f"Action {e.action} is not public on {e.app_path}")
 except DirtyAppError as e:
     # Error during app execution
     print(f"App error: {e.message}, traceback: {e.traceback}")

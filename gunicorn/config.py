@@ -418,6 +418,45 @@ def validate_dict(val):
     return val
 
 
+def validate_dirty_capabilities(val):
+    """Validate the per-app public action overrides.
+
+    Maps ``"module:Class"`` to an iterable of action names. ``None`` or a
+    ``"*"`` entry means the app keeps its whole public surface.
+    """
+    val = validate_dict(val)
+    result = {}
+    for app_path, capabilities in val.items():
+        if not isinstance(app_path, str):
+            raise TypeError(
+                f"dirty_capabilities keys must be strings: {app_path!r}"
+            )
+        if capabilities is None:
+            result[app_path] = None
+            continue
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        try:
+            entries = list(capabilities)
+        except TypeError:
+            raise TypeError(
+                f"dirty_capabilities[{app_path!r}] must be an iterable "
+                f"of action names"
+            ) from None
+        actions = []
+        for action in entries:
+            if not isinstance(action, str):
+                raise TypeError(
+                    f"dirty_capabilities[{app_path!r}] action names must "
+                    f"be strings, got {type(action).__name__}"
+                )
+            action = action.strip()
+            if action:
+                actions.append(action)
+        result[app_path] = actions
+    return result
+
+
 def validate_pos_int(val):
     if not isinstance(val, int):
         val = int(val, 0)
@@ -3138,6 +3177,40 @@ class DirtyApps(Setting):
 
         .. versionchanged:: 25.1.0
            Added per-app worker allocation via ``:N`` format suffix.
+        """
+
+
+class DirtyCapabilities(Setting):
+    name = "dirty_capabilities"
+    section = "Dirty Arbiters"
+    validator = validate_dirty_capabilities
+    default = {}
+    desc = """\
+        Public action overrides for dirty apps.
+
+        Maps an app import path to the action names callers may invoke on
+        it. A dirty app can declare the same thing with the ``capabilities``
+        class attribute::
+
+            class MLApp(DirtyApp):
+                capabilities = {"predict", "embed"}
+
+        The mapping here takes precedence over the class attribute, so a
+        reload can withdraw an action without rebuilding the app::
+
+            dirty_capabilities = {
+                "myapp.ml:MLApp": ["embed"],
+            }
+
+        An app whose declaration is ``None`` (the default) keeps its whole
+        public surface. An empty list exposes nothing. ``"*"`` means the
+        same as ``None``.
+
+        The dirty arbiter checks a request against this declaration before
+        it selects a worker, so a request for a withdrawn action never
+        reaches the worker pool.
+
+        .. versionadded:: 27.1.0
         """
 
 

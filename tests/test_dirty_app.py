@@ -345,3 +345,46 @@ class TestGetAppWorkersAttribute:
         with pytest.raises(DirtyAppError) as exc_info:
             get_app_workers_attribute("invalid.format.no.colon")
         assert "Invalid import path format" in str(exc_info.value)
+
+
+class TestGetAppCapabilitiesAttribute:
+    """Tests for get_app_capabilities_attribute function."""
+
+    def test_get_capabilities_none_for_base_class(self):
+        """Base DirtyApp returns capabilities=None."""
+        from gunicorn.dirty.app import get_app_capabilities_attribute
+
+        assert get_app_capabilities_attribute("gunicorn.dirty.app:DirtyApp") is None
+
+    def test_get_capabilities_from_class_attribute(self):
+        """App with a declared set returns that set."""
+        from gunicorn.dirty.app import get_app_capabilities_attribute
+
+        capabilities = get_app_capabilities_attribute(
+            "tests.support_dirty_app:RestrictedDirtyApp"
+        )
+        assert set(capabilities) == {"compute", "fast_action"}
+
+    def test_get_capabilities_none_for_inherited(self):
+        """App without an explicit declaration returns None."""
+        from gunicorn.dirty.app import get_app_capabilities_attribute
+
+        assert get_app_capabilities_attribute(
+            "tests.support_dirty_app:TestDirtyApp"
+        ) is None
+
+    def test_get_capabilities_not_found_module(self):
+        """Non-existent module raises DirtyAppNotFoundError."""
+        from gunicorn.dirty.app import get_app_capabilities_attribute
+        from gunicorn.dirty.errors import DirtyAppNotFoundError
+
+        with pytest.raises(DirtyAppNotFoundError):
+            get_app_capabilities_attribute("nonexistent.module:App")
+
+    def test_get_capabilities_invalid_format(self):
+        """Invalid format raises DirtyAppError."""
+        from gunicorn.dirty.app import get_app_capabilities_attribute
+        from gunicorn.dirty.errors import DirtyAppError
+
+        with pytest.raises(DirtyAppError):
+            get_app_capabilities_attribute("invalid.format.no.colon")

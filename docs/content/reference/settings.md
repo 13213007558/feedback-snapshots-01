@@ -319,6 +319,40 @@ that are expensive to initialize.
 !!! info "Changed in 25.1.0"
     Added per-app worker allocation via ``:N`` format suffix.
 
+### `dirty_capabilities`
+
+**Default:** `{}`
+
+Public action overrides for dirty apps.
+
+Maps an app import path to the action names callers may invoke on
+it. A dirty app can declare the same thing with the `capabilities`
+class attribute:
+
+```python
+class MLApp(DirtyApp):
+    capabilities = {"predict", "embed"}
+```
+
+The mapping here takes precedence over the class attribute, so a
+reload can withdraw an action without rebuilding the app:
+
+```python
+dirty_capabilities = {
+    "myapp.ml:MLApp": ["embed"],
+}
+```
+
+An app whose declaration is `None` (the default) keeps its whole
+public surface. An empty list exposes nothing. `"*"` means the
+same as `None`.
+
+The dirty arbiter checks a request against this declaration before
+it selects a worker, so a request for a withdrawn action never
+reaches the worker pool.
+
+!!! info "Added in 27.1.0"
+
 ### `dirty_workers`
 
 **Command line:** `--dirty-workers INT`

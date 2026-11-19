@@ -20,7 +20,9 @@ import time
 from gunicorn import util
 
 from .app import get_app_workers_attribute, parse_dirty_app_spec
+from .capabilities import CapabilityPolicy, build_capability_policy
 from .errors import (
+    DirtyCapabilityError,
     DirtyError,
     DirtyNoWorkersAvailableError,
     DirtyTimeoutError,
@@ -118,6 +120,11 @@ class DirtyArbiter:
 
         # Parse app specs on init
         self._parse_app_specs()
+
+        # Capability policy used for the pre-dispatch authorization check.
+        # It is replaced as one object on reload, so a request either sees
+        # the old snapshot or the new one, never a half-applied mix.
+        self.capability_policy = build_capability_policy(self.cfg, self.log)
 
     def _parse_app_specs(self):
         """
@@ -433,6 +440,10 @@ class DirtyArbiter:
                 # Handle worker management (add/remove workers)
                 elif msg_type == DirtyProtocol.MSG_TYPE_MANAGE:
                     await self.handle_manage_request(message, writer)
+                # Replace the capability policy (sent by the main arbiter
+                # on reload)
+                elif msg_type == DirtyProtocol.MSG_TYPE_POLICY:
+                    await self.handle_policy_request(message, writer)
                 else:
                     # Route request to a dirty worker - pass writer for streaming
                     await self.route_request(message, writer)
@@ -461,6 +472,19 @@ class DirtyArbiter:
         """
         request_id = request.get("id", "unknown")
         app_path = request.get("app_path")
+
+        # Authorize before any worker is selected or a request is queued.
+        # A withdrawn or never-declared action is rejected here, so it never
+        # reaches a worker and does not occupy its queue.
+        policy = self.capability_policy
+        action = request.get("action")
+        if policy is not None and not policy.allows(app_path, action):
+            response = make_error_response(
+                request_id,
+                DirtyCapabilityError(app_path, action)
+            )
+            await DirtyProtocol.write_message_async(client_writer, response)
+            return
 
         # Find an available worker (filtered by app if specified)
         worker_pid = await self._get_available_worker(app_path)
@@ -912,6 +936,58 @@ class DirtyArbiter:
             response = make_error_response(request_id, DirtyError(str(e)))
             await DirtyProtocol.write_message_async(client_writer, response)
 
+    async def handle_policy_request(self, message, client_writer):
+        """
+        Replace the capability policy from a main-arbiter snapshot.
+
+        The snapshot is swapped with a single assignment. Requests that
+        already passed the check keep running on their worker; requests
+        handled afterwards are checked against the new snapshot, so a
+        withdrawn action is refused before it is dispatched anywhere.
+
+        Args:
+            message: Policy message with an ``apps`` mapping
+            client_writer: StreamWriter to send the response to
+        """
+        request_id = message.get("id", "unknown")
+        apps = message.get("apps", {})
+
+        try:
+            if not isinstance(apps, dict):
+                raise DirtyError("Capability policy must be a mapping")
+            old_policy = self.capability_policy
+            policy = CapabilityPolicy(apps)
+            self.capability_policy = policy
+
+            result = {
+                "success": True,
+                "apps": len(policy),
+                "previous_apps": len(old_policy) if old_policy else 0,
+            }
+        except Exception as e:
+            self.log.error("Capability policy update error: %s", e)
+            response = make_error_response(request_id, DirtyError(str(e)))
+            await DirtyProtocol.write_message_async(client_writer, response)
+            return
+
+        # Log withdrawals so an operator can see a reload take effect.
+        if old_policy is not None:
+            for app_path in policy.to_dict():
+                previous = old_policy.capabilities_for(app_path)
+                current = policy.capabilities_for(app_path)
+                if previous is None or current is None:
+                    continue
+                withdrawn = previous - current
+                if withdrawn:
+                    self.log.info(
+                        "Capabilities withdrawn for %s: %s",
+                        app_path, ", ".join(sorted(withdrawn))
+                    )
+
+        self.log.info("Capability policy updated (%d apps)", result["apps"])
+        response = make_response(request_id, result)
+        await DirtyProtocol.write_message_async(client_writer, response)
+
     async def manage_workers(self):
         """Maintain the number of dirty workers."""
         if not self.alive:
@@ -1098,6 +1174,11 @@ class DirtyArbiter:
     async def reload(self):
         """Reload workers (SIGHUP handling)."""
         self.log.info("Reloading dirty workers")
+
+        # The capability policy is replaced by the snapshot the main arbiter
+        # pushes after it has reloaded its configuration. Rebuilding it here
+        # from this process's forked copy could race that snapshot and put
+        # the old policy back.
 
         # Spawn new workers
         for _ in range(self.cfg.dirty_workers):

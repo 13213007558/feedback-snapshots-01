@@ -95,6 +95,27 @@ class SlowDirtyApp(DirtyApp):
         self.closed = True
 
 
+class RestrictedDirtyApp(DirtyApp):
+    """A dirty app that only exposes the actions it declares."""
+
+    capabilities = {"compute", "fast_action"}
+
+    def init(self):
+        pass
+
+    def compute(self, a, b):
+        return a + b
+
+    def fast_action(self):
+        return {"fast": True}
+
+    def secret_action(self):
+        return {"secret": True}
+
+    def close(self):
+        pass
+
+
 class HeavyModelApp(DirtyApp):
     """A dirty app that simulates a heavy model requiring limited workers.
 

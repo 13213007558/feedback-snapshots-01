@@ -24,6 +24,7 @@ from .errors import (
     DirtyWorkerError,
     DirtyAppError,
     DirtyAppNotFoundError,
+    DirtyCapabilityError,
     DirtyProtocolError,
 )
 
@@ -59,6 +60,7 @@ __all__ = [
     "DirtyWorkerError",
     "DirtyAppError",
     "DirtyAppNotFoundError",
+    "DirtyCapabilityError",
     "DirtyProtocolError",
     # App base class
     "DirtyApp",

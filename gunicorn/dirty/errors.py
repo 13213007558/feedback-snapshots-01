@@ -47,6 +47,7 @@ class DirtyError(Exception):
             "DirtyAppError": DirtyAppError,
             "DirtyAppNotFoundError": DirtyAppNotFoundError,
             "DirtyNoWorkersAvailableError": DirtyNoWorkersAvailableError,
+            "DirtyCapabilityError": DirtyCapabilityError,
             "DirtyProtocolError": DirtyProtocolError,
         }
         error_type = data.get("error_type", "DirtyError")
@@ -73,6 +74,9 @@ class DirtyError(Exception):
             error.traceback = error.details.get("traceback")
         elif error_class == DirtyNoWorkersAvailableError:
             error.app_path = error.details.get("app_path")
+        elif error_class == DirtyCapabilityError:
+            error.app_path = error.details.get("app_path")
+            error.action = error.details.get("action")
 
         return error
 
@@ -165,6 +169,36 @@ class DirtyNoWorkersAvailableError(DirtyError):
             message = f"No workers available for app: {app_path}"
         super().__init__(message, details={"app_path": app_path})
         self.app_path = app_path
+
+
+class DirtyCapabilityError(DirtyError):
+    """
+    Raised when a caller asks for an action an app does not expose.
+
+    The dirty arbiter answers this before queueing the request, so a
+    withdrawn or never-declared action never reaches a worker.
+
+    Example::
+
+        from gunicorn.dirty import get_dirty_client
+        from gunicorn.dirty.errors import DirtyCapabilityError
+
+        try:
+            client.execute("myapp.ml:MLApp", "retrain")
+        except DirtyCapabilityError as e:
+            # The app only exposes the actions it declared.
+            raise PermissionError(e.action)
+    """
+
+    def __init__(self, app_path, action, message=None):
+        if message is None:
+            message = (
+                f"Action {action!r} is not exposed by dirty app {app_path}"
+            )
+        details = {"app_path": app_path, "action": action}
+        super().__init__(message, details=details)
+        self.app_path = app_path
+        self.action = action
 
 
 class DirtyProtocolError(DirtyError):

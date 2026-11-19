@@ -588,6 +588,12 @@ class Arbiter:
         # manage workers - this will kill old workers beyond num_workers
         self.manage_workers()
 
+        # The configuration has been reloaded, so the public actions of the
+        # dirty apps may have changed. Push the new snapshot now instead of
+        # waiting for the old HTTP workers to exit: requests arriving on the
+        # old workers must already see the reloaded permissions.
+        self.sync_dirty_capabilities()
+
         # wait for old workers to terminate to prevent double SIGTERM
         deadline = time.monotonic() + self.cfg.graceful_timeout
         while time.monotonic() < deadline:
@@ -931,6 +937,44 @@ class Arbiter:
         except Exception:
             self.log.exception("Exception in dirty arbiter process")
             sys.exit(-1)
+
+    def sync_dirty_capabilities(self):
+        """\
+        Send the current capability policy to the dirty arbiter.
+
+        The policy is rebuilt from the main arbiter's configuration, which
+        ``reload()`` has just refreshed. A failure to deliver it is logged
+        and leaves the dirty arbiter's previous policy in place, rather than
+        widening permissions on a transient error.
+        """
+        if not self.dirty_arbiter_pid:
+            return False
+
+        # Lazy import for gevent compatibility (see #3482)
+        from gunicorn.dirty.capabilities import (
+            build_capability_policy,
+            send_capability_policy,
+        )
+
+        socket_path = None
+        if self.dirty_arbiter is not None:
+            socket_path = getattr(self.dirty_arbiter, 'socket_path', None)
+        if not socket_path:
+            socket_path = os.environ.get('GUNICORN_DIRTY_SOCKET')
+        if not socket_path:
+            self.log.warning("Cannot sync dirty capabilities: no socket path")
+            return False
+
+        policy = build_capability_policy(self.cfg, self.log)
+        try:
+            result = send_capability_policy(socket_path, policy)
+        except Exception as e:
+            self.log.error("Failed to sync dirty capabilities: %s", e)
+            return False
+
+        self.log.info("Synced dirty capabilities (%s apps)",
+                      result.get("apps", len(policy)))
+        return True
 
     def kill_dirty_arbiter(self, sig):
         """\

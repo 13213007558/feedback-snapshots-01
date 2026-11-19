@@ -45,6 +45,7 @@ MSG_TYPE_END = 0x05
 MSG_TYPE_STASH = 0x10  # Stash operations (shared state between workers)
 MSG_TYPE_STATUS = 0x11  # Status query for arbiter/workers
 MSG_TYPE_MANAGE = 0x12  # Worker management (add/remove workers)
+MSG_TYPE_POLICY = 0x13  # Replace the arbiter's capability policy
 
 # Message type names (for backwards compatibility with old API)
 MSG_TYPE_REQUEST_STR = "request"
@@ -55,6 +56,7 @@ MSG_TYPE_END_STR = "end"
 MSG_TYPE_STASH_STR = "stash"
 MSG_TYPE_STATUS_STR = "status"
 MSG_TYPE_MANAGE_STR = "manage"
+MSG_TYPE_POLICY_STR = "policy"
 
 # Map int types to string names
 MSG_TYPE_TO_STR = {
@@ -66,6 +68,7 @@ MSG_TYPE_TO_STR = {
     MSG_TYPE_STASH: MSG_TYPE_STASH_STR,
     MSG_TYPE_STATUS: MSG_TYPE_STATUS_STR,
     MSG_TYPE_MANAGE: MSG_TYPE_MANAGE_STR,
+    MSG_TYPE_POLICY: MSG_TYPE_POLICY_STR,
 }
 
 # Map string names to int types
@@ -110,6 +113,7 @@ class BinaryProtocol:
     MSG_TYPE_STASH = MSG_TYPE_STASH_STR
     MSG_TYPE_STATUS = MSG_TYPE_STATUS_STR
     MSG_TYPE_MANAGE = MSG_TYPE_MANAGE_STR
+    MSG_TYPE_POLICY = MSG_TYPE_POLICY_STR
 
     @staticmethod
     def encode_header(msg_type: int, request_id: int, payload_length: int) -> bytes:
@@ -319,6 +323,29 @@ class BinaryProtocol:
         }
         payload = TLVEncoder.encode(payload_dict)
         header = BinaryProtocol.encode_header(MSG_TYPE_MANAGE, request_id,
+                                              len(payload))
+        return header + payload
+
+    @staticmethod
+    def encode_policy(request_id: int, apps: dict) -> bytes:
+        """
+        Encode a capability policy replacement message.
+
+        ``apps`` maps an app import path to a list of exposed actions, or to
+        None when the app does not restrict its public actions. The arbiter
+        replaces its whole snapshot with this mapping, so an app missing from
+        it is no longer part of the registered set.
+
+        Args:
+            request_id: Unique request identifier (uint64)
+            apps: Capability mapping
+
+        Returns:
+            bytes: Complete message (header + payload)
+        """
+        payload_dict = {"apps": apps or {}}
+        payload = TLVEncoder.encode(payload_dict)
+        header = BinaryProtocol.encode_header(MSG_TYPE_POLICY, request_id,
                                               len(payload))
         return header + payload
 
@@ -639,6 +666,11 @@ class BinaryProtocol:
                 message.get("op"),
                 message.get("count", 1)
             )
+        elif msg_type == MSG_TYPE_POLICY:
+            return BinaryProtocol.encode_policy(
+                request_id,
+                message.get("apps")
+            )
         else:
             raise DirtyProtocolError(f"Unhandled message type: {msg_type}")
 
@@ -807,4 +839,23 @@ def make_manage_message(request_id, op: int, count: int = 1) -> dict:
         "id": request_id,
         "op": op,
         "count": count,
+    }
+
+
+def make_policy_message(request_id, apps: dict) -> dict:
+    """
+    Build a capability policy replacement message dict.
+
+    Args:
+        request_id: Unique request identifier (int or str)
+        apps: Mapping of app import path to exposed actions, or None for an
+              unrestricted app
+
+    Returns:
+        dict: Policy message dict
+    """
+    return {
+        "type": DirtyProtocol.MSG_TYPE_POLICY,
+        "id": request_id,
+        "apps": apps or {},
     }

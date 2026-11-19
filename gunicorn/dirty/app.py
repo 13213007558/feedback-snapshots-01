@@ -95,6 +95,13 @@ class DirtyApp:
     # Set to an integer to limit how many workers load this app.
     workers = None
 
+    # Actions this app exposes to callers. A set of action names restricts
+    # the public surface to those actions; None (the default) keeps the
+    # historical behaviour of exposing every public action. An empty set
+    # exposes nothing. The ``dirty_capabilities`` setting can override this
+    # per app, which is how a reload withdraws an action.
+    capabilities = None
+
     def init(self):
         """
         Initialize the application.
@@ -348,3 +355,61 @@ def get_app_workers_attribute(import_path):
 
     # Return the workers attribute (defaults to None if not set)
     return getattr(app_class, 'workers', None)
+
+
+def get_app_capabilities_attribute(import_path):
+    """
+    Get the capabilities class attribute from a dirty app without
+    instantiating it.
+
+    This mirrors :func:`get_app_workers_attribute` so the arbiter can build
+    its routing policy before any worker has loaded the app.
+
+    Args:
+        import_path: String in format 'module.path:ClassName'
+
+    Returns:
+        The capabilities class attribute value (None when unset)
+
+    Raises:
+        DirtyAppNotFoundError: If the module or class cannot be found
+        DirtyAppError: If the import path format is invalid
+    """
+    app_class = _load_app_class(import_path)
+    return getattr(app_class, 'capabilities', None)
+
+
+def _load_app_class(import_path):
+    """Import and return a dirty app class without instantiating it."""
+    if ':' not in import_path:
+        raise DirtyAppError(
+            f"Invalid import path format: {import_path}. "
+            f"Expected 'module.path:ClassName'",
+            app_path=import_path
+        )
+
+    module_path, class_name = import_path.rsplit(':', 1)
+
+    try:
+        # Import the module
+        if module_path in sys.modules:
+            module = sys.modules[module_path]
+        else:
+            module = importlib.import_module(module_path)
+    except ImportError as e:
+        raise DirtyAppNotFoundError(import_path) from e
+
+    # Get the class from the module
+    try:
+        app_class = getattr(module, class_name)
+    except AttributeError:
+        raise DirtyAppNotFoundError(import_path) from None
+
+    # Validate it's a class
+    if not isinstance(app_class, type):
+        raise DirtyAppError(
+            f"{import_path} is not a class",
+            app_path=import_path
+        )
+
+    return app_class
