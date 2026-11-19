@@ -1,0 +1,118 @@
+% Offline UDS download evidence tracker
+
+# Handwritten byte transcripts (no vehicle access) exercising
+# RequestDownload / TransferData / RequestTransferExit evidence rules.
+
++ Offline download evidence
+
+= Load module
+load_contrib("automotive.uds_download_audit", globals_dict=globals())
+UDS_DownloadEvidenceTracker is not None
+
+= Handwritten transcript helpers
+
+def download_transcript(blocks):
+    # Session 0x02, security access observed, uncompressed/unencrypted
+    # RequestDownload to 0x10000000 with memorySize 0x100, negotiated
+    # maxNumberOfBlockLength 3 (i.e. 1 data byte per TransferData).
+    t = [("tx", b"\x10\x02"), ("rx", b"\x50\x02"),
+         ("tx", b"\x27\x01"), ("rx", b"\x67\x01"),
+         ("tx", b"\x34\x00\x44\x10\x00\x00\x00\x00\x00\x01\x00"),
+         ("rx", b"\x74\x01\x03")]
+    t.extend(blocks)
+    t.append(("tx", b"\x37"))
+    t.append(("rx", b"\x77"))
+    return t
+
+
+def success_blocks():
+    # Counters 0x01..0xff wrapping to 0x00, with a retransmission of
+    # block 0x05, a responsePending before block 0x0a is confirmed and
+    # a duplicate confirmation of block 0x07.
+    blocks = []
+    for c in list(range(1, 256)) + [0]:
+        blocks.append(("tx", bytes([0x36, c, 0xaa])))
+        if c == 5:
+            blocks.append(("tx", bytes([0x36, 5, 0xaa])))
+        if c == 10:
+            blocks.append(("rx", b"\x7f\x36\x78"))
+        blocks.append(("rx", bytes([0x76, c])))
+        if c == 7:
+            blocks.append(("rx", bytes([0x76, 7])))
+    return blocks
+
+
+def audit(transcript, session=0x02):
+    tracker = UDS_DownloadEvidenceTracker(session)
+    for direction, payload in transcript:
+        tracker.feed(payload, direction == "tx")
+    return tracker.report()
+
+True
+
+= Successful transfer with retransmission and counter wraparound
+
+report = audit(download_transcript(success_blocks()))
+report["status"] == "complete" and \
+    report["session_state"] == "confirmed" and \
+    report["download"]["address"] == 0x10000000 and \
+    report["download"]["size"] == 0x100 and \
+    report["download"]["max_block_length"] == 3 and \
+    report["confirmed_bytes"] == 0x100 and \
+    report["confirmed_ranges"] == [(0, 0x100)] and \
+    report["unconfirmed_ranges"] == [] and \
+    report["transfer_exit"] == "confirmed" and \
+    report["security_access_observed"]
+
+= Retransmission and duplicates are not accumulated twice
+
+report = audit(download_transcript(success_blocks()))
+notes = " ".join(report["notes"])
+"retransmission of pending block 0x05" in notes and \
+    "duplicate confirmation of block 0x07; not accumulated" in notes and \
+    "ResponsePending" in notes
+
+= Missing final confirmation stays incomplete
+
+transcript = download_transcript(success_blocks())
+del transcript[-1]  # drop the RequestTransferExit positive response
+report = audit(transcript)
+report["status"] == "incomplete" and \
+    report["confirmed_bytes"] == 0x100 and \
+    report["confirmed_ranges"] == [(0, 0x100)] and \
+    report["transfer_exit"] == "requested"
+
+= Swapped blocks leave the tail unprovable
+
+blocks = []
+for c in list(range(1, 256)) + [0]:
+    if c == 0x10:
+        # block 0x11 sent before 0x10 and refused; never retransmitted
+        blocks.append(("tx", bytes([0x36, 0x11, 0xaa])))
+        blocks.append(("rx", b"\x7f\x36\x73"))
+    if c == 0x11:
+        continue
+    blocks.append(("tx", bytes([0x36, c, 0xaa])))
+    blocks.append(("rx", bytes([0x76, c])))
+
+report = audit(download_transcript(blocks))
+report["status"] == "unknown" and \
+    report["confirmed_ranges"] == [(0, 0x10)] and \
+    report["confirmed_bytes"] == 0x10 and \
+    report["unconfirmed_ranges"] == [(0x10, 0x100)] and \
+    len(report["unverifiable_blocks"]) > 0
+
+= Replay under a different session proves nothing
+
+report = audit(download_transcript(success_blocks()), session=0x03)
+report["status"] == "unknown" and \
+    report["session_state"] == "unknown" and \
+    report["confirmed_bytes"] == 0 and \
+    report["confirmed_ranges"] == []
+
+= Completion never implies a trustworthy image
+
+report = audit(download_transcript(success_blocks()))
+notes = " ".join(report["notes"])
+"not evidence that the flashed image is trustworthy" in notes and \
+    "does not prove the firmware's origin" in notes
