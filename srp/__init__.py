@@ -29,3 +29,17 @@ NG_CUSTOM = _mod.NG_CUSTOM
 
 rfc5054_enable   = _mod.rfc5054_enable
 no_username_in_x = _mod.no_username_in_x
+
+# Session-scoped compatibility configuration. Pass one of these (or a
+# registered identifier string) as ``config=`` to pin the hash-input mode for
+# a single verifier creation / handshake instead of relying on the
+# process-global switches above.
+SrpConfig                        = _mod.SrpConfig
+register_srp_config              = _mod.register_srp_config
+srp_config_identifier            = _mod.srp_config_identifier
+
+SRP_CONFIG_LEGACY                = _mod.SRP_CONFIG_LEGACY
+SRP_CONFIG_RFC5054               = _mod.SRP_CONFIG_RFC5054
+SRP_CONFIG_NO_USERNAME           = _mod.SRP_CONFIG_NO_USERNAME
+SRP_CONFIG_RFC5054_NO_USER       = _mod.SRP_CONFIG_RFC5054_NO_USER
+DEFAULT_SRP_CONFIG_ID            = _mod.DEFAULT_SRP_CONFIG_ID

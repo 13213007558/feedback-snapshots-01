@@ -39,6 +39,70 @@ another SRP implementation, use the srp.rfc5054_enable() method to enable
 RFC5054 compatibility. Otherwise a pysrp-specific default implementation will
 be used.
 
+Session-scoped compatibility configuration
+------------------------------------------
+
+`srp.rfc5054_enable()` and `srp.no_username_in_x()` change process-global
+state, so they are unsafe when several tenants with different compatibility
+modes register or authenticate concurrently in the same process. Pass an
+explicit, immutable `srp.SrpConfig` (or one of the registered identifier
+strings) as the `config=` argument of `create_salted_verification_key()`,
+`User` and `Verifier` to pin the hash-input mode for that single verifier
+creation or handshake. The mode is frozen when the object is constructed and
+later global toggles cannot change it.
+
+The built-in identifiers are:
+
+- `srp.SRP_CONFIG_LEGACY` (`'pysrp-legacy'`): historical pysrp hash inputs, the default.
+- `srp.SRP_CONFIG_RFC5054` (`'rfc5054'`): RFC 5054 length-prefixed padding.
+- `srp.SRP_CONFIG_NO_USERNAME` (`'pysrp-no-username-in-x'`): username omitted from `x`.
+- `srp.SRP_CONFIG_RFC5054_NO_USER` (`'rfc5054-no-username-in-x'`): both options combined.
+
+Custom combinations can be given a stable name with
+`srp.register_srp_config(identifier, config)`. Omitting `config` keeps the
+historical behavior: the global switches are snapshotted at construction
+time, so even callers that never pass `config` are insulated from toggles
+that happen mid-handshake.
+
+```python
+import srp
+
+# Registration: the returned identifier must be stored with salt and verifier.
+salt, verifier = srp.create_salted_verification_key(
+    'testuser', 'testpassword', config=srp.SRP_CONFIG_RFC5054)
+mode_id = srp.SRP_CONFIG_RFC5054
+
+# Authentication on a later request, even with different tenants in parallel.
+usr = srp.User('testuser', 'testpassword', config=mode_id)
+uname, A = usr.start_authentication()
+svr = srp.Verifier(uname, salt, verifier, A, config=mode_id)
+s, B = svr.get_challenge()
+M = usr.process_challenge(s, B)
+HAMK = svr.verify_session(M)
+usr.verify_session(HAMK)
+assert usr.authenticated() and svr.authenticated()
+```
+
+A client and server must use the same mode: a proof built under a different
+mode is rejected (`Verifier.verify_session()` returns `None`) and pysrp never
+falls back to, or retries with, another (potentially weaker) mode.
+
+### Migrating stored verification records
+
+The compatibility mode is part of what defines a verifier, so the server must
+persist it alongside the salt and verifier:
+
+1. Add a `srp_config` column (or equivalent field) to the credential store.
+2. Backfill existing rows with `srp.DEFAULT_SRP_CONFIG_ID`
+   (`'pysrp-legacy'`), because legacy records were produced with the default
+   globals. Do not infer the mode by trying logins with different parameters.
+3. On registration, call `create_salted_verification_key(..., config=mode_id)`
+   and save `mode_id` with the salt and verifier.
+4. On login, pass the saved identifier as `config=` when constructing the
+   `Verifier` (and require the client to indicate its mode the same way).
+5. An unknown or missing identifier must fail closed with a `ValueError`;
+   never attempt weaker parameters after a failed proof.
+
 
 Usage Example
 -------------

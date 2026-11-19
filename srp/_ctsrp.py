@@ -33,6 +33,100 @@ def no_username_in_x(enable=True):
     _no_username_in_x = enable
 
 
+class SrpConfig( object ):
+    """Immutable, session-scoped SRP compatibility configuration.
+
+    The two hash-input compatibility flags are captured on construction so
+    that verifier creation, the client handshake and the server handshake for
+    one tenant can never be altered mid-flight by the process-global
+    ``rfc5054_enable()`` / ``no_username_in_x()`` switches used by another
+    tenant running concurrently.
+    """
+
+    __slots__ = ( 'rfc5054_compat', 'no_username_in_x' )
+
+    def __init__( self, rfc5054_compat=False, no_username_in_x=False ):
+        object.__setattr__( self, 'rfc5054_compat', bool(rfc5054_compat) )
+        object.__setattr__( self, 'no_username_in_x', bool(no_username_in_x) )
+
+    def __setattr__( self, name, value ):
+        raise AttributeError( "SrpConfig is immutable" )
+
+    def __repr__( self ):
+        return 'SrpConfig(rfc5054_compat=%r, no_username_in_x=%r)' % (
+            self.rfc5054_compat, self.no_username_in_x )
+
+    def __eq__( self, other ):
+        return ( isinstance(other, SrpConfig)
+                 and self.rfc5054_compat == other.rfc5054_compat
+                 and self.no_username_in_x == other.no_username_in_x )
+
+    def __ne__( self, other ):
+        return not self.__eq__(other)
+
+    def __hash__( self ):
+        return hash( (self.rfc5054_compat, self.no_username_in_x) )
+
+
+# Stable identifiers persisted alongside each stored verifier. They describe
+# how the verifier's hash inputs were built and must never be renumbered or
+# reused for a different combination of flags.
+SRP_CONFIG_LEGACY          = 'pysrp-legacy'
+SRP_CONFIG_RFC5054         = 'rfc5054'
+SRP_CONFIG_NO_USERNAME     = 'pysrp-no-username-in-x'
+SRP_CONFIG_RFC5054_NO_USER = 'rfc5054-no-username-in-x'
+DEFAULT_SRP_CONFIG_ID      = SRP_CONFIG_LEGACY
+
+_srp_configs = {
+    SRP_CONFIG_LEGACY:          SrpConfig(False, False),
+    SRP_CONFIG_RFC5054:         SrpConfig(True,  False),
+    SRP_CONFIG_NO_USERNAME:     SrpConfig(False, True),
+    SRP_CONFIG_RFC5054_NO_USER: SrpConfig(True,  True),
+}
+
+
+def register_srp_config( identifier, config ):
+    """Register a custom SrpConfig under a persistent identifier.
+
+    The identifier is what a server stores next to the salt and verifier so
+    that the exact compatibility mode can be reconstructed on every login.
+    """
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("A non-empty string identifier is required")
+    if not isinstance(config, SrpConfig):
+        raise TypeError("config must be an SrpConfig instance")
+    _srp_configs[ identifier ] = config
+    return identifier
+
+
+def srp_config_identifier( config ):
+    """Return the persisted identifier for an SrpConfig instance."""
+    for identifier, registered in _srp_configs.items():
+        if registered == config:
+            return identifier
+    raise ValueError("Unregistered SrpConfig; call register_srp_config() first")
+
+
+def _resolve_config( config ):
+    """Freeze a caller-supplied config argument into an SrpConfig.
+
+    ``None`` preserves the historical behavior of snapshotting the process
+    globals at the moment the session/verifier is created. Strings are looked
+    up in the registry so a server can rebuild the mode saved with a record.
+    """
+    if config is None:
+        return SrpConfig( _rfc5054_compat, _no_username_in_x )
+    if isinstance(config, SrpConfig):
+        return config
+    if isinstance(config, str):
+        try:
+            return _srp_configs[ config ]
+        except KeyError:
+            raise ValueError( "Unknown SRP config identifier: %r" % config )
+    raise TypeError(
+        "config must be an SrpConfig, a registered identifier string, or None" )
+
+
 SHA1   = 0
 SHA224 = 1
 SHA256 = 2
@@ -260,16 +354,17 @@ def H_bn( hash_class, dest, n ):
     BN_bin2bn(d, len(d), dest)
 
 
-def H_bn_bn( hash_class, dest, n1, n2, width ):
+def H_bn_bn( hash_class, dest, n1, n2, width, config=None ):
     h    = hash_class()
     bin1 = ctypes.create_string_buffer( BN_num_bytes(n1) )
     bin2 = ctypes.create_string_buffer( BN_num_bytes(n2) )
     BN_bn2bin(n1, bin1)
     BN_bn2bin(n2, bin2)
-    if _rfc5054_compat:
+    rfc5054_compat = _rfc5054_compat if config is None else config.rfc5054_compat
+    if rfc5054_compat:
         h.update(bytes(width - len(bin1.raw)))
     h.update( bin1.raw )
-    if _rfc5054_compat:
+    if rfc5054_compat:
         h.update(bytes(width - len(bin2.raw)))
     h.update( bin2.raw )
     d = h.digest()
@@ -286,10 +381,11 @@ def H_bn_str( hash_class, dest, n, s ):
     BN_bin2bn(d, len(d), dest)
 
 
-def calculate_x( hash_class, dest, salt, username, password ):
+def calculate_x( hash_class, dest, salt, username, password, config=None ):
     username = username.encode() if hasattr(username, 'encode') else username
     password = password.encode() if hasattr(password, 'encode') else password
-    if _no_username_in_x:
+    no_username = _no_username_in_x if config is None else config.no_username_in_x
+    if no_username:
         username = b''
     up = hash_class(username + b':' + password).digest()
     H_bn_str( hash_class, dest, salt, up )
@@ -302,10 +398,10 @@ def update_hash( ctx, n ):
     ctx.update( buff.raw )
 
 
-def calculate_M( hash_class, N, g, I, s, A, B, K ):
+def calculate_M( hash_class, N, g, I, s, A, B, K, config=None ):
     I = I.encode() if hasattr(I, 'encode') else I
     h = hash_class()
-    h.update( HNxorg( hash_class, N, g ) )
+    h.update( HNxorg( hash_class, N, g, config ) )
     h.update( hash_class(I).digest() )
     update_hash( h, s )
     update_hash( h, A )
@@ -322,14 +418,15 @@ def calculate_H_AMK( hash_class, A, M, K ):
     return h.digest()
 
 
-def HNxorg( hash_class, N, g ):
+def HNxorg( hash_class, N, g, config=None ):
     bN = ctypes.create_string_buffer( BN_num_bytes(N) )
     bg = ctypes.create_string_buffer( BN_num_bytes(g) )
 
     BN_bn2bin(N, bN)
     BN_bn2bin(g, bg)
 
-    padding = len(bN) - len(bg) if _rfc5054_compat else 0
+    rfc5054_compat = _rfc5054_compat if config is None else config.rfc5054_compat
+    padding = len(bN) - len(bg) if rfc5054_compat else 0
 
     hN = hash_class( bN.raw ).digest()
     hg = hash_class( b''.join([ b'\0'*padding, bg.raw ]) ).digest()
@@ -337,7 +434,7 @@ def HNxorg( hash_class, N, g ):
     return ( ''.join( chr( hN[i] ^ hg[i] ) for i in range(0,len(hN)) ) ).encode('latin1')
 
 
-def get_ngk( hash_class, ng_type, n_hex, g_hex, ctx ):
+def get_ngk( hash_class, ng_type, n_hex, g_hex, ctx, config=None ):
     if ng_type < NG_CUSTOM:
         n_hex, g_hex = _ng_const[ ng_type ]
     N = BN_new()
@@ -346,28 +443,30 @@ def get_ngk( hash_class, ng_type, n_hex, g_hex, ctx ):
 
     BN_hex2bn( N, n_hex )
     BN_hex2bn( g, g_hex )
-    H_bn_bn(hash_class, k, N, g, width=BN_num_bytes(N))
-    if _rfc5054_compat:
+    H_bn_bn(hash_class, k, N, g, width=BN_num_bytes(N), config=config)
+    rfc5054_compat = _rfc5054_compat if config is None else config.rfc5054_compat
+    if rfc5054_compat:
         BN_mod(k, k, N, ctx)
 
     return N, g, k
 
 
 
-def create_salted_verification_key( username, password, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, salt_len=4, k_hex=None ):
+def create_salted_verification_key( username, password, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, salt_len=4, k_hex=None, config=None ):
     if ng_type == NG_CUSTOM and (n_hex is None or g_hex is None):
         raise ValueError("Both n_hex and g_hex are required when ng_type = NG_CUSTOM")
+    config = _resolve_config( config )
     s    = BN_new()
     v    = BN_new()
     x    = BN_new()
     ctx  = BN_CTX_new()
 
     hash_class = _hash_map[ hash_alg ]
-    N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, ctx )
+    N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, ctx, config )
 
     BN_rand(s, salt_len * 8, -1, 0);
 
-    calculate_x( hash_class, x, s, username, password )
+    calculate_x( hash_class, x, s, username, password, config )
 
     BN_mod_exp(v, g, x, N, ctx)
 
@@ -387,7 +486,7 @@ def create_salted_verification_key( username, password, hash_alg=SHA1, ng_type=N
 
 
 class Verifier:
-    def __init__(self,  username, bytes_s, bytes_v, bytes_A=None, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, bytes_b=None, k_hex=None):
+    def __init__(self,  username, bytes_s, bytes_v, bytes_A=None, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, bytes_b=None, k_hex=None, config=None):
         if ng_type == NG_CUSTOM and (n_hex is None or g_hex is None):
             raise ValueError("Both n_hex and g_hex are required when ng_type = NG_CUSTOM")
         if bytes_b and len(bytes_b) != 32:
@@ -408,9 +507,10 @@ class Verifier:
         self._authenticated = False
 
         self.safety_failed = False
+        self.config = _resolve_config( config )
 
         hash_class = _hash_map[ hash_alg ]
-        N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, self.ctx )
+        N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, self.ctx, self.config )
         if k_hex is not None:
             BN_hex2bn(k, k_hex)
 
@@ -464,6 +564,14 @@ class Verifier:
         return self.I
 
 
+    def get_config(self):
+        return self.config
+
+
+    def get_config_identifier(self):
+        return srp_config_identifier( self.config )
+
+
     def get_ephemeral_secret(self):
         return bn_to_bytes(self.b)
 
@@ -503,7 +611,7 @@ class Verifier:
             self.safety_failed = True
 
     def _derive_H_AMK(self):
-        H_bn_bn(self.hash_class, self.u, self.A, self.B, width=BN_num_bytes(self.N))
+        H_bn_bn(self.hash_class, self.u, self.A, self.B, width=BN_num_bytes(self.N), config=self.config)
 
         # S = (A *(v^u)) ^ b
         BN_mod_exp(self.tmp1, self.v, self.u, self.N, self.ctx)
@@ -512,12 +620,12 @@ class Verifier:
 
         self.K = self.hash_class( bn_to_bytes(self.S) ).digest()
 
-        self.M     = calculate_M( self.hash_class, self.N, self.g, self.I, self.s, self.A, self.B, self.K )
+        self.M     = calculate_M( self.hash_class, self.N, self.g, self.I, self.s, self.A, self.B, self.K, self.config )
         self.H_AMK = calculate_H_AMK( self.hash_class, self.A, self.M, self.K )
 
 
 class User:
-    def __init__(self, username, password, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, bytes_a=None, bytes_A=None, k_hex=None):
+    def __init__(self, username, password, hash_alg=SHA1, ng_type=NG_2048, n_hex=None, g_hex=None, bytes_a=None, bytes_A=None, k_hex=None, config=None):
         if ng_type == NG_CUSTOM and (n_hex is None or g_hex is None):
             raise ValueError("Both n_hex and g_hex are required when ng_type = NG_CUSTOM")
         if bytes_a and len(bytes_a) != 32:
@@ -541,8 +649,9 @@ class User:
         self.H_AMK = None
         self._authenticated = False
 
+        self.config = _resolve_config( config )
         hash_class = _hash_map[ hash_alg ]
-        N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, self.ctx )
+        N,g,k      = get_ngk( hash_class, ng_type, n_hex, g_hex, self.ctx, self.config )
         if k_hex is not None:
             BN_hex2bn(k, k_hex)
 
@@ -592,6 +701,14 @@ class User:
         return self.username
 
 
+    def get_config(self):
+        return self.config
+
+
+    def get_config_identifier(self):
+        return srp_config_identifier( self.config )
+
+
     def get_ephemeral_secret(self):
         return bn_to_bytes(self.a)
 
@@ -619,13 +736,13 @@ class User:
         if BN_is_zero(self.B):
             return None
 
-        H_bn_bn(hash_class, self.u, self.A, self.B, width=BN_num_bytes(N))
+        H_bn_bn(hash_class, self.u, self.A, self.B, width=BN_num_bytes(N), config=self.config)
 
         # SRP-6a safety check
         if BN_is_zero(self.u):
             return None
 
-        calculate_x( hash_class, self.x, self.s, self.username, self.password )
+        calculate_x( hash_class, self.x, self.s, self.username, self.password, self.config )
 
         BN_mod_exp(self.v, g, self.x, N, self.ctx)
 
@@ -639,7 +756,7 @@ class User:
         BN_mod_exp(self.S, self.tmp1, self.tmp2, N, self.ctx)
 
         self.K     = hash_class( bn_to_bytes(self.S) ).digest()
-        self.M     = calculate_M( hash_class, N, g, self.username, self.s, self.A, self.B, self.K )
+        self.M     = calculate_M( hash_class, N, g, self.username, self.s, self.A, self.B, self.K, self.config )
         self.H_AMK = calculate_H_AMK( hash_class, self.A, self.M, self.K )
 
         return self.M
