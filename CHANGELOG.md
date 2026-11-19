@@ -71,6 +71,15 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(intel)** Record boundary-inference evidence for recovered x86 jump tables. Every resolved dispatch now
+  leaves a `JumpTableEvidence` on `JumpTableAnalyzer.evidence` (keyed by jump instruction) naming the table kind
+  (explicit / absolute / relative / register-base), the bound's kind and source instruction (explicit compare,
+  `and` mask, the two of them combined, the case-number table of a two-level switch, or an untied compare whose
+  index was rewritten before the branch), and whether the bounded register survived to the branch. Each recovered
+  target names the table entry it was read from and whether the proven bound covers it; entries the scan admitted
+  past a proven bound stay `candidate_targets` instead of being presented as definite branches, so an analyst can
+  count how much of a switch is evidence-backed. Recovery itself is unchanged: candidates are still queued as
+  blocks for completeness and never reach the function-candidate manager.
 
 ### Changed
 

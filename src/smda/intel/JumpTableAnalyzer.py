@@ -9,6 +9,22 @@ from smda.intel.definitions import (
     canonicalRegister,
     stripFlatSegmentOverride,
 )
+from smda.intel.JumpTableEvidence import (
+    BOUND_COMPARE,
+    BOUND_COMPARE_MASK,
+    BOUND_INDEX_TABLE,
+    BOUND_MASK,
+    BOUND_NONE,
+    BOUND_UNTIED_COMPARE,
+    TABLE_ABSOLUTE,
+    TABLE_EXPLICIT,
+    TABLE_REGISTER_BASE,
+    TABLE_RELATIVE,
+    BoundEvidence,
+    IndexTableEvidence,
+    JumpTableEntry,
+    JumpTableEvidence,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +175,12 @@ class JumpTableAnalyzer:
         self.disassembler = disassembler
         self.disassembly = self.disassembler.disassembly
         self.table_offsets = self._findJumpTables()
+        # jump instruction address -> JumpTableEvidence, one per resolved dispatch
+        self.evidence = {}
+
+    def _evidenceRecords(self):
+        # analyzers built with __new__ (tests) carry no __init__ state; record lazily
+        return self.__dict__.setdefault("evidence", {})
 
     def _findJumpTables(self):
         jumptables = set()
@@ -303,13 +325,19 @@ class JumpTableAnalyzer:
         return 0
 
     def _findJumpTableSize(self, backtracked, index_keys=None):
-        """Recover the switch bound, preferring a compare against the dispatch's own index.
+        """The entry count of the recovered bound, 0 when none was found."""
+        return self._traceJumpTableBound(backtracked, index_keys).size
+
+    def _traceJumpTableBound(self, backtracked, index_keys=None):
+        """Recover the switch bound and the evidence for it, preferring a compare against
+        the dispatch's own index.
 
         Walking back to the first `cmp <reg>, <imm>` finds an unrelated compare whenever one
         sits between the real bound check and the dispatch, and misses pattern B entirely,
         where the bound is checked against the memory cell the index is loaded from. Following
-        the index backwards through its copies answers both: the compare that bounds the table
-        is the one testing whatever the dispatch ends up indexing with.
+        the index backwards through its copies answers both: the compare that bounds the
+        table is the one testing whatever the dispatch ends up indexing with, and the tie
+        surviving to the branch is what makes the bound evidence rather than a scan limit.
 
         An `and` mask on the index bounds it too, but a compare further back can bound it
         tighter - `cmp eax, 5; ja; and eax, 7` leaves six cases, not eight - so the walk goes
@@ -317,7 +345,10 @@ class JumpTableAnalyzer:
         """
         tracked = set(index_keys) if index_keys else set()
         untied_size = 0
+        untied_source = None
         mask_bound = 0
+        mask_source = None
+        mask_tied_to = None
         for position, instr in enumerate(backtracked[::-1]):
             mnemonic = instr[2].split(" ")[-1]
             if mnemonic in RET_INS:
@@ -328,15 +359,22 @@ class JumpTableAnalyzer:
                 right = right.strip()
                 if _IMMEDIATE_RE.match(right):
                     bound = int(right, 16 if right.startswith("0x") else 10) + 1
-                    if tracked and self._operandKey(left) in tracked:
+                    left_key = self._operandKey(left)
+                    if tracked and left_key in tracked:
                         if not mask_bound:
-                            return bound
+                            return BoundEvidence(BOUND_COMPARE, bound, instr[0], left_key, True)
                         # a compare narrower than the mask leaves the bits above it unchecked
                         if mask_bound <= 1 << self._operandWidth(left):
-                            return min(bound, mask_bound)
-                        return mask_bound
+                            size = min(bound, mask_bound)
+                            # the kind names whichever of the two the size was proven by
+                            kind = BOUND_COMPARE_MASK if bound < mask_bound else BOUND_MASK
+                            source = instr[0] if bound < mask_bound else mask_source
+                            tied_to = left_key if bound < mask_bound else mask_tied_to
+                            return BoundEvidence(kind, size, source, tied_to, True)
+                        return BoundEvidence(BOUND_MASK, mask_bound, mask_source, mask_tied_to, True)
                     if not untied_size and self.RE_CMP_SIZE.match(operands):
                         untied_size = bound
+                        untied_source = instr[0]
                 continue
             if not tracked or mnemonic in _INDEX_READ_ONLY_MNEMONICS:
                 continue
@@ -359,8 +397,10 @@ class JumpTableAnalyzer:
                 # An immediate mask only clears bits, so the value before it is no smaller and
                 # a compare bounding that bounds the index as well: the tie is kept.
                 bound = self._maskBound(destination, source)
-                if bound:
-                    mask_bound = min(mask_bound, bound) if mask_bound else bound
+                if bound and (not mask_bound or bound < mask_bound):
+                    mask_bound = bound
+                    mask_source = instr[0]
+                    mask_tied_to = destination_key
                 continue
             if mnemonic in _NAMED_DESTINATION_MNEMONICS and destination_key not in tracked:
                 # These write only the operand they name, so a write to a register the index
@@ -379,7 +419,13 @@ class JumpTableAnalyzer:
             # tie to a compare that bounds a value the dispatch never indexes with, so the tie
             # is dropped whole and the untied scan answers instead.
             tracked = set()
-        return mask_bound or untied_size
+        if mask_bound:
+            return BoundEvidence(BOUND_MASK, mask_bound, mask_source, mask_tied_to, True)
+        if untied_size:
+            # the compare tested a value that was rewritten - or never was the index - before
+            # the branch, so its size limits the scan without proving the table's extent
+            return BoundEvidence(BOUND_UNTIED_COMPARE, untied_size, untied_source, None, False)
+        return BoundEvidence(BOUND_NONE, 0, None, None, False)
 
     def _recordIndexTable(self, jump_instruction, state, backtracked):
         """Book the byte table a two-level switch reads its case number from as data.
@@ -412,7 +458,28 @@ class JumpTableAnalyzer:
             extent = self._indexTableExtent(address, bound, entries)
             if extent is not None:
                 state.addDataRef(instruction[0], extent[0], size=extent[1], is_table=True)
+                self._recordIndexTableEvidence(jump_instruction_address, instruction[0], extent)
             return
+
+    def _recordIndexTableEvidence(self, jump_instruction_address, source, extent):
+        """Attach the byte table to its dispatch's evidence and let it prove the bound.
+
+        Every byte of a validated index table is a case number smaller than the jump table's
+        entry count, so the first max + 1 entries are reachable through it: for a dispatch
+        whose own compare bounded the switch value rather than the case number, this is the
+        bound the jump table's entries are confirmed by. A bound already tied to the dispatch
+        index stands on its own and is kept.
+        """
+        record = self._evidenceRecords().get(jump_instruction_address)
+        if record is None:
+            return
+        case_numbers = self.disassembly.getBytes(extent[0], extent[1])
+        proven = max(case_numbers) + 1 if case_numbers else 0
+        record.index_table = IndexTableEvidence(extent[0], extent[1], source, proven)
+        if proven and not record.bound.index_intact:
+            record.bound = BoundEvidence(BOUND_INDEX_TABLE, proven, source, None, True)
+            for entry in record.entries:
+                entry.confirmed = entry.index < proven
 
     def _indexTableExtent(self, address, bound, entries):
         """Where the byte table read at `address` lies, as (start, length), or None.
@@ -528,7 +595,14 @@ class JumpTableAnalyzer:
         return None
 
     def _resolveRegisterBaseTable(
-        self, jump_instruction_address, jump_instruction_op_str, state, backtracked, jumptable_size
+        self,
+        jump_instruction_address,
+        jump_instruction_op_str,
+        state,
+        backtracked,
+        jumptable_size,
+        entries=None,
+        entries_confirmed=False,
     ):
         """Targets of a 64-bit absolute table whose base a rip-relative `lea` put in a register.
 
@@ -573,6 +647,8 @@ class JumpTableAnalyzer:
             state=state,
             jump_instruction_address=jump_instruction_address,
             entry_size=8,
+            entries=entries,
+            entries_confirmed=entries_confirmed,
         )
 
     def _x64Handler(self, state, backtracked, target_register=None):
@@ -599,7 +675,14 @@ class JumpTableAnalyzer:
         return bonus_offset
 
     def _extractDirectTableOffsets(
-        self, jumptable_size, off_jumptable, state=None, jump_instruction_address=None, entry_size=4
+        self,
+        jumptable_size,
+        off_jumptable,
+        state=None,
+        jump_instruction_address=None,
+        entry_size=4,
+        entries=None,
+        entries_confirmed=False,
     ):
         bound_was_recovered = bool(jumptable_size)
         jumptable_size = jumptable_size if bound_was_recovered else 0xFF
@@ -616,6 +699,8 @@ class JumpTableAnalyzer:
                         continue
                     break
                 jump_targets.add(entry)
+                if entries is not None:
+                    entries.append(JumpTableEntry(index, off_jumptable + index * entry_size, entry, entries_confirmed))
                 if state is not None:
                     state.addDataRef(
                         jump_instruction_address, off_jumptable + index * entry_size, size=entry_size, is_table=True
@@ -630,6 +715,8 @@ class JumpTableAnalyzer:
         bonus_offset=0,
         state=None,
         jump_instruction_address=None,
+        entries=None,
+        entries_confirmed=False,
     ):
         jumptable_size = jumptable_size if jumptable_size else 0xFF
         jump_targets = set()
@@ -667,6 +754,10 @@ class JumpTableAnalyzer:
                 if entry:
                     target = (jump_base + entry) & self.disassembler.getBitMask()
                     jump_targets.add(target)
+                    if entries is not None:
+                        entries.append(
+                            JumpTableEntry(index, off_jumptable + bonus_offset + index * 4, target, entries_confirmed)
+                        )
                     if state is not None:
                         # Claim the entry as data. `rebased` is an image offset, so the address
                         # has to be rebuilt from off_jumptable -- without this the table bytes
@@ -681,7 +772,15 @@ class JumpTableAnalyzer:
                     break
         return sorted(jump_targets)
 
-    def _resolveExplicitTable(self, jump_instruction_address, state, jumptable_address, jumptable_size=None):
+    def _resolveExplicitTable(
+        self,
+        jump_instruction_address,
+        state,
+        jumptable_address,
+        jumptable_size=None,
+        entries=None,
+        entries_confirmed=False,
+    ):
         # _findJumpTableSize reports an unrecovered bound as 0, not None, so testing against
         # None here read "zero entries" and abandoned the table -- mirror the truthiness test
         # _extractRelativeTableOffsets uses, and let the per-entry image bound stop the scan.
@@ -705,6 +804,10 @@ class JumpTableAnalyzer:
                 table_entry = struct.unpack(entry_format, raw_entry_bytes)[0]
                 if not table_entry or not self._isCodePointer(table_entry):
                     break
+                if entries is not None:
+                    entries.append(
+                        JumpTableEntry(i, jumptable_address + i * entry_size, table_entry, entries_confirmed)
+                    )
                 state.addDataRef(
                     jump_instruction_address,
                     jumptable_address + i * entry_size,
@@ -734,15 +837,32 @@ class JumpTableAnalyzer:
         ]
         backtracked_sequence = "-".join([ins[2] for ins in backtracked[::-1]][:3])
         index_keys = self._dispatchIndexKeys(stripFlatSegmentOverride(jump_instruction_op_str))
-        jumptable_size = self._findJumpTableSize(backtracked, index_keys)
+        bound = self._traceJumpTableBound(backtracked, index_keys)
+        jumptable_size = bound.size
+        # only a bound proven against the dispatch's own index confirms the entries it
+        # covers; an untied compare or the fallback scan limit leaves them candidates
+        entries_confirmed = bound.index_intact and jumptable_size > 0
+        entries = []
+        table_kind = None
+        entry_size = 4
         # if False and jump_instruction_address:
         #     print("0x%x %s %s -> %s" % (jump_instruction_address, jump_instruction_mnemonic, jump_instruction_op_str, backtracked_sequence))
         if jump_instruction_op_str.startswith(("dword ptr [", "qword ptr [")):
+            table_kind = TABLE_EXPLICIT
+            entry_size = 8 if self.disassembly.binary_info.bitness == 64 else 4
             off_jumptable = self.disassembler.getReferencedAddr(jump_instruction_op_str)
-            table_offsets = self._resolveExplicitTable(jump_instruction_address, state, off_jumptable, jumptable_size)
+            table_offsets = self._resolveExplicitTable(
+                jump_instruction_address,
+                state,
+                off_jumptable,
+                jumptable_size,
+                entries=entries,
+                entries_confirmed=entries_confirmed,
+            )
         else:
             # 32bit cases typically load into target register directly
             if backtracked_sequence.startswith("mov"):
+                table_kind = TABLE_ABSOLUTE
                 off_jumptable, entry_size = self._directHandler(jump_instruction_op_str, state, backtracked)
                 table_offsets = self._extractDirectTableOffsets(
                     jumptable_size,
@@ -750,8 +870,11 @@ class JumpTableAnalyzer:
                     state=state,
                     jump_instruction_address=jump_instruction_address,
                     entry_size=entry_size,
+                    entries=entries,
+                    entries_confirmed=entries_confirmed,
                 )
             elif backtracked_sequence.startswith("add-movsxd"):
+                table_kind = TABLE_RELATIVE
                 off_jumptable = self._x64Handler(state, backtracked)
                 alternative_base = 0
                 if "rsi" in backtracked[::-1][0][3]:
@@ -762,13 +885,22 @@ class JumpTableAnalyzer:
                     alternative_base=alternative_base,
                     state=state,
                     jump_instruction_address=jump_instruction_address,
+                    entries=entries,
+                    entries_confirmed=entries_confirmed,
                 )
             elif backtracked_sequence.startswith(("lea", "add-add", "add-shr")):
+                table_kind = TABLE_RELATIVE
                 off_jumptable = self._x64Handler(state, backtracked)
                 table_offsets = self._extractRelativeTableOffsets(
-                    jumptable_size, off_jumptable, state=state, jump_instruction_address=jump_instruction_address
+                    jumptable_size,
+                    off_jumptable,
+                    state=state,
+                    jump_instruction_address=jump_instruction_address,
+                    entries=entries,
+                    entries_confirmed=entries_confirmed,
                 )
             elif backtracked_sequence.startswith("add-mov"):
+                table_kind = TABLE_RELATIVE
                 off_jumptable = self._x64Handler(state, backtracked)
                 bonus = self._getx64BonusOffset(backtracked)
                 table_offsets = self._extractRelativeTableOffsets(
@@ -777,6 +909,8 @@ class JumpTableAnalyzer:
                     bonus_offset=bonus,
                     state=state,
                     jump_instruction_address=jump_instruction_address,
+                    entries=entries,
+                    entries_confirmed=entries_confirmed,
                 )
         if not table_offsets:
             # Every arm above recognizes its table by an address standing in the operand text of
@@ -784,9 +918,31 @@ class JumpTableAnalyzer:
             # so those arms come back empty on a table the compiler addressed that way and this
             # is the only place it can be recovered.
             table_offsets = self._resolveRegisterBaseTable(
-                jump_instruction_address, jump_instruction_op_str, state, backtracked, jumptable_size
+                jump_instruction_address,
+                jump_instruction_op_str,
+                state,
+                backtracked,
+                jumptable_size,
+                entries=entries,
+                entries_confirmed=entries_confirmed,
             )
+            if table_offsets:
+                table_kind = TABLE_REGISTER_BASE
+                entry_size = 8
         if table_offsets:
+            table_address = off_jumptable
+            if entries:
+                # the address slot 0 was - or would have been - read from; for a bonus-offset
+                # table this is the only form that names where the entries actually lie
+                table_address = entries[0].address - entries[0].index * entry_size
+            self._evidenceRecords()[jump_instruction_address] = JumpTableEvidence(
+                jump_instruction_address,
+                table_kind,
+                table_address,
+                entry_size,
+                bound,
+                entries,
+            )
             self._recordIndexTable(jump_instruction, state, backtracked)
         # if False and off_jumptable and table_offsets:
         #     print("  Found jump table: 0x%x -> %d" % (off_jumptable, len(table_offsets)))
