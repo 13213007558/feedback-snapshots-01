@@ -61,7 +61,10 @@ class PLAIN(statemachine.SASLMechanism):
             mechanism: typing.Any,
             ) -> None:
         logger.info("attempting PLAIN mechanism")
-        username, password = await self._credential_provider()
+        credentials = await self._credential_provider()
+        # A versioned credential provider may also serve SCRAM; PLAIN has
+        # no use for the version and simply ignores it.
+        username, password = credentials[:2]
         encoded_username = username.encode("utf8")
         encoded_password = password.encode("utf8")
 

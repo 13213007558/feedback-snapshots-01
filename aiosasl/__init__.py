@@ -82,9 +82,16 @@ SASL mechanisms
 
 .. autoclass:: PLAIN
 
-.. autoclass:: SCRAM(credential_provider, *[, after_scram_plus=False][, enforce_minimum_iteration_count=True])
+.. autoclass:: SCRAM
+   :noindex:
 
-.. autoclass:: SCRAMPLUS(credential_provider, cb_provider, *[, enforce_minimum_iteration_count=True])
+.. autoclass:: SCRAMPLUS
+   :noindex:
+
+.. autoclass:: DerivedKeyCache
+   :noindex:
+
+.. autoclass:: DerivedKeyCacheKey
 
 .. autoclass:: ANONYMOUS
 
@@ -92,6 +99,31 @@ Base class
 ----------
 
 .. autoclass:: SASLMechanism
+
+Caching SCRAM derivations
+=========================
+
+High-rate SCRAM authentication spends most of its CPU time in PBKDF.  The
+derived salted password only depends on the prepared password, the salt,
+the digest and the iteration count, so it can be shared between handshakes.
+:class:`DerivedKeyCache` provides an optional, capacity- and
+lifetime-bounded cache for this purpose::
+
+    cache = aiosasl.DerivedKeyCache(capacity=1024, ttl=300.0)
+
+    async def credentials():
+        return username, password, account.credential_version
+
+    scram = aiosasl.SCRAM(credentials, cache=cache)
+
+Every exchange still performs its own nonce negotiation and computes its
+own client and server proofs; only the expensive PBKDF invocation is
+skipped on a hit.  Cache entries are only published after the server
+signature has been verified, so failed authentication cannot promote a
+derivation into the cache.  When a password is rotated, call
+:meth:`DerivedKeyCache.invalidate`; the credential version must change as
+well.  In-flight derivations started before the invalidation are rejected
+at publication time and cannot be reused under the new credentials.
 
 A note for implementers
 -----------------------
@@ -141,6 +173,16 @@ from .statemachine import (  # noqa:F401
 from .scram import (  # noqa:F401
     SCRAM,
     SCRAMPLUS,
+)
+
+from .scram_cache import (  # noqa:F401
+    CacheKey,
+    DerivedCache,
+    DerivedKeyCache,
+    DerivedKeyCacheKey,
+    PBKDF2Cache,
+    SCRAMCache,
+    SCRAMDerivedKeyCache,
 )
 
 from .plain import (  # noqa:F401

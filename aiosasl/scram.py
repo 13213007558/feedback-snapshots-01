@@ -25,14 +25,36 @@ import collections
 import functools
 import hashlib
 import hmac
+import inspect
 import logging
 import random
 import time
 import typing
 
-from hashlib import pbkdf2_hmac as pbkdf2
-
 from . import channel_binding, common, statemachine, stringprep, utils
+from .scram_cache import (  # noqa:F401
+    CacheKey,
+    DerivedCache,
+    DerivedKeyCache,
+    DerivedKeyCacheKey,
+    PBKDF2Cache,
+    SCRAMCache,
+    SCRAMDerivedKeyCache,
+)
+
+
+def pbkdf2(
+        hash_name: str,
+        password: bytes,
+        salt: bytes,
+        iterations: int,
+        dklen: typing.Optional[int] = None) -> bytes:
+    """Thin indirection which keeps the PBKDF call patchable."""
+    if dklen is None:
+        return hashlib.pbkdf2_hmac(
+            hash_name, password, salt, iterations)
+    return hashlib.pbkdf2_hmac(
+        hash_name, password, salt, iterations, dklen)
 
 
 logger = logging.getLogger(__name__)
@@ -63,11 +85,133 @@ class Base:
             credential_provider: common.CredentialProvider,
             *,
             nonce_length: int = 15,
-            enforce_minimum_iteration_count: bool = True):
+            enforce_minimum_iteration_count: bool = True,
+            cache: typing.Optional[DerivedKeyCache] = None,
+            derived_cache: typing.Optional[DerivedKeyCache] = None,
+            cache_capacity: typing.Optional[int] = None,
+            cache_size: typing.Optional[int] = None,
+            cache_ttl: typing.Optional[float] = None,
+            cache_lifetime: typing.Optional[float] = None,
+            credential_version_provider: typing.Optional[
+                typing.Callable[..., typing.Any]
+            ] = None,
+            credential_version: typing.Any = None):
         super().__init__()
+        if cache is not None and derived_cache is not None:
+            raise TypeError(
+                "cache and derived_cache are mutually exclusive")
+        if cache is None:
+            cache = derived_cache
+        if cache_capacity is not None and cache_size is not None:
+            raise TypeError(
+                "cache_capacity and cache_size are mutually exclusive")
+        if cache_capacity is None:
+            cache_capacity = cache_size
+        if cache_ttl is not None and cache_lifetime is not None:
+            raise TypeError(
+                "cache_ttl and cache_lifetime are mutually exclusive")
+        if cache_ttl is None:
+            cache_ttl = cache_lifetime
+        if cache is None and (cache_capacity is not None or
+                              cache_ttl is not None):
+            cache = DerivedKeyCache(
+                capacity=(
+                    cache_capacity
+                    if cache_capacity is not None else 64
+                ),
+                ttl=cache_ttl if cache_ttl is not None else 300.0,
+            )
+        elif cache is not None and (cache_capacity is not None or
+                                    cache_ttl is not None):
+            raise TypeError(
+                "an explicit cache cannot be combined with cache_capacity "
+                "or cache_ttl")
+
         self._credential_provider = credential_provider
+        self._cache = cache
+        self._credential_version_provider = credential_version_provider
+        self._credential_version = credential_version
         self.nonce_length = nonce_length
         self.enforce_minimum_iteration_count = enforce_minimum_iteration_count
+
+    @property
+    def cache(self) -> typing.Optional[DerivedKeyCache]:
+        """The configured derived cache, or :data:`None` if disabled."""
+        return self._cache
+
+    @property
+    def derived_cache(self) -> typing.Optional[DerivedKeyCache]:
+        """Alias for :attr:`cache`."""
+        return self._cache
+
+    async def _resolve_credential_version(
+            self,
+            username: str,
+            password: str) -> typing.Any:
+        provider = self._credential_version_provider
+        if provider is None:
+            return self._credential_version
+        try:
+            signature = inspect.signature(provider)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
+            positional = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_varargs = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            )
+        else:
+            positional = []
+            has_varargs = False
+
+        if has_varargs or len(positional) >= 2:
+            result = provider(username, password)
+        elif len(positional) == 1:
+            result = provider(username)
+        else:
+            result = provider()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _resolve_credentials(
+            self,
+            ) -> typing.Tuple[str, str, typing.Any]:
+        credentials = await self._credential_provider()
+        if not isinstance(credentials, (tuple, list)):
+            raise ValueError(
+                "credential provider must return a (username, password) "
+                "or (username, password, credential_version) tuple")
+        try:
+            length = len(credentials)
+        except TypeError:
+            raise ValueError(
+                "credential provider must return a (username, password) "
+                "or (username, password, credential_version) tuple"
+            ) from None
+
+        if length == 2:
+            username, password = credentials
+            version = await self._resolve_credential_version(
+                username, password)
+        elif length == 3:
+            versioned = typing.cast(
+                typing.Tuple[str, str, typing.Any], credentials)
+            username, password, version = versioned
+        else:
+            raise ValueError(
+                "credential provider must return a (username, password) "
+                "or (username, password, credential_version) tuple")
+        return username, password, version
 
     _supported_hashalgos = {
         # the second argument is for preference ordering (highest first)
@@ -154,8 +298,16 @@ class Base:
 
         hashfun_factory = functools.partial(hashlib.new, info.hashfun_name)
 
+        cache = self._cache
+        # Observe the revocation generation before anything about this
+        # attempt is read.  If a credential is revoked while we are still
+        # preparing or deriving, the result belongs to the revoked
+        # credentials and must not be published under the new generation.
+        cache_generation = cache.generation if cache is not None else None
+
         gs2_header = self._get_gs2_header()
-        username, password = await self._credential_provider()
+        username, password, credential_version = \
+            await self._resolve_credentials()
         encoded_username = stringprep.saslprep(
             username,
             allow_unassigned=True,
@@ -214,11 +366,31 @@ class Base:
 
         t0 = time.time()
 
-        salted_password = pbkdf2(
-            info.hashfun_name,
-            encoded_password,
-            salt,
-            iteration_count)
+        cache_key = None
+        cache_hit = False
+        salted_password = None
+        if cache is not None:
+            cache_key = cache.make_key(
+                credential_version,
+                encoded_username,
+                encoded_password,
+                info.hashfun_name,
+                salt,
+                iteration_count,
+            )
+            salted_password = cache.get(cache_key)
+            if salted_password is None:
+                logger.debug("SCRAM derived cache miss")
+            else:
+                logger.debug("SCRAM derived cache hit")
+                cache_hit = True
+
+        if salted_password is None:
+            salted_password = pbkdf2(
+                info.hashfun_name,
+                encoded_password,
+                salt,
+                iteration_count)
 
         logger.debug("pbkdf2 timing: %f seconds", time.time() - t0)
 
@@ -277,6 +449,18 @@ class Base:
                 "authentication successful, but server signature invalid",
             )
 
+        # Only a fully verified exchange may publish a derivation.  A
+        # concurrent invalidation (credential rotation) advances the cache
+        # generation; results derived before that boundary are discarded.
+        if cache is not None and cache_key is not None and not cache_hit:
+            if not cache.put(
+                    cache_key,
+                    salted_password,
+                    generation=cache_generation):
+                logger.debug(
+                    "SCRAM derived cache publication rejected "
+                    "due to concurrent invalidation")
+
 
 class SCRAM(Base, statemachine.SASLMechanism):
     """
@@ -289,11 +473,40 @@ class SCRAM(Base, statemachine.SASLMechanism):
     :param enforce_minimum_iteration_count: Enforce the minimum iteration
         count specified by the SCRAM specifications.
     :type enforce_minimum_iteration_count: :class:`bool`
+    :param cache: Optional :class:`DerivedKeyCache` used to re-use expensive
+        PBKDF derivations across handshakes.
+    :type cache: :class:`DerivedKeyCache` or :data:`None`
+    :param credential_version_provider: Optional callable (sync or async)
+        which returns a trusted credential version.  It is invoked only
+        when the credential provider returns a two-tuple.  The callable may
+        take no arguments, the username, or the username and password.
+    :type credential_version_provider: callable or :data:`None`
+    :param credential_version: Trusted credential version used for every
+        handshake when no `credential_version_provider` is given.  It is
+        only relevant when a cache is configured.
+    :param int cache_capacity: Capacity of a cache created implicitly when
+        no `cache` instance is supplied.
+    :param float cache_ttl: Absolute lifetime, in seconds, of a cache
+        created implicitly when no `cache` instance is supplied.
+
+    `credential_provider` must be a coroutine function which returns a
+    ``(user, password)`` tuple.  When a cache is used, it may instead
+    return a ``(user, password, credential_version)`` triple; the version
+    must be trusted by the application and change whenever the password
+    changes.
 
     .. note::
 
        As "non-PLUS" suggests, this does not support channel binding.
        Use :class:`SCRAMPLUS` if you want channel binding.
+
+    .. note::
+
+       Derived secrets are independent of the nonce and channel binding
+       data.  A cache hit therefore still performs this handshake's own
+       nonce exchange and proof computation; only the PBKDF invocation is
+       skipped.  A failure at any point of the exchange does not publish
+       the derivation.
 
 
     `credential_provider` must be coroutine function which returns a ``(user,
@@ -352,9 +565,16 @@ class SCRAMPLUS(Base, statemachine.SASLMechanism):
     :param enforce_minimum_iteration_count: Enforce the minimum iteration
         count specified by the SCRAM specifications.
     :type enforce_minimum_iteration_count: :class:`bool`
+    :param cache: Optional :class:`DerivedKeyCache` used to re-use expensive
+        PBKDF derivations across handshakes.  Each handshake still uses its
+        own channel binding data in its transcript.
+    :type cache: :class:`DerivedKeyCache` or :data:`None`
 
     `credential_provider` must be coroutine which returns a ``(user,
-    password)`` tuple.
+    password)`` tuple, or a ``(user, password, credential_version)`` triple
+    when a cache is used.
+
+    See :class:`SCRAM` for the cache and credential version parameters.
 
     `cb_provider` must be an instance of
     :class:`.ChannelBindingProvider`, which specifies and implements
