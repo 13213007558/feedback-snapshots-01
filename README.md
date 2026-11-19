@@ -149,6 +149,21 @@ Other capabilities:
 - JSON output of the parsed object hierarchy
 - FDF (flash description file) generation from parsed firmware volumes
 - Replacement of sections and files in a firmware volume by GUID
+- Provenance for partitioned Dell PFS sections: each chunk's original range and
+  its reassembled range, with missing bytes, duplicate payloads, length
+  conflicts and trailing data reported separately
+
+**Partitioned PFS sections.** A `PFSPartitionedSection` holds one logical
+stream split across several chunk records. It keeps a table with each chunk's
+container range, payload range and reassembled range, so any reassembled byte
+can be traced to the record that supplied it. The container does not number its
+chunks: order is the record order, a payload that repeats an earlier one is
+reported as a duplicate and does not extend the confirmed range, and a chunk
+after a gap is kept but marked as unconfirmed placement. `complete` is only true
+when the records account for the whole physical body and the nested firmware
+volumes are wholly present; concatenating whatever was readable is not enough.
+`dump()` also writes `<GUID>.provenance.json` next to the reassembled data.
+Names, specs and versions are copied declarations, not identities.
 
 ## Helper scripts
 

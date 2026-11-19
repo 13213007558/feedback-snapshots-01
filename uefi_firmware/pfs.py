@@ -1,3 +1,5 @@
+import hashlib
+import json
 import struct
 import os
 import re
@@ -160,15 +162,127 @@ class PFHeader(FirmwareObject, BaseObject):
             self.objs[i].dump(images, i)
 
 
-class PFSPartitionedSection(FirmwareObject, BaseObject):
-    '''A PFSSection with embedded PFSFiles (with additional sections) that
-    split the content of the section across multiple chunks. The chunks and the
-    encompassing embedded PFSFile are named as 'partitioned' section.
+def _merge_ranges(ranges):
+    '''Return the sorted, non-overlapping union of (start, end) ranges.'''
+    merged = []
+    for start, end in sorted(ranges):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
-    Search within a PFSFile, similar to handling sets of PFSSections without
-    recording information/objects for each section. Instead, strip all data
-    and content, save for the defined body. The object then represents the
-    single, concatenated body.
+
+def _subtract_ranges(ranges, start, end):
+    '''The parts of [start, end) not covered by ranges.'''
+    missing = []
+    position = start
+    for range_start, range_end in _merge_ranges(ranges):
+        if range_end <= position:
+            continue
+        if range_start > position:
+            missing.append((position, min(range_start, end)))
+        position = max(position, range_end)
+        if position >= end:
+            break
+    if position < end:
+        missing.append((position, end))
+    return [list(pair) for pair in missing if pair[1] > pair[0]]
+
+
+def _declared_version(header):
+    '''Read a section header's declared spec and version.
+
+    The values are copied from the image and are not authenticated: they
+    must not be used to identify a chunk or to decide that two chunks are
+    the same.
+    '''
+    spec, version_type = struct.unpack("<I4s", header[0x10:0x18])
+    version = ""
+    for i in range(4):
+        group_offset = 0x18 + (i * 2)
+        if version_type[i:i + 1] == b'A':
+            version += "%X" % struct.unpack(
+                "<h", header[group_offset:group_offset + 2])[0]
+        elif version_type[i:i + 1] == b'N':
+            version += ".%d" % struct.unpack(
+                "<h", header[group_offset:group_offset + 2])[0]
+    return spec, version_type, version
+
+
+def _scan_volume_region(data):
+    '''Scan consecutive firmware volumes, keeping declared and held extents.
+
+    A volume header may claim more bytes than the caller holds. The volume is
+    still parsed from the bytes present, but its declared end is reported so
+    the caller can separate parsed content from a declared but absent tail.
+
+    Returns:
+        dict: "volumes" (each with offset, declared size, bytes held, whether
+            it processed, and the object), "failure" (None, "no_header",
+            "process" or "zero") and "failure_offset" (where parsing stopped).
+    '''
+    volumes = []
+    failure = None
+    failure_offset = len(data)
+    view = memoryview(data)
+    offset = 0
+    while offset < len(data):
+        volume = FirmwareVolume(view[offset:], hex(offset))
+        if not volume.valid_header:
+            failure = "no_header"
+            failure_offset = offset
+            break
+        size = volume.size
+        available = len(getattr(volume, "_data", b""))
+        parsed = volume.process()
+        volumes.append({
+            "offset": offset,
+            "size": size,
+            "available": available,
+            "parsed": bool(parsed),
+            "object": volume,
+        })
+        if size <= 0:
+            failure = "zero"
+            failure_offset = offset
+            break
+        if not parsed:
+            failure = "process"
+            failure_offset = offset
+            break
+        offset += size
+    return {
+        "volumes": volumes,
+        "failure": failure,
+        "failure_offset": failure_offset,
+    }
+
+
+class PFSPartitionedSection(FirmwareObject, BaseObject):
+    '''A PFSSection whose content is split across nested chunk records.
+
+    A partitioned section is a PFS.HDR. envelope followed by one or more
+    chunks and a PFS.FTR. trailer. Each chunk is a 0x48-byte header, 0x248
+    bytes of variables, its payload, then up to three signature blobs. The
+    payloads belong to one logical stream, but the container does not store a
+    chunk number: order comes from the physical record sequence.
+
+    This object keeps a table of every chunk with its container range, its
+    payload range and its reassembled range, so a caller can trace any
+    reassembled byte back to the record that supplied it. Each record has two
+    independent states: how far its own framing extends (complete, truncated,
+    signatures absent, invalid) and whether its reassembled position is
+    supported (confirmed, unconfirmed, duplicate, tail). It never edits the
+    input. Missing bytes, duplicate payloads, length conflicts and trailing
+    bytes are reported separately, each with the coordinate space its ranges
+    refer to; "complete" is only true when the records account for the whole
+    body and the nested firmware volumes are wholly present.
+
+    Section names, specs and versions are declarations copied from the image.
+    They are not used as identities and do not authenticate a chunk.
     '''
 
     HEADER_SIZE = 0x48
@@ -180,37 +294,386 @@ class PFSPartitionedSection(FirmwareObject, BaseObject):
         self.section_objects = []
         self.partitions = 0
         self.section_data = b""
+        # The class documented a "uuid" here, but bytes 0..8 are the
+        # PFS.HDR. magic, so this is not an RFC 4122 GUID. Keep it as the
+        # opaque body prefix rather than a binary GUID.
+        self.header_prefix = data[0x0:0x10]
+        self.chunks = []
+        self.missing = []
+        self.duplicates = []
+        self.length_conflicts = []
+        self.tail = []
+        self.container_errors = []
+        self.coverage = {}
+        self.complete = False
+
+    def _add_length_conflict(self, where, declared, actual):
+        self.length_conflicts.append({
+            "where": where,
+            "declared": declared,
+            "actual": actual,
+        })
+
+    def _add_missing(self, reason, ranges, space="reassembly", **extra):
+        entry = {
+            "reason": reason,
+            "space": space,
+            "ranges": ranges,
+        }
+        entry.update(extra)
+        self.missing.append(entry)
+
+    def _add_tail(self, reason, ranges, space="container", **extra):
+        entry = {
+            "reason": reason,
+            "space": space,
+            "ranges": ranges,
+        }
+        entry.update(extra)
+        self.tail.append(entry)
+
+    def _parse_envelope(self):
+        # The first 0x10 bytes start with the PFS.HDR. magic. The remaining
+        # eight were called a UUID by the original parser and are kept
+        # opaque here: they are not a body size and must not decide framing.
+        # The last 0x10 bytes are a trailer. Images put its magic either at
+        # the end (like a PFSFile footer, which also holds a body size) or at
+        # the start (as the partitioned-chunk fixture does), so both layouts
+        # are recognised. Only the physical extent bounds the chunk scan.
+        header = bytes(self.data[:0x10])
+        magic, opaque = header[:8], header[8:0x10]
+        self.header_magic = magic
+        self.envelope = {
+            "magic": magic.decode("latin-1"),
+            "opaque": opaque.hex(),
+        }
+
+        trailer_layout = None
+        footer_size = None
+        footer_checksum = None
+        if self.size >= 0x20:
+            trailer = bytes(self.data[-0x10:])
+            if trailer[8:] == PFSFile.PFS_FOOTER:
+                trailer_layout = "size_then_magic"
+                footer_size, footer_checksum = struct.unpack(
+                    "<II", trailer[:8])
+            elif trailer[:8] == PFSFile.PFS_FOOTER:
+                trailer_layout = "magic_first"
+
+        if trailer_layout is None:
+            self.container_errors.append({
+                "where": "footer.magic",
+                "detail": "missing PFS.FTR. trailer",
+            })
+            physical_body_end = self.size
+        else:
+            physical_body_end = self.size - 0x10
+
+        body_size = physical_body_end - 0x10
+        self.envelope.update({
+            "trailer": trailer_layout,
+            "footer_body_size": footer_size,
+            "footer_checksum": footer_checksum,
+            "body": [0x10, physical_body_end],
+            "physical_body_size": body_size,
+        })
+
+        if footer_size is not None and footer_size != body_size:
+            # The trailer's own size claim disagrees with the bytes present.
+            self._add_length_conflict(
+                "envelope.footer_body_size", footer_size, body_size)
+        return physical_body_end
+
+    def _parse_chunks(self, scan_end):
+        step = 0x10
+        chunk_limit = max(0, scan_end)
+        while step + self.HEADER_SIZE <= chunk_limit:
+            order = len(self.chunks)
+            header = bytes(self.data[step:step + self.HEADER_SIZE])
+            declared_size = struct.unpack("<I", header[0x28:0x2C])[0]
+            sig1_size, sig2_size, sig3_size = struct.unpack(
+                "<III", header[0x2C:0x38])
+
+            spec, version_type, version = _declared_version(header)
+            payload_start = step + self.HEADER_SIZE + self.DATA_OFFSET
+            payload_end = step + self.HEADER_SIZE + declared_size
+            record_end = step + self.HEADER_SIZE + declared_size + \
+                sig1_size + sig2_size + sig3_size
+
+            def entry_for(payload, status):
+                return {
+                    "order": order,
+                    "header": [step, step + self.HEADER_SIZE],
+                    "record": [step, min(record_end, chunk_limit)],
+                    "declared_record_end": record_end,
+                    "declared_size": declared_size,
+                    "payload": [payload_start,
+                                payload_start + len(payload)],
+                    "declared_payload": [payload_start, payload_end],
+                    "signatures": {
+                        "rsa1": [payload_end, payload_end + sig1_size],
+                        "pmim": [payload_end + sig1_size,
+                                 payload_end + sig1_size + sig2_size],
+                        "rsa2": [payload_end + sig1_size + sig2_size,
+                                 payload_end + sig1_size + sig2_size +
+                                 sig3_size],
+                    },
+                    "declared": {
+                        "spec": spec,
+                        "version_type": version_type.hex(),
+                        "version": version,
+                    },
+                    "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                    "payload_length": len(payload),
+                    "duplicate_of": None,
+                    "placement": "unconfirmed",
+                    "status": status,
+                }
+
+            if declared_size < self.DATA_OFFSET or \
+                    payload_start > chunk_limit:
+                # The header does not describe a payload that can be sourced.
+                # Keep the header in the table, but do not invent a payload
+                # range and do not try to frame later records.
+                self.chunks.append(entry_for(b"", "invalid"))
+                self.partitions += 1
+                self._add_length_conflict(
+                    "chunk[%d].payload_range" % order,
+                    [payload_start, payload_end], chunk_limit)
+                self._add_tail(
+                    "framing_lost", [[step, chunk_limit]],
+                    space="container")
+                return
+
+            available_end = max(payload_start,
+                                min(payload_end, chunk_limit))
+            payload = bytes(self.data[payload_start:available_end])
+
+            if payload_end > chunk_limit:
+                self.chunks.append(entry_for(payload, "truncated"))
+                self.partitions += 1
+                # The record claims data past the bytes present. Report the
+                # absent part and stop: later framing cannot be trusted.
+                self._add_length_conflict(
+                    "chunk[%d].payload_end" % order,
+                    payload_end, chunk_limit)
+                self._add_missing(
+                    "chunk_payload_absent",
+                    [[available_end, payload_end]],
+                    space="container", chunk=order)
+                return
+
+            if record_end > chunk_limit:
+                self.chunks.append(entry_for(payload, "signatures_absent"))
+                self.partitions += 1
+                # The payload is present but the declared signatures or
+                # stride are not. The record's end is reported as absent; no
+                # later record is expected to be framed after it.
+                self._add_length_conflict(
+                    "chunk[%d].record_end" % order,
+                    record_end, chunk_limit)
+                self._add_missing(
+                    "chunk_record_absent",
+                    [[chunk_limit, record_end]],
+                    space="container", chunk=order)
+                return
+
+            if record_end <= step:
+                self.chunks.append(entry_for(payload, "invalid"))
+                self.partitions += 1
+                self._add_length_conflict(
+                    "chunk[%d].stride" % order, record_end, step)
+                return
+
+            self.chunks.append(entry_for(payload, "complete"))
+            self.partitions += 1
+            step = record_end
+
+        if step < chunk_limit:
+            # Too few bytes for another chunk header. They are trailing data
+            # inside the body, not a chunk.
+            self._add_tail(
+                "chunk_framing_leftover", [[step, chunk_limit]],
+                space="container")
+
+    def _mark_duplicates(self):
+        '''Record chunks whose payload repeats one already seen.
+
+        The container has no chunk identifier, so equal bytes are the only
+        duplicate evidence available. A repeated payload is reported but is
+        not used to extend the confirmed range.
+        '''
+        first_seen = {}
+        for entry in self.chunks:
+            if entry["payload_length"] == 0:
+                continue
+            digest = entry["digest"]
+            if digest in first_seen:
+                entry["duplicate_of"] = first_seen[digest]
+                self.duplicates.append({
+                    "order": entry["order"],
+                    "duplicate_of": first_seen[digest],
+                    "ranges": [entry["payload"]],
+                    "space": "container",
+                })
+            else:
+                first_seen[digest] = entry["order"]
+
+    def _reassemble(self):
+        payloads = []
+        reassembly_offset = 0
+        for entry in self.chunks:
+            payload = bytes(self.data[entry["payload"][0]:entry["payload"][1]])
+            reassembly_start = reassembly_offset
+            reassembly_offset += len(payload)
+            entry["reassembly"] = [reassembly_start, reassembly_offset]
+            payloads.append(payload)
+        self.section_data = b"".join(payloads)
+
+    def _parse_volumes(self):
+        scan = _scan_volume_region(self.section_data)
+        self.volumes = []
+        for index, volume in enumerate(scan["volumes"]):
+            declared_end = volume["offset"] + volume["size"]
+            complete = volume["size"] <= volume["available"] and \
+                volume["parsed"]
+            self.volumes.append({
+                "index": index,
+                "offset": volume["offset"],
+                "size": volume["size"],
+                "available": volume["available"],
+                "declared_end": declared_end,
+                "complete": complete,
+            })
+            self.section_objects.append(volume["object"])
+            if volume["size"] > volume["available"]:
+                # The volume claims bytes the reassembled stream does not
+                # hold. Their position inside the volume is not known: a
+                # missing chunk could be at the end or between chunks.
+                self._add_missing(
+                    "volume_declares_more",
+                    [[volume["offset"] + volume["available"], declared_end]],
+                    volume=index, declared=volume["size"],
+                    available=volume["available"])
+        if scan["failure"] in ("process", "zero"):
+            self._add_missing(
+                "volume_unparsed",
+                [[scan["failure_offset"], len(self.section_data)]],
+                volume=scan["failure_offset"])
+        elif scan["failure"] == "no_header":
+            failure_offset = scan["failure_offset"]
+            if failure_offset < len(self.section_data):
+                if self.volumes:
+                    self._add_tail(
+                        "after_volumes",
+                        [[failure_offset, len(self.section_data)]],
+                        space="reassembly")
+                else:
+                    # A partitioned section's stream should begin with a
+                    # firmware volume. Without one, the record that held the
+                    # start is absent or unrecognised; the bytes are not
+                    # simply trailing data after parsed content.
+                    self._add_missing(
+                        "volume_header_absent",
+                        [[0, len(self.section_data)]],
+                        space="reassembly")
+        self.volume_scan = scan
+
+    def _label_chunks(self):
+        '''Mark whether a chunk's reassembled position is supported.
+
+        A chunk inside a complete volume is confirmed. A chunk that starts an
+        incomplete volume is confirmed only if it also ends within the bytes
+        that volume holds: the container anchors its first chunk, but chunks
+        after a possible gap could have shifted. A duplicate payload is never
+        counted as confirmation.
+        '''
+        for entry in self.chunks:
+            start, end = entry.get("reassembly", [0, 0])
+            if entry["duplicate_of"] is not None:
+                entry["placement"] = "duplicate"
+                continue
+            if end == start:
+                # No payload bytes were sourced from this record, so it
+                # cannot anchor or extend the reassembled stream. Its framing
+                # status still says whether the record itself was located.
+                entry["placement"] = "unparsed"
+                continue
+            overlapping = [
+                volume for volume in self.volumes
+                if volume["offset"] < end and start < volume["declared_end"]
+            ]
+            if not overlapping:
+                entry["placement"] = "tail"
+                continue
+            if all(volume["complete"] for volume in overlapping):
+                entry["placement"] = "confirmed"
+                continue
+            first = overlapping[0]
+            if start == first["offset"] and \
+                    end <= first["offset"] + first["available"]:
+                entry["placement"] = "confirmed"
+            else:
+                entry["placement"] = "unconfirmed"
+
+    def _summarize_coverage(self):
+        total = len(self.section_data)
+        declared_ends = [volume["declared_end"] for volume in self.volumes]
+        coverage_end = max([total] + declared_ends)
+        confirmed = [
+            tuple(entry["reassembly"]) for entry in self.chunks
+            if entry["placement"] == "confirmed"
+        ]
+        sourced = [tuple(entry["reassembly"]) for entry in self.chunks
+                   if entry["payload_length"] > 0]
+        self.coverage = {
+            "reassembled_size": total,
+            "coverage_end": coverage_end,
+            "sourced_ranges": [list(pair) for pair in _merge_ranges(sourced)],
+            "confirmed_ranges": [
+                list(pair) for pair in _merge_ranges(confirmed)],
+            "unknown_ranges": _subtract_ranges(confirmed, 0, coverage_end),
+        }
+        for entry in self.chunks:
+            self.coverage.setdefault("chunks", []).append({
+                "order": entry["order"],
+                "original": entry["payload"],
+                "reassembly": entry["reassembly"],
+                "placement": entry["placement"],
+            })
 
     def process(self):
-        # The end removes the PFS trailer.
-        body_end = self.size - 0x10
-        # This data is the content of a section, with stripped PFS header.
-        # The first line will be the UUID.
-        self.uuid = self.data[0x0:0x10]
-        body_step = 0x10
-
-        # The stepping is equivilent to a PFSSection save for a 0x200-sized
-        # set of variables.
-        while body_step < body_end:
-            # The UUID for partitioned section is useless.
-            header = self.data[body_step:body_step + self.HEADER_SIZE]
-            if len(header) < self.HEADER_SIZE:
-                return False
-            self.partitions += 1
-            size = struct.unpack("<I", header[0x28:0x28 + 0x04])[0]
-            # Advance the seek pointer past the header.
-            body_step += self.HEADER_SIZE
-            # The section data seeks past an offset of variables.
-            data = self.data[body_step + self.DATA_OFFSET:body_step + size]
-            self.section_data += data
-            sig1_size, trp_size, sig2_size = struct.unpack("<III", header[0x2C:0x2C + 0x0C])
-            body_step += size + sig1_size + trp_size + sig2_size
-
-        # Now that section partitions are reconstructed, search for volumes.
-        volumes = _discover_volumes(self.section_data)
-        if volumes is False:
+        if len(self.data) < 0x10 or self.data[:8] != PFSFile.PFS_HEADER:
             return False
-        self.section_objects = volumes
+        scan_end = self._parse_envelope()
+        self._parse_chunks(scan_end)
+        self._mark_duplicates()
+        self._reassemble()
+        self._parse_volumes()
+        self._label_chunks()
+        self._summarize_coverage()
+
+        # Each check answers a different question, and all of them must hold
+        # before the reassembly can be called complete. Chunk records must
+        # account for the body, every payload must be sourced and placed, no
+        # byte may be missing or extra, and the nested volumes must be wholly
+        # present rather than merely parseable up to a cut.
+        body_start, body_end = self.envelope["body"]
+        framed = [tuple(chunk["record"]) for chunk in self.chunks]
+        unframed = _subtract_ranges(framed, body_start, body_end)
+        self.coverage["unframed_ranges"] = unframed
+        self.complete = bool(
+            self.chunks and
+            not self.container_errors and
+            not self.length_conflicts and
+            not self.missing and
+            not self.duplicates and
+            not self.tail and
+            not unframed and
+            all(entry["placement"] == "confirmed" for entry in self.chunks) and
+            self.volumes and
+            all(volume["complete"] for volume in self.volumes)
+        )
         return True
 
     @property
@@ -227,24 +690,87 @@ class PFSPartitionedSection(FirmwareObject, BaseObject):
 
     def to_dict(self):
         return {
-            'guid': sguid(self.uuid),
             'partitions': self.partitions,
             'size': len(self.section_data),
+            'complete': self.complete,
+            'envelope': dict(self.envelope),
+            'chunks': [dict(entry) for entry in self.chunks],
+            'missing': list(self.missing),
+            'duplicates': list(self.duplicates),
+            'length_conflicts': list(self.length_conflicts),
+            'tail': list(self.tail),
+            'container_errors': list(self.container_errors),
+            'coverage': dict(self.coverage),
             'objects': [volume.to_dict() for volume in self.section_objects],
         }
 
+    def _range_text(self, ranges):
+        return ", ".join("0x%x-0x%x" % (start, end)
+                         for start, end in ranges) or "-"
+
     def showinfo(self, ts='', index=None):
-        print("%s%s %s partitions %d size 0x%x (%d bytes)" % (
-            ts, blue("Dell PFSPartitionedSection:"), green(sguid(self.uuid)),
-            self.partitions, len(self.section_data), len(self.section_data)))
+        print("%s%s partitions %d, reassembled 0x%x (%d bytes), "
+              "complete %s" % (
+                  ts, blue("Dell PFSPartitionedSection:"), self.partitions,
+                  len(self.section_data), len(self.section_data),
+                  "yes" if self.complete else "no"))
+        for entry in self.chunks:
+            duplicate = ""
+            if entry["duplicate_of"] is not None:
+                duplicate = " duplicate-of %d" % entry["duplicate_of"]
+            print("%s  chunk %d: original 0x%x-0x%x reassembled 0x%x-0x%x "
+                  "framing %s, placement %s%s" % (
+                      ts, entry["order"], entry["payload"][0],
+                      entry["payload"][1], entry["reassembly"][0],
+                      entry["reassembly"][1], entry["status"],
+                      entry["placement"], duplicate))
+        for item in self.missing:
+            print("%s  missing %s: %s %s" % (
+                ts, item.get("space", "reassembly"), item["reason"],
+                self._range_text(item["ranges"])))
+        for item in self.tail:
+            print("%s  tail %s: %s %s" % (
+                ts, item.get("space", "container"), item["reason"],
+                self._range_text(item["ranges"])))
+        for item in self.length_conflicts:
+            print("%s  length conflict: %s declared %s actual %s" % (
+                ts, item["where"], item["declared"], item["actual"]))
+        if self.coverage.get("confirmed_ranges"):
+            print("%s  confirmed: %s" % (
+                ts, self._range_text(self.coverage["confirmed_ranges"])))
+        if self.coverage.get("unknown_ranges"):
+            print("%s  unknown: %s" % (
+                ts, self._range_text(self.coverage["unknown_ranges"])))
         for sub_object in self.section_objects:
             sub_object.showinfo("%s  " % ts)
 
     def dump(self, parent="", index=None):
-        path = os.path.join(parent, "%s" % sguid(self.uuid))
+        # The partitioned body has no GUID of its own (its head is the
+        # PFS.HDR. magic), so name the files by their serial position.
+        name = "partitioned"
+        if index is not None:
+            name += "-%d" % index
+        path = os.path.join(parent, name)
         dump_data("%s.data" % path, self.section_data)
 
-        path = os.path.join(parent, "section-%s" % sguid(self.uuid))
+        # The manifest makes the reassembly traceable after extraction. It
+        # describes the original container; no original bytes are rewritten.
+        manifest = {
+            "complete": self.complete,
+            "envelope": self.envelope,
+            "chunks": self.chunks,
+            "missing": self.missing,
+            "duplicates": self.duplicates,
+            "length_conflicts": self.length_conflicts,
+            "tail": self.tail,
+            "coverage": self.coverage,
+            "section_sha256": hashlib.sha256(self.section_data).hexdigest(),
+        }
+        dump_data(
+            "%s.provenance.json" % path,
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
+
+        path = os.path.join(parent, "section-%s" % name)
         for sub_object in self.section_objects:
             sub_object.dump(path)
         pass
