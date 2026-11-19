@@ -29,6 +29,7 @@
 #*/
 
 from binascii import unhexlify
+from collections.abc import Mapping
 
 from pycrate_core.utils  import *
 from pycrate_core.repr   import *
@@ -138,9 +139,27 @@ class SCCPBufBCD(BufBCD):
     # as given in 3.4.2.3.1
     _chars  = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
                '_spare10_', '_code11_', '_code12_', '_spare13_', '_spare14_', '_ST_')
-    # TODO: make something that can be re-encoded
-    
+    # In Q.713 3.4.2.3.1, the high-order nibble of an odd number of address
+    # signals is filled with 0000.  The ST code (1111) is an address signal
+    # terminator, not padding, so get_route_identity() does not accept it as
+    # filler for a GT number.
     _filler = 0x0
+
+    def decode_parity(self, odd):
+        """Decode address signals for display, according to the expected parity.
+
+        Contrary to decode(), the last nibble of an odd address is removed as
+        padding regardless of its value, so that both 0x0 filler and an ST code
+        display the number without an extra trailing digit.  This is a display
+        helper only: use get_route_identity() for a validated identity.
+        """
+        signals = []
+        for octet in self.get_val():
+            signals.append(octet & 0xF)
+            signals.append((octet >> 4) & 0xF)
+        if odd and signals:
+            signals = signals[:-1]
+        return ''.join(self._chars[s] for s in signals)
 
 
 # GTInd 0001
@@ -168,10 +187,7 @@ class _GlobalTitle0001(Envelope):
     def get_addr(self):
         """return BCD-encoded Addr, properly decoded according to OE
         """
-        if self[0].get_val():
-            return self[2].decode()[:-1]
-        else:
-            return self[2].decode()
+        return self[2].decode_parity(bool(self[0].get_val()))
     
     def set_addr(self, addr):
         """set the BCD-encoded Addr and OE
@@ -248,13 +264,11 @@ class _GlobalTitle0011(Envelope):
         """return the BCD- or hex-encoded Addr, properly decoded according to EncodingScheme
         """
         enc = self[2].get_val()
-        if enc == 1:
-            return self[3].get_alt().decode()[:-1]
-        elif enc == 2:
-            return self[3].get_alt().decode()
+        if enc in (1, 2):
+            return self[3].get_alt().decode_parity(enc == 1)
         else:
             return self[3].get_alt().hex()
-    
+
     def set_addr_bcd(self, addr):
         """set the BCD-encoded Addr and EncodingScheme
         """
@@ -298,10 +312,8 @@ class _GlobalTitle0100(Envelope):
         """return the BCD- or hex-encoded Addr, properly decoded according to EncodingScheme
         """
         enc = self[2].get_val()
-        if enc == 1:
-            return self[5].get_alt().decode()[:-1]
-        elif enc == 2:
-            return self[5].get_alt().decode()
+        if enc in (1, 2):
+            return self[5].get_alt().decode_parity(enc == 1)
         else:
             return self[5].get_alt().hex()
     
@@ -424,6 +436,13 @@ class SCCPPartyAddr(Envelope):
     def get_gt(self):
         return self[1][3].get_alt()
 
+    def get_route_identity(self, party=None):
+        """Return the auditable exact routing identity for this party address.
+
+        See pycrate_mobile.SCCP.get_route_identity().
+        """
+        return get_route_identity(self, party)
+
 
 class CallingPartyAddr(SCCPPartyAddr):
     pass
@@ -431,6 +450,726 @@ class CallingPartyAddr(SCCPPartyAddr):
 
 class CalledPartyAddr(SCCPPartyAddr):
     pass
+
+
+#------------------------------------------------------------------------------#
+# SCCP routing identity and policy
+# ITU-T Q.713, sections 3.4 and 3.5
+#------------------------------------------------------------------------------#
+
+# Exact fields which make up a routing identity, in deterministic order.  The
+# decoded digits are represented too, but only for display and as one field
+# among all the others: digits alone are never an identity.
+_SCCPIdentityFields = (
+    'address_indicator',
+    'reserved',
+    'routing_indicator',
+    'gt_indicator',
+    'ssn_indicator',
+    'pc_indicator',
+    'point_code',
+    'ssn',
+    'gt_present',
+    'global_title_type',
+    'translation_type',
+    'numbering_plan',
+    'nature_of_address',
+    'encoding_scheme',
+    'address_parity',
+    'address_digits',
+    'address_raw',
+    'global_title_raw',
+    'global_title_spare'
+    )
+
+_SCCPRouting_dict = {
+    0 : 'route on GT',
+    1 : 'route on SSN'
+    }
+
+
+def _sccp_elt_val(elt):
+    """Return the numeric value of an SCCP element, or None."""
+    try:
+        return elt.get_val()
+    except Exception:
+        return None
+
+
+def _sccp_elt_bytes(elt):
+    """Return the raw bytes of an SCCP element, or b'' on error."""
+    try:
+        val = elt.to_bytes()
+        if isinstance(val, bytes_types):
+            return val
+    except Exception:
+        pass
+    try:
+        val = elt.get_val()
+        if isinstance(val, bytes_types):
+            return val
+    except Exception:
+        pass
+    return b''
+
+
+def _sccp_child(env, name):
+    """Return a named child from an Envelope, or None."""
+    try:
+        if name in env._by_name:
+            return env[name]
+    except Exception:
+        pass
+    return None
+
+
+def _sccp_addr_value(addr):
+    """Return the _SCCPAddr value element from an address or message field."""
+    if isinstance(addr, SCCPPartyAddr):
+        return addr[1]
+    if isinstance(addr, _SCCPAddr):
+        return addr
+    if isinstance(addr, Envelope) and 'AddrInd' in getattr(addr, '_by_name', ()):
+        return addr
+    raise(PycrateErr('SCCP routing identity: invalid address type {0}'\
+          .format(type(addr).__name__)))
+
+
+def _sccp_bcd_decode(raw, parity):
+    """Strictly decode Q.713 BCD address signals.
+
+    `parity` is "odd" or "even".  For an odd address, the last high-order
+    nibble must be the 0000 filler defined in Q.713 3.4.2.3.1; for an even
+    address, no filler is present.  Only decimal address signals 0..9 are
+    accepted for the digits.
+
+    Returns (digits, issues); digits is None when the address must be kept
+    unknown.  Illegal filler and non-decimal signals are never trimmed or
+    normalised into a shorter/wider valid number.
+    """
+    signals = []
+    for octet in raw:
+        # address signals are packed low nibble first, see Q.713 3.4.2.3.1
+        signals.append(octet & 0xF)
+        signals.append((octet >> 4) & 0xF)
+    if parity not in ('odd', 'even'):
+        return None, ['unknown address parity']
+    if not signals:
+        return None, ['empty address signals']
+    if parity == 'odd':
+        if signals[-1] != 0x0:
+            return None, ['odd address has illegal filler 0x{0:x} (expected '
+                          '0000)'.format(signals[-1])]
+        signals = signals[:-1]
+    if not signals:
+        return None, ['no address signals after padding']
+    bad = [s for s in signals if s > 9]
+    if bad:
+        return None, ['non-decimal address signal(s): {0}'\
+                      .format(', '.join('0x{0:x}'.format(s) for s in bad))]
+    return ''.join(str(s) for s in signals), []
+
+
+def _sccp_gt_identity(gtind, gt_elt):
+    """Extract global title fields from the `GT` alternative.
+
+    Returns (gt_audit, canonical_fields, unknown, evidence).
+    """
+    evidence = []
+    unknown = []
+    canonical = {
+        'global_title_type'  : gtind,
+        'translation_type'   : None,
+        'numbering_plan'     : None,
+        'nature_of_address'  : None,
+        'encoding_scheme'    : None,
+        'address_parity'     : None,
+        'address_digits'     : None,
+        'address_raw'        : None,
+        'global_title_raw'   : None,
+        'global_title_spare' : None
+        }
+    if gt_elt is None:
+        return None, canonical, ['GT indicator is non-zero but no GT is '\
+                                 'present'], evidence
+    # GT is a plain Buf when GT_DONT_DECODE was used or when the GT indicator
+    # is not supported by this parser.
+    if hasattr(gt_elt, 'get_alt'):
+        try:
+            actual = gt_elt.get_alt()
+        except Exception:
+            actual = None
+    else:
+        actual = gt_elt
+    if actual is None or not isinstance(actual, Envelope) or \
+    actual._name == 'GT_unk':
+        raw = _sccp_elt_bytes(actual) if actual is not None else b''
+        canonical['global_title_raw'] = raw.hex()
+        unknown.append('global title is not decoded (raw only)')
+        evidence.append({'source' : 'Value.GT',
+                         'raw'    : '0x' + raw.hex(),
+                         'field'  : 'global_title',
+                         'value'  : None,
+                         'status' : 'unknown'})
+        audit = {'type'      : gtind,
+                 'type_name' : _GTInd_dict.get(gtind, 'unsupported'),
+                 'raw'       : raw.hex(),
+                 'digits'    : None,
+                 'parity'    : None,
+                 'unknown'   : list(unknown)}
+        return audit, canonical, unknown, evidence
+    gt_raw = _sccp_elt_bytes(actual)
+    canonical['global_title_raw'] = gt_raw.hex()
+    audit = {'type'      : gtind,
+             'type_name' : _GTInd_dict.get(gtind, 'unsupported'),
+             'raw'       : gt_raw.hex(),
+             'digits'    : None,
+             'parity'    : None,
+             'unknown'   : []}
+    tt = _sccp_child(actual, 'TranslationType')
+    np = _sccp_child(actual, 'NumberingPlan')
+    es = _sccp_child(actual, 'EncodingScheme')
+    nai = _sccp_child(actual, 'NAI')
+    spare = _sccp_child(actual, 'spare')
+    oe = _sccp_child(actual, 'OE')
+    if tt is not None:
+        tt_val = _sccp_elt_val(tt)
+        canonical['translation_type'] = tt_val
+        audit['translation_type'] = tt_val
+        evidence.append({'source' : 'Value.GT.TranslationType',
+                         'raw'    : '0x{0:02x}'.format(tt_val or 0),
+                         'field'  : 'translation_type',
+                         'value'  : tt_val})
+    if np is not None:
+        np_val = _sccp_elt_val(np)
+        canonical['numbering_plan'] = np_val
+        audit['numbering_plan'] = np_val
+        audit['numbering_plan_name'] = _NumPlan_dict.get(np_val)
+        evidence.append({'source' : 'Value.GT.NumberingPlan',
+                         'raw'    : '0x{0:x}'.format(np_val or 0),
+                         'field'  : 'numbering_plan',
+                         'value'  : np_val,
+                         'meaning': _NumPlan_dict.get(np_val)})
+    if es is not None:
+        es_val = _sccp_elt_val(es)
+        canonical['encoding_scheme'] = es_val
+        audit['encoding_scheme'] = es_val
+        audit['encoding_scheme_name'] = _EncScheme_dict.get(es_val)
+        evidence.append({'source' : 'Value.GT.EncodingScheme',
+                         'raw'    : '0x{0:x}'.format(es_val or 0),
+                         'field'  : 'encoding_scheme',
+                         'value'  : es_val,
+                         'meaning': _EncScheme_dict.get(es_val)})
+    if nai is not None:
+        nai_val = _sccp_elt_val(nai)
+        canonical['nature_of_address'] = nai_val
+        audit['nature_of_address'] = nai_val
+        audit['nature_of_address_name'] = _GTNAI_dict.get(nai_val)
+        evidence.append({'source' : 'Value.GT.NAI',
+                         'raw'    : '0x{0:02x}'.format(nai_val or 0),
+                         'field'  : 'nature_of_address',
+                         'value'  : nai_val,
+                         'meaning': _GTNAI_dict.get(nai_val)})
+    if spare is not None:
+        spare_val = _sccp_elt_val(spare)
+        canonical['global_title_spare'] = spare_val
+        audit['spare'] = spare_val
+        evidence.append({'source' : 'Value.GT.spare',
+                         'raw'    : str(spare_val),
+                         'field'  : 'global_title_spare',
+                         'value'  : spare_val})
+    # parity comes from OE for GT type 1, from the encoding scheme otherwise
+    parity = None
+    if oe is not None:
+        oe_val = _sccp_elt_val(oe)
+        parity = 'odd' if oe_val else 'even'
+        evidence.append({'source' : 'Value.GT.OE',
+                         'raw'    : str(oe_val),
+                         'field'  : 'address_parity',
+                         'value'  : oe_val,
+                         'meaning': parity})
+    elif es is not None:
+        es_val = _sccp_elt_val(es)
+        if es_val == 1:
+            parity = 'odd'
+        elif es_val == 2:
+            parity = 'even'
+    canonical['address_parity'] = parity
+    audit['parity'] = parity
+    addr_elt = _sccp_child(actual, 'Addr')
+    if addr_elt is None:
+        unknown.append('GT address signals are absent')
+        audit['unknown'] = list(unknown)
+        return audit, canonical, unknown, evidence
+    if hasattr(addr_elt, 'get_alt'):
+        try:
+            addr_alt = addr_elt.get_alt()
+        except Exception:
+            addr_alt = None
+    else:
+        addr_alt = addr_elt
+    addr_raw = _sccp_elt_bytes(addr_alt) if addr_alt is not None else b''
+    canonical['address_raw'] = addr_raw.hex()
+    audit['address_signals_raw'] = addr_raw.hex()
+    digits = None
+    issues = []
+    if gtind == 1:
+        # GT 1: OE + NAI + BCD address signals, no numbering plan nor TT
+        digits, issues = _sccp_bcd_decode(addr_raw, parity)
+    elif gtind == 2:
+        # GT 2 has no encoding scheme: never guess digits from its raw octets
+        issues = ['GT type 2 has no BCD encoding scheme; address retained '\
+                  'as raw only']
+    elif gtind in (3, 4):
+        es_val = _sccp_elt_val(es) if es is not None else None
+        if es_val in (1, 2):
+            digits, issues = _sccp_bcd_decode(addr_raw, parity)
+        elif es_val == 3:
+            issues = ['national specific encoding is not supported for '\
+                      'routing identity']
+        else:
+            issues = ['unsupported/unknown encoding scheme {0!r}'\
+                      .format(es_val)]
+    else:
+        issues = ['unsupported global title indicator {0}'.format(gtind)]
+    canonical['address_digits'] = digits
+    audit['digits'] = digits
+    audit['unknown'] = list(issues)
+    unknown.extend(issues)
+    evidence.append({'source' : 'Value.GT.Addr',
+                     'raw'    : '0x' + addr_raw.hex(),
+                     'field'  : 'address_signals',
+                     'parity' : parity,
+                     'padding': '0x0' if parity == 'odd' else None,
+                     'digits' : digits,
+                     'status' : 'valid' if not issues else 'unknown',
+                     'issues' : list(issues)})
+    return audit, canonical, unknown, evidence
+
+
+class SCCPRouteIdentity(Mapping):
+    """Auditable SCCP routing identity.
+
+    Behaves as a read-only mapping over its audit dictionary.  Equality and
+    hashing use the complete canonical identity, never the displayed digits,
+    so two addresses which display the same number but differ in numbering
+    plan, nature of address, translation type, GT format or routing mode are
+    distinct identities.
+    """
+
+    def __init__(self, audit, canonical):
+        self._audit = audit
+        self._canonical = canonical
+        self._key = tuple(canonical[name] for name in _SCCPIdentityFields)
+
+    # mapping interface
+    def __getitem__(self, key):
+        return self._audit[key]
+
+    def __iter__(self):
+        return iter(self._audit)
+
+    def __len__(self):
+        return len(self._audit)
+
+    # attributes
+    @property
+    def canonical(self):
+        return dict(self._canonical)
+
+    @property
+    def canonical_key(self):
+        return self._key
+
+    @property
+    def unknown(self):
+        return list(self._audit['unknown'])
+
+    @property
+    def valid(self):
+        return bool(self._audit['valid'])
+
+    @property
+    def evidence(self):
+        return list(self._audit['evidence'])
+
+    @property
+    def display(self):
+        return self._audit['display']
+
+    def to_dict(self):
+        """Return a JSON-friendly audit dictionary."""
+        audit = dict(self._audit)
+        audit['canonical'] = dict(self._canonical)
+        audit['identity_key'] = list(self._key)
+        return audit
+
+    def __eq__(self, other):
+        if isinstance(other, SCCPRouteIdentity):
+            return self._key == other._key
+        if isinstance(other, Mapping):
+            canonical = other.get('canonical')
+            if isinstance(canonical, Mapping):
+                other = canonical
+            return dict(self._canonical) == dict(other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        eq = self.__eq__(other)
+        if eq is NotImplemented:
+            return eq
+        return not eq
+
+    def __hash__(self):
+        return hash(self._key)
+
+    def __repr__(self):
+        return '<SCCPRouteIdentity {0!r} valid={1}>'\
+               .format(self._audit['display'], self.valid)
+
+
+def get_route_identity(addr, party=None):
+    """Build an auditable SCCP routing identity from a party address.
+
+    Args:
+        addr: SCCPPartyAddr / CalledPartyAddr / CallingPartyAddr, a bare
+            _SCCPAddr, the bytes of a length-prefixed party address, or an
+            SCCPRouteIdentity / audit dict produced earlier.
+        party (str): optional role label stored in the audit output, e.g.
+            "called" or "calling".
+
+    Returns:
+        SCCPRouteIdentity: mapping-like, JSON-friendly audit object.  It keeps
+        the address indicator (including its reserved bit), routing indicator,
+        GT indicator, numbering plan, nature of address, translation type,
+        encoding scheme, BCD parity and raw address bytes.  GT is kept
+        separate from point code and SSN.  Illegal BCD padding and unsupported
+        encodings are retained as unknown: no alternative or truncated number
+        is produced and nothing is normalised into a wider allowed number.
+    """
+    if isinstance(addr, SCCPRouteIdentity):
+        return addr
+    if isinstance(addr, Mapping):
+        canonical = addr.get('canonical')
+        if not isinstance(canonical, Mapping):
+            raise(PycrateErr('SCCP routing identity: mapping has no '\
+                             'canonical fields'))
+        missing = [name for name in _SCCPIdentityFields
+                   if name not in canonical]
+        if missing:
+            raise(PycrateErr('SCCP routing identity: mapping is missing '\
+                             'canonical field(s) {0}'\
+                             .format(', '.join(missing))))
+        audit = dict(addr)
+        audit.setdefault('party', None)
+        audit.setdefault('unknown', [])
+        audit.setdefault('valid', not audit['unknown'])
+        audit.setdefault('evidence', [])
+        if 'display' not in audit:
+            digits = canonical.get('address_digits')
+            raw = canonical.get('address_raw')
+            audit['display'] = digits if digits is not None else \
+                               ('raw:' + raw if raw else '<no address>')
+        return SCCPRouteIdentity(audit, dict(canonical))
+    if isinstance(addr, (bytes_types, bytearray)):
+        paddr = SCCPPartyAddr()
+        paddr.from_bytes(bytes(addr))
+        addr = paddr
+    if party is None:
+        name = getattr(addr, '_name', None)
+        if name == 'CalledPartyAddr':
+            party = 'called'
+        elif name == 'CallingPartyAddr':
+            party = 'calling'
+    value = _sccp_addr_value(addr)
+    ai = _sccp_child(value, 'AddrInd')
+    if ai is None:
+        raise(PycrateErr('SCCP routing identity: address indicator is absent'))
+    res = _sccp_elt_val(_sccp_child(ai, 'res')) or 0
+    ri = _sccp_elt_val(_sccp_child(ai, 'RoutingInd'))
+    gtind = _sccp_elt_val(_sccp_child(ai, 'GTInd'))
+    ssnind = _sccp_elt_val(_sccp_child(ai, 'SSNInd')) or 0
+    pcind = _sccp_elt_val(_sccp_child(ai, 'PCInd')) or 0
+    if ri is None or gtind is None:
+        raise(PycrateErr('SCCP routing identity: incomplete address indicator'))
+    ai_raw = ((res & 1) << 7) | ((ri & 1) << 6) | ((gtind & 0xF) << 2) | \
+             ((ssnind & 1) << 1) | (pcind & 1)
+    bits = '{0:08b}'.format(ai_raw)
+    evidence = [
+        {'source' : 'Value.AddrInd',
+         'raw'    : '0x{0:02x}'.format(ai_raw),
+         'bits'   : bits,
+         'field'  : 'reserved',
+         'value'  : res},
+        {'source' : 'Value.AddrInd',
+         'raw'    : bits,
+         'field'  : 'routing_indicator',
+         'value'  : ri,
+         'meaning': _SCCPRouting_dict.get(ri)},
+        {'source' : 'Value.AddrInd',
+         'raw'    : bits,
+         'field'  : 'global_title_indicator',
+         'value'  : gtind,
+         'meaning': _GTInd_dict.get(gtind, 'unsupported')},
+        {'source' : 'Value.AddrInd',
+         'raw'    : bits,
+         'field'  : 'ssn_indicator',
+         'value'  : ssnind},
+        {'source' : 'Value.AddrInd',
+         'raw'    : bits,
+         'field'  : 'point_code_indicator',
+         'value'  : pcind}
+        ]
+    unknown = []
+    pc = _sccp_elt_val(_sccp_child(value, 'PC')) if pcind else None
+    ssn = _sccp_elt_val(_sccp_child(value, 'SSN')) if ssnind else None
+    if pcind:
+        pc_raw = _sccp_elt_bytes(_sccp_child(value, 'PC'))
+        evidence.append({'source' : 'Value.PC',
+                         'raw'    : '0x' + pc_raw.hex(),
+                         'field'  : 'point_code',
+                         'value'  : pc})
+    if ssnind:
+        evidence.append({'source' : 'Value.SSN',
+                         'raw'    : '0x{0:02x}'.format(ssn or 0),
+                         'field'  : 'ssn',
+                         'value'  : ssn,
+                         'meaning': _SSN_dict.get(ssn)})
+    gt_elt = _sccp_child(value, 'GT')
+    if ri == 0 and gtind == 0:
+        unknown.append('routing indicator selects GT but GT indicator is 0')
+    if ri == 1 and not (ssnind or pcind):
+        unknown.append('routing indicator selects SSN but neither SSN nor '\
+                       'point code is present')
+    if ri == 1 and gtind != 0:
+        # A global title in an address routed on SSN does not select the
+        # destination by itself, but it remains part of the audited identity.
+        evidence.append({'source' : 'Value.AddrInd',
+                         'raw'    : bits,
+                         'field'  : 'routing_conflict',
+                         'value'  : 'GT present but routing indicator is SSN',
+                         'meaning': 'GT retained separately from SSN route'})
+    gt_audit = None
+    gt_canonical = {
+        'global_title_type'  : None,
+        'translation_type'   : None,
+        'numbering_plan'     : None,
+        'nature_of_address'  : None,
+        'encoding_scheme'    : None,
+        'address_parity'     : None,
+        'address_digits'     : None,
+        'address_raw'        : None,
+        'global_title_raw'   : None,
+        'global_title_spare' : None
+        }
+    if gtind != 0:
+        gt_audit, gt_canonical, gt_unknown, gt_evidence = \
+            _sccp_gt_identity(gtind, gt_elt)
+        unknown.extend(gt_unknown)
+        evidence.extend(gt_evidence)
+    else:
+        evidence.append({'source' : 'Value.GT',
+                         'raw'    : None,
+                         'field'  : 'global_title',
+                         'value'  : None,
+                         'meaning': 'not present'})
+    if gt_canonical['address_digits'] is not None:
+        display = gt_canonical['address_digits']
+    elif gt_canonical['address_raw']:
+        display = 'raw:' + gt_canonical['address_raw']
+    elif gt_canonical['global_title_raw']:
+        display = 'raw:' + gt_canonical['global_title_raw']
+    else:
+        parts = []
+        if pcind:
+            parts.append('pc={0}'.format(pc))
+        if ssnind:
+            parts.append('ssn={0}'.format(ssn))
+        display = ' '.join(parts) if parts else '<no address>'
+    canonical = {
+        'address_indicator' : ai_raw,
+        'reserved'          : res,
+        'routing_indicator' : ri,
+        'gt_indicator'      : gtind,
+        'ssn_indicator'     : ssnind,
+        'pc_indicator'      : pcind,
+        'point_code'        : pc,
+        'ssn'               : ssn,
+        'gt_present'        : gtind != 0
+        }
+    canonical.update(gt_canonical)
+    audit = {
+        'party' : party,
+        'address' : {
+            'indicator'         : ai_raw,
+            'reserved'          : res,
+            'routing_indicator' : ri,
+            'routing'           : _SCCPRouting_dict.get(ri),
+            'gt_indicator'      : gtind,
+            'gt_type'           : _GTInd_dict.get(gtind, 'unsupported'),
+            'ssn_indicator'     : ssnind,
+            'pc_indicator'      : pcind,
+            'point_code'        : pc,
+            'ssn'               : ssn
+            },
+        'global_title' : gt_audit,
+        'display'      : display,
+        'display_note' : 'display is for review only; it is not a route '
+                         'identity and must not be used for policy',
+        'canonical'    : dict(canonical),
+        'unknown'      : list(dict.fromkeys(unknown)),
+        'valid'        : not unknown,
+        'evidence'     : evidence
+        }
+    return SCCPRouteIdentity(audit, canonical)
+
+
+# convenient aliases
+route_identity = get_route_identity
+routing_identity = get_route_identity
+
+
+def get_message_route_identities(msg):
+    """Return the routing identities carried by an SCCP message.
+
+    Args:
+        msg: a parsed SCCPMessage (or any Envelope containing
+            CalledPartyAddr / CallingPartyAddr fields, including optional
+            parameters).
+
+    Returns:
+        list of SCCPRouteIdentity, in field order.  Messages without party
+        addresses (e.g. RLC) return an empty list.
+    """
+    idents = []
+    _sccp_collect_party_addrs(msg, idents)
+    return idents
+
+
+def _sccp_collect_party_addrs(elt, idents):
+    if isinstance(elt, SCCPPartyAddr):
+        name = getattr(elt, '_name', None)
+        if name == 'CalledPartyAddr':
+            party = 'called'
+        elif name == 'CallingPartyAddr':
+            party = 'calling'
+        else:
+            # unwrap the option wrapper around the party address, if any
+            party = None
+            for child in getattr(elt, '_content', ()):
+                if isinstance(child, SCCPPartyAddr):
+                    party = 'called' if child._name == 'CalledPartyAddr' \
+                            else 'calling'
+                    elt = child
+                    break
+        idents.append(get_route_identity(elt, party))
+        return
+    for child in getattr(elt, '_content', ()):
+        if isinstance(child, Element):
+            _sccp_collect_party_addrs(child, idents)
+
+
+def _sccp_identity(addr, party=None):
+    """Coerce an address, identity or audit dict into an identity."""
+    return get_route_identity(addr, party)
+
+
+def _sccp_compare(rule, ident):
+    """Compare every canonical field of two identities."""
+    checks = []
+    for name in _SCCPIdentityFields:
+        expected = rule._canonical[name]
+        observed = ident._canonical[name]
+        checks.append({'field'    : name,
+                       'expected' : expected,
+                       'observed' : observed,
+                       'match'    : expected == observed})
+    return checks
+
+
+class SCCPRoutePolicy:
+    """Exact-match allow policy for SCCP routing identities.
+
+    A rule is a complete SCCPRouteIdentity.  There is deliberately no
+    digits-only, prefix or wildcard matching: the same displayed number on a
+    different numbering plan, nature of address, translation type, GT type or
+    routing mode is a different route.  Identities containing unknown or
+    illegal fields can never be added as trusted rules and are always denied
+    by check(), instead of being normalised into a wider allowed number.
+    """
+
+    def __init__(self, allowed=None, name=None):
+        self._name = name
+        self._rules = []
+        if allowed:
+            for rule in allowed:
+                self.add_allowed(rule)
+
+    @property
+    def rules(self):
+        return list(self._rules)
+
+    def add_allowed(self, addr, party=None):
+        """Add one complete identity or party address to the allow list."""
+        ident = _sccp_identity(addr, party)
+        if not ident.valid:
+            raise(PycrateErr('SCCP routing policy: refusing unknown identity '
+                             'as trusted rule: {0}'\
+                             .format(', '.join(ident.unknown))))
+        self._rules.append(ident)
+        return ident
+
+    # aliases for readability at call sites
+    allow = add_allowed
+    allow_addr = add_allowed
+
+    def clear(self):
+        self._rules = []
+
+    def is_allowed(self, addr, party=None):
+        return self.check(addr, party)['allowed']
+
+    def check(self, addr, party=None):
+        """Return a decision with raw-field evidence and exact-match checks."""
+        try:
+            ident = _sccp_identity(addr, party)
+        except Exception as exc:
+            return {'allowed'  : False,
+                    'reason'   : 'unparseable_address',
+                    'error'    : str(exc),
+                    'checks'   : [],
+                    'identity' : None}
+        if not ident.valid:
+            return {'allowed'  : False,
+                    'reason'   : 'unknown_identity',
+                    'unknown'  : ident.unknown,
+                    'checks'   : [],
+                    'identity' : ident.to_dict()}
+        decision = {'allowed'       : False,
+                    'reason'        : 'no_matching_rule',
+                    'checks'        : [],
+                    'nearest_rules' : [],
+                    'identity'      : ident.to_dict()}
+        for ind, rule in enumerate(self._rules):
+            checks = _sccp_compare(rule, ident)
+            if all(check['match'] for check in checks):
+                decision['allowed'] = True
+                decision['reason'] = 'allowed'
+                decision['matched_rule'] = ind
+                decision['checks'] = checks
+                return decision
+            decision['nearest_rules'].append(
+                {'rule_index' : ind,
+                 'mismatches' : [check for check in checks
+                                 if not check['match']]})
+        # keep the closest rules for the audit trail, best match first
+        decision['nearest_rules'].sort(key=lambda r: len(r['mismatches']))
+        decision['nearest_rules'] = decision['nearest_rules'][:3]
+        if decision['nearest_rules']:
+            decision['checks'] = decision['nearest_rules'][0]['mismatches']
+        if not self._rules:
+            decision['reason'] = 'no_rules_configured'
+        return decision
 
 
 #------------------------------------------------------------------------------#

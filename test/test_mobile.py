@@ -39,6 +39,13 @@ from pycrate_mobile.NAS             import parse_NAS_MO, parse_NAS_MT, parse_NAS
 from pycrate_mobile.SIGTRAN         import SIGTRAN
 from pycrate_mobile.M3UA            import parse_M3UA
 from pycrate_mobile.SCCP            import parse_SCCP
+from pycrate_mobile.SCCP            import (
+    CalledPartyAddr,
+    CallingPartyAddr,
+    SCCPRoutePolicy,
+    get_route_identity,
+    get_message_route_identities,
+    )
 from pycrate_mobile.ISUP            import parse_ISUP
 from pycrate_mobile.TS0960_GTPv0    import parse_GTPv0
 from pycrate_mobile.TS29060_GTP     import parse_GTP
@@ -431,6 +438,246 @@ def test_sccp(sccp_pdu=sccp_pdu):
     m[4].get_gt().set_addr_bcd(calling)
     assert( m[3].get_gt().get_addr() == called )
     assert( m[4].get_gt().get_addr() == calling )
+
+
+def _sccp_test_addr(np=1, nai=4, tt=0, es=1, digits='12345', ri=0, gtind=4,
+                    ssn=6, pc=None, res=0, called=True):
+    """Build a party address for routing identity tests."""
+    a = CalledPartyAddr() if called else CallingPartyAddr()
+    ai = a[1][0]
+    ai['res'].set_val(res)
+    ai['RoutingInd'].set_val(ri)
+    ai['GTInd'].set_val(gtind)
+    ai['SSNInd'].set_val(1 if ssn is not None else 0)
+    ai['PCInd'].set_val(1 if pc is not None else 0)
+    if ssn is not None:
+        a[1]['SSN'].set_val(ssn)
+    if pc is not None:
+        a[1]['PC'].set_val(pc)
+    if gtind:
+        g = a[1]['GT'].get_alt()
+        if gtind == 1:
+            g['OE'].set_val(len(digits) % 2)
+            g['NAI'].set_val(nai)
+            g['Addr'].encode(digits)
+        elif gtind == 2:
+            g['TranslationType'].set_val(tt)
+            g['Addr'].set_val(b'\x21\x43')
+        else:
+            g['TranslationType'].set_val(tt)
+            g['NumberingPlan'].set_val(np)
+            g['EncodingScheme'].set_val(es)
+            if gtind == 4:
+                g['NAI'].set_val(nai)
+            g.set_addr_bcd(digits)
+    return a
+
+
+def test_sccp_routing_identity():
+    # same digits, but different numbering plan / nature of address /
+    # translation type are different routing identities
+    base = _sccp_test_addr(np=1)
+    ident = get_route_identity(base)
+    assert( ident.valid )
+    assert( ident.display == '12345' )
+    assert( ident['canonical']['numbering_plan'] == 1 )
+    assert( ident['canonical']['nature_of_address'] == 4 )
+    assert( ident['canonical']['translation_type'] == 0 )
+    assert( ident['canonical']['gt_indicator'] == 4 )
+    assert( ident['canonical']['address_parity'] == 'odd' )
+    #
+    same_digits = [
+        _sccp_test_addr(np=7),
+        _sccp_test_addr(nai=3),
+        _sccp_test_addr(tt=5),
+        _sccp_test_addr(es=2, digits='123456'),
+        ]
+    for other in same_digits:
+        other_id = get_route_identity(other)
+        assert( other_id.valid )
+        assert( other_id != ident )
+        assert( other_id.canonical_key != ident.canonical_key )
+    #
+    # exact duplicate compares equal
+    assert( get_route_identity(_sccp_test_addr(np=1)) == ident )
+    #
+    # GT format 1 carries no numbering plan: it is a distinct identity too
+    gt1 = get_route_identity(_sccp_test_addr(gtind=1, digits='12345'))
+    assert( gt1.valid and gt1 != ident )
+    assert( gt1['canonical']['numbering_plan'] is None )
+    #
+    # point code / SSN addresses do not carry a GT and stay separate
+    pc_addr = _sccp_test_addr(gtind=0, ri=1, ssn=6, pc=0x1234)
+    pc_id = get_route_identity(pc_addr)
+    assert( pc_id.valid )
+    assert( pc_id['canonical']['gt_present'] is False )
+    assert( pc_id['canonical']['point_code'] == 0x1234 )
+    assert( pc_id['canonical']['ssn'] == 6 )
+    assert( pc_id != ident )
+    #
+    # address indicator reserved bit is retained
+    res_addr = _sccp_test_addr(res=1)
+    res_id = get_route_identity(res_addr)
+    assert( res_id['canonical']['reserved'] == 1 )
+    assert( res_id['canonical']['address_indicator'] == 0x92 )
+    assert( res_id != ident )
+
+
+def test_sccp_routing_identity_unknown():
+    # illegal filler must not be trimmed into a valid shorter number
+    bad = _sccp_test_addr(digits='12345')
+    raw = bytearray(bad[1]['GT'].get_alt()['Addr'].get_alt().to_bytes())
+    raw[-1] = 0x55
+    bad[1]['GT'].get_alt()['Addr'].get_alt().set_val(bytes(raw))
+    bad_id = get_route_identity(bad)
+    assert( not bad_id.valid )
+    assert( bad_id['canonical']['address_digits'] is None )
+    assert( 'illegal filler' in ' '.join(bad_id.unknown) )
+    #
+    # non-decimal address signal: unknown, not a wildcard number
+    bad2 = _sccp_test_addr(digits='12345')
+    raw = bytearray(bad2[1]['GT'].get_alt()['Addr'].get_alt().to_bytes())
+    raw[0] = (raw[0] & 0xF0) | 0xA
+    bad2[1]['GT'].get_alt()['Addr'].get_alt().set_val(bytes(raw))
+    bad2_id = get_route_identity(bad2)
+    assert( not bad2_id.valid )
+    assert( bad2_id['canonical']['address_digits'] is None )
+    assert( 'non-decimal' in ' '.join(bad2_id.unknown) )
+    #
+    # unsupported encoding scheme 3 (national specific) is unknown
+    nat = _sccp_test_addr(es=1)
+    nat[1]['GT'].get_alt()['EncodingScheme'].set_val(3)
+    nat_id = get_route_identity(nat)
+    assert( not nat_id.valid )
+    assert( nat_id['canonical']['address_digits'] is None )
+    #
+    # GT type 2 is retained as raw only, never decoded as digits
+    gt2_id = get_route_identity(_sccp_test_addr(gtind=2, tt=5))
+    assert( not gt2_id.valid )
+    assert( gt2_id['canonical']['address_digits'] is None )
+    assert( gt2_id['canonical']['address_raw'] is not None )
+    #
+    # a policy never accepts an unknown identity as a trusted rule
+    pol = SCCPRoutePolicy()
+    try:
+        pol.add_allowed(bad)
+    except Exception:
+        pass
+    else:
+        raise AssertionError('unknown identity was accepted as a rule')
+    decision = pol.check(bad)
+    assert( not decision['allowed'] )
+    assert( decision['reason'] == 'unknown_identity' )
+
+
+def test_sccp_routing_policy():
+    pol = SCCPRoutePolicy()
+    trusted = _sccp_test_addr(np=1)
+    pol.add_allowed(trusted)
+    #
+    assert( pol.is_allowed(trusted) )
+    # same displayed number on another numbering plan is not the same route
+    for other in (_sccp_test_addr(np=7), _sccp_test_addr(nai=3),
+                  _sccp_test_addr(tt=5), _sccp_test_addr(ri=1)):
+        decision = pol.check(other)
+        assert( not decision['allowed'] )
+        assert( decision['reason'] == 'no_matching_rule' )
+        # the rejection cites conflicting raw fields, not just the display
+        assert( decision['checks'] )
+        assert( any(not c['match'] for c in decision['checks']) )
+        assert( all(c['expected'] != c['observed']
+                    for c in decision['checks']) )
+        # digits are identical for these cases, so the display alone would
+        # have merged them into the trusted route
+        assert( get_route_identity(other).display == '12345' )
+    #
+    # evidence chains back from policy-relevant fields to raw bytes
+    fields = {ev.get('field') for ev in get_route_identity(trusted).evidence}
+    for name in ('routing_indicator', 'global_title_indicator',
+                 'numbering_plan', 'nature_of_address',
+                 'translation_type', 'address_signals'):
+        assert( name in fields )
+    ev = [ev for ev in get_route_identity(trusted).evidence
+          if ev.get('field') == 'address_signals'][0]
+    assert( ev['raw'] == '0x214305' )
+    assert( ev['digits'] == '12345' )
+    assert( ev['parity'] == 'odd' )
+    assert( ev['status'] == 'valid' )
+    #
+    # changing the address indicator bits alone changes the decision
+    res_other = _sccp_test_addr(res=1)
+    decision = pol.check(res_other)
+    assert( not decision['allowed'] )
+    assert( any(c['field'] == 'address_indicator'
+                for c in decision['checks']) )
+    #
+    # the allowed rule is separate from the digit display: two identities
+    # showing the same number are not merged
+    assert( pol.check(trusted)['identity']['canonical']['numbering_plan'] == 1 )
+    assert( pol.check(_sccp_test_addr(np=7))['identity']['canonical']\
+            ['numbering_plan'] == 7 )
+
+
+def test_sccp_routing_identity_formats():
+    # GT format 3 has no nature of address
+    gt3 = get_route_identity(_sccp_test_addr(gtind=3))
+    assert( gt3.valid )
+    assert( gt3['canonical']['nature_of_address'] is None )
+    assert( gt3['canonical']['numbering_plan'] == 1 )
+    #
+    # GT format 2 has no encoding scheme: never guess digits from raw octets
+    # (the parser's DEFAULT alternative keeps them as a Buf, see below)
+    gt2 = get_route_identity(_sccp_test_addr(gtind=2))
+    assert( not gt2.valid )
+    assert( gt2['canonical']['global_title_type'] == 2 )
+    assert( gt2['canonical']['address_digits'] is None )
+    #
+    # an unsupported GT indicator keeps the raw global title, never digits
+    unsup = _sccp_test_addr(gtind=4)
+    buf = bytearray(unsup.to_bytes())
+    buf[1] = (buf[1] & 0xC3) | (5 << 2)
+    unsup2 = CalledPartyAddr()
+    unsup2.from_bytes(bytes(buf))
+    unsup_id = get_route_identity(unsup2)
+    assert( not unsup_id.valid )
+    assert( unsup_id['canonical']['global_title_type'] == 5 )
+    assert( unsup_id['canonical']['address_digits'] is None )
+    assert( unsup_id['canonical']['global_title_raw'] )
+    #
+    # message-level helper returns both parties in order
+    m, e = parse_SCCP(sccp_pdu[5])
+    idents = get_message_route_identities(m)
+    assert( [i['party'] for i in idents] == ['called', 'calling'] )
+    # RLC has no party address
+    m, e = parse_SCCP(unhexlify('05000000000000'))
+    assert( e == 0 )
+    assert( get_message_route_identities(m) == [] )
+    #
+    # bytes and bare value elements are accepted too
+    paddr = _sccp_test_addr(np=1)
+    raw_id = get_route_identity(paddr.to_bytes())
+    assert( raw_id == get_route_identity(paddr) )
+    assert( get_route_identity(paddr[1]) == raw_id )
+    assert( paddr.get_route_identity() == raw_id )
+
+
+def test_sccp_routing_identity_message():
+    # an actual UDT message: called party routed on GT, calling on SSN
+    m, e = parse_SCCP(sccp_pdu[5])
+    assert( e == 0 )
+    called = get_route_identity(m[3], 'called')
+    calling = get_route_identity(m[4], 'calling')
+    assert( called['party'] == 'called' )
+    assert( calling['party'] == 'calling' )
+    assert( called['canonical']['ssn'] == 6 )
+    assert( calling['canonical']['ssn'] == 7 )
+    assert( calling.valid )
+    assert( calling.display == '913520812502' )
+    # the called party's odd GT in this capture has a non-zero filler nibble;
+    # it must be reported as unknown rather than truncated to a shorter number
+    assert( not called.valid )
+    assert( called['canonical']['address_digits'] is None )
+    assert( called.display.startswith('raw:') )
 
 
 def test_isup(isup_pdu=isup_pdu):

@@ -313,7 +313,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *NASLTE*: provides two functions to parse LTE uplink and downlink NAS messages
 * *NAS5G*: provides one function to parse 5G uplink and downlink mobile NAS messages
 * *PPP*: structures for NCP and LCP protocols used for PPP connection estabishment, as defined in RFC 1661, 1332 and 1334
-* *SCCP*: structures for SCCP user-data and management messages as defined in ITU-T Q.713
+* *SCCP*: structures for SCCP user-data and management messages as defined in ITU-T Q.713, plus `get_route_identity()` and `SCCPRoutePolicy` for exact, field-aware routing identities
 * *ISUP*: structures for ISUP messages as defined in ITU-T Q.763
 * *SIGTRAN*: generic structures for SIGTRAN (i.e. M2UA, M2PA, MTP3 and M3UA) messages
 * *M3UA*: structures dedicated to the M3UA format from RFC 4666
