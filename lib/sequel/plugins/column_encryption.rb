@@ -32,6 +32,7 @@ rescue RuntimeError, OpenSSL::Cipher::CipherError
 end
 
 require 'securerandom'
+require 'monitor'
 
 module Sequel
   module Plugins
@@ -188,6 +189,87 @@ module Sequel
     #
     #   ds = ConfidentialModel.needing_reencryption.limit(100)
     #   true until ds.all(&:reencrypt).empty?
+    #
+    # However, that approach is not safe if the application is still updating the same
+    # records, as +reencrypt+ saves the entire row and can overwrite columns changed by
+    # the application after the row was retrieved.  It also has no way to record the
+    # rows it has completed, so restarting it starts from the beginning.
+    #
+    # For an online rotation where the application can update records concurrently, use
+    # +rotate_encryption+ instead:
+    #
+    #   result = ConfidentialModel.rotate_encryption(batch_size: 100)
+    #   result.last_pk  # => primary key of the last row processed
+    #   result.errors   # => rows that could not be rotated, with their exceptions
+    #
+    # +rotate_encryption+ only updates the encrypted columns that need rotating, and
+    # only if their values are still the same as when they were read.  If the
+    # application changes a row between the read and the update, the update does not
+    # affect the row.  If the application already stored the value with the current
+    # key, the row is counted as skipped, otherwise it is recorded in
+    # <tt>result.conflicts</tt> for a later pass.  Values encrypted with the old key
+    # remain readable during the transition, as long as the old key is still in the
+    # configuration.
+    #
+    # The following options are supported by +rotate_encryption+:
+    #
+    # :batch_size :: The maximum number of rows to process in each batch. Defaults
+    #                to 100.
+    # :after :: Only process rows with a primary key greater than this value.  Use
+    #           <tt>result.last_pk</tt> from a previous run to resume where the
+    #           previous run stopped.  Rows at or before this value are not
+    #           examined, so pass a lower value or omit this option if you need
+    #           to retry rows reported in <tt>result.errors</tt> or
+    #           <tt>result.conflicts</tt> from the previous run.
+    # :max_batches :: The maximum number of batches to process in this call.  This
+    #                 allows deliberately stopping a rotation, and then resuming it
+    #                 later with <tt>after: result.last_pk</tt>.
+    # :checkpoint :: A callable called with the primary key after each batch has
+    #                been processed.  Use this to durably store the resume position.
+    #                If the process exits in the middle of a batch, the rows at the
+    #                start of the batch that were already rotated are not returned by
+    #                +needing_reencryption+, so the next run skips them.  Rows at or
+    #                before the checkpoint are not reexamined when resuming, so rows
+    #                reported in <tt>result.errors</tt> or <tt>result.conflicts</tt>
+    #                before the checkpoint need to be retried separately (the
+    #                +:on_error+ and +:on_conflict+ callbacks can record them).
+    # :raise_on_error :: If true, raise an error for a row that cannot be rotated
+    #                    instead of recording it in <tt>result.errors</tt>.
+    # :on_error :: A callable called with a RowError for each row that cannot be
+    #              rotated, as soon as the error occurs.  Use this to durably
+    #              record the row for later handling.  The row is also added to
+    #              <tt>result.errors</tt>.
+    # :on_conflict :: A callable called with a RowConflict for each row changed
+    #                 concurrently that still needs rotation, as soon as the
+    #                 conflict is detected.  The conflict is also added to
+    #                 <tt>result.conflicts</tt>.
+    # :server :: The database server/shard to use.
+    #
+    # +rotate_encryption+ requires the model to have a single column primary key.  It
+    # returns a Sequel::Plugins::ColumnEncryption::Rotation object with the following
+    # methods:
+    #
+    # processed :: The number of rows examined.
+    # rotated :: The number of rows rotated to the current key.
+    # skipped :: The number of rows that did not need rotation when processed.
+    # conflicts :: An array of RowConflict objects for rows changed concurrently that
+    #              still need rotation.  Each object has +primary_key+ and +columns+
+    #              methods.
+    # errors :: An array of RowError objects for rows that could not be rotated.
+    #           Each object has +primary_key+, +columns+, and +exception+ methods.
+    # batches :: The number of batches processed.
+    # last_pk :: The primary key of the last row examined.  Pass this as the +:after+
+    #            option to resume from this position.
+    #
+    # A row that is already using the current key is not returned by
+    # +needing_reencryption+, and rows that are rotated concurrently by the application
+    # are skipped.  This makes it safe to run the rotation more than once, and to run
+    # it concurrently from multiple processes, though using a single process with
+    # checkpointing is recommended.
+    #
+    # A row that raised an error is included in <tt>result.errors</tt> so it can be
+    # investigated separately.  Errors affecting the database connection (such as
+    # a disconnect) are not treated as row errors, and stop the rotation.
     #
     # After all values have been reencrypted for all models, and no models use the older
     # encryption key, you can remove it from the configuration:
@@ -586,6 +668,97 @@ module Sequel
         end
       end
 
+      # Lock used to serialize rotation calls in the current process.  The
+      # conditional updates used by rotation make it safe to run multiple
+      # processes at the same time, but serializing rotation calls in the
+      # same process avoids wasted work.
+      ROTATION_LOCK = Monitor.new
+
+      # A row that was modified concurrently while the rotation was running, and
+      # that still contains values encrypted with an older key.  The +columns+
+      # are the encrypted columns that the rotation was unable to update.
+      RowConflict = Struct.new(:primary_key, :columns)
+
+      # A row that could not be rotated because an exception was raised while
+      # processing it.  The +columns+ are the encrypted columns being processed
+      # when the exception was raised, and +exception+ is the exception raised.
+      RowError = Struct.new(:primary_key, :columns, :exception)
+
+      # The result of a call to +rotate_encryption+.  See the documentation for
+      # +rotate_encryption+ for details on the methods.
+      class Rotation
+        # The number of rows examined.
+        attr_reader :processed
+
+        # The number of rows rotated to the current encryption key.
+        attr_reader :rotated
+
+        # The number of rows that did not need rotation when they were examined.
+        attr_reader :skipped
+
+        # An array of RowConflict instances for rows changed concurrently that
+        # still need rotation.
+        attr_reader :conflicts
+
+        # An array of RowError instances for rows that could not be rotated.
+        attr_reader :errors
+
+        # The number of batches processed.
+        attr_reader :batches
+
+        # The primary key of the last row examined.  Pass this as the +:after+
+        # option to +rotate_encryption+ to resume from this position.  Rows
+        # that raised an error or conflicted with a concurrent update are
+        # examined again only if they are not after this position.
+        attr_reader :last_pk
+
+        def initialize(last_pk=nil)
+          @processed = 0
+          @rotated = 0
+          @skipped = 0
+          @conflicts = []
+          @errors = []
+          @batches = 0
+          @last_pk = last_pk
+        end
+
+        # Record a row that did not need rotation.
+        def skip
+          @processed += 1
+          @skipped += 1
+          nil
+        end
+
+        # Record a row that was rotated.
+        def rotate
+          @processed += 1
+          @rotated += 1
+          nil
+        end
+
+        # Record a row that was modified concurrently and still needs rotation.
+        def conflict(primary_key, columns)
+          @processed += 1
+          @conflicts << RowConflict.new(primary_key, columns).freeze
+          nil
+        end
+
+        # Record a row that could not be rotated.
+        def error(primary_key, columns, exception)
+          @processed += 1
+          @errors << RowError.new(primary_key, columns, exception).freeze
+          nil
+        end
+
+        # Record that a batch was processed, and the primary key of the last
+        # row examined in the batch.
+        def finish_batch(last_pk)
+          @batches += 1
+          @last_pk = last_pk
+          nil
+        end
+      end
+
       def self.apply(model, opts=OPTS, &_)
         model.plugin :serialization
       end
@@ -693,11 +866,205 @@ module Sequel
       module ClassMethods
         Plugins.def_dataset_methods(self, [:with_encrypted_value, :needing_reencryption])
 
+        # Rotate encrypted columns to the current encryption key in batches.
+        # See the documentation for the column_encryption plugin for details
+        # on the supported options and the object returned.
+        def rotate_encryption(opts=OPTS)
+          lock = ROTATION_LOCK.synchronize do
+            @column_encryption_rotate_lock ||= Monitor.new
+          end
+
+          lock.synchronize do
+            _rotate_encryption(opts)
+          end
+        end
+
         Plugins.inherited_instance_variables(self,
           :@column_encryption_cryptor=>nil,
           :@column_encryption_keys=>nil,
           :@column_encryption_metadata=>nil,
+          :@column_encryption_rotate_lock=>nil,
         )
+
+        private
+
+        # The primary key column to use as a cursor for rotation, and the
+        # metadata for all encrypted columns.
+        def _rotation_pk_and_metadata
+          case pk = primary_key
+          when Symbol
+            nil
+          when Array
+            raise Error, "cannot rotate encryption for a model with a composite primary key"
+          else
+            raise Error, "cannot rotate encryption for a model without a primary key"
+          end
+
+          [pk, column_encryption_metadata]
+        end
+
+        # Return the encrypted columns in the given row that need rotation, with
+        # their current and rotated values.  The row should be a hash of column
+        # values from the database.
+        def _rotation_changes(row, metadata)
+          changes = {}
+
+          metadata.each do |column, column_metadata|
+            value = row[column]
+            next if value.nil?
+            next if value.start_with?(column_metadata.key_searcher.call)
+
+            changes[column] = [value, column_metadata.encryptor.call(column_metadata.decryptor.call(value))]
+          end
+
+          changes
+        end
+
+        # Return the columns in the row that still need rotation, using the
+        # values for the given columns only.
+        def _rotation_remaining_columns(row, metadata, columns)
+          columns.select do |column|
+            value = row[column]
+            value && !value.start_with?(metadata[column].key_searcher.call)
+          end
+        end
+
+        # Rotate a single row.  Uses a conditional update so that if the row
+        # changed after it was fetched, the old values are not written over the
+        # new values.  Returns :rotated, :skipped, or an array of the columns
+        # that still need rotation (for conflicts).
+        def _rotate_encryption_row(ds, pk, row, metadata)
+          pk_value = row[pk]
+          changes = _rotation_changes(row, metadata)
+
+          if changes.empty?
+            return :skipped
+          end
+
+          condition = {pk=>pk_value}
+          changes.each do |column, (old_value, _)|
+            condition[column] = old_value
+          end
+          new_values = Hash[changes.map{|column, (_, new_value)| [column, new_value]}]
+
+          if ds.where(condition).update(new_values) == 1
+            return :rotated
+          end
+
+          # The row changed between the fetch and the update.  Re-fetch the
+          # encrypted columns to see if another process already rotated them
+          # or rotated a different encrypted column in the same row.
+          current = ds.
+            where(pk=>pk_value).
+            select(pk, *metadata.keys).
+            naked.
+            first
+
+          return :skipped unless current
+
+          remaining = _rotation_remaining_columns(current, metadata, metadata.keys)
+          return :skipped if remaining.empty?
+
+          remaining
+        end
+
+        # Rotate encrypted columns to the current encryption key in batches.
+        # Calling this method concurrently on the same model is serialized in
+        # the current process.  Concurrent changes by other processes are
+        # handled by the conditional update in _rotate_encryption_row.
+        def _rotate_encryption(opts)
+          batch_size = opts.fetch(:batch_size, 100)
+          unless batch_size.is_a?(Integer) && batch_size >= 1
+            raise Error, "invalid :batch_size option, must be a positive integer"
+          end
+
+          if opts.has_key?(:max_batches)
+            max_batches = opts[:max_batches]
+            unless max_batches.is_a?(Integer) && max_batches >= 0
+              raise Error, "invalid :max_batches option, must be a nonnegative integer"
+            end
+          end
+
+          checkpoint = opts[:checkpoint]
+          if checkpoint && !checkpoint.respond_to?(:call)
+            raise Error, "invalid :checkpoint option, must respond to call"
+          end
+
+          on_error = opts[:on_error]
+          if on_error && !on_error.respond_to?(:call)
+            raise Error, "invalid :on_error option, must respond to call"
+          end
+
+          on_conflict = opts[:on_conflict]
+          if on_conflict && !on_conflict.respond_to?(:call)
+            raise Error, "invalid :on_conflict option, must respond to call"
+          end
+
+          raise_on_error = opts[:raise_on_error]
+          server = opts[:server]
+          pk, metadata = _rotation_pk_and_metadata
+          after = opts[:after]
+          result = Rotation.new(after)
+          row_ds = server ? dataset.server(server) : dataset
+
+          while max_batches.nil? || result.batches < max_batches
+            rows_ds = dataset.
+              needing_reencryption.
+              select(pk, *metadata.keys).
+              order(pk).
+              limit(batch_size)
+            rows_ds = rows_ds.where(Sequel[pk] > after) if after
+            rows_ds = rows_ds.server(server) if server
+            rows = rows_ds.naked.all
+            break if rows.empty?
+
+            # Advance the cursor for every row examined, including rows with
+            # errors or conflicts.  Those rows are recorded separately in the
+            # result, so they do not cause the rotation to get stuck on them.
+            # If the process exits in the middle of a batch, no checkpoint is
+            # recorded for the batch, and the next run resumes from the
+            # previous checkpoint.  Rows already rotated in the partial batch
+            # are skipped by the next run.
+            after = rows.last[pk]
+
+            rows.each do |row|
+              begin
+                case remaining = _rotate_encryption_row(row_ds, pk, row, metadata)
+                when :rotated
+                  result.rotate
+                when :skipped
+                  result.skip
+                else
+                  result.conflict(row[pk], remaining)
+                  on_conflict.call(result.conflicts.last) if on_conflict
+                end
+              rescue Sequel::DatabaseDisconnectError, Sequel::DatabaseConnectionError
+                # Errors affecting the database connection should stop the
+                # rotation, and not be recorded as an error for a single row.
+                raise
+              rescue StandardError => e
+                raise if raise_on_error
+                result.error(row[pk], _rotation_changes_columns(row, metadata), e)
+                on_error.call(result.errors.last) if on_error
+              end
+            end
+
+            result.finish_batch(after)
+            checkpoint.call(after) if checkpoint
+            break if rows.length < batch_size
+          end
+
+          result
+        end
+
+        # The encrypted columns in the row that have not been rotated, for
+        # error reporting if an exception is raised while processing the row.
+        def _rotation_changes_columns(row, metadata)
+          metadata.keys.select do |column|
+            value = row[column]
+            value && !value.start_with?(metadata[column].key_searcher.call)
+          end
+        end
       end
 
       module InstanceMethods

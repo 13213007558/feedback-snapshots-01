@@ -576,4 +576,504 @@ describe "column_encryption plugin" do
       end
     end.must_raise Sequel::Error
   end
+
+  it "should require a single column primary key for rotate_encryption" do
+    @model.set_primary_key nil
+    proc{@model.rotate_encryption}.must_raise Sequel::Error
+
+    @model.set_primary_key [:id, :not_enc]
+    proc{@model.rotate_encryption}.must_raise Sequel::Error
+  end
+
+  it "should validate rotate_encryption options" do
+    proc{@model.rotate_encryption(:batch_size=>0)}.must_raise Sequel::Error
+    proc{@model.rotate_encryption(:batch_size=>'1')}.must_raise Sequel::Error
+    proc{@model.rotate_encryption(:max_batches=>-1)}.must_raise Sequel::Error
+    proc{@model.rotate_encryption(:checkpoint=>Object.new)}.must_raise Sequel::Error
+    proc{@model.rotate_encryption(:on_error=>Object.new)}.must_raise Sequel::Error
+    proc{@model.rotate_encryption(:on_conflict=>Object.new)}.must_raise Sequel::Error
+  end
+
+  it "should rotate encrypted columns in batches using conditional updates" do
+    @model.plugin :column_encryption do |enc|
+      enc.key 1, "1"*32
+      enc.key 0, "0"*32
+      enc.column :enc
+    end
+
+    old_value = @obj[:enc]
+    @db.sqls
+    @db.fetch = [{:id=>1, :enc=>old_value}]
+    @db.numrows = 1
+
+    result = @model.rotate_encryption(:batch_size=>10)
+    sqls = @db.sqls
+
+    result.processed.must_equal 1
+    result.rotated.must_equal 1
+    result.skipped.must_equal 0
+    result.batches.must_equal 1
+    result.last_pk.must_equal 1
+    result.errors.must_equal []
+    result.conflicts.must_equal []
+
+    select_sql, update_sql = sqls
+    select_sql.must_include "SELECT id, enc FROM ce_test"
+    update_sql.must_include "UPDATE ce_test SET enc = '"
+    update_sql.must_include "WHERE ((id = 1) AND (enc = '#{old_value}'))"
+    update_sql.wont_include "not_enc"
+  end
+
+  it "should record rows that cannot be rotated and continue with later rows" do
+    @model.plugin :column_encryption do |enc|
+      enc.key 1, "1"*32
+      enc.key 0, "0"*32
+      enc.column :enc
+    end
+
+    @db.sqls
+    @db.fetch = [{:id=>1, :enc=>"AAAAcorrupt"}, {:id=>2, :enc=>@obj[:enc]}]
+    @db.numrows = 1
+
+    result = @model.rotate_encryption(:batch_size=>10)
+    result.processed.must_equal 2
+    result.rotated.must_equal 1
+    result.errors.length.must_equal 1
+    result.errors.first.primary_key.must_equal 1
+    result.errors.first.columns.must_equal [:enc]
+    result.errors.first.exception.must_be_kind_of Sequel::Error
+    result.last_pk.must_equal 2
+
+    @db.fetch = [{:id=>1, :enc=>"AAAAcorrupt"}]
+    result = @model.rotate_encryption
+    result.errors.length.must_equal 1
+    result.rotated.must_equal 0
+    result.skipped.must_equal 0
+
+    @db.fetch = [{:id=>1, :enc=>"AAAAcorrupt"}]
+    proc{@model.rotate_encryption(:raise_on_error=>true)}.must_raise Sequel::Error
+
+    errors = []
+    @db.fetch = [{:id=>1, :enc=>"AAAAcorrupt"}]
+    result = @model.rotate_encryption(:on_error=>errors.method(:push))
+    errors.length.must_equal 1
+    errors.first.must_be_same_as result.errors.first
+    errors.first.primary_key.must_equal 1
+  end
+
+  it "should call the checkpoint after each batch" do
+    @model.plugin :column_encryption do |enc|
+      enc.key 1, "1"*32
+      enc.key 0, "0"*32
+      enc.column :enc
+    end
+
+    @db.fetch = [
+      [{:id=>1, :enc=>@obj[:enc]}, {:id=>2, :enc=>@obj[:enc]}],
+      [{:id=>3, :enc=>@obj[:enc]}],
+    ]
+    @db.numrows = 1
+
+    checkpoints = []
+    result = @model.rotate_encryption(:batch_size=>2, :checkpoint=>checkpoints.method(:<<))
+    checkpoints.must_equal [2, 3]
+    result.batches.must_equal 2
+    result.last_pk.must_equal 3
+  end
+
+  it "should allow resuming from a checkpoint" do
+    @model.plugin :column_encryption do |enc|
+      enc.key 1, "1"*32
+      enc.key 0, "0"*32
+      enc.column :enc
+    end
+
+    @db.sqls
+    @db.fetch = []
+    result = @model.rotate_encryption(:after=>5)
+    result.last_pk.must_equal 5
+    @db.sqls.first.must_include "id > 5"
+  end
+
+  begin
+    require 'sqlite3'
+  rescue LoadError
+    warn "Skipping SQLite tests of column_encryption rotation: can't load sqlite3"
+  else
+    describe "with SQLite" do
+      before do
+        @db = Sequel.sqlite
+        @db.create_table(:ce_rotation_test) do
+          primary_key :id
+          String :name
+          String :enc
+        end
+        @model = Class.new(Sequel::Model(@db[:ce_rotation_test]))
+        @model.plugin :column_encryption do |enc|
+          enc.key 0, "0"*32
+          enc.column :enc
+        end
+      end
+
+      def create_rows(count)
+        count.times do |i|
+          @model.create(:name=>"row#{i + 1}", :enc=>"value#{i + 1}")
+        end
+      end
+
+      def rotate_to_new_key
+        @model.plugin :column_encryption do |enc|
+          enc.key 1, "1"*32
+          enc.key 0, "0"*32
+          enc.column :enc
+        end
+      end
+
+      def values
+        @model.order(:id).all.map{|obj| [obj.id, obj.name, obj.enc]}
+      end
+
+      it "should rotate all rows in batches and keep rows readable during the transition" do
+        create_rows 5
+        rotate_to_new_key
+        expected = values
+
+        result = @model.rotate_encryption(:batch_size=>2, :max_batches=>1)
+        result.processed.must_equal 2
+        result.rotated.must_equal 2
+        result.last_pk.must_equal 2
+        @model.needing_reencryption.count.must_equal 3
+
+        # Rows rotated with the new key and rows still encrypted with the old key
+        # are both readable during the transition.
+        values.must_equal expected
+
+        result = @model.rotate_encryption(:batch_size=>2, :after=>result.last_pk, :max_batches=>1)
+        result.processed.must_equal 2
+        result.last_pk.must_equal 4
+
+        result = @model.rotate_encryption(:batch_size=>2, :after=>result.last_pk)
+        result.processed.must_equal 1
+        result.batches.must_equal 1
+        result.last_pk.must_equal 5
+
+        @model.needing_reencryption.count.must_equal 0
+        values.must_equal expected
+
+        # Running the rotation again does nothing.
+        result = @model.rotate_encryption
+        result.processed.must_equal 0
+        result.rotated.must_equal 0
+        result.batches.must_equal 0
+        values.must_equal expected
+      end
+
+      it "should resume from the last checkpoint after exiting in the middle of a run" do
+        create_rows 25
+        rotate_to_new_key
+        expected = values
+
+        checkpoints = []
+        # Exit after two batches have been committed, before the checkpoint for
+        # the second batch is recorded.
+        result = @model.rotate_encryption(
+          :batch_size=>10,
+          :checkpoint=>lambda{|pk| checkpoints << pk; raise "exit" if checkpoints.length == 2}
+        ) rescue $!
+        result.must_be_kind_of RuntimeError
+        checkpoints.must_equal [10, 20]
+        @model.needing_reencryption.count.must_equal 5
+
+        # Resume from the last confirmed position.  Rows rotated after that
+        # position are skipped, and only the remaining rows are processed.
+        result = @model.rotate_encryption(:batch_size=>10, :after=>checkpoints.last)
+        result.processed.must_equal 5
+        result.rotated.must_equal 5
+        result.last_pk.must_equal 25
+
+        @model.needing_reencryption.count.must_equal 0
+        values.must_equal expected
+      end
+
+      it "should resume after exiting in the middle of a batch" do
+        create_rows 25
+        rotate_to_new_key
+        expected = values
+        db = @db
+
+        # Simulate the process exiting after updating 15 rows, in the middle of
+        # the second batch.  No checkpoint is recorded for the partial batch.
+        update_count = 0
+        test = self
+        hook = Module.new do
+          define_method(:update) do |*args|
+            update_count += 1
+            test.assert(false, "expected process exit") if update_count == 15
+            super(*args)
+          end
+        end
+        @model.dataset = @model.dataset.with_extend(hook)
+
+        e = assert_raises(Minitest::Assertion) do
+          @model.rotate_encryption(:batch_size=>10, :checkpoint=>proc{})
+        end
+        e.message.must_include "expected process exit"
+
+        @model.set_dataset(db[:ce_rotation_test])
+        @model.needing_reencryption.count.must_equal 11
+        values.must_equal expected
+
+        # Rows rotated before the exit are skipped, and all remaining rows are
+        # rotated.
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.rotated.must_equal 11
+        result.batches.must_equal 2
+        @model.needing_reencryption.count.must_equal 0
+        values.must_equal expected
+      end
+
+      it "should record rows with errors separately and continue processing the batch" do
+        create_rows 5
+        expected = values
+        rotate_to_new_key
+        @db[:ce_rotation_test].where(:id=>3).update(:enc=>"AAAAcorrupt")
+
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.processed.must_equal 5
+        result.rotated.must_equal 4
+        result.errors.length.must_equal 1
+        result.errors.first.primary_key.must_equal 3
+        result.errors.first.columns.must_equal [:enc]
+        result.errors.first.exception.must_be_kind_of Sequel::Error
+        result.last_pk.must_equal 5
+
+        @model.needing_reencryption.select_map(:id).must_equal [3]
+
+        # Repeating the run retries the error row and skips the completed rows.
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.processed.must_equal 1
+        result.rotated.must_equal 0
+        result.skipped.must_equal 0
+        result.errors.length.must_equal 1
+        result.errors.first.primary_key.must_equal 3
+
+        # Fixing the row allows a later run to see it no longer needs rotation.
+        @db[:ce_rotation_test].where(:id=>3).update(:enc=>@model.send(:column_encryption_metadata)[:enc].encryptor.call("value3"))
+        result = @model.rotate_encryption
+        result.processed.must_equal 0
+        result.rotated.must_equal 0
+        @model.needing_reencryption.count.must_equal 0
+        values.must_equal expected
+      end
+
+      it "should not overwrite encrypted columns changed concurrently by the application" do
+        create_rows 3
+        rotate_to_new_key
+        metadata = @model.send(:column_encryption_metadata)
+        db = @db
+
+        # Simulate the application updating the encrypted column after the
+        # rotation fetched the row, but before the rotation updates it.
+        state = {:updated=>false}
+        hook = Module.new do
+          define_method(:update) do |*args|
+            unless state[:updated]
+              state[:updated] = true
+              db[:ce_rotation_test].where(:id=>1).update(
+                :name=>"business name",
+                :enc=>metadata[:enc].encryptor.call("business value")
+              )
+            end
+            super(*args)
+          end
+        end
+        @model.dataset = @model.dataset.with_extend(hook)
+
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.processed.must_equal 3
+        result.rotated.must_equal 2
+        result.skipped.must_equal 1
+        result.errors.must_equal []
+        result.conflicts.must_equal []
+
+        obj = @model[1]
+        obj.name.must_equal "business name"
+        obj.enc.must_equal "business value"
+        @model[2].enc.must_equal "value2"
+        @model[3].enc.must_equal "value3"
+        @model.needing_reencryption.count.must_equal 0
+      end
+
+      it "should preserve non-encrypted columns changed concurrently by the application" do
+        create_rows 2
+        rotate_to_new_key
+        db = @db
+
+        # Simulate the application changing a non-encrypted column after the
+        # rotation fetched the row.
+        state = {:updated=>false}
+        hook = Module.new do
+          define_method(:update) do |*args|
+            unless state[:updated]
+              state[:updated] = true
+              db[:ce_rotation_test].where(:id=>1).update(:name=>"renamed")
+            end
+            super(*args)
+          end
+        end
+        @model.dataset = @model.dataset.with_extend(hook)
+
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.rotated.must_equal 2
+        result.conflicts.must_equal []
+
+        obj = @model[1]
+        obj.name.must_equal "renamed"
+        obj.enc.must_equal "value1"
+        @model.needing_reencryption.count.must_equal 0
+      end
+
+      it "should record a conflict if the application rewrites the row with an old key" do
+        create_rows 3
+        old_encryptor = @model.send(:column_encryption_metadata)[:enc].encryptor
+        rotate_to_new_key
+        db = @db
+
+        state = {:updated=>false}
+        hook = Module.new do
+          define_method(:update) do |*args|
+            unless state[:updated]
+              state[:updated] = true
+              db[:ce_rotation_test].where(:id=>1).update(
+                :name=>"business name",
+                :enc=>old_encryptor.call("business value")
+              )
+            end
+            super(*args)
+          end
+        end
+        @model.dataset = @model.dataset.with_extend(hook)
+
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.processed.must_equal 3
+        result.rotated.must_equal 2
+        result.conflicts.length.must_equal 1
+        result.conflicts.first.primary_key.must_equal 1
+        result.conflicts.first.columns.must_equal [:enc]
+        result.errors.must_equal []
+
+        # The concurrently written value is still readable.
+        @model[1].enc.must_equal "business value"
+        @model[1].name.must_equal "business name"
+
+        # A later run rotates the conflicting row.
+        @model.set_dataset(@db[:ce_rotation_test])
+        result = @model.rotate_encryption
+        result.rotated.must_equal 1
+        result.conflicts.must_equal []
+        @model.needing_reencryption.count.must_equal 0
+        @model[1].enc.must_equal "business value"
+        @model[1].name.must_equal "business name"
+      end
+
+      it "should skip rows deleted concurrently by the application" do
+        create_rows 3
+        rotate_to_new_key
+        db = @db
+
+        state = {:updated=>false}
+        hook = Module.new do
+          define_method(:update) do |*args|
+            unless state[:updated]
+              state[:updated] = true
+              db[:ce_rotation_test].where(:id=>1).delete
+            end
+            super(*args)
+          end
+        end
+        @model.dataset = @model.dataset.with_extend(hook)
+
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.processed.must_equal 3
+        result.rotated.must_equal 2
+        result.skipped.must_equal 1
+        result.errors.must_equal []
+        result.conflicts.must_equal []
+        @model.select_order_map(:id).must_equal [2, 3]
+      end
+
+      it "should only update encrypted columns that need rotation" do
+        @db.drop_table(:ce_rotation_test)
+        @db.create_table(:ce_rotation_test) do
+          primary_key :id
+          String :name
+          String :enc
+          String :enc2
+        end
+        @model = Class.new(Sequel::Model(@db[:ce_rotation_test]))
+        @model.plugin :column_encryption do |enc|
+          enc.key 0, "0"*32
+          enc.column :enc
+          enc.column :enc2 do |cenc|
+            cenc.key 0, "0"*32
+          end
+        end
+        3.times do |i|
+          @model.create(:name=>"row#{i + 1}", :enc=>"value#{i + 1}", :enc2=>"second#{i + 1}")
+        end
+
+        @model.plugin :column_encryption do |enc|
+          enc.key 1, "1"*32
+          enc.key 0, "0"*32
+          enc.column :enc
+          enc.column :enc2 do |cenc|
+            cenc.key 2, "2"*32
+            cenc.key 0, "0"*32
+          end
+        end
+
+        expected = @model.order(:id).all.map{|obj| [obj.id, obj.name, obj.enc, obj.enc2]}
+        result = @model.rotate_encryption(:batch_size=>10)
+        result.rotated.must_equal 3
+
+        @model.needing_reencryption.count.must_equal 0
+        @model.order(:id).all.map{|obj| [obj.id, obj.name, obj.enc, obj.enc2]}.must_equal expected
+      end
+
+      it "should rotate searchable columns and allow searching during the transition" do
+        @db.drop_table(:ce_rotation_test)
+        @db.create_table(:ce_rotation_test) do
+          primary_key :id
+          String :name
+          String :enc
+        end
+        @model = Class.new(Sequel::Model(@db[:ce_rotation_test]))
+        @model.plugin :column_encryption do |enc|
+          enc.key 0, "0"*32
+          enc.column :enc, :searchable=>true
+        end
+        3.times{|i| @model.create(:name=>"row#{i + 1}", :enc=>"value#{i + 1}")}
+
+        @model.plugin :column_encryption do |enc|
+          enc.key 1, "1"*32
+          enc.key 0, "0"*32
+          enc.column :enc, :searchable=>true
+        end
+
+        # Search finds values encrypted with both the new and old keys during
+        # the transition.
+        @model.rotate_encryption(:batch_size=>1, :max_batches=>1)
+        @model.with_encrypted_value(:enc, "value1").select_map(:id).must_equal [1]
+        @model.with_encrypted_value(:enc, "value2").select_map(:id).must_equal [2]
+        @model.with_encrypted_value(:enc, "value3").select_map(:id).must_equal [3]
+
+        @model.rotate_encryption(:batch_size=>10)
+        @model.with_encrypted_value(:enc, "value1").select_map(:id).must_equal [1]
+        @model.with_encrypted_value(:enc, "value2").select_map(:id).must_equal [2]
+        @model.with_encrypted_value(:enc, "value3").select_map(:id).must_equal [3]
+        @model.with_encrypted_value(:enc, "value4").must_be_empty
+        @model.needing_reencryption.count.must_equal 0
+      end
+    end
+  end
 end if RUBY_VERSION >= '2.3' && (begin; require 'sequel/plugins/column_encryption'; true; rescue LoadError; false end)
