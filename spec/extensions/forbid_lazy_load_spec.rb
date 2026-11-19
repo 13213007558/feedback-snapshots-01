@@ -338,6 +338,79 @@ describe "forbid_lazy_load plugin" do
     end
   end
 
+  describe "query and returned data constraints" do
+    before do
+      @db = Sequel.mock
+      @c = Class.new(Sequel::Model)
+      @c.set_dataset @db[:ts]
+      @c.plugin :forbid_lazy_load
+      @c.columns :id, :t_id
+      @c.many_to_one :t, :class=>@c, :key=>:t_id
+      @c.one_to_many :ts, :class=>@c, :key=>:t_id
+      @db.sqls
+    end
+
+    it "should only issue the list query and forbid lazy association loads when retrieving a list of objects" do
+      @db.fetch = {:id=>1, :t_id=>2}
+      objs = @c.all
+      @db.sqls.must_equal ["SELECT * FROM ts"]
+
+      objs.must_equal [@c.load(:id=>1, :t_id=>2)]
+      o = objs.first
+      proc{o.t}.must_raise Sequel::Plugins::ForbidLazyLoad::Error
+      proc{o.ts}.must_raise Sequel::Plugins::ForbidLazyLoad::Error
+      @db.sqls.must_equal []
+    end
+
+    it "should not issue additional queries for associations when explicitly eager loading a list of objects" do
+      @db.fetch = [[{:id=>1, :t_id=>2}], [{:id=>2, :t_id=>3}], [{:id=>2, :t_id=>1}]]
+      objs = @c.eager(:t, :ts).all
+      @db.sqls.must_equal [
+        "SELECT * FROM ts",
+        "SELECT * FROM ts WHERE (ts.id IN (2))",
+        "SELECT * FROM ts WHERE (ts.t_id IN (1))"]
+
+      objs.must_equal [@c.load(:id=>1, :t_id=>2)]
+      o = objs.first
+      o.t.must_equal @c.load(:id=>2, :t_id=>3)
+      o.ts.must_equal [@c.load(:id=>2, :t_id=>1)]
+      @db.sqls.must_equal []
+    end
+
+    it "should not issue queries when accessing cached associations on objects forbidding lazy load" do
+      o = @c.load(:id=>1, :t_id=>2)
+      @db.fetch = {:id=>2, :t_id=>3}
+      o.t.must_equal @c.load(:id=>2, :t_id=>3)
+      o.ts.must_equal [@c.load(:id=>2, :t_id=>3)]
+      @db.sqls.must_equal [
+        "SELECT * FROM ts WHERE (id = 2) LIMIT 1",
+        "SELECT * FROM ts WHERE (ts.t_id = 1)"]
+
+      o.forbid_lazy_load.must_be_same_as o
+      o.t.must_equal @c.load(:id=>2, :t_id=>3)
+      o.ts.must_equal [@c.load(:id=>2, :t_id=>3)]
+      @db.sqls.must_equal []
+    end
+
+    it "should only issue the allowed query for an explicitly permitted lazy association read" do
+      @db.fetch = {:id=>1, :t_id=>2}
+      o = @c.all.first
+      @db.sqls.must_equal ["SELECT * FROM ts"]
+
+      @db.fetch = {:id=>2, :t_id=>3}
+      o.t(:forbid_lazy_load=>false).must_equal @c.load(:id=>2, :t_id=>3)
+      @db.sqls.must_equal ["SELECT * FROM ts WHERE (id = 2) LIMIT 1"]
+
+      o.t.must_equal @c.load(:id=>2, :t_id=>3)
+      proc{o.ts}.must_raise Sequel::Plugins::ForbidLazyLoad::Error
+      @db.sqls.must_equal []
+
+      @db.fetch = [{:id=>2, :t_id=>1}]
+      o.ts(:forbid_lazy_load=>false).must_equal [@c.load(:id=>2, :t_id=>1)]
+      @db.sqls.must_equal ["SELECT * FROM ts WHERE (ts.t_id = 1)"]
+    end
+  end
+
   describe "allow_by_default option" do
     before do
       setup_model(allow_by_default: true)
