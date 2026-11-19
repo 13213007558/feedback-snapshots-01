@@ -15,11 +15,17 @@ import time
 import weakref
 from contextlib import closing
 from email.utils import parsedate_tz
-from typing import TYPE_CHECKING, Collection, Mapping
+from typing import TYPE_CHECKING, Callable, Collection, Mapping
 
 from requests.structures import CaseInsensitiveDict
 
 from cachecontrol.cache import DictCache, SeparateBodyBaseCache
+from cachecontrol.metadata import (
+    CacheMetadata,
+    ensure_metadata,
+    parse_age,
+    response_metadata,
+)
 from cachecontrol.serialize import Serializer
 
 if TYPE_CHECKING:
@@ -57,11 +63,64 @@ class CacheController:
         cache_etags: bool = True,
         serializer: Serializer | None = None,
         status_codes: Collection[int] | None = None,
+        max_reusable_age: float | None = None,
+        clock: Callable[[], float] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ):
         self.cache = DictCache() if cache is None else cache
         self.cache_etags = cache_etags
         self.serializer = serializer or Serializer()
         self.cacheable_status_codes = status_codes or (200, 203, 300, 301, 308)
+
+        if max_reusable_age is not None:
+            max_reusable_age = float(max_reusable_age)
+            if max_reusable_age < 0:
+                raise ValueError("max_reusable_age must not be negative")
+        # An upper bound, in seconds, on how long a cached response may be
+        # reused regardless of what its Date/Cache-Control headers claim.
+        # ``None`` keeps the response's own freshness lifetime.
+        self.max_reusable_age = max_reusable_age
+        # Injectable clocks keep the freshness calculations testable and let
+        # callers supply a time source that matches their environment.  The
+        # defaults are looked up dynamically so that tests which replace
+        # ``time.time`` after construction are still honored.
+        self._clock = clock
+        self._monotonic = monotonic
+
+    def _now(self) -> float:
+        """Return the current time from the controller's clock."""
+        return time.time() if self._clock is None else self._clock()
+
+    def _monotonic_now(self) -> float | None:
+        """Return a monotonic reading, if one is available."""
+        if self._monotonic is None:
+            return time.monotonic()
+        return self._monotonic()
+
+    def record_response_time(self, response: HTTPResponse) -> CacheMetadata:
+        """Record when ``response`` was received, if not already recorded.
+
+        Uses the controller's clock so that the receive time and the later
+        freshness checks share one time source.  Existing metadata is kept:
+        the adapter records the arrival time before the body is consumed.
+        """
+        metadata = response_metadata(response)
+        if metadata is not None:
+            return metadata
+        return ensure_metadata(response, self._now(), self._monotonic_now())
+
+    def cache_age(self, response: HTTPResponse) -> float | None:
+        """Return the age of ``response`` in seconds.
+
+        This is the response's corrected initial age plus the time elapsed
+        since it was received, regardless of any Date header skew.  ``None``
+        means the entry cannot be aged safely (for example the local clock
+        is earlier than the recorded receive time).
+        """
+        metadata = response_metadata(response)
+        if metadata is None:
+            return None
+        return metadata.current_age(self._now(), self._monotonic_now())
 
     @classmethod
     def _urlnorm(cls, uri: str) -> str:
@@ -230,8 +289,35 @@ class CacheController:
         request_cc: Mapping[str, int | None],
         date: int,
     ) -> bool:
-        current_age = max(0, time.time() - date)
-        logger.debug("Current age based on date: %i", current_age)
+        now = self._now()
+        metadata = response_metadata(resp)
+        if isinstance(metadata, CacheMetadata):
+            # Anchor age to when this client received the response.  A Date
+            # that is ahead of the local clock (fast upstream proxy) or an
+            # Age header can therefore never make the response look younger.
+            current_age = metadata.current_age(now, self._monotonic_now())
+            if current_age is None:
+                logger.debug(
+                    "Ignoring cached response: local clock is earlier than "
+                    "the recorded response time"
+                )
+                return False
+        else:
+            current_age = max(0, now - date)
+            age = parse_age(headers.get("age"))
+            if age is not None:
+                current_age = max(current_age, float(age))
+
+            if self.max_reusable_age is not None and date > now:
+                # Without a recorded receive time a future Date is
+                # indistinguishable from a response that has been cached
+                # indefinitely.  A conservative policy must not reuse it.
+                logger.debug(
+                    "Ignoring cached response: date is in the future and "
+                    "no receive time was recorded"
+                )
+                return False
+        logger.debug("Current age based on receive time: %i", current_age)
 
         # Apply normal freshness checks to every cached response. In the case
         # of permanent redirects, RFC 9110 sections 15.4.2 and 15.4.9 permit
@@ -241,7 +327,7 @@ class CacheController:
         resp_cc = self.parse_cache_control(headers)
 
         # determine freshness
-        freshness_lifetime = 0
+        freshness_lifetime: float = 0
 
         # Check the max-age pragma in the cache control header
         max_age = resp_cc.get("max-age")
@@ -260,8 +346,15 @@ class CacheController:
         # Permanent redirects are heuristically cacheable when the response
         # does not provide an explicit freshness lifetime.
         elif int(resp.status) in PERMANENT_REDIRECT_STATUSES:
-            logger.debug("Returning cached permanent redirect response")
-            return True
+            if self.max_reusable_age is None:
+                logger.debug("Returning cached permanent redirect response")
+                return True
+            freshness_lifetime = self.max_reusable_age
+            logger.debug(
+                "Freshness lifetime for permanent redirect from "
+                "max_reusable_age: %i",
+                freshness_lifetime,
+            )
 
         # Determine if we are setting freshness limit in the
         # request. Note, this overrides what was in the response.
@@ -277,6 +370,19 @@ class CacheController:
             # adjust our current age by our min fresh
             current_age += min_fresh
             logger.debug("Adjusted current age from min-fresh: %i", current_age)
+
+        # Enforce the caller's maximum reusable age as a final upper bound.
+        # This applies on top of any directive, including a request max-age,
+        # and never modifies the response's observable headers.
+        if (
+            self.max_reusable_age is not None
+            and freshness_lifetime > self.max_reusable_age
+        ):
+            freshness_lifetime = self.max_reusable_age
+            logger.debug(
+                "Freshness lifetime capped by max_reusable_age: %i",
+                freshness_lifetime,
+            )
 
         # Return entry if it is fresh enough
         if freshness_lifetime > current_age:
@@ -310,8 +416,7 @@ class CacheController:
         body: bytes | None = None,
         expires_time: int | None = None,
     ) -> None:
-        """Store the data in the cache.
-        """
+        """Store the data in the cache."""
         if expires_time is not None and expires_time <= 0:
             # Already stale on arrival
             logger.debug("Purging cached response: expires in the past")
@@ -396,6 +501,11 @@ class CacheController:
         assert request.url is not None
         cache_url = self.cache_url(request.url)
         logger.debug('Updating cache with response from "%s"', cache_url)
+
+        # Record when this response arrived and its age at that moment.  The
+        # receive time is what freshness is anchored to, so an upstream Date
+        # that runs ahead of the local clock cannot extend the entry's life.
+        self.record_response_time(response)
 
         # Delete it from the cache if we happen to have it stored there
         no_store = False
@@ -515,6 +625,25 @@ class CacheController:
                 }
             )
             cached_response.status = 200
+            # A 304 refreshes the cached entry.  Keep the receive time of the
+            # validation response, but recompute the initial age from the
+            # merged headers: if the 304 omits Date or Age, the cached values
+            # still apply and must not be reset to zero.
+            validation_metadata = response_metadata(response)
+            response_time = (
+                validation_metadata.response_time
+                if validation_metadata is not None
+                else self._now()
+            )
+            setattr(
+                cached_response,
+                "cache_metadata",
+                CacheMetadata.from_response(
+                    response_time,
+                    CaseInsensitiveDict(cached_response.headers),
+                    self._monotonic_now(),
+                ),
+            )
             self._cache_set(cache_url, request, cached_response)
         except BaseException:
             cached_response.close()

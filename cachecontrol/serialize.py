@@ -10,6 +10,8 @@ import msgpack
 from requests.structures import CaseInsensitiveDict
 from urllib3 import HTTPResponse
 
+from cachecontrol.metadata import CacheMetadata
+
 if TYPE_CHECKING:
     from requests import PreparedRequest
 
@@ -45,6 +47,12 @@ class Serializer:
                 "decode_content": response.decode_content,
             }
         }
+
+        # Persist the local freshness metadata alongside the response.  Entries
+        # written by older versions simply do not have it.
+        metadata = getattr(response, "cache_metadata", None)
+        if isinstance(metadata, CacheMetadata):
+            data["cache_metadata"] = metadata.to_dict()
 
         # Construct our vary headers
         data["vary"] = {}
@@ -135,7 +143,11 @@ class Serializer:
         # Discard any `strict` parameter serialized by older version of cachecontrol.
         cached["response"].pop("strict", None)
 
-        return HTTPResponse(body=body, preload_content=False, **cached["response"])
+        response = HTTPResponse(body=body, preload_content=False, **cached["response"])
+        metadata = cached.get("cache_metadata")
+        if metadata is not None:
+            setattr(response, "cache_metadata", CacheMetadata.from_dict(metadata))
+        return response
 
     def _loads_v4(
         self,

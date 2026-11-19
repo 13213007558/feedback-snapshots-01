@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from email.utils import formatdate, parsedate, parsedate_tz
 from typing import TYPE_CHECKING, Any, Mapping
 
+from cachecontrol.metadata import parse_age, response_metadata
+
 if TYPE_CHECKING:
     from urllib3 import HTTPResponse
 
@@ -144,13 +146,35 @@ class LastModified(BaseHeuristic):
             return {}
 
         now = time.time()
-        current_age = max(0, now - date)
-        delta = date - calendar.timegm(last_modified)
+
+        # Prefer the receive-time based age: it accounts for an upstream Date
+        # that runs ahead of the local clock and for an existing Age header.
+        metadata = response_metadata(resp)
+        if metadata is not None:
+            current_age = metadata.current_age(now)
+            if current_age is None:
+                # The local clock moved behind the recorded receive time;
+                # calculating a heuristic expiration now could postpone it.
+                return {}
+        else:
+            current_age = max(0, now - calendar.timegm(time_tuple[:6]))
+            age = parse_age(headers.get("age"))
+            if age is not None:
+                current_age = max(current_age, float(age))
+
+        # Never let a Date beyond the local clock inflate the heuristic
+        # lifetime: measuring from the earlier of the two keeps a fast
+        # upstream clock from postponing the expiry.
+        delta = min(date, now) - calendar.timegm(last_modified)
         freshness_lifetime = max(0, min(delta / 10, 24 * 3600))
         if freshness_lifetime <= current_age:
             return {}
 
-        expires = date + freshness_lifetime
+        # Express the remaining lifetime in terms of the local clock.  With a
+        # sane Date this is exactly ``date + freshness_lifetime``; with a fast
+        # upstream clock or a non-zero Age it only moves the expiration
+        # earlier, never later.
+        expires = now + (freshness_lifetime - current_age)
         return {"expires": time.strftime(TIME_FMT, time.gmtime(expires))}
 
     def warning(self, resp: HTTPResponse) -> str | None:

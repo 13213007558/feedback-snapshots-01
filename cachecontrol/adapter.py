@@ -34,6 +34,7 @@ class CacheControlAdapter(HTTPAdapter):
         serializer: Serializer | None = None,
         heuristic: BaseHeuristic | None = None,
         cacheable_methods: Collection[str] | None = None,
+        max_reusable_age: float | None = None,
         *args: Any,
         **kw: Any,
     ) -> None:
@@ -43,8 +44,14 @@ class CacheControlAdapter(HTTPAdapter):
         self.cacheable_methods = cacheable_methods or ("GET",)
 
         controller_factory = controller_class or CacheController
+        controller_kwargs: dict[str, Any] = {}
+        if max_reusable_age is not None:
+            controller_kwargs["max_reusable_age"] = max_reusable_age
         self.controller = controller_factory(
-            self.cache, cache_etags=cache_etags, serializer=serializer
+            self.cache,
+            cache_etags=cache_etags,
+            serializer=serializer,
+            **controller_kwargs,
         )
 
     def send(
@@ -92,6 +99,11 @@ class CacheControlAdapter(HTTPAdapter):
         """
         cacheable = cacheable_methods or self.cacheable_methods
         if not from_cache and request.method in cacheable:
+            # Stamp the local receive time before the body is consumed.  A
+            # streamed response may be cached much later; using the arrival
+            # time keeps the recorded age independent of download duration.
+            self.controller.record_response_time(response)
+
             # Check for any heuristics that might update headers
             # before trying to cache.
             if self.heuristic:

@@ -10,6 +10,14 @@
 0.15.0
 ======
 
+* Anchor cached response freshness to the local receive time, so an upstream
+  ``Date`` that runs ahead of the local clock, an existing ``Age`` header, or
+  a local clock that moves backwards cannot extend how long a response is
+  reused.
+* Add the ``max_reusable_age`` option to ``CacheControl``,
+  ``CacheControlAdapter`` and ``CacheController`` to cap how long any cached
+  response may be reused.  Response headers are left untouched and the value
+  is stored in the cache entry's metadata.
 * Honor explicit expiration on cached permanent redirects.
 * Parse ``Cache-Control`` directive names case-insensitively.
 * Preserve the case of usernames and passwords in cache keys.
