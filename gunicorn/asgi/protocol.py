@@ -15,11 +15,11 @@ import binascii
 import collections
 import errno
 from http import HTTPStatus
-import ipaddress
 import logging
 import re
 import time
 
+from gunicorn import trust
 from gunicorn.asgi.unreader import AsyncUnreader
 from gunicorn.asgi.parser import (
     PythonProtocol, CallbackRequest, ParseError,
@@ -62,22 +62,16 @@ def _normalize_sockaddr(sockaddr):
 
 
 def _check_trusted_proxy(peer_addr, allow_list, networks):
-    """Check if peer address is in the trusted proxy list.
+    """Check if an IP peer address is in a trusted proxy list.
 
-    Cached at connection start to avoid repeated IP parsing per request.
+    Kept for callers and tests that have an address and a list in hand; the
+    protocol itself resolves trust per listener through gunicorn.trust.
+    A peer without a tuple address (a UNIX socket, or an unknown address)
+    is not an IP peer, so this answers False like it always has.
     """
     if not isinstance(peer_addr, tuple):
         return False
-    if '*' in allow_list:
-        return True
-    try:
-        ip = ipaddress.ip_address(peer_addr[0])
-    except ValueError:
-        return False
-    for network in networks:
-        if ip in network:
-            return True
-    return False
+    return trust.peer_in_allow_list(peer_addr, allow_list, networks)
 
 
 # Response header checks, same rules as the WSGI Response.process_headers
@@ -133,16 +127,20 @@ def _scan_response_headers(headers):
 class _RequestHeaderPolicy(HeaderPolicy):
     """Run the header policy shared with WSGI and HTTP/2 on an HTTP/1
     request parsed by the ASGI worker: scheme headers and underscore names
-    are honored only from peers in ``forwarded_allow_ips``."""
+    are honored only from peers the listener trusts to forward."""
 
     # Expect: 100-continue is handled by the ASGI body receiver.
     _policy_expect_continue = False
 
-    def __init__(self, cfg, peer_addr, scheme, version):
+    def __init__(self, cfg, peer_addr, scheme, version, listener_trust=None):
         self.cfg = cfg
         self.peer_addr = peer_addr
         self.scheme = scheme
         self.version = version
+        self.listener_trust = (
+            listener_trust
+            if listener_trust is not None
+            else trust.resolve_or_default(cfg, None))
 
     def apply(self, request, trust=None, secure_names=None):
         """Apply the policy to the request's (lower-case bytes) headers.
@@ -619,9 +617,14 @@ class ASGIProtocol(asyncio.Protocol):
     _h1c_parse_errors = ()  # Every other request error gunicorn_h1c raises
     _h1c_unsupported_transfer_coding = None  # When gunicorn_h1c defines it
 
-    def __init__(self, worker):
+    def __init__(self, worker, listener=None):
         self.worker = worker
         self.cfg = cfg = worker.cfg
+        # The listening socket that accepted this connection. asyncio's
+        # create_server() gives it to the protocol factory in the ASGI
+        # worker; other workers pass it down the accept path.
+        self._listener = listener
+        self._listener_trust = trust.resolve_or_default(cfg, listener)
         self.log = worker.log
         self.app = worker.asgi
         # Settings read on every request, read once per connection instead.
@@ -637,6 +640,7 @@ class ASGIProtocol(asyncio.Protocol):
         self._proxy_protocol = getattr(cfg, "proxy_protocol", "off")
         # (secure_scheme_headers, forwarder_headers) this peer may set,
         # decided on the first request: the peer cannot change either.
+        # Unlike the explicit listener trust, this depends on the peer.
         self._forwarded_trust = None
         self._secure_names = None
         # (sockname, peername, scope server, scope client), see
@@ -718,7 +722,8 @@ class ASGIProtocol(asyncio.Protocol):
                 return
 
         peername = transport.get_extra_info('peername')
-        if negotiation.prior_knowledge_allowed(self.cfg, peername):
+        if negotiation.prior_knowledge_allowed(
+                self.cfg, peername, self._listener_trust):
             # Cleartext HTTP/2 with prior knowledge. Unlike the sync workers
             # we cannot read here, so commit to neither protocol yet: buffer
             # in data_received() until the preface either matches or cannot.
@@ -768,7 +773,8 @@ class ASGIProtocol(asyncio.Protocol):
         # gained in 0.6.9. The pip floor is not enforced at runtime, so an
         # older parser means no upgrade rather than silently dropped frames.
         self._h2c_upgrade_ok = (
-            negotiation.upgrade_allowed(self.cfg, peername)
+            negotiation.upgrade_allowed(
+                self.cfg, peername, self._listener_trust)
             and hasattr(self._callback_parser, 'remaining')
         )
         self._task = self.worker.loop.create_task(self._handle_connection())
@@ -892,11 +898,8 @@ class ASGIProtocol(asyncio.Protocol):
             if cfg_proxy != 'off':
                 peername = self.transport.get_extra_info('peername')
                 normalized = _normalize_sockaddr(peername)
-                trusted = _check_trusted_proxy(
-                    normalized,
-                    self.cfg.proxy_allow_ips,
-                    self.cfg.proxy_allow_networks(),
-                )
+                trusted = (isinstance(normalized, tuple)
+                           and self._listener_trust.trusts_proxy(normalized))
                 parser_kwargs['proxy_protocol'] = cfg_proxy if trusted else 'off'
             else:
                 parser_kwargs['proxy_protocol'] = 'off'
@@ -911,7 +914,7 @@ class ASGIProtocol(asyncio.Protocol):
         request = self._current_request
         policy = _RequestHeaderPolicy(
             self.cfg, self.transport.get_extra_info('peername'),
-            request.scheme, request.version,
+            request.scheme, request.version, self._listener_trust,
         )
         if self._forwarded_trust is None:
             self._forwarded_trust = policy._peer_trusted_for_forwarded()
@@ -2182,11 +2185,9 @@ class ASGIProtocol(asyncio.Protocol):
         """
         if self._proxy_protocol == 'off':
             return peername
-        if not _check_trusted_proxy(
-            peername,
-            self.cfg.proxy_allow_ips,
-            self.cfg.proxy_allow_networks(),
-        ):
+        normalized = _normalize_sockaddr(peername)
+        if not (isinstance(normalized, tuple)
+                and self._listener_trust.trusts_proxy(normalized)):
             return peername
         parser = self._callback_parser
         info = getattr(parser, 'proxy_protocol_info', None) if parser else None
@@ -2356,7 +2357,7 @@ class ASGIProtocol(asyncio.Protocol):
 
             # Create HTTP/2 connection handler
             h2_conn = AsyncHTTP2Connection(
-                self.cfg, reader, writer, peername
+                self.cfg, reader, writer, peername, listener=self._listener
             )
             if upgrade is None:
                 await h2_conn.initiate_connection()

@@ -1435,6 +1435,48 @@ when handling HTTPS requests.
 It is important that your front-end proxy configuration ensures that
 the headers defined here can not be passed directly from the client.
 
+### `forwarded_allow_ips_by_bind`
+
+**Command line:** `--forwarded-allow-ips-by-bind BIND=LIST`
+
+**Default:** `None`
+
+Per-listener override of [forwarded-allow-ips](#forwarded_allow_ips).
+
+Maps a bind address from [bind](#bind) to the peers allowed to set
+forwarded and secure-scheme headers on that listener. A listener
+without an entry here uses ``forwarded_allow_ips``; the two are not
+merged, so one listener's rule never leaks to another.
+
+This is what a server with a public listener and an internal
+listener needs: trust the load balancer on the internal port only,
+and leave direct internet traffic untrusted.
+
+```python
+bind = ["0.0.0.0:8000", "10.0.0.5:8001"]
+forwarded_allow_ips_by_bind = {
+    "10.0.0.5:8001": "10.0.0.0/8",
+}
+```
+
+The key may be the bind string as written, or the address the socket
+reports (``127.0.0.1:8000``, ``[::1]:8000``, ``unix:/run/app.sock``).
+An empty value trusts no peer with an IP address on that listener,
+without falling back to ``forwarded_allow_ips``. A UNIX-socket peer
+is still allowed, as it is with the global setting.
+
+On the command line the option takes ``BIND=LIST`` and may be
+repeated.
+
+```console
+# Listen on both, then trust the load balancer on the
+# internal one only. Repeat to name another listener.
+gunicorn --bind 0.0.0.0:8000 --bind 10.0.0.5:8001 app:app
+
+# or on the internal listener alone, with a separate command
+gunicorn --bind 10.0.0.5:8001 app:app --forwarded-allow-ips-by-bind 10.0.0.5:8001=10.0.0.0/8
+```
+
 ### `forwarded_allow_ips`
 
 **Command line:** `--forwarded-allow-ips STRING`
@@ -1454,6 +1496,11 @@ authorized front-ends can access Gunicorn.
 
 By default, the value of the ``FORWARDED_ALLOW_IPS`` environment
 variable. If it is not defined, the default is ``"127.0.0.1,::1"``.
+
+A listener that has an entry in [forwarded-allow-ips-by-bind](#forwarded_allow_ips_by_bind)
+uses that entry instead; a listener without one uses this value.
+The two are alternative, not combined, so a server with a public and
+an internal entry can trust the load balancer on one port only.
 
 !!! note
     This option does not affect UNIX socket connections. Connections not associated with
@@ -1569,9 +1616,39 @@ where you don't know in advance the IP address of front-end, but
 instead have ensured via other means that only your
 authorized front-ends can access Gunicorn.
 
+A listener that has an entry in [proxy-allow-ips-by-bind](#proxy_allow_ips_by_bind) uses
+that entry instead; a listener without one uses this value.
+
 !!! note
     This option does not affect UNIX socket connections. Connections not associated with
     an IP address are treated as allowed, unconditionally.
+
+### `proxy_allow_ips_by_bind`
+
+**Command line:** `--proxy-allow-ips-by-bind BIND=LIST`
+
+**Default:** `None`
+
+Per-listener override of [proxy-allow-ips](#proxy_allow_ips).
+
+Maps a bind address from [bind](#bind) to the peers allowed to send
+PROXY protocol framing on that listener. A listener without an entry
+here uses ``proxy_allow_ips``; the two are not merged.
+
+Use it when only the load-balanced listener is spoken to with PROXY
+protocol, so direct clients cannot get their address rewritten:
+enable ``proxy_protocol`` and trust the load balancer's network on
+that port only.
+
+```python
+bind = ["0.0.0.0:8000", "10.0.0.5:8001"]
+proxy_protocol = "auto"
+proxy_allow_ips_by_bind = {
+    "10.0.0.5:8001": "10.0.0.0/8",
+}
+```
+
+Keys and empty values work as in [forwarded-allow-ips-by-bind](#forwarded_allow_ips_by_bind).
 
 ### `protocol`
 

@@ -136,7 +136,8 @@ class SyncWorker(base.Worker):
         try:
             if self.cfg.is_ssl:
                 client = sock.ssl_wrap_socket(client, self.cfg)
-            parser = http.get_parser(self.cfg, client, addr)
+            parser = http.get_parser(self.cfg, client, addr,
+                                     listener=listener)
             req = next(parser)
             self.handle_request(listener, req, client, addr)
         except http.errors.NoMoreData as e:

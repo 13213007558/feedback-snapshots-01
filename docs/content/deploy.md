@@ -78,6 +78,70 @@ proxy IP rather than the upstream client. To log the real client address, set
 
 When binding Gunicorn to a UNIX socket `REMOTE_ADDR` will be empty.
 
+## One server, two entry points
+
+A server can listen on a public address and, on another address, on traffic
+from a load balancer. The two entries need different answers to "may this peer
+speak for the client?": a direct request on the public port must not be
+allowed to set its own scheme or client address.
+
+Trust is resolved from the listener that accepted the connection, so the
+rule for one port never applies to the other. Give the internal listener its
+own entry; the public one keeps the global setting.
+
+```python
+bind = ["0.0.0.0:8000", "10.0.0.5:8001"]
+
+# Direct internet traffic keeps the global default, 127.0.0.1 and ::1.
+forwarded_allow_ips = "127.0.0.1,::1"
+
+# Only the load balancer's network may set X-Forwarded-* on the internal port.
+forwarded_allow_ips_by_bind = {
+    "10.0.0.5:8001": "10.0.0.0/8",
+}
+```
+
+On the public listener, `X-Forwarded-Proto: https` from a client is ignored
+and `wsgi.url_scheme` / `scope["scheme"]` stay `http`. On the internal
+listener the same header, from a peer in `10.0.0.0/8`, sets `https`, and
+ASGI exposes that in `scope["scheme"]` while `scope["client"]` remains the
+load balancer's address. `REMOTE_ADDR` in WSGI is unchanged too:
+`X-Forwarded-For` is request data for the application, not a rewrite of the
+peer.
+
+A listener with no entry falls back to `forwarded_allow_ips`; it is not
+merged with the global list. An entry may also be empty to trust no IP
+forwarder on that listener (a UNIX-socket peer is still allowed, as with the
+global setting):
+
+```python
+forwarded_allow_ips_by_bind = {
+    "0.0.0.0:8000": "",
+    "10.0.0.5:8001": "10.0.0.0/8",
+}
+```
+
+Keys may be the bind string as written or the address the socket reports
+(`127.0.0.1:8000`, `[::1]:8000`, `unix:/run/app.sock`). The same mapping exists
+for PROXY protocol framing as `proxy_allow_ips_by_bind`, so only the
+load-balanced listener can be sent PROXY headers:
+
+```python
+proxy_protocol = "auto"
+proxy_allow_ips_by_bind = {
+    "10.0.0.5:8001": "10.0.0.0/8",
+}
+```
+
+Framing on a listener whose rule does not trust the peer is refused with a
+`403` before the request is parsed. On the ASGI worker the framing is not
+recognised at all on that entry, so the bytes are read as HTTP, fail to parse,
+and the connection is answered with a `400` and closed.
+
+Cleartext HTTP/2 (`http2_cleartext`) follows the forwarded-header rule of the
+listener as well: a public listener does not get its connection preface
+sniffed just because the internal one trusts the load balancer.
+
 ## PROXY Protocol
 
 The [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt)

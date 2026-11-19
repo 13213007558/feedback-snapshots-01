@@ -9,9 +9,10 @@ import ssl
 import sys
 
 from gunicorn import http
-from gunicorn.http import wsgi
-from gunicorn import util
 from gunicorn import sock as gunicorn_sock
+from gunicorn import trust
+from gunicorn import util
+from gunicorn.http import wsgi
 from gunicorn.http.errors import InvalidH2CPreface
 from gunicorn.http2 import negotiation
 from gunicorn.http2.response import HTTP2Response
@@ -38,6 +39,7 @@ class AsyncWorker(base.Worker):
     def handle(self, listener, client, addr):
         req = None
         unread_preface = b""
+        listener_trust = trust.resolve_or_default(self.cfg, listener)
         try:
             # Complete the handshake to ensure ALPN negotiation is done
             # (needed if do_handshake_on_connect is False)
@@ -52,7 +54,8 @@ class AsyncWorker(base.Worker):
                 self.handle_http2(listener, client, addr)
                 return
 
-            if negotiation.prior_knowledge_allowed(self.cfg, addr):
+            if negotiation.prior_knowledge_allowed(
+                    self.cfg, addr, listener_trust):
                 # HTTP/2 cleartext with prior knowledge (RFC 9113 section
                 # 3.4). Peers outside forwarded_allow_ips never reach here
                 # and are served HTTP/1.x as if the setting were off.
@@ -68,7 +71,8 @@ class AsyncWorker(base.Worker):
                 # that carries it; fall through with the bytes preserved.
                 unread_preface = buf
 
-            parser = http.get_parser(self.cfg, client, addr)
+            parser = http.get_parser(self.cfg, client, addr,
+                                     listener=listener)
             if unread_preface:
                 parser.unreader.unread(unread_preface)
             try:
@@ -76,7 +80,7 @@ class AsyncWorker(base.Worker):
                 if not self.cfg.keepalive:
                     req = next(parser)
                     if self._try_h2c_upgrade(listener, req, parser, client,
-                                             addr):
+                                             addr, listener_trust):
                         return
                     self.handle_request(listener_name, req, client, addr)
                 else:
@@ -89,7 +93,7 @@ class AsyncWorker(base.Worker):
                         if not req:
                             break
                         if self._try_h2c_upgrade(listener, req, parser, client,
-                                                 addr):
+                                                 addr, listener_trust):
                             return
                         if req.proxy_protocol_info:
                             proxy_protocol_info = req.proxy_protocol_info
@@ -130,7 +134,8 @@ class AsyncWorker(base.Worker):
         finally:
             util.close(client)
 
-    def _try_h2c_upgrade(self, listener, req, parser, client, addr):
+    def _try_h2c_upgrade(self, listener, req, parser, client, addr,
+                         listener_trust=None):
         """Switch to HTTP/2 if this request asks to upgrade.
 
         Returns True when the connection has been taken over. Any HTTP/2
@@ -141,7 +146,7 @@ class AsyncWorker(base.Worker):
         taking the buffer before draining it would feed the payload to the
         HTTP/2 state machine as if it were frames.
         """
-        if not negotiation.upgrade_allowed(self.cfg, addr):
+        if not negotiation.upgrade_allowed(self.cfg, addr, listener_trust):
             return False
         settings = negotiation.upgrade_settings(req)
         if settings is None:
@@ -169,7 +174,9 @@ class AsyncWorker(base.Worker):
         listener_name = listener.getsockname()
 
         try:
-            h2_conn = http.get_parser(self.cfg, client, addr, http2_connection=True)
+            h2_conn = http.get_parser(self.cfg, client, addr,
+                                      http2_connection=True,
+                                      listener=listener)
             if upgrade is not None:
                 settings, http1_req, body = upgrade
                 upgraded = h2_conn.initiate_upgrade(settings, http1_req, body)

@@ -3,11 +3,11 @@
 # See the NOTICE for more information.
 
 from enum import IntEnum
-import ipaddress
 import re
 import socket
 import struct
 
+from gunicorn import trust
 from gunicorn.http.body import ChunkedReader, LengthReader, EOFReader, Body
 from gunicorn.http.errors import (
     InvalidHeader, InvalidHeaderName, NoMoreData,
@@ -170,16 +170,8 @@ def _ip_in_allow_list(ip_str, allow_list, networks):
         allow_list: The original allow list (strings, may contain "*")
         networks: Pre-computed ipaddress.ip_network objects from config
     """
-    if '*' in allow_list:
-        return True
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        return False
-    for network in networks:
-        if ip in network:
-            return True
-    return False
+    return trust.peer_in_allow_list(
+        (ip_str, 0), allow_list, networks)
 
 
 class HeaderPolicy:
@@ -203,10 +195,7 @@ class HeaderPolicy:
 
     def _peer_is_trusted_proxy(self):
         """Whether the peer may set forwarding and scheme headers."""
-        cfg = self.cfg
-        return (not isinstance(self.peer_addr, tuple)
-                or _ip_in_allow_list(self.peer_addr[0], cfg.forwarded_allow_ips,
-                                     cfg.forwarded_allow_networks()))
+        return self.listener_trust.trusts_forwarded(self.peer_addr)
 
     def _peer_trusted_for_forwarded(self):
         """Return the (secure_scheme_headers, forwarder_headers) the peer is allowed to set.
@@ -215,9 +204,8 @@ class HeaderPolicy:
         configured forwarding/secure-scheme policy must be ignored to prevent
         spoofing.  Returns ``({}, [])`` when the peer is untrusted.
         """
-        cfg = self.cfg
         if self._peer_is_trusted_proxy():
-            return cfg.secure_scheme_headers, cfg.forwarder_headers
+            return self.cfg.secure_scheme_headers, self.cfg.forwarder_headers
         return {}, []
 
     def _apply_header_policy(self, name, value, scheme_state, seen,
@@ -294,11 +282,19 @@ class HeaderPolicy:
 
 
 class Message(HeaderPolicy):
-    def __init__(self, cfg, unreader, peer_addr):
+    def __init__(self, cfg, unreader, peer_addr, listener=None,
+                 listener_trust=None):
         self.cfg = cfg
         self.unreader = unreader
         self.peer_addr = peer_addr
         self.remote_addr = peer_addr
+        # The socket that accepted the connection, if known. Trust is keyed
+        # by it so one listener's rule cannot apply to another's traffic.
+        # The parser resolves it once per connection and passes it down;
+        # direct construction resolves it here.
+        self.listener = listener
+        self.listener_trust = (listener_trust if listener_trust is not None
+                               else trust.resolve_or_default(cfg, listener))
         self.version = None
         self.headers = []
         self.trailers = []
@@ -495,7 +491,8 @@ class Message(HeaderPolicy):
 
 
 class Request(Message):
-    def __init__(self, cfg, unreader, peer_addr, req_number=1):
+    def __init__(self, cfg, unreader, peer_addr, req_number=1,
+                 listener=None, listener_trust=None):
         self.method = None
         self.uri = None
         self.path = None
@@ -522,7 +519,8 @@ class Request(Message):
         # Check if fast parser should be used
         self._use_fast = _check_fast_parser(cfg)
 
-        super().__init__(cfg, unreader, peer_addr)
+        super().__init__(cfg, unreader, peer_addr, listener=listener,
+                         listener_trust=listener_trust)
 
     def get_data(self, unreader, buf, stop=False):
         data = unreader.read()
@@ -759,9 +757,7 @@ class Request(Message):
 
     def proxy_protocol_access_check(self):
         """Check if proxy protocol is allowed from this peer."""
-        if (isinstance(self.peer_addr, tuple) and
-                not _ip_in_allow_list(self.peer_addr[0], self.cfg.proxy_allow_ips,
-                                      self.cfg.proxy_allow_networks())):
+        if not self.listener_trust.trusts_proxy(self.peer_addr):
             raise ForbiddenProxyRequest(self.peer_addr[0])
 
     def _parse_proxy_protocol_v1(self, unreader, buf):

@@ -6,6 +6,7 @@ import socket
 import ssl
 import time
 
+from gunicorn import trust
 from gunicorn.http.message import Request
 from gunicorn.http.unreader import SocketUnreader, IterUnreader
 
@@ -19,8 +20,11 @@ _DRAIN_MAX_BYTES = 64 * 1024
 class Parser:
 
     mesg_class = None
+    #: Whether ``mesg_class`` takes the listening socket. Only HTTP requests
+    #: carry proxy trust; the uWSGI protocol has its own allow list.
+    mesg_accepts_listener = False
 
-    def __init__(self, cfg, source, source_addr):
+    def __init__(self, cfg, source, source_addr, listener=None):
         self.cfg = cfg
         if hasattr(source, "recv"):
             self.unreader = SocketUnreader(source)
@@ -28,6 +32,10 @@ class Parser:
             self.unreader = IterUnreader(source)
         self.mesg = None
         self.source_addr = source_addr
+        # The listening socket that accepted this connection, and the trust
+        # its requests get. Resolved once per connection, not per request.
+        self.listener = listener
+        self.listener_trust = trust.resolve_or_default(cfg, listener)
 
         # request counter (for keepalive connetions)
         self.req_count = 0
@@ -116,7 +124,14 @@ class Parser:
 
         # Parse the next request
         self.req_count += 1
-        self.mesg = self.mesg_class(self.cfg, self.unreader, self.source_addr, self.req_count)
+        if self.mesg_accepts_listener:
+            self.mesg = self.mesg_class(
+                self.cfg, self.unreader, self.source_addr, self.req_count,
+                listener=self.listener,
+                listener_trust=self.listener_trust)
+        else:
+            self.mesg = self.mesg_class(
+                self.cfg, self.unreader, self.source_addr, self.req_count)
         if not self.mesg:
             raise StopIteration()
         return self.mesg
@@ -127,3 +142,4 @@ class Parser:
 class RequestParser(Parser):
 
     mesg_class = Request
+    mesg_accepts_listener = True

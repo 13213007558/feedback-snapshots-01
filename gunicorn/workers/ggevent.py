@@ -40,8 +40,11 @@ class GeventWorker(AsyncWorker):
         # patch sockets
         sockets = []
         for s in self.sockets:
-            sockets.append(socket.socket(s.FAMILY, socket.SOCK_STREAM,
-                                         fileno=s.sock.detach()))
+            patched = socket.socket(s.FAMILY, socket.SOCK_STREAM,
+                                    fileno=s.sock.detach())
+            # Keep the bind identity: proxy trust is keyed by it.
+            patched.bind_spec = getattr(s, "bind_spec", None)
+            sockets.append(patched)
         self.sockets = sockets
 
     def notify(self):

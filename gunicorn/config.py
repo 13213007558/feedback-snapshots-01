@@ -23,6 +23,7 @@ import warnings
 from gunicorn import __version__, util
 from gunicorn.errors import ConfigError
 from gunicorn.reloader import reloader_engines
+from gunicorn.trust import normalize_bind_key
 
 KNOWN_SETTINGS = []
 PLATFORM = sys.platform
@@ -1419,6 +1420,112 @@ class SecureSchemeHeader(Setting):
         """
 
 
+def validate_allow_ips_by_bind(val):
+    """Validate a ``{bind: allow-list}`` mapping.
+
+    Keys are bind strings as written in :ref:`bind` (``"10.0.0.5:8000"``,
+    ``"[::1]:8000"``, ``"unix:/run/app.sock"``). Values accept the same
+    addresses, CIDR networks and ``*`` as the global setting. An empty value
+    trusts no IP peer on that listener; a UNIX-socket peer is still allowed,
+    as with the global setting.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        val = [val]
+    if isinstance(val, (list, tuple)):
+        pairs = {}
+        for item in val:
+            if not isinstance(item, str):
+                raise TypeError("Expected BIND=LIST, got: %s" % item)
+            bind, sep, allow = item.partition("=")
+            if not sep or not bind.strip():
+                raise ValueError("Expected BIND=LIST, got: %s" % item)
+            key = bind.strip()
+            if key in pairs:
+                raise ValueError("Duplicate bind key: %s" % key)
+            pairs[key] = allow
+        val = pairs
+    if not isinstance(val, dict):
+        raise TypeError("Value is not a dictionary: %s " % val)
+
+    validated = {}
+    for bind, allow in val.items():
+        if not isinstance(bind, str):
+            raise TypeError("Bind keys must be strings: %s" % bind)
+        key = bind.strip()
+        if not key:
+            raise ValueError("Bind keys must not be empty")
+        if allow is None:
+            allow = ""
+        if isinstance(allow, (list, tuple)):
+            allow = ",".join(str(item) for item in allow)
+        if not isinstance(allow, str):
+            raise TypeError("Value for %r must be a string: %s" % (key, allow))
+        if key in validated:
+            raise ValueError("Duplicate bind key: %s" % key)
+        validated[key] = validate_string_to_addr_list(allow)
+
+    # ``tcp://127.0.0.1:8000`` and ``127.0.0.1:8000`` name one listener; two
+    # different rules for it would leave the winner up to spelling order.
+    seen = {}
+    for key in validated:
+        normalized = normalize_bind_key(key)
+        if normalized in seen:
+            raise ValueError(
+                "Bind keys %r and %r name the same listener"
+                % (seen[normalized], key))
+        seen[normalized] = key
+    return validated
+
+
+class ForwardedAllowIPSByBind(Setting):
+    name = "forwarded_allow_ips_by_bind"
+    section = "Server Mechanics"
+    cli = ["--forwarded-allow-ips-by-bind"]
+    meta = "BIND=LIST"
+    action = "append"
+    validator = validate_allow_ips_by_bind
+    default = None
+    desc = """\
+        Per-listener override of :ref:`forwarded-allow-ips`.
+
+        Maps a bind address from :ref:`bind` to the peers allowed to set
+        forwarded and secure-scheme headers on that listener. A listener
+        without an entry here uses ``forwarded_allow_ips``; the two are not
+        merged, so one listener's rule never leaks to another.
+
+        This is what a server with a public listener and an internal
+        listener needs: trust the load balancer on the internal port only,
+        and leave direct internet traffic untrusted.
+
+        .. code:: python
+
+            bind = ["0.0.0.0:8000", "10.0.0.5:8001"]
+            forwarded_allow_ips_by_bind = {
+                "10.0.0.5:8001": "10.0.0.0/8",
+            }
+
+        The key may be the bind string as written, or the address the socket
+        reports (``127.0.0.1:8000``, ``[::1]:8000``, ``unix:/run/app.sock``).
+        An empty value trusts no peer with an IP address on that listener,
+        without falling back to ``forwarded_allow_ips``. A UNIX-socket peer
+        is still allowed, as it is with the global setting.
+
+        On the command line the option takes ``BIND=LIST`` and may be
+        repeated.
+
+        .. code:: console
+
+            # Listen on both, then trust the load balancer on the
+            # internal one only. Repeat to name another listener.
+            gunicorn --bind 0.0.0.0:8000 --bind 10.0.0.5:8001 app:app
+
+            # or on the internal listener alone, with a separate command
+            gunicorn --bind 10.0.0.5:8001 app:app --forwarded-allow-ips-by-bind 10.0.0.5:8001=10.0.0.0/8
+        """
+
+
 class ForwardedAllowIPS(Setting):
     name = "forwarded_allow_ips"
     section = "Server Mechanics"
@@ -1440,6 +1547,11 @@ class ForwardedAllowIPS(Setting):
 
         By default, the value of the ``FORWARDED_ALLOW_IPS`` environment
         variable. If it is not defined, the default is ``"127.0.0.1,::1"``.
+
+        A listener that has an entry in :ref:`forwarded-allow-ips-by-bind`
+        uses that entry instead; a listener without one uses this value.
+        The two are alternative, not combined, so a server with a public and
+        an internal entry can trust the load balancer on one port only.
 
         .. note::
 
@@ -2282,10 +2394,45 @@ class ProxyAllowFrom(Setting):
         instead have ensured via other means that only your
         authorized front-ends can access Gunicorn.
 
+        A listener that has an entry in :ref:`proxy-allow-ips-by-bind` uses
+        that entry instead; a listener without one uses this value.
+
         .. note::
 
             This option does not affect UNIX socket connections. Connections not associated with
             an IP address are treated as allowed, unconditionally.
+        """
+
+
+class ProxyAllowFromByBind(Setting):
+    name = "proxy_allow_ips_by_bind"
+    section = "Server Mechanics"
+    cli = ["--proxy-allow-ips-by-bind"]
+    meta = "BIND=LIST"
+    action = "append"
+    validator = validate_allow_ips_by_bind
+    default = None
+    desc = """\
+        Per-listener override of :ref:`proxy-allow-ips`.
+
+        Maps a bind address from :ref:`bind` to the peers allowed to send
+        PROXY protocol framing on that listener. A listener without an entry
+        here uses ``proxy_allow_ips``; the two are not merged.
+
+        Use it when only the load-balanced listener is spoken to with PROXY
+        protocol, so direct clients cannot get their address rewritten:
+        enable ``proxy_protocol`` and trust the load balancer's network on
+        that port only.
+
+        .. code:: python
+
+            bind = ["0.0.0.0:8000", "10.0.0.5:8001"]
+            proxy_protocol = "auto"
+            proxy_allow_ips_by_bind = {
+                "10.0.0.5:8001": "10.0.0.0/8",
+            }
+
+        Keys and empty values work as in :ref:`forwarded-allow-ips-by-bind`.
         """
 
 

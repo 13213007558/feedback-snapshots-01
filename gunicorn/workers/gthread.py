@@ -24,8 +24,9 @@ from functools import partial
 
 from . import base
 from .. import http
-from .. import util
 from .. import sock
+from .. import trust
+from .. import util
 from ..http import wsgi
 from ..http.errors import InvalidH2CPreface
 from ..http2 import negotiation
@@ -57,6 +58,10 @@ class TConn:
 
         self.timeout = None
         self.parser = None
+        # The listening socket that accepted this connection. ``None`` in
+        # tests and embedders that build a TConn directly.
+        self.listener = None
+        self.listener_trust = None
         self.initialized = False
         self.is_http2 = False
         # Track if we've already waited for data (to avoid waiting again after defer)
@@ -71,6 +76,11 @@ class TConn:
             return
         self.initialized = True
         self.sock.setblocking(True)
+        # A TConn built directly (tests, embedders) has no listener; trust
+        # then comes from the global settings, as before this change.
+        if self.listener_trust is None:
+            self.listener_trust = trust.resolve_or_default(
+                self.cfg, self.listener)
 
         if self.parser is None:
             # wrap the socket if needed
@@ -86,12 +96,14 @@ class TConn:
                 if sock.is_http2_negotiated(self.sock):
                     self.is_http2 = True
                     self.parser = http.get_parser(
-                        self.cfg, self.sock, self.client, http2_connection=True
+                        self.cfg, self.sock, self.client, http2_connection=True,
+                        listener=self.listener,
                     )
                     self.parser.initiate_connection()
                     return
 
-            elif negotiation.prior_knowledge_allowed(self.cfg, self.client):
+            elif negotiation.prior_knowledge_allowed(
+                    self.cfg, self.client, self.listener_trust):
                 # HTTP/2 cleartext with prior knowledge (RFC 9113 section
                 # 3.4): the client opens a plain TCP connection and sends the
                 # connection preface immediately. Peers outside
@@ -101,7 +113,8 @@ class TConn:
                 if matched:
                     self.is_http2 = True
                     self.parser = http.get_parser(
-                        self.cfg, self.sock, self.client, http2_connection=True
+                        self.cfg, self.sock, self.client, http2_connection=True,
+                        listener=self.listener,
                     )
                     self.parser.initiate_connection()
                     # The consumed preface bytes still need to reach the
@@ -115,12 +128,14 @@ class TConn:
                     raise InvalidH2CPreface(buf)
                 # Upgrade is enabled too, so this may be the HTTP/1 request
                 # that carries it. Give the bytes back and carry on.
-                self.parser = http.get_parser(self.cfg, self.sock, self.client)
+                self.parser = http.get_parser(
+                    self.cfg, self.sock, self.client, listener=self.listener)
                 self.parser.unreader.unread(buf)
                 return
 
             # initialize the HTTP/1.x parser
-            self.parser = http.get_parser(self.cfg, self.sock, self.client)
+            self.parser = http.get_parser(
+                self.cfg, self.sock, self.client, listener=self.listener)
 
     def set_timeout(self):
         # Use monotonic clock for reliability (time.time() can jump due to NTP)
@@ -322,7 +337,10 @@ class ThreadWorker(base.Worker):
             self.nr_conns += 1
             client_sock.setblocking(True)
 
-            conn = TConn(self.cfg, client_sock, client_addr, listener.getsockname())
+            conn = TConn(self.cfg, client_sock, client_addr,
+                         listener.getsockname())
+            conn.listener = listener
+            conn.listener_trust = trust.resolve_or_default(self.cfg, listener)
 
             # Submit directly to thread pool for processing
             self.enqueue_req(conn)
@@ -544,7 +562,8 @@ class ThreadWorker(base.Worker):
                 return False
 
             settings = None
-            if negotiation.upgrade_allowed(self.cfg, conn.client):
+            if negotiation.upgrade_allowed(
+                    self.cfg, conn.client, conn.listener_trust):
                 settings = negotiation.upgrade_settings(req)
             if settings is not None:
                 return self.handle_h2c_upgrade(conn, req, settings)
@@ -608,7 +627,8 @@ class ThreadWorker(base.Worker):
         util.write(conn.sock, negotiation.UPGRADE_101)
 
         h2_conn = http.get_parser(self.cfg, conn.sock, conn.client,
-                                  http2_connection=True)
+                                  http2_connection=True,
+                                  listener=conn.listener)
         upgraded = h2_conn.initiate_upgrade(settings, req, body)
         conn.parser = h2_conn
         conn.is_http2 = True

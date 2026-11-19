@@ -14,6 +14,9 @@ import selectors
 import time
 from io import BytesIO
 
+from gunicorn import trust
+from gunicorn.http.errors import ParseException
+
 from .errors import (
     HTTP2Error, HTTP2ProtocolError, HTTP2ConnectionError,
     HTTP2NotAvailable, HTTP2ErrorCode,
@@ -21,7 +24,6 @@ from .errors import (
 from .stream import HTTP2Stream, StreamState
 from .h2conn import server_connection_class
 from .request import HTTP2Request
-from gunicorn.http.errors import ParseException
 
 
 # Import h2 lazily to allow graceful fallback
@@ -78,7 +80,7 @@ class HTTP2ServerConnection:
     # Default buffer size for socket reads
     READ_BUFFER_SIZE = 65536
 
-    def __init__(self, cfg, sock, client_addr):
+    def __init__(self, cfg, sock, client_addr, listener=None):
         """Initialize an HTTP/2 server connection.
 
         Args:
@@ -94,6 +96,9 @@ class HTTP2ServerConnection:
         self.cfg = cfg
         self.sock = sock
         self.client_addr = client_addr
+        # The listening socket that accepted the connection, for proxy trust.
+        self.listener = listener
+        self.listener_trust = trust.resolve_or_default(cfg, listener)
 
         # Active streams indexed by stream ID
         self.streams = {}
@@ -208,7 +213,9 @@ class HTTP2ServerConnection:
             # That body came over HTTP/1, so no window credit is owed.
             stream.acked_size = stream.body_size
         self.streams[1] = stream
-        return HTTP2Request(stream, self.cfg, self.client_addr)
+        return HTTP2Request(
+            stream, self.cfg, self.client_addr,
+            listener=self.listener, listener_trust=self.listener_trust)
 
     def receive_data(self, data=None):
         """Process received data and return new requests.
@@ -409,7 +416,9 @@ class HTTP2ServerConnection:
 
         # Dispatch on headers: the body streams in behind the request.
         try:
-            return HTTP2Request(stream, self.cfg, self.client_addr)
+            return HTTP2Request(
+            stream, self.cfg, self.client_addr,
+            listener=self.listener, listener_trust=self.listener_trust)
         except (ParseException, ValueError):
             # A bad request is a stream error, not a connection error
             # (RFC 9113 section 8.1.1).

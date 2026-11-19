@@ -1,6 +1,17 @@
 <span id="news"></span>
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- Proxy trust can be set per listener: `forwarded_allow_ips_by_bind` and
+  `proxy_allow_ips_by_bind` map a `bind` address to the peers that listener
+  trusts for forwarded headers and for PROXY protocol framing. A listener
+  without an entry uses the global `forwarded_allow_ips` / `proxy_allow_ips`,
+  so a public listener can keep its default rule while an internal one
+  behind a load balancer gets its own.
+
 ## 27.0.1 - 2026-11-12
 
 ### Bug Fixes

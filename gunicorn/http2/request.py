@@ -9,6 +9,7 @@ HTTP/2 request wrapper.
 Provides a Request-compatible interface for HTTP/2 streams.
 """
 
+from gunicorn import trust
 from gunicorn.http.message import (
     RFC9110_6_5_1_FORBIDDEN_TRAILER, TOKEN_RE,
     HeaderPolicy,
@@ -189,18 +190,23 @@ class HTTP2Request(HeaderPolicy):
     #: response would be written as HTTP/1 bytes onto an HTTP/2 connection.
     _policy_expect_continue = False
 
-    def __init__(self, stream, cfg, peer_addr):
+    def __init__(self, stream, cfg, peer_addr, listener=None,
+                 listener_trust=None):
         """Initialize from an HTTP/2 stream.
 
         Args:
             stream: HTTP2Stream instance with received headers/body
             cfg: Gunicorn configuration object
             peer_addr: Client address tuple (host, port)
+            listener: The socket that accepted the connection, if known
         """
         self.stream = stream
         self.cfg = cfg
         self.peer_addr = peer_addr
         self.remote_addr = peer_addr
+        self.listener = listener
+        self.listener_trust = (listener_trust if listener_trust is not None
+                               else trust.resolve_or_default(cfg, listener))
 
         # HTTP/2 version tuple
         self.version = (2, 0)

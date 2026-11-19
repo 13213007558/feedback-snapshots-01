@@ -38,14 +38,18 @@ def preface_match(buf):
     return PARTIAL if H2C_PREFACE.startswith(buf) else MISMATCH
 
 
-def peer_trusted_for_h2c(cfg, peer_addr):
+def peer_trusted_for_h2c(cfg, peer_addr, listener_trust=None):
     """Whether this peer may negotiate cleartext HTTP/2.
 
-    Reuses the ``forwarded_allow_ips`` trust list: h2c is only ever expected
-    from the TLS-terminating proxy in front of gunicorn, which is the same
-    peer already trusted to set forwarded headers. Unix socket peers are
-    trusted, matching that policy.
+    Reuses the forwarded-header trust list: h2c is only ever expected from
+    the TLS-terminating proxy in front of gunicorn, which is the same peer
+    already trusted to set forwarded headers.  When the listener that
+    accepted the connection is known its rule is used, so a public listener
+    does not inherit the trust granted to an internal one.  Unix socket
+    peers are trusted, matching that policy.
     """
+    if listener_trust is not None:
+        return listener_trust.trusts_forwarded(peer_addr)
     if not isinstance(peer_addr, tuple):
         return True
     return _ip_in_allow_list(
@@ -66,7 +70,7 @@ def _h2c_available(cfg):
     )
 
 
-def prior_knowledge_allowed(cfg, peer_addr):
+def prior_knowledge_allowed(cfg, peer_addr, listener_trust=None):
     """Whether to sniff for the connection preface from this peer.
 
     Deliberately separate from :func:`upgrade_allowed`: enabling one mechanism
@@ -74,7 +78,8 @@ def prior_knowledge_allowed(cfg, peer_addr):
     """
     if cfg.http2_cleartext not in ("prior-knowledge", "both"):
         return False
-    return _h2c_available(cfg) and peer_trusted_for_h2c(cfg, peer_addr)
+    return (_h2c_available(cfg)
+            and peer_trusted_for_h2c(cfg, peer_addr, listener_trust))
 
 
 def mismatch_is_error(cfg):
@@ -88,11 +93,12 @@ def mismatch_is_error(cfg):
     return cfg.http2_cleartext == "prior-knowledge"
 
 
-def upgrade_allowed(cfg, peer_addr):
+def upgrade_allowed(cfg, peer_addr, listener_trust=None):
     """Whether to honour an ``Upgrade: h2c`` request from this peer."""
     if cfg.http2_cleartext not in ("upgrade", "both"):
         return False
-    return _h2c_available(cfg) and peer_trusted_for_h2c(cfg, peer_addr)
+    return (_h2c_available(cfg)
+            and peer_trusted_for_h2c(cfg, peer_addr, listener_trust))
 
 
 def read_preface_blocking(sock, timeout=None):

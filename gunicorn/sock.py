@@ -23,6 +23,11 @@ class BaseSocket:
         self.conf = conf
 
         self.cfg_addr = address
+        # The bind string this listener came from, when there was one. The
+        # parsed address alone loses the spelling (``tcp://``, ``unix:``),
+        # and an inherited fd has no bind string at all. Proxy trust keys on
+        # this, see gunicorn.trust.
+        self.bind_spec = None
         if fd is None:
             sock = socket.socket(self.FAMILY, socket.SOCK_STREAM)
             bound = False
@@ -209,6 +214,7 @@ def create_sockets(conf, log, fds=None):
             sock_name = sock.getsockname()
             sock_type = _sock_type(sock_name)
             listener = sock_type(sock_name, conf, log, fd=fd)
+            listener.bind_spec = _bind_spec_for(conf, fd)
             listeners.append(listener)
 
         return listeners
@@ -220,6 +226,7 @@ def create_sockets(conf, log, fds=None):
         for i in range(5):
             try:
                 sock = sock_type(addr, conf, log)
+                sock.bind_spec = _bind_spec_for(conf, addr)
             except OSError as e:
                 if e.args[0] == errno.EADDRINUSE:
                     log.error("Connection in use: %s", str(addr))
@@ -240,6 +247,22 @@ def create_sockets(conf, log, fds=None):
         listeners.append(sock)
 
     return listeners
+
+
+def _bind_spec_for(conf, address):
+    """The configured bind string that produced ``address``, if any.
+
+    ``conf.address`` is the parsed form, so the index of ``address`` in it
+    gives the matching entry of ``conf.bind``.  Workers rebuilt under
+    ``reuse_port`` call this too, which is why it goes through the config
+    rather than an argument threaded from the arbiter.
+    """
+    try:
+        index = conf.address.index(address)
+        specs = conf.bind
+        return specs[index]
+    except (AttributeError, ValueError, IndexError, TypeError):
+        return None
 
 
 def close_sockets(listeners, unlink=True):

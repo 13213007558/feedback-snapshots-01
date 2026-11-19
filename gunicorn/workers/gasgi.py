@@ -10,6 +10,7 @@ HTTP parsing infrastructure.
 """
 
 import asyncio
+import functools
 import os
 import signal
 import sys
@@ -188,8 +189,10 @@ class ASGIWorker(base.Worker):
 
         for sock in self.sockets:
             try:
+                # The protocol gets the listener so proxy trust can be keyed
+                # by it; create_server() calls the factory per connection.
                 server = await self.loop.create_server(
-                    lambda: ASGIProtocol(self),
+                    functools.partial(ASGIProtocol, self, sock),
                     sock=sock.sock,
                     ssl=ssl_context,
                     reuse_address=True,

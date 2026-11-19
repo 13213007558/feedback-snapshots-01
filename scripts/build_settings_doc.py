@@ -59,9 +59,14 @@ def _format_cli(setting: guncfg.Setting) -> str | None:
 
 
 REF_MAP = {
+    "bind": ("reference/settings.md", "bind"),
     "forwarded-allow-ips": ("reference/settings.md", "forwarded_allow_ips"),
+    "forwarded-allow-ips-by-bind": (
+        "reference/settings.md", "forwarded_allow_ips_by_bind"),
     "forwarder-headers": ("reference/settings.md", "forwarder_headers"),
     "proxy-allow-ips": ("reference/settings.md", "proxy_allow_ips"),
+    "proxy-allow-ips-by-bind": (
+        "reference/settings.md", "proxy_allow_ips_by_bind"),
     "worker-class": ("reference/settings.md", "worker_class"),
     "reload": ("reference/settings.md", "reload"),
     "raw-env": ("reference/settings.md", "raw_env"),
