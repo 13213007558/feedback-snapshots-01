@@ -23,6 +23,7 @@ no_matching_unlock_account_key_error_flash :: The flash error message to show if
 unlock_account_additional_form_tags :: HTML fragment with additional form tags to use on the unlock account form.
 unlock_account_autologin? :: Whether to autologin users after successful account unlock. This defaults to true, as otherwise an attacker can prevent an account from logging in by continually locking out their account.
 unlock_account_button :: The text to use on the unlock account button.
+unlock_account_email_delivery_error_class :: The exception class (or module) rescued when sending the unlock account email fails. Defaults to +StandardError+. A rescued failure rolls back the request transaction so the account stays locked and no resend cooldown is recorded, while the external response stays the same as a successful request.
 unlock_account_email_recently_sent_error_flash :: The flash error to show if not sending an unlock account email because another was sent recently.
 unlock_account_email_recently_sent_redirect :: Where to redirect after not sending an unlock account email because another was sent recently.
 unlock_account_email_subject :: The subject to use for the unlock account email.
@@ -65,6 +66,7 @@ send_unlock_account_email :: Send the account unlock email.
 set_unlock_account_email_last_sent :: Set the last time an unlock_account email is sent.
 unlock_account :: Unlock the account.
 unlock_account_email_body :: The body to use for the unlock account email.
+unlock_account_email_delivery_failed(exception) :: Called when sending the unlock account email raises an +unlock_account_email_delivery_error_class+ error. Override this to record or report the delivery failure; by default it does nothing. The surrounding transaction is rolled back after this runs, leaving the account locked and without a recorded resend cooldown.
 unlock_account_email_link :: The link to the unlock account form to include in the unlock account email.
 unlock_account_key :: The unlock account key for the current account.
 unlock_account_request_response :: Return a response after successfully requesting an account unlock. By default, redirects to +unlock_account_request_redirect+.

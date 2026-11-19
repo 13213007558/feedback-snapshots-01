@@ -1,3 +1,9 @@
+=== master
+
+* Keep account locked and allow an immediate retry when the unlock account email delivery fails temporarily, while keeping the external response consistent with a successful request in the lockout feature (jeremyevans)
+
+* Recheck the unlock account email cooldown inside a row-locked transaction so concurrent requests cannot send multiple emails for the same account (jeremyevans)
+
 === 2.51.0 (2026-11-17)
 
 * Disallow submission of webauthn challenge more than 10 minutes after challenge provided by default (jeremyevans)

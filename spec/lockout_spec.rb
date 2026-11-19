@@ -420,4 +420,165 @@ describe 'Rodauth lockout feature' do
     login
     page.body.must_include 'Logged In'
   end
+
+  it "keeps the account locked and records the failure when the unlock email cannot be delivered" do
+    delivery_errors = []
+    fail_delivery = true
+    rodauth do
+      enable :lockout
+      max_invalid_logins 2
+      unlock_account_email_delivery_failed { |e| delivery_errors << e }
+      send_email do |email|
+        raise IOError, "temporary mail delivery outage" if fail_delivery
+        super(email)
+      end
+    end
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>(rodauth.logged_in? ? "Logged In" : "Not Logged")}
+    end
+
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    3.times do
+      fill_in 'Password', :with=>'012345678910'
+      click_button 'Login'
+    end
+    page.find('#error_flash').text.must_equal "This account is currently locked out and cannot be logged in to"
+
+    lockout_id = DB[:account_lockouts].get(:id)
+    key_before = DB[:account_lockouts].where(:id=>lockout_id).get(:key)
+    deadline_before = DB[:account_lockouts].where(:id=>lockout_id).get(:deadline)
+
+    click_button 'Request Account Unlock'
+
+    # External response is identical to a successful request.
+    page.find('#notice_flash').text.must_equal 'An email has been sent to you with a link to unlock your account'
+    page.current_path.must_equal '/'
+    Mail::TestMailer.deliveries.must_be_empty
+
+    # The failure is reported through the internal hook with a locatable exception.
+    delivery_errors.length.must_equal 1
+    delivery_errors.first.must_be_kind_of IOError
+    delivery_errors.first.message.must_equal "temporary mail delivery outage"
+
+    # No cooldown was recorded and the lockout row is untouched, so the lock stays in effect.
+    DB[:account_lockouts].where(:id=>lockout_id).get(:email_last_sent).must_be_nil
+    DB[:account_lockouts].where(:id=>lockout_id).get(:key).must_equal key_before
+    DB[:account_lockouts].where(:id=>lockout_id).get(:deadline).must_equal deadline_before
+    DB[:account_lockouts].count.must_equal 1
+
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    fill_in 'Password', :with=>'0123456789'
+    click_button 'Login'
+    page.find('#error_flash').text.must_equal "This account is currently locked out and cannot be logged in to"
+
+    # A retry once delivery recovers sends the email without waiting out any cooldown.
+    fail_delivery = false
+    click_button 'Request Account Unlock'
+    page.find('#notice_flash').text.must_equal 'An email has been sent to you with a link to unlock your account'
+    link = email_link(/(\/unlock-account\?key=.+)$/)
+
+    # The account stays locked until the user actually completes verification with the link.
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    fill_in 'Password', :with=>'0123456789'
+    click_button 'Login'
+    page.find('#error_flash').text.must_equal "This account is currently locked out and cannot be logged in to"
+    DB[:account_lockouts].count.must_equal 1
+
+    visit link
+    click_button 'Unlock Account'
+    page.find('#notice_flash').text.must_equal 'Your account has been unlocked'
+    DB[:account_lockouts].count.must_equal 0
+
+    # Unlock autologins by default, so the account is now fully usable.
+    visit '/'
+    page.body.must_include 'Logged In'
+  end
+
+  it "does not resend an unlock email while a successful send is within the cooldown, but allows it after the cooldown" do
+    rodauth do
+      enable :lockout
+      max_invalid_logins 2
+      unlock_account_skip_resend_email_within 300
+    end
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>(rodauth.logged_in? ? "Logged In" : "Not Logged")}
+    end
+
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    3.times do
+      fill_in 'Password', :with=>'012345678910'
+      click_button 'Login'
+    end
+    page.find('#error_flash').text.must_equal "This account is currently locked out and cannot be logged in to"
+
+    click_button 'Request Account Unlock'
+    page.find('#notice_flash').text.must_equal 'An email has been sent to you with a link to unlock your account'
+    link = email_link(/(\/unlock-account\?key=.+)$/)
+    DB[:account_lockouts].get(:email_last_sent).wont_be_nil
+
+    # Concurrent/duplicate triggers inside the cooldown produce the recent-sent response and no email.
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    fill_in 'Password', :with=>'012345678910'
+    click_button 'Login'
+    click_button 'Request Account Unlock'
+    page.find('#error_flash').text.must_equal "An email has recently been sent to you with a link to unlock the account"
+    Mail::TestMailer.deliveries.must_be_empty
+
+    # After the cooldown elapses, a new request is allowed to send another email.
+    DB[:account_lockouts].update(:email_last_sent=>Time.now - 301)
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    fill_in 'Password', :with=>'012345678910'
+    click_button 'Login'
+    click_button 'Request Account Unlock'
+    page.find('#notice_flash').text.must_equal 'An email has been sent to you with a link to unlock your account'
+    email_link(/(\/unlock-account\?key=.+)$/).must_equal link
+  end
+
+  it "rechecks the cooldown inside the locked transaction so a concurrent request cannot send a second email" do
+    simulate_concurrent_send = true
+    rodauth do
+      enable :lockout
+      max_invalid_logins 2
+      unlock_account_skip_resend_email_within 300
+    end
+    no_freeze!
+    roda do |r|
+      r.rodauth
+      r.root{view :content=>(rodauth.logged_in? ? "Logged In" : "Not Logged")}
+    end
+
+    # Simulate a concurrent request winning the race and recording a successful send between
+    # the row lock and the in-transaction cooldown recheck.
+    concurrent = simulate_concurrent_send
+    app.rodauth.prepend(Module.new do
+      define_method(:unlock_account_email_recently_sent?) do
+        if concurrent
+          concurrent = false
+          DB[:account_lockouts].update(:email_last_sent=>Sequel::CURRENT_TIMESTAMP)
+        end
+        super()
+      end
+    end)
+
+    visit '/login'
+    fill_in 'Login', :with=>'foo@example.com'
+    3.times do
+      fill_in 'Password', :with=>'012345678910'
+      click_button 'Login'
+    end
+    page.find('#error_flash').text.must_equal "This account is currently locked out and cannot be logged in to"
+
+    click_button 'Request Account Unlock'
+    page.find('#error_flash').text.must_equal "An email has recently been sent to you with a link to unlock the account"
+    Mail::TestMailer.deliveries.must_be_empty
+    DB[:account_lockouts].count.must_equal 1
+  end
 end

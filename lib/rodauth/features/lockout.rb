@@ -45,6 +45,7 @@ module Rodauth
     auth_value_method :unlock_account_key_param, 'key'
     auth_value_method :unlock_account_requires_password?, false
     auth_value_method :unlock_account_skip_resend_email_within, 300
+    auth_value_method :unlock_account_email_delivery_error_class, StandardError
     session_key :unlock_account_session_key, :unlock_account_key
 
     auth_methods(
@@ -55,6 +56,7 @@ module Rodauth
       :invalid_login_attempted,
       :locked_out?,
       :set_unlock_account_email_last_sent,
+      :unlock_account_email_delivery_failed,
       :unlock_account_email_link,
       :unlock_account,
       :unlock_account_key
@@ -73,19 +75,39 @@ module Rodauth
 
       r.post do
         if account_from_login(login_param_value) && get_unlock_account_key
-          if unlock_account_email_recently_sent?
+          @unlock_account_key_value = get_unlock_account_key
+
+          result = transaction do
+            # Lock the lockout row for the duration of the transaction so concurrent requests
+            # cannot both pass the cooldown check and send an email for the same account.
+            select_key_for_update!
+            account_lockouts_ds.get(account_lockouts_key_column)
+
+            if unlock_account_email_recently_sent?
+              next :recently_sent
+            end
+
+            before_unlock_account_request
+            set_unlock_account_email_last_sent
+
+            begin
+              send_unlock_account_email
+            rescue unlock_account_email_delivery_error_class => e
+              unlock_account_email_delivery_failed(e)
+              raise Sequel::Rollback
+            end
+
+            after_unlock_account_request
+            :sent
+          end
+          if result == :recently_sent
             set_redirect_error_flash unlock_account_email_recently_sent_error_flash
             redirect unlock_account_email_recently_sent_redirect
           end
 
-          @unlock_account_key_value = get_unlock_account_key
-          transaction do
-            before_unlock_account_request
-            set_unlock_account_email_last_sent
-            send_unlock_account_email
-            after_unlock_account_request
-          end
-
+          # On a delivery failure the transaction was rolled back (result is nil): the account
+          # stays locked and no cooldown is recorded. Return the same response as a successful
+          # request so the temporary delivery problem is not exposed externally.
           unlock_account_request_response
         else
           set_redirect_error_status(no_matching_login_error_status)
@@ -245,6 +267,13 @@ module Rodauth
 
     def unlock_account_email_recently_sent?
       (email_last_sent = get_unlock_account_email_last_sent) && (Time.now - email_last_sent < unlock_account_skip_resend_email_within)
+    end
+
+    # Called when sending the unlock account email raises an +unlock_account_email_delivery_error_class+
+    # error. Override it to record or report the delivery failure; by default it does nothing.
+    # The surrounding transaction is rolled back afterwards, so the account stays locked and no
+    # email cooldown is persisted.
+    def unlock_account_email_delivery_failed(_exception)
     end
 
     def clear_tokens(reason)
