@@ -620,6 +620,166 @@ a = BGPPAAS4Aggregator(b'&kN%\xc0\x00\x02\x01')
 a.aggregator_asn == 644566565 and a.speaker_address == "192.0.2.1"
 
 
+#################### bgp_interpret_update_path (RFC 6793) ####################
++ bgp_interpret_update_path - offline RFC 6793 path interpretation
+
+= Legacy router prepend (OLD peer, AS4_PATH merge)
+# AS_PATH seq[65001, 65001, AS_TRANS, AS_TRANS] (a legacy router
+# prepended 65001 twice), AS4_PATH seq[65536, 196611]. The merge must
+# recover the 4-octet ASNs; AS_TRANS must not be treated as a real ASN.
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0035" "02"
+    "0000" "001e"
+    "40010100"
+    "40020a" "0204fde9fde95ba05ba0"
+    "c0110a" "02020001000000030003"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert not r.degraded
+assert r.segments == [(2, [65001, 65001, 65536, 196611])]
+assert r.effective_path == [65001, 65001, 65536, 196611]
+assert r.origin == 196611
+assert r.contains_asn(65536) and not r.contains_asn(23456)
+assert r.raw_attributes[2] == bytes.fromhex("0204fde9fde95ba05ba0")
+assert r.raw_attributes[17] == bytes.fromhex("02020001000000030003")
+
+= AS4_PATH longer than AS_PATH (OLD peer, explicit degradation)
+# Malformed per RFC 6793 4.2.3: the AS4_PATH is ignored and the result
+# must be degraded instead of exposing AS_TRANS as a trusted origin.
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0033" "02"
+    "0000" "001c"
+    "40010100"
+    "400204" "02015ba0"
+    "c0110e" "0203000100000003000300030188"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert r.degraded
+assert r.origin is None
+assert r.segments == [(2, [23456])]
+assert any("longer than AS_PATH" in reason for reason in r.reasons)
+
+= AGGREGATOR conflicts with AS4_AGGREGATOR (OLD peer)
+# AGGREGATOR AS 65010 vs AS4_AGGREGATOR AS 196610: the aggregator
+# information is contradictory and must not be trusted.
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0036" "02"
+    "0000" "001f"
+    "40010100"
+    "400204" "0201fde9"
+    "c00706" "fdf20a000001"
+    "c01208" "000300020a000001"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert r.degraded
+assert r.aggregator is None
+assert r.origin is None
+assert any("conflicts" in reason for reason in r.reasons)
+
+= AGGREGATOR AS_TRANS resolved through AS4_AGGREGATOR (OLD peer)
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0036" "02"
+    "0000" "001f"
+    "40010100"
+    "400204" "0201fde9"
+    "c00706" "5ba00a000001"
+    "c01208" "000300020a000001"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert not r.degraded
+assert r.aggregator == (196610, "10.0.0.1")
+assert r.origin == 65001
+
+= AGGREGATOR AS_TRANS without AS4_AGGREGATOR (OLD peer)
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "002b" "02"
+    "0000" "0014"
+    "40010100"
+    "400204" "0201fde9"
+    "c00706" "5ba00a000001"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert r.degraded
+assert r.aggregator is None
+assert any("AS4_AGGREGATOR is missing" in reason for reason in r.reasons)
+
+= NEW peer session (4-octet AS_PATH, AS4_PATH ignored)
+# AS_PATH seq[65536, 196611] with 4-octet ASNs, a spurious AS4_PATH
+# (ignored per RFC 6793) and an 8-octet AGGREGATOR.
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "003c" "02"
+    "0000" "0025"
+    "40010100"
+    "40020a" "02020001000000030003"
+    "c01106" "020100030003"
+    "c00708" "000300020a000001"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=True)
+assert not r.degraded
+assert r.segments == [(2, [65536, 196611])]
+assert r.origin == 196611
+assert r.aggregator == (196610, "10.0.0.1")
+assert any("AS4_PATH" in reason for reason in r.reasons)
+
+= Interleaved sessions do not pollute each other
+# Same messages parsed alternately with different session capabilities;
+# results must be identical across calls and independent from the
+# module-wide configuration.
+old_msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0035" "02"
+    "0000" "001e"
+    "40010100"
+    "40020a" "0204fde9fde95ba05ba0"
+    "c0110a" "02020001000000030003"
+)
+new_msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "003c" "02"
+    "0000" "0025"
+    "40010100"
+    "40020a" "02020001000000030003"
+    "c01106" "020100030003"
+    "c00708" "000300020a000001"
+)
+new_first = bgp_interpret_update_path(new_msg, peer_four_bytes_asn=True)
+old_first = bgp_interpret_update_path(old_msg, peer_four_bytes_asn=False)
+bgp_module_conf.use_2_bytes_asn = False
+new_second = bgp_interpret_update_path(new_msg, peer_four_bytes_asn=True)
+old_second = bgp_interpret_update_path(old_msg, peer_four_bytes_asn=False)
+bgp_module_conf.use_2_bytes_asn = True
+assert new_first.segments == new_second.segments == [(2, [65536, 196611])]
+assert old_first.segments == old_second.segments == [(2, [65001, 65001, 65536, 196611])]
+assert new_first.origin == new_second.origin == 196611
+assert old_first.origin == old_second.origin == 196611
+
+= Confederation segments and AS_SET tail (OLD peer)
+# AS_PATH confed_seq[65010] seq[65001] set{65002, 65003}: confederation
+# segments are excluded from the effective path, and an AS_SET tail
+# means no unique origin.
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "002c" "02"
+    "0000" "0015"
+    "40010100"
+    "40020e" "0301fdf20201fde90102fdea" "fdeb"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert not r.degraded
+assert r.effective_path == [65001]
+assert r.origin is None
+assert r.contains_asn(65003) and not r.contains_asn(65010)
+
+= AS_TRANS without AS4_PATH (OLD peer, explicit degradation)
+msg = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffff" "0022" "02"
+    "0000" "000b"
+    "40010100"
+    "400204" "02015ba0"
+)
+r = bgp_interpret_update_path(msg, peer_four_bytes_asn=False)
+assert r.degraded
+assert r.origin is None
+assert any("AS_TRANS" in reason for reason in r.reasons)
+
+
 ############################# BGPPALargeCommunity ############################
 + BGPPALargeCommunity class tests
 

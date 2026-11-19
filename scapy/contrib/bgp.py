@@ -2638,6 +2638,367 @@ class BGPRouteRefresh(BGP):
 
 
 #
+# RFC 6793 offline AS path interpretation
+#
+
+# AS_PATH segment types (RFC 4271, RFC 5065)
+_BGP_AS_SET = 1
+_BGP_AS_SEQUENCE = 2
+_BGP_AS_CONFED_SEQUENCE = 3
+_BGP_AS_CONFED_SET = 4
+
+
+class BGPPathInterpretation(object):
+    """
+    Result of an offline RFC 6793 AS path interpretation, as returned by
+    bgp_interpret_update_path().
+
+    The raw attribute values are kept alongside the interpreted path and
+    the reasons that led to it, so that origin and loop checks can be
+    justified. When `degraded` is True, the information was incomplete or
+    invalid: `origin` is then None and the path must not be trusted as
+    complete.
+    """
+
+    def __init__(self):
+        self.peer_four_bytes_asn = None
+        self.raw_attributes = {}
+        self.segments = []
+        self.aggregator = None
+        self.degraded = False
+        self.reasons = []
+
+    @property
+    def effective_path(self):
+        """
+        Ordered AS_SEQUENCE AS numbers. Confederation segments are
+        excluded (RFC 5065: they are not visible outside the
+        confederation) and AS_SET members are unordered, hence not part
+        of the ordered path.
+        """
+        path = []
+        for segment_type, asns in self.segments:
+            if segment_type == _BGP_AS_SEQUENCE:
+                path.extend(asns)
+        return path
+
+    @property
+    def origin(self):
+        """
+        Originating AS number, or None when it cannot be uniquely
+        determined (degraded interpretation, empty path, or a path
+        ending with an AS_SET).
+        """
+        if self.degraded:
+            return None
+        for segment_type, asns in reversed(self.segments):
+            if segment_type == _BGP_AS_SEQUENCE:
+                return asns[-1] if asns else None
+            if segment_type == _BGP_AS_SET:
+                return None
+        return None
+
+    def contains_asn(self, asn):
+        """
+        Loop check helper: True if `asn` appears in any
+        non-confederation segment (AS_SEQUENCE or AS_SET).
+        """
+        return any(
+            segment_type in (_BGP_AS_SEQUENCE, _BGP_AS_SET) and
+            asn in asns
+            for segment_type, asns in self.segments
+        )
+
+
+def _bgp_parse_as_path_segments(value, asn_size):
+    """
+    Parse raw AS_PATH/AS4_PATH value bytes into a list of
+    (segment_type, [asn, ...]). Returns (None, error) when malformed.
+    """
+    segments = []
+    offset = 0
+    while offset < len(value):
+        if offset + 2 > len(value):
+            return None, "truncated AS path segment header"
+        segment_type = value[offset]
+        segment_length = value[offset + 1]
+        offset += 2
+        if segment_type not in as_path_segment_types:
+            return None, "invalid AS path segment type %d" % segment_type
+        if offset + segment_length * asn_size > len(value):
+            return None, "AS path segment length overruns the attribute"
+        asns = []
+        for _ in range(segment_length):
+            asns.append(
+                int.from_bytes(value[offset:offset + asn_size], "big"))
+            offset += asn_size
+        segments.append((segment_type, asns))
+    return segments, None
+
+
+def _bgp_interpret_aggregator(result):
+    """
+    Fill result.aggregator from the raw AGGREGATOR and AS4_AGGREGATOR
+    attributes of result, applying the RFC 6793 AS_TRANS rules.
+    """
+    as_trans = BGPPAASPath.AS_TRANS
+    aggregator_raw = result.raw_attributes.get(7)
+    as4_aggregator_raw = result.raw_attributes.get(18)
+
+    if aggregator_raw is None:
+        if as4_aggregator_raw is not None:
+            result.reasons.append(
+                "AS4_AGGREGATOR without AGGREGATOR: ignored")
+        return
+
+    if result.peer_four_bytes_asn:
+        # RFC 6793 4.2.2: between 4-octet capable speakers the
+        # AGGREGATOR attribute carries a 4-octet AS number.
+        if len(aggregator_raw) != 8:
+            result.degraded = True
+            result.reasons.append(
+                "invalid AGGREGATOR length %d for a 4-octet capable "
+                "peer" % len(aggregator_raw))
+            return
+        result.aggregator = (
+            struct.unpack("!I", aggregator_raw[:4])[0],
+            socket.inet_ntoa(aggregator_raw[4:8])
+        )
+        return
+
+    if len(aggregator_raw) != 6:
+        result.degraded = True
+        result.reasons.append(
+            "invalid AGGREGATOR length %d" % len(aggregator_raw))
+        return
+    aggregator_asn = struct.unpack("!H", aggregator_raw[:2])[0]
+
+    if aggregator_asn == as_trans:
+        # RFC 6793 4.2.3: the real aggregator AS number is carried by
+        # AS4_AGGREGATOR.
+        if as4_aggregator_raw is None:
+            result.degraded = True
+            result.reasons.append(
+                "AGGREGATOR holds AS_TRANS but AS4_AGGREGATOR is "
+                "missing")
+            return
+        if len(as4_aggregator_raw) != 8:
+            result.degraded = True
+            result.reasons.append(
+                "invalid AS4_AGGREGATOR length %d"
+                % len(as4_aggregator_raw))
+            return
+        result.aggregator = (
+            struct.unpack("!I", as4_aggregator_raw[:4])[0],
+            socket.inet_ntoa(as4_aggregator_raw[4:8])
+        )
+        result.reasons.append(
+            "AGGREGATOR AS_TRANS resolved through AS4_AGGREGATOR")
+        return
+
+    if as4_aggregator_raw is not None:
+        if len(as4_aggregator_raw) != 8:
+            result.degraded = True
+            result.reasons.append(
+                "invalid AS4_AGGREGATOR length %d"
+                % len(as4_aggregator_raw))
+            return
+        as4_aggregator_asn = struct.unpack("!I", as4_aggregator_raw[:4])[0]
+        if as4_aggregator_asn != aggregator_asn:
+            result.degraded = True
+            result.reasons.append(
+                "AGGREGATOR AS %d conflicts with AS4_AGGREGATOR AS %d"
+                % (aggregator_asn, as4_aggregator_asn))
+            return
+    result.aggregator = (
+        aggregator_asn,
+        socket.inet_ntoa(aggregator_raw[2:6])
+    )
+
+
+def bgp_interpret_update_path(update, peer_four_bytes_asn):
+    """
+    Interpret the AS path of a raw BGP UPDATE message offline, following
+    RFC 6793.
+
+    `update` is the raw UPDATE message, with or without the 19-octet BGP
+    header. `peer_four_bytes_asn` tells whether the peer negotiated the
+    4-octet AS number capability; it must come from trusted session
+    information and is deliberately per-call, so that interleaved
+    sessions with different capabilities never interfere through the
+    module-wide configuration.
+
+    AS_TRANS (23456) placeholders are never treated as real AS numbers:
+    when the peer is not 4-octet capable, they are resolved through
+    AS4_PATH and AS4_AGGREGATOR. When the information is incomplete or
+    invalid, the result is explicitly degraded instead of exposing a
+    seemingly complete origin.
+    """
+    result = BGPPathInterpretation()
+    result.peer_four_bytes_asn = bool(peer_four_bytes_asn)
+    as_trans = BGPPAASPath.AS_TRANS
+
+    if update[:16] == _BGP_HEADER_MARKER:
+        if len(update) < _BGP_HEADER_SIZE:
+            result.degraded = True
+            result.reasons.append("truncated BGP header")
+            return result
+        length = struct.unpack("!H", update[16:18])[0]
+        if update[18] != 2:
+            result.degraded = True
+            result.reasons.append(
+                "not an UPDATE message (type %d)" % update[18])
+            return result
+        if length < _BGP_HEADER_SIZE or length > len(update):
+            result.degraded = True
+            result.reasons.append(
+                "invalid BGP message length %d" % length)
+            return result
+        update = update[_BGP_HEADER_SIZE:length]
+
+    if len(update) < 4:
+        result.degraded = True
+        result.reasons.append("truncated UPDATE message")
+        return result
+    withdrawn_len = struct.unpack("!H", update[:2])[0]
+    if 2 + withdrawn_len + 2 > len(update):
+        result.degraded = True
+        result.reasons.append(
+            "withdrawn routes length overruns the message")
+        return result
+    offset = 2 + withdrawn_len
+    attrs_len = struct.unpack("!H", update[offset:offset + 2])[0]
+    offset += 2
+    if offset + attrs_len > len(update):
+        result.degraded = True
+        result.reasons.append(
+            "path attributes length overruns the message")
+        return result
+    attrs_data = update[offset:offset + attrs_len]
+
+    while attrs_data:
+        if len(attrs_data) < _BGP_PATH_ATTRIBUTE_MIN_SIZE:
+            result.degraded = True
+            result.reasons.append("truncated path attribute")
+            return result
+        flags = attrs_data[0]
+        type_code = attrs_data[1]
+        if flags & _BGP_PA_EXTENDED_LENGTH:
+            if len(attrs_data) < 4:
+                result.degraded = True
+                result.reasons.append("truncated path attribute")
+                return result
+            attr_len = struct.unpack("!H", attrs_data[2:4])[0]
+            header_len = 4
+        else:
+            attr_len = attrs_data[2]
+            header_len = 3
+        if header_len + attr_len > len(attrs_data):
+            result.degraded = True
+            result.reasons.append(
+                "path attribute %d length overruns the message"
+                % type_code)
+            return result
+        if type_code in result.raw_attributes:
+            result.degraded = True
+            result.reasons.append(
+                "duplicate path attribute %d" % type_code)
+        else:
+            result.raw_attributes[type_code] = \
+                attrs_data[header_len:header_len + attr_len]
+        attrs_data = attrs_data[header_len + attr_len:]
+
+    as_path_raw = result.raw_attributes.get(2)
+    if as_path_raw is None:
+        result.degraded = True
+        result.reasons.append("missing AS_PATH attribute")
+        return result
+    as_path, error = _bgp_parse_as_path_segments(
+        as_path_raw, 4 if result.peer_four_bytes_asn else 2)
+    if as_path is None:
+        result.degraded = True
+        result.reasons.append("invalid AS_PATH: " + error)
+        return result
+
+    if result.peer_four_bytes_asn:
+        # RFC 6793 4.2.3: between 4-octet capable speakers the AS_PATH
+        # carries 4-octet AS numbers; AS4_PATH and AS4_AGGREGATOR are
+        # not used.
+        result.segments = as_path
+        if 17 in result.raw_attributes:
+            result.reasons.append(
+                "AS4_PATH received from a 4-octet capable peer: ignored")
+        if 18 in result.raw_attributes:
+            result.reasons.append(
+                "AS4_AGGREGATOR received from a 4-octet capable peer: "
+                "ignored")
+    else:
+        as4_path_raw = result.raw_attributes.get(17)
+        as4_path = None
+        if as4_path_raw is not None:
+            as4_path, error = _bgp_parse_as_path_segments(as4_path_raw, 4)
+            if as4_path is None:
+                result.degraded = True
+                result.reasons.append("invalid AS4_PATH: " + error)
+        if as4_path is None:
+            result.segments = as_path
+        else:
+            path_count = sum(len(asns) for _, asns in as_path)
+            as4_count = sum(len(asns) for _, asns in as4_path)
+            if any(segment_type in (_BGP_AS_CONFED_SEQUENCE,
+                                    _BGP_AS_CONFED_SET)
+                   for segment_type, _ in as4_path):
+                result.degraded = True
+                result.reasons.append(
+                    "AS4_PATH carries confederation segments: ignored")
+                result.segments = as_path
+            elif as4_count > path_count:
+                # RFC 6793 4.2.3: malformed; the AS4_PATH is ignored and
+                # the AS_PATH still holds unresolved AS_TRANS
+                # placeholders.
+                result.degraded = True
+                result.reasons.append(
+                    "AS4_PATH (%d ASNs) longer than AS_PATH (%d ASNs): "
+                    "ignored" % (as4_count, path_count))
+                result.segments = as_path
+            else:
+                # RFC 6793 4.2.3: keep the head of AS_PATH that AS4_PATH
+                # does not cover, then append AS4_PATH.
+                head = path_count - as4_count
+                merged = []
+                for segment_type, asns in as_path:
+                    if head == 0:
+                        break
+                    if len(asns) <= head:
+                        merged.append((segment_type, list(asns)))
+                        head -= len(asns)
+                    else:
+                        merged.append((segment_type, list(asns[:head])))
+                        result.reasons.append(
+                            "AS_PATH/AS4_PATH merge splits an AS path "
+                            "segment")
+                        head = 0
+                tail = [
+                    (segment_type, list(asns))
+                    for segment_type, asns in as4_path
+                ]
+                if merged and tail and merged[-1][0] == tail[0][0]:
+                    # Coalesce the two same-type segments around the
+                    # AS_PATH/AS4_PATH seam.
+                    merged[-1][1].extend(tail[0][1])
+                    tail = tail[1:]
+                result.segments = merged + tail
+
+    if any(as_trans in asns for _, asns in result.segments):
+        result.degraded = True
+        result.reasons.append(
+            "unresolved AS_TRANS placeholder in the AS path")
+
+    _bgp_interpret_aggregator(result)
+    return result
+
+
+#
 # Layer bindings
 #
 
