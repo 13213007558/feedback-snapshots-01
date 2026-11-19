@@ -1,5 +1,13 @@
 === master
 
+* Add host_authorization defer_hosts, reject_hosts, and on_reject options, to explicitly configure host policy ownership and record rejections (jeremyevans)
+
+* Support wildcard strings for authorized, deferred, and rejected hosts in host_authorization plugin (jeremyevans)
+
+* Remove middleware environment flag before dispatching to the next application in middleware plugin, so downstream applications do not mistake the request for a middleware request (jeremyevans)
+
+* Add RodaRequest#forward_next! to middleware plugin, for forwarding a request to the next application before routing (jeremyevans)
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)

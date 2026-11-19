@@ -70,6 +70,29 @@ class Roda
     # If you would like the middleware to forward +/foo/app+ request to the
     # application, you should use the +:next_if_not_found+ plugin option.
     #
+    # It is possible to forward a request to the next application before routing,
+    # by calling +forward_next!+ on the request:
+    #
+    #   class Mid < Roda
+    #     plugin :middleware
+    #
+    #     route do |r|
+    #       r.forward_next! if r.host.end_with?('.internal.example.com')
+    #
+    #       # ...
+    #     end
+    #   end
+    #
+    # This is designed for plugins that need to make a decision before routing,
+    # such as the host_authorization plugin with the +defer_hosts+ option.  If
+    # the application is not being used as middleware, +forward_next!+ is a no-op,
+    # and the caller should continue normal request handling.
+    #
+    # The environment variable used to indicate a middleware request is only set
+    # while the middleware application is handling the request.  It is removed
+    # before dispatching to the next application, so a downstream Roda application
+    # does not mistake the request for a middleware request.
+    #
     # It is possible to use the Roda app as a regular app even when using
     # the middleware plugin.  Using an app as middleware automatically creates
     # a subclass of the app for the middleware.  Because a subclass is automatically
@@ -152,11 +175,25 @@ class Roda
         # pass handling of the request to the next middleware.
         def call(env)
           res = nil
+          env_var = @mid.middleware_env_var
+          previous = env[env_var]
+          env[env_var] = true
 
-          call_next = catch(:next) do
-            env[@mid.middleware_env_var] = true
-            res = @mid.call(env)
-            false
+          call_next = begin
+            catch(:next) do
+              res = @mid.call(env)
+              false
+            end
+          ensure
+            # The flag only applies while the current middleware is handling the
+            # request.  Restore it before dispatching to the next application, so
+            # a downstream Roda application doesn't treat the request as a
+            # middleware request handled by this layer.
+            if previous.nil?
+              env.delete(env_var)
+            else
+              env[env_var] = previous
+            end
           end
 
           if call_next
@@ -223,6 +260,20 @@ class Roda
         # this request is being performed for middleware.
         def forward_next
           env[roda_class.middleware_env_var]
+        end
+
+        # Forward the request to the next application, without this application
+        # handling it.  Intended for plugins that make a decision before routing
+        # that means the request belongs to the next application.  This has no
+        # effect when the application is not used as middleware, in which case
+        # the caller is responsible for continuing normal request handling.  The
+        # request environment is not modified, except for the response headers if
+        # the :forward_response_headers plugin option is used.
+        def forward_next!
+          return false unless forward_next
+
+          env['roda.response_headers'] = scope.response.headers if roda_class.middleware_forward_response_headers
+          throw :next, true
         end
       end
     end

@@ -378,4 +378,71 @@ describe "middleware plugin" do
     body('/a/b').must_equal 'a-b'
     body('/d').must_equal 'c'
   end
+
+  it "supports forward_next! to forward a request to the next application" do
+    a2 = app(:bare) do
+      plugin :middleware
+
+      route do |r|
+        r.forward_next! if r.host == 'forward.example.com'
+        r.is 'a' do
+          'a2'
+        end
+      end
+    end
+
+    app(:bare) do
+      use a2
+
+      route do |r|
+        "next:#{r.env['HTTP_HOST']}:#{r.path}"
+      end
+    end
+
+    body('/a').must_equal 'a2'
+    body('/a', 'HTTP_HOST'=>'forward.example.com').must_equal 'next:forward.example.com:/a'
+    body('/b').must_equal 'next::/b'
+  end
+
+  it "uses response headers when forwarding with forward_next! if :forward_response_headers is used" do
+    a2 = app(:bare) do
+      plugin :middleware, :forward_response_headers=>true
+
+      route do |r|
+        response['x-mid'] = 'mid'
+        r.forward_next! if r.path == '/forward'
+        r.get 'other' do
+          response['x-mid'] = 'handled'
+          'a2'
+        end
+      end
+    end
+
+    app(:bare) do
+      use a2
+
+      route do |r|
+        response['x-mid'] = 'next'
+        'next'
+      end
+    end
+
+    body('/forward').must_equal 'next'
+    header('x-mid', '/forward').must_equal 'next'
+    body('/other').must_equal 'a2'
+    header('x-mid', '/other').must_equal 'handled'
+  end
+
+  it "does not change behavior when calling forward_next! without being used as middleware" do
+    app(:bare) do
+      plugin :middleware
+
+      route do |r|
+        r.forward_next!
+        'direct'
+      end
+    end
+
+    body.must_equal 'direct'
+  end
 end
