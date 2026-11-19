@@ -10,6 +10,9 @@ need to expand or change the policy. django-csp includes four decorators to help
 All decorators take an optional keyword argument, ``REPORT_ONLY``, which defaults to ``False``. If
 set to ``True``, the decorator will update the report-only policy instead of the enforced policy.
 
+All decorators work with both sync and async views; the decorated view keeps its original
+sync/async nature so Django's async request path is preserved.
+
 ``@csp_exempt``
 ===============
 
