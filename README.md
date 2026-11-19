@@ -86,6 +86,87 @@ hotp.verify("259769", 1401) # => 1401
 hotp.verify("259769", 1402) # => nil
 ```
 
+### Verifying several authenticators with one work budget
+
+An account can have more than one TOTP/HOTP authenticator. Verifying a single
+submitted code against all of them must not let the caller expand windows
+forever, and it must not consume the first match when several candidates
+match. `ROTP::MultiVerifier` snapshots the candidate configuration, searches it
+under one shared HMAC budget, and commits only a unique match through a
+compare-and-swap callback.
+
+```ruby
+authenticators = [
+  ROTP::MultiVerifier.authenticator("JBSWY3DPEHPK3PXP", id: :phone),
+  ROTP::MultiVerifier.authenticator(
+    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+    id: :backup,
+    digest: "sha1",
+    digits: 8,
+    drift_behind: 30,
+    drift_ahead: 30
+  ),
+  ROTP::MultiVerifier.authenticator(
+    "KRSXG5CTMVRXEZLUKN2XAZLSKNSWG4TFOQ",
+    type: :hotp,
+    id: :hardware,
+    counter: 42,
+    retries: 5
+  )
+]
+
+verifier = ROTP::MultiVerifier.new(max_hmac: 20)
+snapshot = verifier.snapshot(authenticators) # frozen configuration
+
+result = verifier.verify(
+  "301999",
+  snapshot,
+  at: Time.now,
+  consume: lambda do |authenticator, expected, unit|
+    # Compare-and-swap: only move on if the stored value is still +expected+.
+    # Returns false when another request consumed first.
+    OtpAuthenticator.compare_and_swap(
+      authenticator.id, expected, unit
+    )
+  end
+)
+
+case result.status
+when :unique
+  result.authenticator.id  # => :phone
+  result.consumed_at       # => committed Unix timestamp or HOTP counter
+  result.hmac_count        # => HMACs actually computed
+when :ambiguous
+  # More than one candidate matched; nothing was consumed.
+when :exhausted
+  # The shared budget ran out before the search finished; nothing was consumed.
+else
+  # :invalid, :rejected, :conflict, :unavailable or :error
+end
+```
+
+Key properties:
+
+- The candidate list is copied into a frozen snapshot before any HMAC runs, so
+  later mutations cannot change the work of an in-flight verification.
+- Each candidate states its digest, digit count and window unit explicitly:
+  TOTP windows are in seconds (internally `timestamp / interval`), HOTP windows
+  are counters.
+- `max_hmac` is a single total for the whole call. Splitting one wide window
+  into several narrow windows does not increase it, and the window is iterated
+  lazily rather than materialized.
+- The whole snapshot is searched before deciding, so a later collision cannot
+  be mistaken for a unique match. Multiple matches anywhere - across
+  authenticators or repeated inside one window - yield `:ambiguous` and no
+  consumption.
+- `:exhausted`, `:rejected` and `:ambiguous` never invoke the consume callback.
+  Only a unique match does, and a `false` return is reported as `:conflict`.
+- Passing a `consumed_through` value skips windows at or before it without
+  spending an HMAC.
+- The existing single-authenticator `TOTP#verify` and `HOTP#verify` APIs are
+  unchanged. Both classes also accept an optional `hmac:` backend for auditing
+  or counting, e.g. `ROTP::TOTP.new(secret, hmac: recorder)`.
+
 ### Preventing reuse of Time based OTP's
 
 By keeping track of the last time a user's OTP was verified, we can prevent token reuse during

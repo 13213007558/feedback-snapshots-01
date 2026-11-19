@@ -1,8 +1,11 @@
+require 'rotp/hmac'
+
 module ROTP
   class OTP
-    attr_reader :secret, :digits, :digest, :name, :issuer, :provisioning_params, :skip_default_uri_params
+    attr_reader :secret, :digits, :digest, :name, :issuer, :provisioning_params, :skip_default_uri_params, :hmac
     DEFAULT_DIGITS = 6
     DEFAULT_DIGEST = 'sha1'
+    DEFAULT_HMAC = ROTP::HMAC.new.freeze
 
     # @param [String] secret in the form of base32
     # @option options digits [Integer] (6)
@@ -24,6 +27,9 @@ module ROTP
     #     When true, parameters that match the RFC defaults (SHA1, 6 digits,
     #     30 second period) are omitted from the provisioning URI. Set to
     #     false to always include them.
+    # @option options hmac [#digest, #call]
+    #     Optional HMAC implementation. It must be thread safe if the OTP
+    #     object is shared. Defaults to a thin wrapper around OpenSSL::HMAC.
     # @returns [OTP] OTP instantiation
     def initialize(s, options = {})
       @digits = options[:digits] || DEFAULT_DIGITS
@@ -32,6 +38,10 @@ module ROTP
       @issuer = options[:issuer]
       @provisioning_params = options[:provisioning_params] || {}
       @skip_default_uri_params = options.fetch(:skip_default_uri_params, true)
+      @hmac = options[:hmac] || DEFAULT_HMAC
+      unless @hmac.respond_to?(:digest) || @hmac.respond_to?(:call)
+        raise ArgumentError, '`hmac` must respond to #digest or #call'
+      end
       @secret = s
     end
 
@@ -39,8 +49,8 @@ module ROTP
     # Usually either the counter, or the computed integer
     # based on the Unix timestamp
     def generate_otp(input)
-      hmac = OpenSSL::HMAC.digest(
-        OpenSSL::Digest.new(digest),
+      hmac = digest_hmac(
+        digest,
         byte_secret,
         int_to_bytestring(input)
       )
@@ -54,7 +64,26 @@ module ROTP
       code_str[-digits..-1]
     end
 
+    # Constant-time comparison used by all OTP verification paths.
+    # @return [Boolean]
+    def self.secure_compare(a, b)
+      return false if a.empty? || b.empty? || a.bytesize != b.bytesize
+
+      left = a.unpack "C#{a.bytesize}"
+      result = 0
+      b.each_byte { |byte| result |= byte ^ left.shift }
+      result == 0
+    end
+
     private
+
+    def digest_hmac(digest_name, key, data)
+      if @hmac.respond_to?(:digest)
+        @hmac.digest(digest_name, key, data)
+      else
+        @hmac.call(digest_name, key, data)
+      end
+    end
 
     def verify(input, generated)
       raise ArgumentError, '`otp` should be a String' unless
@@ -86,12 +115,7 @@ module ROTP
 
     # constant-time compare the strings
     def time_constant_compare(a, b)
-      return false if a.empty? || b.empty? || a.bytesize != b.bytesize
-
-      l = a.unpack "C#{a.bytesize}"
-      res = 0
-      b.each_byte { |byte| res |= byte ^ l.shift }
-      res == 0
+      self.class.secure_compare(a, b)
     end
   end
 end
