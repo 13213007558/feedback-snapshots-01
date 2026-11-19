@@ -1,0 +1,8 @@
+source 'https://rubygems.org'
+ruby '>= 3.3', '< 4'
+gem 'faraday-net_http', '>= 2.0', '< 3.6'
+gem 'rspec'
+gem 'simplecov'
+gem 'coveralls_reborn'
+gem 'webmock'
+gem 'pry'
