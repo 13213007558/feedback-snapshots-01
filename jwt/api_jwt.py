@@ -48,6 +48,18 @@ class PyJWT:
 
         self._jws = PyJWS(options=self._get_sig_options())
 
+    @property
+    def jws(self) -> PyJWS:
+        """The underlying :class:`~jwt.api_jws.PyJWS` used for signing and verification.
+
+        Use this to register custom algorithms on a dedicated
+        :class:`PyJWT` client via :meth:`~jwt.api_jws.PyJWS.register_algorithm`
+        (or build one with :meth:`~jwt.api_jws.PyJWS.from_algorithms`). The
+        registry belongs to this client only and never affects the
+        process-global client or any other :class:`PyJWT` instance.
+        """
+        return self._jws
+
     @staticmethod
     def _get_default_options() -> FullOptions:
         return {

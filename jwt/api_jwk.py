@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
-from .algorithms import get_default_algorithms, has_crypto, requires_cryptography
+from .algorithms import (
+    Algorithm,
+    get_default_algorithms,
+    has_crypto,
+    requires_cryptography,
+)
 from .exceptions import (
     InvalidKeyError,
     MissingCryptographyError,
@@ -17,18 +22,35 @@ from .types import JWKDict
 
 
 class PyJWK:
-    def __init__(self, jwk_data: JWKDict, algorithm: str | None = None) -> None:
+    def __init__(
+        self,
+        jwk_data: JWKDict,
+        algorithm: str | None = None,
+        algorithms: Mapping[str, Algorithm] | None = None,
+    ) -> None:
         """A class that represents a `JSON Web Key <https://www.rfc-editor.org/rfc/rfc7517>`_.
 
         :param jwk_data: The decoded JWK data.
         :type jwk_data: dict[str, typing.Any]
         :param algorithm: The key algorithm. If not specified, the key's ``alg`` will be used.
         :type algorithm: str or None
+        :param algorithms: A custom mapping of algorithm name to
+            :class:`~jwt.algorithms.Algorithm`, e.g. one produced by a
+            compatibility layer via :meth:`jwt.PyJWS.from_algorithms`. When
+            provided, the key is resolved against this registry instead of the
+            built-in defaults, which lets callers load keys for custom
+            (including same-named) algorithms without changing any other
+            client's allow-list.
+        :type algorithms: collections.abc.Mapping[str, Algorithm] or None
         :raises InvalidKeyError: If the key type (``kty``) is not found or unsupported, or if the curve (``crv``) is not found or unsupported.
         :raises MissingCryptographyError: If the algorithm requires ``cryptography`` to be installed and it is not available.
         :raises PyJWKError: If unable to find an algorithm for the key.
         """
         self._jwk_data = jwk_data
+
+        registry = (
+            dict(algorithms) if algorithms is not None else get_default_algorithms()
+        )
 
         kty = self._jwk_data.get("kty", None)
         if not kty:
@@ -73,7 +95,7 @@ class PyJWK:
         self.algorithm_name = algorithm
 
         try:
-            self.Algorithm = get_default_algorithms()[algorithm]
+            self.Algorithm = registry[algorithm]
         except KeyError:
             raise PyJWKError(
                 f"Unable to find an algorithm for key: {self._jwk_data}",
@@ -87,30 +109,46 @@ class PyJWK:
             ) from error
 
     @staticmethod
-    def from_dict(obj: JWKDict, algorithm: str | None = None) -> PyJWK:
+    def from_dict(
+        obj: JWKDict,
+        algorithm: str | None = None,
+        algorithms: Mapping[str, Algorithm] | None = None,
+    ) -> PyJWK:
         """Creates a :class:`PyJWK` object from a JSON-like dictionary.
 
         :param obj: The JWK data, as a dictionary
         :type obj: dict[str, typing.Any]
         :param algorithm: The key algorithm. If not specified, the key's ``alg`` will be used.
         :type algorithm: str or None
+        :param algorithms: Optional custom mapping of algorithm name to
+            :class:`~jwt.algorithms.Algorithm`, used to resolve custom
+            algorithms instead of the built-in defaults.
+        :type algorithms: collections.abc.Mapping[str, Algorithm] or None
         :rtype: PyJWK
         """
-        return PyJWK(obj, algorithm)
+        return PyJWK(obj, algorithm=algorithm, algorithms=algorithms)
 
     @staticmethod
-    def from_json(data: str, algorithm: str | None = None) -> PyJWK:
+    def from_json(
+        data: str,
+        algorithm: str | None = None,
+        algorithms: Mapping[str, Algorithm] | None = None,
+    ) -> PyJWK:
         """Create a :class:`PyJWK` object from a JSON string.
         Implicitly calls :meth:`PyJWK.from_dict()`.
 
         :param str data: The JWK data, as a JSON string.
         :param algorithm:  The key algorithm.  If not specific, the key's ``alg`` will be used.
         :type algorithm: str or None
+        :param algorithms: Optional custom mapping of algorithm name to
+            :class:`~jwt.algorithms.Algorithm`, used to resolve custom
+            algorithms instead of the built-in defaults.
+        :type algorithms: collections.abc.Mapping[str, Algorithm] or None
 
         :rtype: PyJWK
         """
         obj = json.loads(data)
-        return PyJWK.from_dict(obj, algorithm)
+        return PyJWK.from_dict(obj, algorithm=algorithm, algorithms=algorithms)
 
     @property
     def key_type(self) -> str | None:

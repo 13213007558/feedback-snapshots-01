@@ -7,6 +7,18 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.1...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Public API for registering custom signature algorithms on an isolated
+  client: ``PyJWS.from_algorithms()`` builds a client whose registry is an
+  independent copy (allowing same-named, including built-in, algorithm
+  IDs), ``PyJWT.jws`` exposes the underlying ``PyJWS`` for per-client
+  registration, and ``PyJWK`` / ``PyJWK.from_dict`` / ``PyJWK.from_json``
+  accept an ``algorithms`` mapping so keys for custom algorithms can be
+  loaded without the global registry. Registrations remain scoped to the
+  client and never alter another caller's allow-list.
+
 Changed
 ~~~~~~~
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import binascii
 import json
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .algorithms import (
@@ -54,6 +54,47 @@ class PyJWS:
         self.options: SigOptions = self._get_default_options()
         if options is not None:
             self.options = {**self.options, **options}
+
+    @classmethod
+    def from_algorithms(
+        cls,
+        algorithms: Mapping[str, Algorithm],
+        options: SigOptions | None = None,
+    ) -> PyJWS:
+        """Build a client whose algorithm registry is exactly ``algorithms``.
+
+        This is the entry point for a compatibility layer that needs to
+        register custom :class:`~jwt.algorithms.Algorithm` implementations
+        without touching the process-global registry. Every returned object
+        owns an independent copy of the mapping, so registering or
+        unregistering an algorithm on one client never changes the allow-list
+        of another caller.
+
+        :param algorithms: mapping of algorithm name to
+            :class:`~jwt.algorithms.Algorithm` instance. The mapping is copied,
+            not shared, and may shadow built-in algorithm names for this client
+            only.
+        :type algorithms: collections.abc.Mapping[str, Algorithm]
+        :param options: decoding/verification options, see
+            :class:`jwt.types.SigOptions`.
+        :type options: jwt.types.SigOptions or None
+        :rtype: PyJWS
+        :raises TypeError: if a mapping value is not an
+            :class:`~jwt.algorithms.Algorithm` instance.
+        """
+        registry: dict[str, Algorithm] = {}
+        for alg_id, alg_obj in algorithms.items():
+            if not isinstance(alg_obj, Algorithm):
+                raise TypeError("Object is not of type `Algorithm`")
+            registry[alg_id] = alg_obj
+
+        client = cls.__new__(cls)
+        client._algorithms = registry
+        client._valid_algs = set(registry)
+        client.options = client._get_default_options()
+        if options is not None:
+            client.options = {**client.options, **options}
+        return client
 
     @staticmethod
     def _get_default_options() -> SigOptions:

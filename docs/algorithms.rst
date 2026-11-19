@@ -101,3 +101,64 @@ HS512 or HS256, the claim will be rejected with an ``InvalidAlgorithmError``.
    in the same place you configure the ``key``. Make sure not to mix
    symmetric and asymmetric algorithms that interpret the ``key`` in
    different ways (e.g. HS\* and RS\*).
+
+Registering Custom Algorithms
+-----------------------------
+
+A compatibility layer can plug in its own
+:class:`~jwt.algorithms.Algorithm` implementations without touching the
+process-global registry. Build a dedicated client with
+:meth:`PyJWS.from_algorithms`, passing a mapping of algorithm name to
+algorithm object:
+
+.. code-block:: python
+
+    from jwt.algorithms import HMACAlgorithm
+    from jwt.api_jws import PyJWS
+
+    class MyMACAlgorithm(HMACAlgorithm):
+        pass
+
+    jws = PyJWS.from_algorithms({"MY-MAC": MyMACAlgorithm(HMACAlgorithm.SHA256)})
+
+The mapping is copied, so each client owns an independent registry and may
+even shadow a built-in name (such as ``"HS256"``) for itself only.
+Registering an algorithm on one client never changes another caller's
+allow-list:
+
+.. code-block:: python
+
+    first = PyJWS()
+    second = PyJWS()
+    first.register_algorithm("MY-MAC", MyMACAlgorithm(HMACAlgorithm.SHA256))
+
+    "MY-MAC" in first.get_algorithms()   # True
+    "MY-MAC" in second.get_algorithms()  # False
+
+A :class:`~jwt.api_jwt.PyJWT` client exposes the same surface through its
+:attr:`~jwt.api_jwt.PyJWT.jws` property:
+
+.. code-block:: python
+
+    from jwt import PyJWT
+
+    client = PyJWT()
+    client.jws.register_algorithm("MY-MAC", MyMACAlgorithm(HMACAlgorithm.SHA256))
+    token = client.encode({"hello": "world"}, key, algorithm="MY-MAC")
+    client.decode(token, key, algorithms=["MY-MAC"])
+
+To read a :class:`~jwt.api_jwk.PyJWK` whose ``alg`` is a custom (or
+same-named) algorithm, pass the same registry to
+:meth:`PyJWK.from_dict` / :meth:`PyJWK.from_json`. Without it, the key is
+rejected with :class:`~jwt.exceptions.PyJWKError` because the algorithm is
+absent from the built-in defaults:
+
+.. code-block:: python
+
+    registry = {"MY-MAC": MyMACAlgorithm(HMACAlgorithm.SHA256)}
+    jwk = PyJWK.from_dict(jwk_data, algorithms=registry)
+
+Every custom algorithm remains responsible for validating the keys it
+accepts in :meth:`~jwt.algorithms.Algorithm.prepare_key` and
+:meth:`~jwt.algorithms.Algorithm.from_jwk`; an unexpected key type should
+raise :class:`~jwt.exceptions.InvalidKeyError`.
