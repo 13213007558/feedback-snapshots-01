@@ -9,6 +9,15 @@ General
 
 - Add support for Django 5.2
 
+S3
+--
+
+- Add optional signed URL restrictions ``AWS_S3_SIGNING_ALLOWED_METHODS``,
+  ``AWS_S3_SIGNING_ALLOWED_PREFIXES`` and ``AWS_S3_SIGNING_MAX_EXPIRE``.
+  Restricted requests are rejected before any signer is called, and caller
+  query parameters cannot override signing authorization parameters. Public
+  and unsigned CDN URLs are unaffected.
+
 1.14.6 (2025-04-01)
 *******************
 

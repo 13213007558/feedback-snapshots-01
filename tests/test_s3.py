@@ -1206,3 +1206,226 @@ class TestBackwardsNames(TestCase):
         from storages.backends.s3boto3 import S3Boto3StorageFile  # noqa
         from storages.backends.s3boto3 import S3ManifestStaticStorage  # noqa
         from storages.backends.s3boto3 import S3StaticStorage  # noqa
+
+
+class RecordingCloudFrontSigner:
+    """Local stand-in that records exactly what the backend hands to a signer."""
+
+    def __init__(self, result="https://cdn.example.com/signed"):
+        self.calls = []
+        self.result = result
+
+    def generate_presigned_url(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.result
+
+
+class S3SigningRestrictionTests(TestCase):
+    def setUp(self):
+        self.signer = RecordingCloudFrontSigner()
+        self.storage = s3.S3Storage(
+            bucket_name="bucket",
+            custom_domain="cdn.example.com",
+            cloudfront_signer=self.signer,
+        )
+        self.storage._connections.connection = mock.MagicMock()
+
+    def test_no_restrictions_preserves_existing_signed_url_behaviour(self):
+        self.assertEqual(self.storage.url("media/report.pdf"), self.signer.result)
+
+        (args, kwargs), = self.signer.calls
+        self.assertEqual(args, ("https://cdn.example.com/media/report.pdf",))
+        self.assertEqual(
+            kwargs["date_less_than"],
+            mock.ANY,
+        )
+
+    def test_allowed_request_passes_exact_parameters_to_signer(self):
+        self.storage.signing_allowed_methods = ["GET"]
+        self.storage.signing_allowed_prefixes = ["media"]
+        self.storage.signing_max_expire = 600
+
+        self.assertEqual(
+            self.storage.url(
+                "media/report.pdf", parameters={"version": 10}, expire=600
+            ),
+            self.signer.result,
+        )
+
+        self.assertEqual(len(self.signer.calls), 1)
+        args, kwargs = self.signer.calls[0]
+        self.assertEqual(
+            args, ("https://cdn.example.com/media/report.pdf?version=10",)
+        )
+        self.assertEqual(list(kwargs), ["date_less_than"])
+        self.assertIsInstance(kwargs["date_less_than"], datetime.datetime)
+
+    def test_signer_is_not_called_when_method_is_not_allowed(self):
+        self.storage.signing_allowed_methods = ["GET"]
+
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf", http_method="HEAD")
+
+        self.assertEqual(self.signer.calls, [])
+
+    def test_signer_is_not_called_outside_of_object_scope(self):
+        self.storage.signing_allowed_prefixes = ["media/public"]
+
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/private/report.pdf")
+
+        # A sibling directory sharing the same text prefix is still out of scope.
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/public-other/report.pdf")
+
+        self.assertEqual(self.signer.calls, [])
+
+    def test_signer_is_not_called_above_lifetime(self):
+        self.storage.signing_max_expire = 300
+
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf", expire=301)
+
+        self.assertEqual(self.signer.calls, [])
+
+    def test_default_lifetime_is_checked_against_the_cap(self):
+        self.storage.signing_max_expire = 300
+        self.storage.querystring_expire = 3600
+
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf")
+
+        self.assertEqual(self.signer.calls, [])
+
+    def test_caller_parameters_cannot_override_signing_authorization(self):
+        self.storage.signing_max_expire = 300
+
+        for parameters in (
+            {"Expires": 999999},
+            {"Policy": "custom"},
+            {"Signature": "forged"},
+            {"Key-Pair-Id": "other"},
+            {"X-Amz-Security-Token": "other"},
+        ):
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(s3.SigningRestrictionError):
+                    self.storage.url("media/report.pdf", parameters=parameters)
+
+        self.assertEqual(self.signer.calls, [])
+
+    def test_unsigned_public_custom_domain_urls_are_unaffected(self):
+        self.storage.querystring_auth = False
+        self.storage.signing_allowed_methods = ["GET"]
+        self.storage.signing_allowed_prefixes = ["media/public"]
+        self.storage.signing_max_expire = 60
+
+        url = self.storage.url(
+            "media/private/report.pdf",
+            parameters={"version": 10},
+            expire=3600,
+        )
+
+        self.assertEqual(
+            url, "https://cdn.example.com/media/private/report.pdf?version=10"
+        )
+        self.assertEqual(self.signer.calls, [])
+
+    def test_unsigned_bucket_urls_are_unaffected(self):
+        self.storage.custom_domain = None
+        self.storage.querystring_auth = False
+        self.storage.signing_allowed_prefixes = ["media/public"]
+
+        self.storage._unsigned_connections.connection = mock.MagicMock()
+        self.storage._unsigned_connections.connection.meta.client.generate_presigned_url.return_value = (
+            "https://bucket.s3.amazonaws.com/other/report.pdf"
+        )
+
+        self.assertEqual(
+            self.storage.url("other/report.pdf"),
+            "https://bucket.s3.amazonaws.com/other/report.pdf",
+        )
+        self.assertEqual(self.signer.calls, [])
+        self.storage._unsigned_connections.connection.meta.client.generate_presigned_url.assert_called_once()
+
+    def test_settings_are_read_from_django_settings(self):
+        with override_settings(
+            AWS_S3_SIGNING_ALLOWED_METHODS=("get",),
+            AWS_S3_SIGNING_ALLOWED_PREFIXES=("media",),
+            AWS_S3_SIGNING_MAX_EXPIRE=120,
+        ):
+            storage = s3.S3Storage(cloudfront_signer=self.signer)
+            self.assertEqual(storage.signing_allowed_methods, frozenset({"GET"}))
+            self.assertEqual(storage.signing_allowed_prefixes, ("media",))
+            self.assertEqual(storage.signing_max_expire, 120)
+
+    def test_invalid_restriction_settings_are_rejected(self):
+        for options in (
+            {"signing_allowed_methods": []},
+            {"signing_allowed_prefixes": []},
+            {"signing_max_expire": 0},
+            {"signing_max_expire": "60"},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises(ImproperlyConfigured):
+                    s3.S3Storage(**options)
+
+    def test_missing_location_prefix_is_normalized(self):
+        with override_settings(AWS_LOCATION="tenant-a"):
+            storage = s3.S3Storage(
+                custom_domain="cdn.example.com",
+                cloudfront_signer=self.signer,
+                signing_allowed_prefixes=["media"],
+            )
+
+        self.assertEqual(storage.signing_allowed_prefixes, ("tenant-a/media",))
+
+        with self.assertRaises(s3.SigningRestrictionError):
+            storage.url("other/report.pdf")
+
+        self.assertEqual(
+            storage.url("media/report.pdf"), self.signer.result
+        )
+        self.assertEqual(len(self.signer.calls), 1)
+        self.assertEqual(
+            self.signer.calls[0][0],
+            ("https://cdn.example.com/tenant-a/media/report.pdf",),
+        )
+
+    def test_standard_s3_presigned_urls_are_restricted(self):
+        self.storage.custom_domain = None
+        self.storage.signing_allowed_methods = ["GET"]
+        self.storage.signing_allowed_prefixes = ["media"]
+        self.storage.signing_max_expire = 300
+        client = self.storage.connection.meta.client
+        client.generate_presigned_url.return_value = "https://signed.example.com"
+        self.storage._connections.connection.Bucket.return_value.name = "bucket"
+
+        self.assertEqual(
+            self.storage.url(
+                "media/report.pdf",
+                parameters={"ResponseContentDisposition": "attachment"},
+                expire=300,
+            ),
+            "https://signed.example.com",
+        )
+        client.generate_presigned_url.assert_called_once_with(
+            "get_object",
+            Params={
+                "ResponseContentDisposition": "attachment",
+                "Bucket": "bucket",
+                "Key": "media/report.pdf",
+            },
+            ExpiresIn=300,
+            HttpMethod=None,
+        )
+
+        client.generate_presigned_url.reset_mock()
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf", http_method="DELETE")
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("other/report.pdf")
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf", expire=301)
+        with self.assertRaises(s3.SigningRestrictionError):
+            self.storage.url("media/report.pdf", parameters={"Signature": "x"})
+        client.generate_presigned_url.assert_not_called()

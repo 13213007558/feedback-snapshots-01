@@ -104,6 +104,58 @@ Settings
 
   The number of seconds that a generated URL is valid for.
 
+``signing_allowed_methods`` or ``AWS_S3_SIGNING_ALLOWED_METHODS``
+
+  Default: ``None``
+
+  Optional allowlist of HTTP methods that may be used when generating a signed
+  URL, for example ``("GET",)``. A method supplied through
+  ``S3Storage.url(http_method=...)`` must be in the list; omitting it means
+  ``GET``. When set, only ``get_object`` URLs can be signed. An empty list is an
+  ``ImproperlyConfigured`` error.
+
+  This is a policy for the application's own signing entry point, not an IAM
+  policy. Upload and delete URLs should be issued by a separate, deliberately
+  configured storage alias (or another signing entry point).
+
+``signing_allowed_prefixes`` or ``AWS_S3_SIGNING_ALLOWED_PREFIXES``
+
+  Default: ``None``
+
+  Optional list of object name prefixes that may be signed, for example
+  ``("downloads/public",)``. Matching respects path boundaries, so
+  ``downloads/public`` allows ``downloads/public/file.pdf`` but not
+  ``downloads/public-other/file.pdf``. Relative prefixes are resolved against
+  ``location``. An empty list is an ``ImproperlyConfigured`` error.
+
+``signing_max_expire`` or ``AWS_S3_SIGNING_MAX_EXPIRE``
+
+  Default: ``None``
+
+  Optional maximum signed URL lifetime in seconds. Requests that ask for a
+  longer lifetime (including via ``S3Storage.url(expire=...)``) are rejected
+  rather than silently shortened. This is separate from
+  ``querystring_expire``, which remains the default lifetime when the caller
+  does not specify one.
+
+When any of these three settings is configured, requests are checked before a
+signer is called. Query parameters supplied by the caller may add ordinary
+response options (for example ``ResponseContentDisposition``), but cannot
+override signing parameters such as ``Expires``, ``Policy``, ``Signature``,
+``Key-Pair-Id`` or ``x-amz-*``. A rejected request raises
+``storages.backends.s3.SigningRestrictionError`` (a ``ValueError`` subclass).
+
+Public URLs are unaffected: when ``querystring_auth`` is ``False``, or a
+``custom_domain`` is used without a CloudFront signer, URLs remain unsigned and
+the restrictions do not apply.
+
+.. warning::
+
+    These settings constrain URL issuance. They do not reduce the permissions
+    of the AWS credentials configured for the storage, so a deployment that
+    must not be able to upload or delete should use credentials scoped to the
+    intended operations in addition to this configuration.
+
 ``url_protocol`` or ``AWS_S3_URL_PROTOCOL``
 
   Default: ``https:``

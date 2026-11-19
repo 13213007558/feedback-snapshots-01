@@ -98,6 +98,31 @@ def _filter_download_params(params):
     }
 
 
+# Query parameters that carry the authorization of a signed URL.  A caller must
+# not be able to replace these when signing restrictions are configured, since
+# they would bypass the method, scope or lifetime limits.
+_SIGNING_QUERY_PARAMETERS = frozenset(
+    {
+        "awsaccesskeyid",
+        "bucket",
+        "expires",
+        "key",
+        "key-pair-id",
+        "policy",
+        "signature",
+    }
+)
+
+
+def _is_reserved_signing_parameter(name):
+    name = str(name).lower()
+    return name.startswith("x-amz-") or name in _SIGNING_QUERY_PARAMETERS
+
+
+class SigningRestrictionError(ValueError):
+    """A signed URL request exceeds the configured signing restrictions."""
+
+
 @deconstructible
 class S3File(CompressedFileMixin, File):
     """
@@ -321,6 +346,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         super().__init__(**settings)
 
         check_location(self)
+        self._normalize_signing_restrictions()
 
         if (self.access_key or self.secret_key) and self.session_profile:
             raise ImproperlyConfigured(
@@ -373,6 +399,128 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             else:
                 self.cloudfront_signer = None
 
+    def _normalize_signing_restrictions(self):
+        """
+        Validate and normalize the optional limits applied to signed URLs.
+
+        ``None`` (the default) leaves the corresponding constraint disabled.
+        """
+        methods = self.signing_allowed_methods
+        if methods is None:
+            self.signing_allowed_methods = None
+        else:
+            if isinstance(methods, str):
+                methods = (methods,)
+            normalized = frozenset(str(method).upper() for method in methods)
+            if not normalized:
+                raise ImproperlyConfigured(
+                    "signing_allowed_methods/AWS_S3_SIGNING_ALLOWED_METHODS "
+                    "must not be empty."
+                )
+            self.signing_allowed_methods = normalized
+
+        prefixes = self.signing_allowed_prefixes
+        if prefixes is None:
+            self.signing_allowed_prefixes = None
+        else:
+            if isinstance(prefixes, str):
+                prefixes = (prefixes,)
+            normalized = []
+            for prefix in prefixes:
+                prefix = clean_name(str(prefix).lstrip("/"))
+                if not prefix:
+                    continue
+                normalized.append(self._normalize_name(prefix).rstrip("/"))
+            if not normalized:
+                raise ImproperlyConfigured(
+                    "signing_allowed_prefixes/AWS_S3_SIGNING_ALLOWED_PREFIXES "
+                    "must contain at least one non-empty object prefix."
+                )
+            self.signing_allowed_prefixes = tuple(normalized)
+
+        max_expire = self.signing_max_expire
+        if max_expire is None:
+            self.signing_max_expire = None
+        else:
+            if isinstance(max_expire, bool) or not isinstance(
+                max_expire, (int, float)
+            ):
+                raise ImproperlyConfigured(
+                    "signing_max_expire/AWS_S3_SIGNING_MAX_EXPIRE must be a "
+                    "positive number of seconds."
+                )
+            if max_expire <= 0:
+                raise ImproperlyConfigured(
+                    "signing_max_expire/AWS_S3_SIGNING_MAX_EXPIRE must be a "
+                    "positive number of seconds."
+                )
+            self.signing_max_expire = max_expire
+
+    def _get_signing_restrictions(self):
+        return (
+            self.signing_allowed_methods,
+            self.signing_allowed_prefixes,
+            self.signing_max_expire,
+        )
+
+    def _check_signing_restrictions(
+        self, name, parameters, expire, http_method, signing_method
+    ):
+        """
+        Apply the configured signing restrictions before any signing happens.
+
+        ``signing_method`` is the operation that will be signed (e.g.
+        ``get_object``).  Requested query parameters cannot be used to relax
+        the configured limits and must not redefine the signed authorization.
+        """
+        allowed_methods, allowed_prefixes, max_expire = (
+            self._get_signing_restrictions()
+        )
+        if (
+            allowed_methods is None
+            and allowed_prefixes is None
+            and max_expire is None
+        ):
+            return
+
+        if allowed_methods is not None:
+            requested_method = "GET" if http_method is None else http_method
+            requested_method = str(requested_method).upper()
+            if requested_method not in allowed_methods:
+                raise SigningRestrictionError(
+                    "HTTP method %r is not allowed for signed URLs."
+                    % (http_method or "GET",)
+                )
+            if signing_method != "get_object":
+                raise SigningRestrictionError(
+                    "Signing is restricted to download URLs; "
+                    "%r is not allowed." % signing_method
+                )
+
+        if allowed_prefixes is not None and not any(
+            name == prefix or name.startswith(prefix + "/")
+            for prefix in allowed_prefixes
+        ):
+            raise SigningRestrictionError(
+                "Object %r is outside of the signing scope." % (name,)
+            )
+
+        if max_expire is not None and expire > max_expire:
+            raise SigningRestrictionError(
+                "Requested signed URL lifetime %r exceeds the configured "
+                "maximum of %r seconds." % (expire, max_expire)
+            )
+
+        if parameters:
+            reserved = sorted(
+                key for key in parameters if _is_reserved_signing_parameter(key)
+            )
+            if reserved:
+                raise SigningRestrictionError(
+                    "Signed URL parameters cannot override authorization "
+                    "parameters: %s." % ", ".join(reserved)
+                )
+
     def get_cloudfront_signer(self, key_id, key):
         cache_key = f"{key_id}:{key}"
         if cache_key not in self.__class__._signers:
@@ -412,6 +560,9 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             "bucket_name": setting("AWS_STORAGE_BUCKET_NAME"),
             "querystring_auth": setting("AWS_QUERYSTRING_AUTH", True),
             "querystring_expire": setting("AWS_QUERYSTRING_EXPIRE", 3600),
+            "signing_allowed_methods": setting("AWS_S3_SIGNING_ALLOWED_METHODS"),
+            "signing_allowed_prefixes": setting("AWS_S3_SIGNING_ALLOWED_PREFIXES"),
+            "signing_max_expire": setting("AWS_S3_SIGNING_MAX_EXPIRE"),
             "signature_version": setting("AWS_S3_SIGNATURE_VERSION"),
             "location": setting("AWS_LOCATION", ""),
             "custom_domain": setting("AWS_S3_CUSTOM_DOMAIN"),
@@ -673,6 +824,16 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             expire = self.querystring_expire
 
         if self.custom_domain:
+            signing = self.querystring_auth and self.cloudfront_signer
+        else:
+            signing = bool(self.querystring_auth)
+
+        if signing:
+            self._check_signing_restrictions(
+                name, params, expire, http_method, "get_object"
+            )
+
+        if self.custom_domain:
             url = "{}//{}/{}{}".format(
                 self.url_protocol,
                 self.custom_domain,
@@ -680,7 +841,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
                 "?{}".format(urlencode(params)) if params else "",
             )
 
-            if self.querystring_auth and self.cloudfront_signer:
+            if signing:
                 expiration = datetime.utcnow() + timedelta(seconds=expire)
                 return self.cloudfront_signer.generate_presigned_url(
                     url, date_less_than=expiration
