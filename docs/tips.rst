@@ -65,3 +65,33 @@ param argument in a request. For example: ::
 
 By ordering your params, you can be sure the cache key will be
 consistent across requests and you are caching effectively.
+
+
+Unsafe Requests and Invalidation
+================================
+
+After a successful ``PUT``, ``PATCH`` or ``DELETE``, CacheControl follows
+RFC 9111 section 4.4 and removes:
+
+* the cache entry for the request URI itself, and
+* entries for any URI named by the response's ``Location`` or
+  ``Content-Location`` header.
+
+This means an API can tell the caller which summary resource became stale
+without having to embed an absolute URL: ::
+
+  PUT /api/contracts/42
+
+  200 OK
+  Location: /api/summaries/42
+
+The next ``GET /api/summaries/42`` misses the cache and fetches the updated
+summary.
+
+References are resolved against the request URI as described by RFC 3986, so
+relative references such as ``summaries/42``, ``../summaries/42`` and
+absolute paths such as ``/api/summaries/42`` all work. ``Location`` and
+``Content-Location`` are only honored when they resolve to the same origin
+(scheme, host and port) as the request; references to other origins are
+ignored so that a response cannot purge unrelated entries. Failed requests
+(non-2xx responses) never invalidate anything.

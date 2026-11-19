@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import functools
+import logging
 import weakref
 import zlib
 from typing import TYPE_CHECKING, Any, Collection, Mapping
+from urllib.parse import urljoin, urlsplit
 
 from requests.adapters import HTTPAdapter
 
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
     from cachecontrol.cache import BaseCache
     from cachecontrol.heuristics import BaseHeuristic
     from cachecontrol.serialize import Serializer
+
+logger = logging.getLogger(__name__)
 
 
 class CacheControlAdapter(HTTPAdapter):
@@ -155,16 +159,75 @@ class CacheControlAdapter(HTTPAdapter):
 
         resp: Response = super().build_response(request, response)
 
-        # See if we should invalidate the cache.
+        # See if we should invalidate the cache. RFC 9111 section 4.4
+        # requires invalidating the effective request URI and any same-origin
+        # URIs named by Location or Content-Location. The latter are often
+        # relative references, so resolve them against the request URI first.
         if request.method in self.invalidating_methods and resp.ok:
-            assert request.url is not None
-            cache_url = self.controller.cache_url(request.url)
-            self.cache.delete(cache_url)
+            for cache_url in self._invalidated_urls(request, resp):
+                self.cache.delete(cache_url)
 
         # Give the request a from_cache attr to let people use it
         resp.from_cache = from_cache  # type: ignore[attr-defined]
 
         return resp
+
+    def _invalidated_urls(
+        self, request: PreparedRequest, response: Response
+    ) -> list[str]:
+        """Return cache keys to purge after a successful unsafe request.
+
+        This is the request URI plus any same-origin URI named by the
+        response's Location or Content-Location headers, following RFC 9111
+        section 4.4. Cross-origin references are ignored so that a response
+        cannot cause entries for another origin to be dropped.
+        """
+        assert request.url is not None
+        request_url = request.url
+        request_origin = self._origin(request_url)
+        cache_urls = [self.controller.cache_url(request_url)]
+
+        for header in ("Location", "Content-Location"):
+            reference = response.headers.get(header)
+            if not reference:
+                continue
+
+            try:
+                target = urljoin(request_url, reference)
+                target_origin = self._origin(target)
+            except ValueError:
+                logger.debug(
+                    'Ignoring unparseable %s "%s" for cache invalidation',
+                    header,
+                    reference,
+                )
+                continue
+
+            if target_origin != request_origin:
+                logger.debug(
+                    'Ignoring cross-origin %s "%s" for cache invalidation',
+                    header,
+                    reference,
+                )
+                continue
+
+            cache_url = self.controller.cache_url(target)
+            if cache_url not in cache_urls:
+                cache_urls.append(cache_url)
+
+        return cache_urls
+
+    @staticmethod
+    def _origin(uri: str) -> tuple[str, str, int | None]:
+        parts = urlsplit(uri)
+        scheme = parts.scheme.lower()
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        if port is None:
+            port = {"http": 80, "https": 443}.get(scheme)
+        return scheme, (parts.hostname or "").lower(), port
 
     def close(self) -> None:
         self.cache.close()

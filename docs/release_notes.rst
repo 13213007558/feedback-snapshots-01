@@ -10,6 +10,9 @@
 0.15.0
 ======
 
+* Invalidate cached entries named by the ``Location`` and
+  ``Content-Location`` response headers after a successful ``PUT``, ``PATCH``
+  or ``DELETE``, including relative references and only for the same origin.
 * Honor explicit expiration on cached permanent redirects.
 * Parse ``Cache-Control`` directive names case-insensitively.
 * Preserve the case of usernames and passwords in cache keys.
