@@ -151,6 +151,42 @@ for file in files:
     parser.clear()
 ```
 
+## External Variable Contract Checking
+
+YARA rules can read *external variables* that the calling program binds at scan time. When the caller declares each variable name together with its type, plyara can statically check that a rule uses each variable consistently, catching integration mistakes such as treating a string variable as an integer before the ruleset is published.
+
+The checker is deliberately limited. It never evaluates a condition and a correctly typed expression is not treated as proof that the detection works. Only a supported subset of expressions is derived; any construct that cannot be explained is reported as unsupported instead of being silently accepted. Rule references, imported module fields and `for` loop local variables are tracked as separate namespaces, including nested loops and loop locals that shadow an external variable of the same name.
+
+``` python
+import plyara
+from plyara import ExternalVariableContract, VariableType, check_external_variables
+
+rules = plyara.Plyara().parse_string('''
+rule example {
+    condition:
+        ext_integer > 10 and ext_string contains "safe"
+}
+rule bad {
+    condition:
+        ext_string > 10
+}
+''')
+
+contract = ExternalVariableContract({
+    'ext_integer': VariableType.INTEGER,
+    'ext_string': VariableType.STRING,
+})
+
+report = check_external_variables(rules, contract)
+report.is_valid            # False
+report.verified_rules      # ['example']
+report.issues[0].code      # ContractIssueCode.TYPE_CONFLICT
+report.issues[0].line      # 8 (absolute source line of the offending term)
+report.issues[0].rationale # how the conflicting type was derived
+```
+
+Each issue is an error and any rule carrying one is excluded from `verified_rules`. The three issue codes are `UNDECLARED_IDENTIFIER`, `TYPE_CONFLICT` and `UNSUPPORTED_EXPRESSION`; call `report.as_dict()` for a JSON-serializable view.
+
 ## Breaking Change: Import Effects
 
 ### Background
