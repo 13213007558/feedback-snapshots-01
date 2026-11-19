@@ -132,6 +132,55 @@ class takes the raw file contents in its constructor and implements:
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
 - `dump()` walks the hierarchy and writes each object to a file.
 
+### Rebuilding without rewriting
+
+`build()` is also a review tool. Without `generate_checksum` it returns the
+bytes the object was parsed from, so an unchanged image comes back
+byte-for-byte: alignment and free space (0x00 or 0xFF), unknown sections,
+vendor blobs, volume extended headers, large file and section headers, and
+even checksum bytes that were invalid in the input.
+
+`build(generate_checksum=True)` is a different request. It recomputes sizes,
+checksums and the volume block map, and only those fields. It does not
+recolour padding, drop unknown data, or change a checksum byte back to a
+trusted value: when content under a signed GUID-defined section changes, the
+signature is invalidated. Re-sign and re-verify it; do not mark it trusted
+again.
+
+Compare the two byte streams, not two parses. A rebuilt image that quietly
+shrank its padding still re-parses, so parsing it again does not prove the
+original was unchanged:
+
+```python
+from uefi_firmware import AutoParser
+from uefi_firmware.audit import audit_rebuild
+
+firmware = AutoParser(data).parse()
+print(audit_rebuild(firmware).render())
+```
+
+The report lists each changed range, labels it (volume checksum, section
+size, file padding, signature preamble, ...) and marks it:
+
+- `allowed`: a checksum, size or block map field the recompute mode exists
+  to rewrite.
+- `derived`: a size, alignment or free-space move that follows from content
+  the caller replaced.
+- `content`: the replaced bytes themselves.
+- `unexpected`: anything else, such as a rewritten header byte, padding or
+  unknown blob. A preserve-mode audit exits non-zero when one appears.
+
+It also names any signature whose bytes changed, and never clears the auth
+status. The command line exposes the same check:
+
+```console
+$ uefi-firmware-parser --audit firmware.fd
+$ uefi-firmware-parser --audit --recompute-checksums firmware.fd
+```
+
+`tests/test_rebuild_regression.py` pins this behaviour for volumes, file
+systems, files, sections, PFS updates and capsules.
+
 ## Features
 
 Supported formats:

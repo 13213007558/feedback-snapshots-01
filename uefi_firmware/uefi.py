@@ -554,7 +554,8 @@ class EfiSection(FirmwareObject):
 
         data = build_sections(self.subsections, self.data, generate_checksum)
 
-        # Pad the pre-compression data
+        # Pad the pre-compression data. Unchanged children keep their bytes,
+        # so this only fills space made by a change.
         trailling_bytes = len(self.data) - len(data)
         if trailling_bytes > 0:
             data += b'\x00' * trailling_bytes
@@ -766,6 +767,9 @@ class GuidDefinedSection(EfiSection):
             fv = FirmwareVolume(self.data, None)
             if fv.valid_header:
                 fv.process()
+                # The volume may not cover the whole body; its extent lets
+                # build() keep any bytes after it.
+                fv.parsed_extent = (0, fv.size)
                 self.subsections = [fv]
                 return True
             return False
@@ -980,6 +984,13 @@ class FirmwareFileSystemSection(EfiSection):
         # section types, see PI spec v1.7 Errata A Volume 3, 2.1.5.1, table 3-4
         dlog(self, sguid(self.guid))
         self.parsed_object = None
+        # Bytes before a nested object the parser skipped (a vendor header).
+        # An unchanged section keeps them; rebuilding without them would
+        # silently shorten the section.
+        self._parsed_prefix = b""
+        # Where a nested volume starts in self.data, and its size then. It
+        # may cover less than the section body, which keeps its other bytes.
+        self._nested_extent = None
         raw_object = False
         self.attrs = {"type": self.type, "size": self.size}
         self.attrs["type_name"] = _get_section_type(self.type)[0]
@@ -1006,10 +1017,16 @@ class FirmwareFileSystemSection(EfiSection):
 
         elif self.type == 0x17:  # firmware-volume
             fv = FirmwareVolume(self.data, None)
+            extent = (0, 0)
             if not fv.valid_header:
                 # Could be a FFSv3 section (Kairos sample)
                 fv = FirmwareVolume(self.data[4:], None)
+                extent = (4, 0)
+                if fv.valid_header:
+                    # The skipped 4-byte header belongs to the section.
+                    self._parsed_prefix = self.data[:4]
             if fv.valid_header:
+                self._nested_extent = (extent[0], fv.size)
                 self.parsed_object = fv
 
         elif self.type == 0x18:  # freeform GUID
@@ -1021,7 +1038,12 @@ class FirmwareFileSystemSection(EfiSection):
             if self.data[:10] == b"123456789A":
                 # HP adds a strange header to nested FVs.
                 fv = FirmwareVolume(self.data[12:], None)
-                self.parsed_object = fv
+                if fv.valid_header:
+                    self._parsed_prefix = self.data[:12]
+                    self._nested_extent = (12, fv.size)
+                    self.parsed_object = fv
+                else:
+                    self.parsed_object = RawObject(self.data)
             else:
                 # For a raw section, we can cheat and assign the parsed object
                 # as the AutoRawObject's managed object. AutoParser has
@@ -1063,7 +1085,15 @@ class FirmwareFileSystemSection(EfiSection):
             # image held.
             return len(self._data), self._data
 
+        if self._nested_extent is not None:
+            # The object covers part of the body; the rest is kept after it.
+            start, parsed_size = self._nested_extent
+            data += self.data[start + parsed_size:]
+
         size = len(data) + 4 # for the EFI_COMMON_SECTION_HEADER size
+
+        data = self._parsed_prefix + data
+        size += len(self._parsed_prefix)
 
         if self.large_header or size >= 0xffffff:
             # EFI_COMMON_SECTION_HEADER2
@@ -1262,8 +1292,12 @@ class FirmwareFile(FirmwareObject):
         fv = FirmwareVolume(self.data, None)
         if fv.valid_header:
             has_object = True
-            status = fv.process() and status
-            self.raw_blobs.append(fv)
+            # A raw file may hold several volumes, or a volume followed by
+            # vendor data. Keep every object and gap, or build() drops them.
+            for obj in find_volumes(self.data, process=False):
+                if isinstance(obj, FirmwareVolume):
+                    status = obj.process() and status
+                self.raw_blobs.append(obj)
         elif self.data[0x10:0x10 + 4] == FLASH_HEADER:
             # Lenovo may also bundle a flash descriptor as raw content.
             from .flash import FlashDescriptor
@@ -2130,9 +2164,12 @@ class FirmwareCapsule(FirmwareObject):
         return True
 
     def build(self, generate_checksum=False, debug=False):
-        if self.is_aptio():
-            # The ROM image is not rebuilt from its volumes, keep the raw bytes.
-            return self._data[:self.size]
+        if self.is_aptio() and (self.capsule_body is None or
+                                len(self._data) <= self.size):
+            # The ROM image is not rebuilt from its volumes, keep the raw
+            # bytes. A ROM image that failed to parse was never processed,
+            # so the capsule has not shrunk to its offset fields.
+            return self._data
 
         if self.capsule_body is not None:
             body = self.capsule_body.build(generate_checksum, debug=debug)

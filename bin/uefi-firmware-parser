@@ -12,6 +12,7 @@ from datetime import datetime
 from uefi_firmware.uefi import *
 from uefi_firmware.generator import uefi as uefi_generator
 from uefi_firmware import AutoParser
+from uefi_firmware.audit import audit_rebuild
 from uefi_firmware.utils import safe_path
 import uefi_firmware.utils # import nocolor
 
@@ -140,6 +141,12 @@ def _process_file(file_name, input_data):
             file_name, parser.type()))
         return 3
 
+    if args.audit:
+        # Compare the input with its rebuild without writing anything out.
+        report = audit_rebuild(firmware, args.recompute_checksums)
+        print(report.render())
+        return 0 if not report.unexpected else 4
+
     if args.json:
         res = firmware.to_dict()
         print(json.dumps(res))
@@ -204,6 +211,12 @@ if __name__ == "__main__":
     argparser.add_argument(
         '-j', "--json", default=False, action='store_true',
         help="Output in JSON format")
+    argparser.add_argument(
+        '--audit', default=False, action='store_true',
+        help="Report what a rebuild would change, without writing anything")
+    argparser.add_argument(
+        '--recompute-checksums', default=False, action='store_true',
+        help="With --audit, audit build(generate_checksum=True)")
     argparser.add_argument(
         "--test", default=False, action='store_true',
         help="Test file parsing, output name/success.")
