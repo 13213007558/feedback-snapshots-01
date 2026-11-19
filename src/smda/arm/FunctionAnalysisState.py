@@ -7,7 +7,7 @@ values that a literal load or ``movw`` put in flight towards an ``add rd, pc`` o
 
 from smda.common.FunctionAnalysisState import FunctionAnalysisState as _CommonFunctionAnalysisState
 
-from .definitions import BLOCK_CALL_MNEMONICS, BLOCK_END_MNEMONICS, split_mnemonic
+from .definitions import BLOCK_CALL_MNEMONICS, BLOCK_END_MNEMONICS, interworkPointer, split_mnemonic
 
 
 class FunctionAnalysisState(_CommonFunctionAnalysisState):
@@ -21,6 +21,16 @@ class FunctionAnalysisState(_CommonFunctionAnalysisState):
         self.arm_indirect_jumps = []
         #: whether a symbol or unwind record states this start; set by the backend
         self.arm_declared = None
+        #: interworking evidence per transfer instruction: instruction address -> {
+        #: "target": normalized address, "thumb": target instruction set,
+        #: "raw_pointer": the pointer the image/code names, with its bit 0,
+        #: "switches": whether the transfer changes the instruction set,
+        #: "kind": "direct" | "indirect" | "pointer"}
+        self.arm_interwork = {}
+        #: transfer instructions whose target - and therefore its instruction set - no
+        #: constant-tracking pass could prove; the single-ISA-per-function model cannot
+        #: say which set an unproven cross-mode transfer enters
+        self.arm_unresolved_interwork = []
 
     @staticmethod
     def endsBlock(instruction, refs_from):
@@ -28,6 +38,56 @@ class FunctionAnalysisState(_CommonFunctionAnalysisState):
         # through; what ends the block is that nothing follows the instruction
         del instruction
         return refs_from is None
+
+    def recordInterwork(self, instruction_addr, target, target_thumb, kind, source_thumb, raw_pointer=None):
+        """Name the instruction-set identity a transfer reaches, keeping the raw pointer.
+
+        ``target`` is the normalized (even) address the CFG edges use; ``target_thumb`` is
+        the instruction set the transfer enters. ``raw_pointer`` is the pointer as the
+        image or the code holds it, bit 0 included; when the caller has none (a direct
+        branch's resolved address) it is reconstructed so the evidence never loses the
+        interworking bit. Two transfers at the same address merge instead of overwriting.
+        """
+        evidence = self.arm_interwork.get(instruction_addr)
+        if evidence is not None and evidence["target"] == target and evidence["thumb"] == target_thumb:
+            evidence["kinds"].add(kind)
+            return
+        if raw_pointer is None:
+            raw_pointer = interworkPointer(target, target_thumb)
+        self.arm_interwork[instruction_addr] = {
+            "target": target,
+            "thumb": bool(target_thumb),
+            "raw_pointer": raw_pointer,
+            "switches": bool(target_thumb) != bool(source_thumb),
+            "kinds": {kind},
+        }
+
+    def recordUnresolvedInterwork(self, instruction_addr, register):
+        """Mark a register-indirect transfer no dataflow pass resolved a target for.
+
+        With no provable target there is no provable instruction set either: a consumer
+        cannot tell whether ``bx``/``blx`` leaves the function's single instruction set, so
+        the report names the limitation instead of guessing a target identity.
+        """
+        entry = {"source": instruction_addr, "register": register}
+        if entry not in self.arm_unresolved_interwork:
+            self.arm_unresolved_interwork.append(entry)
+
+    def unresolvedInterworkMetadata(self):
+        return [dict(entry) for entry in self.arm_unresolved_interwork]
+
+    def interworkMetadata(self):
+        """The serializable interworking evidence, keyed by the transfer instruction address."""
+        return {
+            address: {
+                "target": evidence["target"],
+                "thumb": evidence["thumb"],
+                "raw_pointer": evidence["raw_pointer"],
+                "switches": evidence["switches"],
+                "kinds": sorted(evidence["kinds"]),
+            }
+            for address, evidence in sorted(self.arm_interwork.items())
+        }
 
     def _branchesOutsideImage(self):
         for _address, _size, mnemonic, op_str, _bytes in self.instructions:

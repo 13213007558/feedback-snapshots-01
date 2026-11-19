@@ -339,6 +339,33 @@ def t32_call_target(hw1, hw2, address):
     return (pc_value(address, True, aligned=True) + (offset & ~3)) & 0xFFFFFFFF, False
 
 
+def interworkThumb(pointer):
+    """The Thumb bit (A2.3.2) an interworking pointer carries in bit 0."""
+    return bool(pointer & 1)
+
+
+def normalizeTarget(pointer):
+    """Strip the Thumb bit: the even instruction address an interworking pointer names.
+
+    Function pointers the image stores or states - ELF symbol values, PE ``.pdata``
+    records, literal-pool entries - carry the target instruction set in bit 0. CFG
+    addresses are always normalized; the bit belongs to the target identity, not the
+    address, and feeding an odd value into candidate lookup or reference dedup would
+    open a second, never-decoded identity for the same bytes.
+    """
+    return pointer & ~1
+
+
+def interworkTarget(pointer):
+    """The ``(normalized_address, is_thumb)`` identity an interworking pointer names."""
+    return normalizeTarget(pointer), interworkThumb(pointer)
+
+
+def interworkPointer(address, is_thumb):
+    """Reattach the interworking bit to a normalized address, as the image would store it."""
+    return (address & ~1) | (1 if is_thumb else 0)
+
+
 def is_t32_prefix(halfword):
     return (halfword & T32_PREFIX_MASK) in T32_PREFIXES
 

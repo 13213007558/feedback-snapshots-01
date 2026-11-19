@@ -48,12 +48,47 @@ class ArmDisassembler(RecursiveDisassembler):
         state = super().analyzeFunction(start_addr, as_gap=as_gap, known_table_bytes=known_table_bytes)
         data_bytes = self._dataBytesByFunction()
         if start_addr in self.disassembly.functions:
-            self.disassembly.function_metadata[start_addr] = {"thumb": thumb}
+            metadata = {"thumb": thumb}
+            interwork = state.interworkMetadata()
+            if interwork:
+                # every interworking transfer this function makes, with the normalized
+                # CFG target, the instruction set it enters and the raw pointer (bit 0 intact)
+                metadata["interwork"] = interwork
+            unresolved = state.unresolvedInterworkMetadata()
+            if unresolved:
+                # register-indirect transfers no constant-tracking pass could name a target
+                # for: the instruction set such a transfer would enter is unprovable, so the
+                # single-ISA-per-function model reports the limitation instead of inventing one
+                metadata["unresolved_interwork"] = unresolved
+            conflicts = self._modeConflictsFor(start_addr)
+            if conflicts:
+                # same-address/different-mode evidence the single-instruction-set-per-function
+                # model cannot represent: the decode mode stands, the clash is named, not overwritten
+                metadata["mode_conflicts"] = conflicts
+            self.disassembly.function_metadata[start_addr] = metadata
             if state.data_bytes:
                 data_bytes[start_addr] = state.data_bytes
         for addr, conflict_thumb in self.fc_manager.takeModeConflicts():
             self._redecodeInMode(addr, conflict_thumb)
         return state
+
+    def _modeConflictsFor(self, start_addr):
+        """The explicit mode clashes whose clashing instruction belongs to this function, or
+        whose clashed address is its entry. Entries with an unresolved owner stay in the log."""
+        log = self.fc_manager.mode_conflict_log
+        if not log:
+            return []
+        remaining = []
+        belonging = []
+        for entry in log:
+            source = entry["source"]
+            owner = self.disassembly.ins2fn.get(source)
+            if owner == start_addr or entry["address"] == start_addr:
+                belonging.append(entry)
+            else:
+                remaining.append(entry)
+        self.fc_manager.mode_conflict_log = remaining
+        return belonging
 
     def _dataBytesByFunction(self):
         # the literal pools each function booked, kept to take them back if it is undone

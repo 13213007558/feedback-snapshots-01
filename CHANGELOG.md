@@ -71,6 +71,14 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(arm)** Record interworking evidence and a consistent target identity for A32/T32 control
+  transfers. A function pointer's bit 0 is the Thumb bit, not part of the address, so CFG edges keep
+  the normalized even address while each transfer's `architecture_metadata["interwork"]` entry keeps
+  the raw pointer, the instruction set it enters and whether the mode switches. Same-address/
+  different-mode evidence (a stored or called pointer whose bit contradicts the decoded set) is named
+  in `mode_conflicts` instead of silently overwriting the single-ISA-per-function decode, and register
+  branches no dataflow pass can resolve are reported under `unresolved_interwork` as an explicit
+  limitation. All three fields round-trip through `toDict()`/`fromDict()` and pickle.
 
 ### Changed
 

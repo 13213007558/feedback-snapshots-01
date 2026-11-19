@@ -22,10 +22,12 @@ from .definitions import (
     TABLE_BRANCH_BASES,
     TRAP_BASES,
     a32_branch_target,
+    interworkPointer,
     is_a32_prologue,
     is_load_multiple_return,
     is_noreturn_api,
     is_t32_prologue,
+    normalizeTarget,
     pc_value,
     split_mnemonic,
 )
@@ -372,14 +374,21 @@ class ArmBackend(ArchBackend):
 
     @staticmethod
     def _recordValue(d, state, i_address, value, allow_code=True, pc_relative=False):
-        value &= 0xFFFFFFFF
+        raw_pointer = value & 0xFFFFFFFF
         disassembly = d.disassembly
-        if not disassembly.isAddrWithinMemoryImage(value & ~1):
+        if not disassembly.isAddrWithinMemoryImage(raw_pointer & ~1):
             return
-        if not d.fc_manager.isExecutable(value & ~1):
-            state.addDataRef(i_address, value)
+        if not d.fc_manager.isExecutable(raw_pointer & ~1):
+            state.addDataRef(i_address, raw_pointer)
         elif allow_code:
-            d.fc_manager.addPointerCandidate(value, i_address, pc_relative=pc_relative, from_thumb=d.capstone.is_thumb)
+            added = d.fc_manager.addPointerCandidate(
+                raw_pointer, i_address, pc_relative=pc_relative, from_thumb=d.capstone.is_thumb
+            )
+            if added:
+                target, target_thumb = normalizeTarget(raw_pointer), bool(raw_pointer & 1)
+                state.recordInterwork(
+                    i_address, target, target_thumb, "pointer", d.capstone.is_thumb, raw_pointer=raw_pointer
+                )
 
     # --- control flow -------------------------------------------------------
     def _analyzeCall(self, d, instruction, state, base, thumb):
@@ -390,6 +399,16 @@ class ArmBackend(ArchBackend):
             state.call_register_ins.append(i_address)
             return
         target_thumb = thumb if base == "bl" else not thumb
+        normalized = normalizeTarget(target)
+        state.recordInterwork(
+            i_address,
+            normalized,
+            target_thumb,
+            "direct",
+            thumb,
+            raw_pointer=interworkPointer(normalized, target_thumb),
+        )
+        target = normalized
         slot = self._resolvePltSlot(d, target)
         if slot is not None:
             resolved = d._handleApiTarget(i_address, slot, slot, slot=slot)
@@ -414,6 +433,8 @@ class ArmBackend(ArchBackend):
         i_address, i_size, _i_mnemonic, _i_op_str = instruction
         state.addBlockToQueue(i_address + i_size)
         d.tailcall_analyzer.addJump(i_address, target)
+        # a direct B stays in the instruction set it is decoded in
+        state.recordInterwork(i_address, normalizeTarget(target), d.capstone.is_thumb, "direct", d.capstone.is_thumb)
         if target in d.disassembly.functions:
             state.setSanelyEnding(True)
         elif target != state.start_addr and target in d.fc_manager.getDeclaredFunctionStarts():
@@ -446,6 +467,8 @@ class ArmBackend(ArchBackend):
     def _analyzeUncondBranch(self, d, instruction, state, target, thumb, previous_instruction=None):
         i_address, _i_size, _i_mnemonic, _i_op_str = instruction
         d.tailcall_analyzer.addJump(i_address, target)
+        # a direct B carries no interworking bit: it stays in the caller's instruction set
+        state.recordInterwork(i_address, normalizeTarget(target), thumb, "direct", thumb)
         if target in d.disassembly.functions:
             state.setSanelyEnding(True)
         elif target in d.fc_manager.getStrongFunctionStarts():
@@ -489,8 +512,12 @@ class ArmBackend(ArchBackend):
             if stub[1] is not None and d._handleApiTarget(i_address, stub[1], stub[2], slot=stub[1]):
                 state.setSanelyEnding(True)
             elif stub[1] is None and self._isCodeAddress(d, stub[2] & ~1):
-                d.fc_manager.addTailcallCandidate(stub[2] & ~1, bool(stub[2] & 1))
-                state.addCodeRef(i_address, stub[2] & ~1, by_jump=True)
+                target, target_thumb = normalizeTarget(stub[2]), bool(stub[2] & 1)
+                d.fc_manager.addTailcallCandidate(target, target_thumb)
+                state.recordInterwork(
+                    i_address, target, target_thumb, "indirect", d.capstone.is_thumb, raw_pointer=stub[2]
+                )
+                state.addCodeRef(i_address, target, by_jump=True)
                 state.setSanelyEnding(True)
         else:
             targets = d.jumptable_analyzer.getJumpTargets(instruction, state)
@@ -498,8 +525,12 @@ class ArmBackend(ArchBackend):
                 if d.disassembly.isAddrWithinMemoryImage(target):
                     state.addBlockToQueue(target)
                     state.addCodeRef(i_address, target, by_jump=True)
+                    state.recordInterwork(
+                        i_address, normalizeTarget(target), d.capstone.is_thumb, "indirect", d.capstone.is_thumb
+                    )
             if not targets:
                 state.arm_indirect_jumps.append(i_address)
+                state.recordUnresolvedInterwork(i_address, i_op_str)
                 state.setSanelyEnding(True)
         if conditional:
             self._endBlockKeepingFallthrough(state, i_address, i_size)
@@ -572,6 +603,7 @@ class ArmBackend(ArchBackend):
             state.addCodeRef(i_address, target, by_jump=True)
         elif self._isCodeAddress(d, target):
             d.fc_manager.addTailcallCandidate(target, False)
+            state.recordInterwork(i_address, target, False, "indirect", True)
             state.addCodeRef(i_address, target, by_jump=True)
         state.setSanelyEnding(True)
         state.setNextInstructionReachable(False)
@@ -756,7 +788,9 @@ class ArmBackend(ArchBackend):
             value = self._wordAt(d, pool)
             if value is not None and d.disassembly.isAddrWithinMemoryImage(value & ~1):
                 target = value & ~1
-                d.fc_manager.addTailcallCandidate(target, bool(value & 1))
+                target_thumb = bool(value & 1)
+                d.fc_manager.addTailcallCandidate(target, target_thumb)
+                state.recordInterwork(i_address, target, target_thumb, "indirect", thumb, raw_pointer=value)
                 state.addCodeRef(i_address, target, by_jump=True)
                 if conditional:
                     self._endBlockKeepingFallthrough(state, i_address, i_size)

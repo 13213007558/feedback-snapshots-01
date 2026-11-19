@@ -406,6 +406,10 @@ class ArmIndirectCallAnalyzer:
                     return
                 value, slot = self._resolve(analysis_state, address)
                 if value is None and slot is None:
+                    if is_call:
+                        # no constant reached this call: its target and instruction set are
+                        # unprovable, so the report names the limitation rather than a guessed edge
+                        analysis_state.recordUnresolvedInterwork(address, self._registerAt(analysis_state, address))
                     continue
                 resolved += 1
                 if slot is not None and d._handleApiTarget(
@@ -413,17 +417,33 @@ class ArmIndirectCallAnalyzer:
                 ):
                     continue
                 if value is None:
+                    if is_call:
+                        analysis_state.recordUnresolvedInterwork(address, self._registerAt(analysis_state, address))
                     continue
                 dll, api = d.resolveApi(value, value)
                 if dll or api:
                     d.disassembly.addApiReference(value, address, dll, api)
                 elif d.disassembly.isAddrWithinMemoryImage(value & ~1):
+                    target, target_thumb = value & ~1, bool(value & 1)
                     if is_call:
-                        d.fc_manager.addCallCandidate(value & ~1, bool(value & 1), address)
-                        d.disassembly.addCodeRefs(address, value & ~1)
+                        d.fc_manager.addCallCandidate(target, target_thumb, address)
+                        d.disassembly.addCodeRefs(address, target)
+                        analysis_state.recordInterwork(
+                            address, target, target_thumb, "indirect", _thumbOf(d), raw_pointer=value
+                        )
                     else:
-                        d.fc_manager.addTailcallCandidate(value & ~1, bool(value & 1))
-                        d.disassembly.addCodeRefs(address, value & ~1)
+                        d.fc_manager.addTailcallCandidate(target, target_thumb)
+                        d.disassembly.addCodeRefs(address, target)
+                        analysis_state.recordInterwork(
+                            address, target, target_thumb, "indirect", _thumbOf(d), raw_pointer=value
+                        )
+
+    @staticmethod
+    def _registerAt(analysis_state, address):
+        for instruction in analysis_state.instructions:
+            if instruction[0] == address:
+                return instruction[3]
+        return ""
 
 
 class ArmJumpTableAnalyzer:

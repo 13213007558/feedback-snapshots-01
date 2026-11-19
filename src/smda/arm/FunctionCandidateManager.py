@@ -157,6 +157,8 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         self._mode_strengths = {}
         #: functions already decoded in an instruction set a stronger statement then contradicted
         self.mode_conflicts = []
+        #: explicit same-address/different-mode clashes for the report, one entry per clash
+        self.mode_conflict_log = []
         self._mapping_starts = []
         self._mapping_kinds = []
         self._default_thumb = False
@@ -385,12 +387,14 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
                 seen.add(key)
                 yield symbol
 
-    def noteMode(self, addr, thumb=None, strength=MODE_DECODED):
+    def noteMode(self, addr, thumb=None, strength=MODE_DECODED, source=None):
         """Record the instruction set of the code at ``addr``; returns the even address.
 
         With ``thumb`` omitted, bit 0 of ``addr`` decides it, which is the interworking
         convention for every address the image stores or states. A statement replaces an
         earlier one only if it is stronger, or both are the image's own (see ``MODE_*``).
+        A same-strength contradiction never replaces the first statement, but it is logged
+        in :data:`mode_conflict_log` so the disagreement is visible rather than silent.
         """
         if thumb is None:
             thumb = bool(addr & 1)
@@ -406,6 +410,16 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         if previous is not None:
             previous_strength = self._mode_strengths.get(addr, MODE_DECODED)
             if strength < previous_strength or (strength == previous_strength < MODE_STATED):
+                if previous != thumb:
+                    # the first statement stands, but the disagreement is recorded rather
+                    # than silently swallowed
+                    self.recordModeConflict(
+                        addr,
+                        previous,
+                        source if source is not None else addr,
+                        requested_thumb=thumb,
+                        reason="equal_strength_mode_clash",
+                    )
                 return addr
             self._mode_strengths[addr] = strength
             if previous == thumb:
@@ -442,6 +456,15 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         """Hand over the conflicting functions noted so far, with their current instruction set."""
         conflicts, self.mode_conflicts = self.mode_conflicts, []
         return [(addr, self._modes[addr]) for addr in dict.fromkeys(conflicts)]
+
+    def takeModeConflictLog(self):
+        """Hand over the explicit same-address mode clashes, and reset the log.
+
+        Each entry names the address, the instruction set its bytes are decoded in, the
+        instruction that requested the other set, what that set was and why it was refused.
+        """
+        entries, self.mode_conflict_log = self.mode_conflict_log, []
+        return entries
 
     def requeueInMode(self, addr, thumb):
         candidate = self.candidates.get(addr)
@@ -562,8 +585,11 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
             return False
         if not self._passesCodeFilter(target) or not self.disassembly.isAddrWithinMemoryImage(target):
             return False
+        noted = self._modes.get(target)
+        if noted is not None and noted != thumb:
+            self.recordModeConflict(target, noted, source, requested_thumb=thumb, reason="call_target_mode_mismatch")
         if target in self.candidates:
-            self.noteMode(target, thumb)
+            self.noteMode(target, thumb, source=source)
             self._addStrongStart(target)
             self._addCappedCallRef(self.candidates[target], source)
             self._all_call_refs[source] = target
@@ -571,13 +597,19 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         self.addCandidate(target, reference_source=source)
         if target not in self.candidates:
             return False
-        self.noteMode(target, thumb)
+        self.noteMode(target, thumb, source=source)
         self._addStrongStart(target)
         self._candidate_offsets.add(target)
         return True
 
     def addPointerCandidate(self, value, source, pc_relative=False, from_thumb=False):
-        """A code address held in data or materialised by code (literal, ``movw``/``movt``)."""
+        """A code address held in data or materialised by code (literal, ``movw``/``movt``).
+
+        Returns True when the pointer added or confirmed a candidate, False when it was
+        refused. A refusal because the instruction set the pointer's bit 0 names
+        contradicts evidence already recorded for that address is booked as an explicit
+        mode conflict (see :meth:`takeModeConflicts`) rather than dropped in silence.
+        """
         if self._go_starts and value not in self._go_starts:
             # pclntab names every start of a Go image; anything else is a constant
             return False
@@ -593,6 +625,8 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         if not thumb and self._refusesA32Pointer(target, pc_relative):
             return False
         if target in self.candidates or not self._passesCodeFilter(target):
+            if target in self.candidates:
+                self._notePointerModeConflict(target, thumb, source)
             return False
         if self.disassembly.isCode(target) or not self.disassembly.isAddrWithinMemoryImage(target):
             return False
@@ -606,6 +640,44 @@ class FunctionCandidateManager(_CommonFunctionCandidateManager):
         self.noteMode(target, thumb)
         self._candidate_offsets.add(target)
         return True
+
+    def _notePointerModeConflict(self, target, thumb, source):
+        """Record a stored pointer whose interworking bit contradicts the target's known mode.
+
+        Same strength does not replace the standing statement (see :meth:`noteMode`), but
+        the disagreement must not vanish: the report's ``mode_conflicts`` names both the
+        instruction set the bytes are decoded in and the one this pointer requested.
+        """
+        noted = self._modes.get(target)
+        if noted is None or noted == thumb:
+            return
+        self.recordModeConflict(target, noted, source, requested_thumb=thumb, reason="pointer_mode_mismatch")
+
+    def recordModeConflict(self, addr, decoded_thumb, source, requested_thumb=None, reason="mode_conflict"):
+        """Book an explicit statement about a same-address mode clash.
+
+        Entries accumulate (the first statement does not overwrite the second) and reach the
+        owning function's ``architecture_metadata["mode_conflicts"]`` through the report.
+        The same clash from the same source is recorded once, even when several passes
+        (a literal load, a call candidate, a same-strength statement) each observe it.
+        """
+        entry = {
+            "address": addr & ~1,
+            "decoded_thumb": bool(decoded_thumb),
+            "source": source,
+            "reason": reason,
+        }
+        if requested_thumb is not None:
+            entry["requested_thumb"] = bool(requested_thumb)
+        for existing in self.mode_conflict_log:
+            if (
+                existing["address"] == entry["address"]
+                and existing["source"] == entry["source"]
+                and existing["decoded_thumb"] == entry["decoded_thumb"]
+                and existing.get("requested_thumb") == entry.get("requested_thumb")
+            ):
+                return
+        self.mode_conflict_log.append(entry)
 
     def _refusesA32Pointer(self, target, declared_only):
         """Whether an even code address is no A32 entry: interworking needs bit 0 set for
