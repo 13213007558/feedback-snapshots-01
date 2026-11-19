@@ -99,11 +99,12 @@ class RecursiveDisassembler:
                 reraise_non_operational_exception(exc)
                 LOGGER.error("Label provider %s failed to update: %r", provider.__class__.__name__, exc)
 
-    def _updateLabelProviders(self, binary_info):
+    def _updateLabelProviders(self, binary_info, pdb_info=None):
         self._runLabelProviderUpdate(binary_info)
         # a provider clears its symbol map at the top of update(), so a PDB supplied before
         # analysis would be wiped by this pass; re-apply it afterwards instead
-        pdb_info = getattr(self, "_pdb_info", None)
+        if pdb_info is None:
+            pdb_info = getattr(self, "_pdb_info", None)
         if pdb_info is not None:
             self._runLabelProviderUpdate(pdb_info, pdb_only=True)
         self.active_api_providers = [p for p in self.api_providers if p.is_active()]
@@ -537,6 +538,10 @@ class RecursiveDisassembler:
         )
         self._symbol_cache = {}
         self._api_cache = {}
+        # a PDB registered through addPdbFile is input to this one analysis (disassembleFile
+        # hands it over per sample); consume it up front so a reused instance cannot
+        # re-apply it to the next sample, even if this run fails before finishing
+        pdb_info, self._pdb_info = self._pdb_info, None
         self._cb_analysis_timeout = cbAnalysisTimeout
         self.disassembly = DisassemblyResult()
         self.disassembly.smda_version = self.config.VERSION
@@ -561,7 +566,7 @@ class RecursiveDisassembler:
             LOGGER.debug("Forced Bitness override to: %d", binary_info.bitness)
 
         # update providers after bitness is finalized: some (e.g. DelphiPythiaProvider) key parsing on it
-        self._updateLabelProviders(binary_info)
+        self._updateLabelProviders(binary_info, pdb_info=pdb_info)
 
         self.tailcall_analyzer = TailcallAnalyzer()
         self.indcall_analyzer = self.backend.createIndirectCallAnalyzer(self)

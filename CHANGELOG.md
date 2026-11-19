@@ -79,6 +79,14 @@ past roughly six lines it belongs in the PR the entry links.
 ### Removed
 
 ### Fixed
+- **(core)** Scope a registered PDB to the analysis it was supplied to. `RecursiveDisassembler` kept the
+  `pdb_path` handed to `disassembleFile` in `_pdb_info` and re-applied it on every later analysis run on the
+  same instance, so a reused `Disassembler` (same-architecture samples or a pinned explicit backend) stamped
+  the previous sample's PDB symbols onto the next target and seeded phantom function candidates from its
+  addresses (a reused instance reported 37 functions and 17 symbol names on a sample a fresh instance
+  reported 33 and 1 for). `analyzeBuffer` now consumes the registration with the per-analysis state reset,
+  so the next sample - including the one after a failed analysis - starts clean, while a `pdb_path` passed
+  with each call keeps applying.
 
 ### Security
 

@@ -1,7 +1,12 @@
 import datetime
 import logging
+import os
+import struct
+import tempfile
 import unittest
+from unittest import mock
 
+from smda.common.RecursiveDisassembler import RecursiveDisassembler
 from smda.Disassembler import Disassembler
 
 
@@ -70,6 +75,98 @@ class TestAnalysisTimeoutIsAnnounced(unittest.TestCase):
 
         with self.assertLogs("smda.Disassembler", level="WARNING"):
             self.assertTrue(disassembler._callbackAnalysisTimeout())
+
+
+FIXTURE_DIR = os.path.dirname(os.path.abspath(__file__))
+X86_PE_WITH_PDB = os.path.join(FIXTURE_DIR, "rust_pe_msvc_i686_xored")
+PDB_FOR_FIRST_PE = os.path.join(FIXTURE_DIR, "rust_pe_msvc_i686_pdb_xored")
+X86_PE_OTHER = os.path.join(FIXTURE_DIR, "cutwail_xored")
+ARM64_PE = os.path.join(FIXTURE_DIR, "arm64_pe_probe_xored")
+SHARED_IMAGE_BASE = 0x400000
+PDB_SYMBOL = "main::digest"
+
+
+def decode_fixture(path):
+    with open(path, "rb") as fin:
+        return bytes(byte ^ (index % 256) for index, byte in enumerate(fin.read()))
+
+
+def rebased_to_image_base(pe_data, image_base):
+    data = bytearray(pe_data)
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    assert data[e_lfanew : e_lfanew + 4] == b"PE\0\0"
+    struct.pack_into("<I", data, e_lfanew + 24 + 28, image_base)
+    return bytes(data)
+
+
+def report_signature(report):
+    return (
+        report.status,
+        report.architecture,
+        report.num_functions,
+        report.num_instructions,
+        sorted(function.offset for function in report.getFunctions()),
+        {function.offset: function.function_name for function in report.getFunctions() if function.function_name},
+    )
+
+
+class CrossSampleResidueTestSuite(unittest.TestCase):
+    """A Disassembler reused across samples must not let per-sample input (here: a PDB
+    handed over via disassembleFile's pdb_path) bleed into the next sample's report,
+    while application-level configuration (the shared SmdaConfig, the pinned backend)
+    has to survive untouched. The two x86 PEs are rebased to the same image base so
+    stale addresses from the first sample would land on real functions of the second."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.first_pe = self._write("first.exe", decode_fixture(X86_PE_WITH_PDB))
+        self.first_pdb = self._write("first.pdb", decode_fixture(PDB_FOR_FIRST_PE))
+        rebased = rebased_to_image_base(decode_fixture(X86_PE_OTHER), SHARED_IMAGE_BASE)
+        self.second_pe = self._write("second.exe", rebased)
+        self.arm64_pe = self._write("arm64.exe", decode_fixture(ARM64_PE))
+
+    def _write(self, name, data):
+        path = os.path.join(self.tempdir.name, name)
+        with open(path, "wb") as fout:
+            fout.write(data)
+        return path
+
+    def _independent_second_report(self, **kwargs):
+        return Disassembler(**kwargs).disassembleFile(self.second_pe)
+
+    def test_a_pdb_does_not_leak_into_the_next_sample(self):
+        shared = Disassembler()
+        named = shared.disassembleFile(self.first_pe, pdb_path=self.first_pdb)
+        self.assertIn(PDB_SYMBOL, {f.function_name for f in named.getFunctions()})
+        second = shared.disassembleFile(self.second_pe)
+        self.assertEqual(report_signature(second), report_signature(self._independent_second_report()))
+
+    def test_a_pdb_does_not_survive_an_architecture_switch_sequence(self):
+        for kwargs in ({}, {"backend": "intel"}):
+            with self.subTest(kwargs=kwargs):
+                shared = Disassembler(**kwargs)
+                shared.disassembleFile(self.first_pe, pdb_path=self.first_pdb)
+                shared.disassembleFile(self.arm64_pe)
+                second = shared.disassembleFile(self.second_pe)
+                self.assertEqual(report_signature(second), report_signature(self._independent_second_report(**kwargs)))
+
+    def test_a_failed_sample_does_not_leave_its_pdb_behind(self):
+        shared = Disassembler(backend="intel")
+        with mock.patch.object(
+            RecursiveDisassembler, "_drainCandidateQueue", side_effect=RuntimeError("forced failure")
+        ):
+            failed = shared.disassembleFile(self.first_pe, pdb_path=self.first_pdb)
+        self.assertEqual(failed.status, "error")
+        second = shared.disassembleFile(self.second_pe)
+        self.assertEqual(report_signature(second), report_signature(self._independent_second_report(backend="intel")))
+
+    def test_a_pdb_supplied_with_each_call_still_applies(self):
+        shared = Disassembler()
+        for _ in range(2):
+            report = shared.disassembleFile(self.first_pe, pdb_path=self.first_pdb)
+            self.assertEqual(report.status, "ok")
+            self.assertIn(PDB_SYMBOL, {f.function_name for f in report.getFunctions()})
 
 
 if __name__ == "__main__":
