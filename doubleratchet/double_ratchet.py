@@ -5,12 +5,12 @@ from collections import OrderedDict
 import copy
 import itertools
 import json
-from typing import Optional, Tuple, Type, TypeVar, cast
+from typing import Optional, Set, Tuple, Type, TypeVar, cast
 
 from .aead import AEAD
 from .diffie_hellman_ratchet import DiffieHellmanRatchet
 from .kdf import KDF
-from .migrations import parse_double_ratchet_model
+from .migrations import InconsistentSerializationException, parse_double_ratchet_model
 from .models import DoubleRatchetModel, SkippedMessageKeyModel
 from .types import EncryptedMessage, Header, JSONObject, SkippedMessageKeys
 
@@ -295,10 +295,11 @@ class DoubleRatchet(ABC):
 
         Raises:
             InconsistentSerializationException: if the serialized data is structurally correct, but
-                incomplete. This can only happen when migrating an instance from pre-stable data that was
-                serialized before sending or receiving a single message. In this case, the serialized instance
-                is basically uninitialized and can be discarded/replaced with a new instance using
-                :meth:`encrypt_initial_message` or :meth:`decrypt_initial_message` without losing information.
+                incomplete or internally inconsistent. Incomplete data can only happen when migrating an
+                instance from pre-stable data that was serialized before sending or receiving a single
+                message. In this case, the serialized instance is basically uninitialized and can be
+                discarded/replaced with a new instance using :meth:`encrypt_initial_message` or
+                :meth:`decrypt_initial_message` without losing information.
 
         Warning:
             Migrations are not provided via the :attr:`model`/:meth:`from_model` API. Use
@@ -310,6 +311,52 @@ class DoubleRatchet(ABC):
             raise ValueError(
                 "The `dos_protection_threshold` can't be bigger than `max_num_skipped_message_keys`."
             )
+
+        # Structurally valid data can still be internally inconsistent. Verify the relationships between
+        # the skipped message keys, the chain counters and the Diffie-Hellman public keys before restoring
+        # anything, to make sure the restored state can safely continue the session.
+        diffie_hellman_ratchet_model = model.diffie_hellman_ratchet
+        symmetric_key_ratchet_model = diffie_hellman_ratchet_model.symmetric_key_ratchet
+        receiving_chain_length = None if symmetric_key_ratchet_model.receiving_chain is None \
+            else symmetric_key_ratchet_model.receiving_chain.length
+
+        # The receiving chain is only uninitialized if not a single message has been received yet. In that
+        # case, no Diffie-Hellman ratchet step has been performed either, which means there is no previous
+        # sending chain and no message keys can have been skipped.
+        if symmetric_key_ratchet_model.receiving_chain is None:
+            if symmetric_key_ratchet_model.previous_sending_chain_length is not None:
+                raise InconsistentSerializationException(
+                    "The restored internal state has no receiving chain, but a previous sending chain"
+                    " length, which is impossible before the first Diffie-Hellman ratchet step."
+                )
+            if len(model.skipped_message_keys) > 0:
+                raise InconsistentSerializationException(
+                    "The restored internal state has no receiving chain, but contains skipped message keys,"
+                    " which is impossible before a message has been received."
+                )
+
+        skipped_message_key_keys: Set[Tuple[bytes, int]] = set()
+        for skipped_message_key in model.skipped_message_keys:
+            skipped_message_key_key = (skipped_message_key.ratchet_pub, skipped_message_key.index)
+            if skipped_message_key_key in skipped_message_key_keys:
+                raise InconsistentSerializationException(
+                    "The restored internal state contains multiple skipped message keys for the ratchet"
+                    f" public key/index combination {skipped_message_key_key}."
+                )
+            skipped_message_key_keys.add(skipped_message_key_key)
+
+            # Skipped message keys stored under the current ratchet public key of the other party are
+            # created by stepping the receiving chain past the corresponding indices, thus their indices
+            # must be smaller than the receiving chain length. An index at or beyond the receiving chain
+            # length would claim to belong to a message that has not been sent yet.
+            if skipped_message_key.ratchet_pub == diffie_hellman_ratchet_model.other_ratchet_pub:
+                if receiving_chain_length is None \
+                        or skipped_message_key.index >= receiving_chain_length:
+                    raise InconsistentSerializationException(
+                        "The restored internal state contains a skipped message key for the current ratchet"
+                        " public key of the other party with an index that the receiving chain has not"
+                        " reached yet."
+                    )
 
         self = cls()
         self.__max_num_skipped_message_keys = max_num_skipped_message_keys
@@ -364,10 +411,11 @@ class DoubleRatchet(ABC):
 
         Raises:
             InconsistentSerializationException: if the serialized data is structurally correct, but
-                incomplete. This can only happen when migrating an instance from pre-stable data that was
-                serialized before sending or receiving a single message. In this case, the serialized instance
-                is basically uninitialized and can be discarded/replaced with a new instance using
-                :meth:`encrypt_initial_message` or :meth:`decrypt_initial_message` without losing information.
+                incomplete or internally inconsistent. Incomplete data can only happen when migrating an
+                instance from pre-stable data that was serialized before sending or receiving a single
+                message. In this case, the serialized instance is basically uninitialized and can be
+                discarded/replaced with a new instance using :meth:`encrypt_initial_message` or
+                :meth:`decrypt_initial_message` without losing information.
         """
 
         return cls.from_model(

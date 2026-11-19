@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed
+- Treat restored serialized state as untrusted input: reject negative chain lengths and skipped message key indices, skipped message keys that are not 32 bytes long, chain keys that are not 32 bytes long, Diffie-Hellman key material that can't be used for a key exchange, duplicate ratchet public key/index combinations, skipped message keys under the current ratchet public key with indices beyond the receiving chain length, states without a receiving chain that contain skipped message keys or a previous sending chain length, and unsupported serialization format versions
 
 ## [1.3.0] - 29th of January 2026
 

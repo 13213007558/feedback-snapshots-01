@@ -105,6 +105,9 @@ def parse_diffie_hellman_ratchet_model(serialized: JSONObject) -> DiffieHellmanR
         The model, which can be used to restore the instance using
         :meth:`~doubleratchet.diffie_hellman_ratchet.DiffieHellmanRatchet.from_model`.
 
+    Raises:
+        ValueError: if the serialization format version is not supported.
+
     Note:
         Pre-stable data can only be migrated as a whole using :func:`parse_double_ratchet_model`.
     """
@@ -112,10 +115,13 @@ def parse_diffie_hellman_ratchet_model(serialized: JSONObject) -> DiffieHellmanR
     # Each model has a Python string "version" in its root. Use that to find the model that the data was
     # serialized from.
     version = cast(str, serialized["version"])
-    model: BaseModel = {
+    model_class = {
         "1.0.0": DiffieHellmanRatchetModel,
         "1.0.1": DiffieHellmanRatchetModel
-    }[version](**serialized)  # type: ignore[arg-type]
+    }.get(version)
+    if model_class is None:
+        raise ValueError(f"Unsupported serialization format version: {version}")
+    model: BaseModel = model_class(**serialized)  # type: ignore[arg-type]
 
     # Once all migrations have been applied, the model should be an instance of the most recent model
     assert isinstance(model, DiffieHellmanRatchetModel)
@@ -138,6 +144,7 @@ def parse_double_ratchet_model(serialized: JSONObject) -> DoubleRatchetModel:
         :meth:`~doubleratchet.double_ratchet.DoubleRatchet.from_model`.
 
     Raises:
+        ValueError: if the serialization format version is not supported.
         InconsistentSerializationException: if migration from pre-stable serialization format is performed,
             and the data is structurally correct, but incomplete. In pre-stable, it was possible to serialize
             instances which were not fully initialized yet. Those instances can be treated as non-existent and
@@ -153,11 +160,14 @@ def parse_double_ratchet_model(serialized: JSONObject) -> DoubleRatchetModel:
     # Each model has a Python string "version" in its root. Use that to find the model that the data was
     # serialized from. Special case: the pre-stable serialization format does not contain a version.
     version = cast(str, serialized["version"]) if "version" in serialized else None
-    model: BaseModel = {
+    model_class = {
         None: PreStableModel,
         "1.0.0": DoubleRatchetModel,
         "1.0.1": DoubleRatchetModel
-    }[version](**serialized)
+    }.get(version)
+    if model_class is None:
+        raise ValueError(f"Unsupported serialization format version: {version}")
+    model: BaseModel = model_class(**serialized)
 
     if isinstance(model, PreStableModel):
         # Run migrations from PreStableModel to DoubleRatchetModel
@@ -222,6 +232,9 @@ def parse_kdf_chain_model(serialized: JSONObject) -> KDFChainModel:
         The model, which can be used to restore the instance using
         :meth:`~doubleratchet.kdf_chain.KDFChain.from_model`.
 
+    Raises:
+        ValueError: if the serialization format version is not supported.
+
     Note:
         Pre-stable data can only be migrated as a whole using :func:`parse_double_ratchet_model`.
     """
@@ -229,10 +242,13 @@ def parse_kdf_chain_model(serialized: JSONObject) -> KDFChainModel:
     # Each model has a Python string "version" in its root. Use that to find the model that the data was
     # serialized from.
     version = cast(str, serialized["version"])
-    model: BaseModel = {
+    model_class = {
         "1.0.0": KDFChainModel,
         "1.0.1": KDFChainModel
-    }[version](**serialized)  # type: ignore[arg-type]
+    }.get(version)
+    if model_class is None:
+        raise ValueError(f"Unsupported serialization format version: {version}")
+    model: BaseModel = model_class(**serialized)  # type: ignore[arg-type]
 
     # Once all migrations have been applied, the model should be an instance of the most recent model
     assert isinstance(model, KDFChainModel)
@@ -253,6 +269,9 @@ def parse_symmetric_key_ratchet_model(serialized: JSONObject) -> SymmetricKeyRat
         The model, which can be used to restore the instance using
         :meth:`~doubleratchet.symmetric_key_ratchet.SymmetricKeyRatchet.from_model`.
 
+    Raises:
+        ValueError: if the serialization format version is not supported.
+
     Note:
         Pre-stable data can only be migrated as a whole using :func:`parse_double_ratchet_model`.
     """
@@ -260,10 +279,13 @@ def parse_symmetric_key_ratchet_model(serialized: JSONObject) -> SymmetricKeyRat
     # Each model has a Python string "version" in its root. Use that to find the model that the data was
     # serialized from.
     version = cast(str, serialized["version"])
-    model: BaseModel = {
+    model_class = {
         "1.0.0": SymmetricKeyRatchetModel,
         "1.0.1": SymmetricKeyRatchetModel
-    }[version](**serialized)  # type: ignore[arg-type]
+    }.get(version)
+    if model_class is None:
+        raise ValueError(f"Unsupported serialization format version: {version}")
+    model: BaseModel = model_class(**serialized)  # type: ignore[arg-type]
 
     # Once all migrations have been applied, the model should be an instance of the most recent model
     assert isinstance(model, SymmetricKeyRatchetModel)

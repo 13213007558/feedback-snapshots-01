@@ -1,6 +1,6 @@
 from typing import Annotated, Any, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, NonNegativeInt
 from pydantic.functional_serializers import PlainSerializer
 from pydantic.functional_validators import PlainValidator
 
@@ -54,13 +54,37 @@ def _json_bytes_encoder(val: bytes) -> str:
 JsonBytes = Annotated[bytes, PlainValidator(_json_bytes_decoder), PlainSerializer(_json_bytes_encoder)]
 
 
+def _json_bytes_32_decoder(val: Any) -> bytes:
+    """
+    Decode bytes from a string according to the JSON specification, like :func:`_json_bytes_decoder`, and
+    additionally require the decoded data to consist of exactly 32 bytes.
+
+    Args:
+        val: The value to type check and decode.
+
+    Returns:
+        The value decoded to exactly 32 bytes.
+
+    Raises:
+        ValueError: if the value is not correctly encoded or does not consist of exactly 32 bytes.
+    """
+
+    val = _json_bytes_decoder(val)
+    if len(val) != 32:
+        raise ValueError("This bytes field must be encoded as bytes or str and consist of exactly 32 bytes.")
+    return val
+
+
+JsonBytes32 = Annotated[bytes, PlainValidator(_json_bytes_32_decoder), PlainSerializer(_json_bytes_encoder)]
+
+
 class KDFChainModel(BaseModel):
     """
     The model representing the internal state of a :class:`~doubleratchet.kdf_chain.KDFChain`.
     """
 
     version: str = "1.0.0"
-    length: int
+    length: NonNegativeInt
     key: JsonBytes
 
 
@@ -73,7 +97,7 @@ class SymmetricKeyRatchetModel(BaseModel):
     version: str = "1.0.0"
     receiving_chain: Optional[KDFChainModel]
     sending_chain: Optional[KDFChainModel]
-    previous_sending_chain_length: Optional[int]
+    previous_sending_chain_length: Optional[NonNegativeInt]
 
 
 class DiffieHellmanRatchetModel(BaseModel):
@@ -96,8 +120,8 @@ class SkippedMessageKeyModel(BaseModel):
     """
 
     ratchet_pub: JsonBytes
-    index: int
-    message_key: JsonBytes
+    index: NonNegativeInt
+    message_key: JsonBytes32
 
 
 class DoubleRatchetModel(BaseModel):

@@ -232,7 +232,7 @@ class DiffieHellmanRatchet(ABC):
 
         Raises:
             InconsistentSerializationException: if the serialized data is structurally correct, but
-                incomplete. This can only happen when migrating a
+                incomplete or internally inconsistent. Incomplete data can only happen when migrating a
                 :class:`~doubleratchet.double_ratchet.DoubleRatchet` instance from pre-stable data that was
                 serialized before sending or receiving a single message. In this case, the serialized instance
                 is basically uninitialized and can be discarded/replaced with a new instance without losing
@@ -259,6 +259,36 @@ class DiffieHellmanRatchet(ABC):
             raise InconsistentSerializationException(
                 "The restored internal state does not contain an initialized sending chain."
             )
+
+        # The chain keys produced by this implementation always consist of 32 bytes: the root chain is
+        # initialized with a 32-byte key, the sending and receiving chains are initialized via
+        # SymmetricKeyRatchet.replace_chain, which requires 32 bytes, and KDFChain.step preserves the key
+        # length. Reject restored states that violate this invariant.
+        if len(model.root_chain.key) != 32:
+            raise InconsistentSerializationException(
+                "The restored internal state contains a root chain key that does not consist of 32 bytes."
+            )
+
+        for chain_name, chain in (
+            ("sending", model.symmetric_key_ratchet.sending_chain),
+            ("receiving", model.symmetric_key_ratchet.receiving_chain)
+        ):
+            if chain is not None and len(chain.key) != 32:
+                raise InconsistentSerializationException(
+                    "The restored internal state contains a"
+                    f" {chain_name} chain key that does not consist of 32 bytes."
+                )
+
+        # Make sure that the restored Diffie-Hellman key material is actually usable to continue the
+        # session, i.e. that both keys can be loaded and a shared secret can be derived from them. The
+        # derived secret is discarded, this is purely a consistency check of the restored key material.
+        try:
+            self._perform_diffie_hellman(self.__own_ratchet_priv, self.__other_ratchet_pub)
+        except ValueError as e:
+            raise InconsistentSerializationException(
+                "The restored internal state contains Diffie-Hellman key material that can not be used to"
+                " perform a key exchange."
+            ) from e
 
         return self
 
@@ -289,7 +319,7 @@ class DiffieHellmanRatchet(ABC):
 
         Raises:
             InconsistentSerializationException: if the serialized data is structurally correct, but
-                incomplete. This can only happen when migrating a
+                incomplete or internally inconsistent. Incomplete data can only happen when migrating a
                 :class:`~doubleratchet.double_ratchet.DoubleRatchet` instance from pre-stable data that was
                 serialized before sending or receiving a single message. In this case, the serialized instance
                 is basically uninitialized and can be discarded/replaced with a new instance without losing
