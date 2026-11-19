@@ -19,6 +19,12 @@ _CALLEE_SAVED_64 = frozenset({"rbx", "rbp", "ebx", "ebp", "bx", "bp", "bl", "bh"
     f"r1{number}{suffix}" for number in "2345" for suffix in ("", "d", "w", "b")
 }
 
+# A backward path that reaches a clobber or a definition it cannot model has no provable
+# value. It must not be silently dropped the way an exhausted (loop/already-seen) path is,
+# because a sibling path that does produce a value would then be confirmed as the target of
+# a call the clobbered path can reach too.
+_UNRESOLVED = object()
+
 
 class IndirectCallAnalyzer:
     """Perform basic dataflow analysis to resolve indirect call targets"""
@@ -157,11 +163,26 @@ class IndirectCallAnalyzer:
         return False
 
     def processBlock(self, analysis_state, block, registers, register_name, processed, depth):
-        if not block:
+        candidate = self._collectBlockCandidate(analysis_state, block, registers, register_name, processed, depth)
+        if candidate is None or candidate is _UNRESOLVED:
             return False
+        self._bookResolvedCandidate(candidate)
+        return True
+
+    def _collectBlockCandidate(self, analysis_state, block, registers, register_name, processed, depth):
+        """Backtrack one block and return the value proven for `register_name`.
+
+        Returns an int candidate, None when this path runs out of blocks without a
+        definition, or _UNRESOLVED when it meets a clobber/unmodelled write. At a merge the
+        caller requires every provable path to agree, so a single _UNRESOLVED or a single
+        disagreeing value keeps the indirect call instead of confirming a target only some
+        executions actually reach.
+        """
+        if not block:
+            return None
         if block in processed:
             LOGGER.debug("already processed block 0x%08x; skipping", block[0][0])
-            return False
+            return None
         processed.append(block)
         debug_logging = LOGGER.isEnabledFor(logging.DEBUG)
         if debug_logging:
@@ -188,7 +209,7 @@ class IndirectCallAnalyzer:
                 # the walk begins at the call being resolved, which is itself a clobber; every
                 # instruction before it is not
                 LOGGER.debug("giving up at 0x%08x: %s may write %s", ins[0], mnemonic, register_name)
-                return False
+                return _UNRESOLVED
             # mov and lea are exempted from the clobber check above because the patterns below
             # model them - but only some of their forms. A form none of the patterns match still
             # writes its destination, and reading past it resolves the call against whatever
@@ -200,7 +221,7 @@ class IndirectCallAnalyzer:
                 and self._writesUnmodelledRegister(operands, register_name, registers)
             ):
                 LOGGER.debug("giving up at 0x%08x: unmodelled %s write of %s", ins[0], mnemonic, register_name)
-                return False
+                return _UNRESOLVED
             if mnemonic == "mov":
                 # mov <reg>, <reg>
                 match1 = self.RE_MOV_REG_REG.match(operands)
@@ -283,64 +304,73 @@ class IndirectCallAnalyzer:
                             abs_value_found = True
                 # not handled: lea <reg>, dword ptr [<reg> +- <val>]
                 # requires state-keeping of multiple registers
-            # if the absolute value was found for the call <reg> instruction, detect API
+            # if the absolute value was found for the call <reg> instruction, return it to the
+            # merge-aware caller; the API/candidate side effects happen only once every provable
+            # path has agreed on the same value
             if abs_value_found:
-                candidate = registers.get(register_name, None)
-                if self.current_slot is not None:
-                    # annotation only: leave leaf state and the CFG to the regular analysis
-                    if candidate:
-                        self._recordComputedImportSlot(candidate, *self.current_slot)
-                    return True
-                self.state.setLeaf(False)
-                if candidate:
-                    LOGGER.debug(
-                        "candidate: 0x%x - %s, register: %s",
-                        candidate,
-                        ins[3],
-                        register_name,
-                    )
-                    dll, api = self.disassembler.resolveApi(candidate, candidate)
-                    if dll or api:
-                        LOGGER.debug("successfully resolved: %s %s", dll, api)
-                        self.disassembly.addApiReference(candidate, self.current_calling_addr, dll, api)
-                        # _resolveDwordPointerValue keeps a known import slot instead of
-                        # dereferencing it, so an in-image candidate is that slot
-                        if self.disassembly.isAddrWithinMemoryImage(candidate):
-                            self.disassembly.addImportSlot(candidate, dll, api)
-                    elif self.disassembly.isAddrWithinMemoryImage(candidate):
-                        LOGGER.debug("successfully resolved: 0x%x", candidate)
-                        self.disassembler.fc_manager.addCandidate(candidate, reference_source=self.current_calling_addr)
-                    else:
-                        LOGGER.debug("candidate not resolved")
-                else:
-                    LOGGER.debug("no candidate to resolved")
-
-                return True
+                return registers.get(register_name, None)
         # process previous blocks
-        if depth >= 0:
-            processed_addrs = frozenset(ins[0] for blk in processed for ins in blk)
-            # Use the reverse index (addr_to -> {addr_from}) maintained by
-            # add/removeCodeRef instead of scanning the full code_refs set per block.
-            # Default to () (cached singleton, no allocation) since we only iterate it.
-            refs_in = [fr for fr in analysis_state.code_refs_to.get(block[0][0], ()) if fr not in processed_addrs]
-            LOGGER.debug(
-                "start processing previous blocks, searching in %d in_refs with remaining depth: %d",
-                len(refs_in),
+        if depth < 0:
+            return None
+        processed_addrs = frozenset(ins[0] for blk in processed for ins in blk)
+        # Use the reverse index (addr_to -> {addr_from}) maintained by
+        # add/removeCodeRef instead of scanning the full code_refs set per block.
+        # Default to () (cached singleton, no allocation) since we only iterate it.
+        refs_in = [fr for fr in analysis_state.code_refs_to.get(block[0][0], ()) if fr not in processed_addrs]
+        LOGGER.debug(
+            "start processing previous blocks, searching in %d in_refs with remaining depth: %d",
+            len(refs_in),
+            depth - 1,
+        )
+        path_candidates = []
+        for predecessor in [self.searchBlock(analysis_state, i) for i in refs_in]:
+            path_candidate = self._collectBlockCandidate(
+                analysis_state,
+                predecessor,
+                registers.copy(),
+                register_name,
+                processed,
                 depth - 1,
             )
-            if any(
-                self.processBlock(
-                    analysis_state,
-                    b,
-                    registers.copy(),
-                    register_name,
-                    processed,
-                    depth - 1,
-                )
-                for b in [self.searchBlock(analysis_state, i) for i in refs_in]
-            ):
-                return True
-        return False
+            if path_candidate is _UNRESOLVED:
+                # one way into this block cannot prove the register's value, so neither can the
+                # block as a whole: confirming a sibling's value would bind the call to a target
+                # the clobbered path does not reach
+                return _UNRESOLVED
+            if path_candidate is not None:
+                path_candidates.append(path_candidate)
+        if not path_candidates:
+            return None
+        if any(candidate != path_candidates[0] for candidate in path_candidates[1:]):
+            LOGGER.debug("giving up: %d predecessor paths disagree on %s", len(path_candidates), register_name)
+            return _UNRESOLVED
+        return path_candidates[0]
+
+    def _bookResolvedCandidate(self, candidate):
+        """Apply the API/candidate side effects for a value every provable path agrees on."""
+        if self.current_slot is not None:
+            # annotation only: leave leaf state and the CFG to the regular analysis
+            if candidate:
+                self._recordComputedImportSlot(candidate, *self.current_slot)
+            return
+        self.state.setLeaf(False)
+        if not candidate:
+            LOGGER.debug("no candidate to resolved")
+            return
+        LOGGER.debug("candidate: 0x%x, register: %s", candidate, self.current_calling_addr)
+        dll, api = self.disassembler.resolveApi(candidate, candidate)
+        if dll or api:
+            LOGGER.debug("successfully resolved: %s %s", dll, api)
+            self.disassembly.addApiReference(candidate, self.current_calling_addr, dll, api)
+            # _resolveDwordPointerValue keeps a known import slot instead of
+            # dereferencing it, so an in-image candidate is that slot
+            if self.disassembly.isAddrWithinMemoryImage(candidate):
+                self.disassembly.addImportSlot(candidate, dll, api)
+        elif self.disassembly.isAddrWithinMemoryImage(candidate):
+            LOGGER.debug("successfully resolved: 0x%x", candidate)
+            self.disassembler.fc_manager.addCandidate(candidate, reference_source=self.current_calling_addr)
+        else:
+            LOGGER.debug("candidate not resolved")
 
     def resolveRegisterCalls(self, analysis_state, block_depth=3):
         # after block reconstruction do simple data flow analysis to resolve open cases like "call <register>" as stored in self.call_register_ins

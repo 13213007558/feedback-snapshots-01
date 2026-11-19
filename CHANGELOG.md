@@ -79,8 +79,15 @@ past roughly six lines it belongs in the PR the entry links.
 ### Removed
 
 ### Fixed
+- **(intel)** Require every predecessor path to agree before confirming a register-indirect call target.
+  `IndirectCallAnalyzer.processBlock` backtracked block-by-block and stopped at the first predecessor that
+  produced a concrete value, so at a CFG merge where the other predecessor loaded a different value (or met a
+  clobber it could not model) the call was bound to a target only some executions reach. The walk now collects
+  each provable path's candidate and keeps the call indirect when the values disagree or any path is unprovable;
+  agreeing merges and single-path register transfer chains resolve as before. *Covered by
+  `tests/testIndirectCallRecoveryRegression.py`, which drives short hand-assembled x86 blobs through the full
+  pipeline and asserts on the report's final API references; the merge case fails on the pre-fix walk.*
 
-### Security
 
 ### Compatibility
 
