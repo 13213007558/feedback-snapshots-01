@@ -40,6 +40,7 @@ from test.test_ether  import *
 from test.test_csn1   import *
 from test.test_asn1rt import *
 from test.test_mobile import *
+from test.test_nas_secaudit import *
 from test.test_gsmrr  import *
 from test.test_sms    import *
 from test.test_crypto import *
@@ -275,6 +276,28 @@ class TestPycrate(unittest.TestCase):
         test_diameter()
         test_pfcp()
         test_bssap()
+    
+    # mobile / 5G NAS security audit
+    def test_nas_secaudit(self):
+        print('[<>] testing 5G NAS security audit')
+        test_aes_cmac_vectors()
+        test_missing_key_is_not_a_pass()
+        test_null_integrity_is_not_a_pass()
+        test_wrong_count_blocks_verification()
+        test_normal_transcript()
+        test_capability_replaced_transcript()
+        test_capture_gap_transcript()
+        test_weak_but_consistent_is_not_a_downgrade()
+        test_smc_selecting_null_with_nonzero_mac()
+        test_ciphered_payload_is_opaque()
+        test_record_from_other_procedure_is_flagged()
+        test_transcript_error_cases()
+        test_cli_exit_codes()
+        test_json_report_is_serialisable()
+        test_selection_without_declaration_is_insufficient()
+        test_unverifiable_declaration_is_flagged()
+        test_wrong_key_fails_and_does_not_downgrade_to_unverified()
+        test_capability_echo_drift_is_reported_even_when_selection_matches()
     
     # mobile / GSM RR
     def test_gsmrr(self):

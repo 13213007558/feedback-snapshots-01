@@ -1,0 +1,33 @@
+{
+  "procedure": "initial-registration",
+  "ue": "suci-0-001-01-0000-0-0-0000000001",
+  "keys": {
+    "K_NASint": "000102030405060708090a0b0c0d0e0f"
+  },
+  "algorithms": {
+    "integrity": 2
+  },
+  "records": [
+    {
+      "n": 1,
+      "dir": "UL",
+      "pdu": "7e004171000d0100f1100000000000000000f12e02f0f0",
+      "count": 0,
+      "label": "Registration Request, cleartext UESecCap"
+    },
+    {
+      "n": 2,
+      "dir": "DL",
+      "pdu": "7e032b161887007e005d220002f0f0",
+      "count": 0,
+      "label": "Security Mode Command EA2/IA2, echo as declared"
+    },
+    {
+      "n": 3,
+      "dir": "UL",
+      "pdu": "7e0350c919b1007e005e",
+      "count": 0,
+      "label": "Security Mode Complete"
+    }
+  ]
+}

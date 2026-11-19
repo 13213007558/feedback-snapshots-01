@@ -1,0 +1,24 @@
+{
+  "procedure": "initial-registration",
+  "ue": "suci-0-001-01-0000-0-0-0000000001",
+  "records": [
+    {
+      "n": 1,
+      "dir": "UL",
+      "pdu": "7e004171000d0100f1100000000000000000f12e02e0e0",
+      "count": 0,
+      "label": "Registration Request, cleartext UESecCap EA1/2/3 IA1/2/3"
+    },
+    {
+      "n": 2,
+      "dir": "DL",
+      "gap": "Security Mode Command not captured; radio trace gap"
+    },
+    {
+      "n": 3,
+      "dir": "UL",
+      "pdu": "7e03bdf2f24b077e005e",
+      "label": "Security Mode Complete, neither K_NASint nor 32-bit COUNT in capture"
+    }
+  ]
+}

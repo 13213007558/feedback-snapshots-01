@@ -1,0 +1,33 @@
+{
+  "procedure": "mobility-registration-update",
+  "ue": "suci-0-001-01-0000-0-0-0000000001",
+  "keys": {
+    "K_NASint": "000102030405060708090a0b0c0d0e0f"
+  },
+  "algorithms": {
+    "integrity": 2
+  },
+  "records": [
+    {
+      "n": 1,
+      "dir": "UL",
+      "pdu": "7e01a21fd203037e004172000d0100f1100000000000000000f12e02e0e0",
+      "count": 3,
+      "label": "Registration Request (mobility update), authenticated UESecCap EA1/2/3 IA1/2/3"
+    },
+    {
+      "n": 2,
+      "dir": "DL",
+      "pdu": "7e0376e0d834047e005d0200028020",
+      "count": 4,
+      "label": "Security Mode Command EA0/IA2, echoed capability narrowed to EA0 + IA2"
+    },
+    {
+      "n": 3,
+      "dir": "UL",
+      "pdu": "7e038b72cbb8047e005e",
+      "count": 4,
+      "label": "Security Mode Complete"
+    }
+  ]
+}

@@ -350,6 +350,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *TS44018_IE*: structures for many information elements from TS 44.018
 * *TS44018_RR*: structures for the GSM and GPRS radio ressources messages from TS 44.018
 * *TS48058_Abis*: few IE structures for the GSM Abis protocol from TS 48.058
+* *NASSecAudit*: offline consistency audit of a captured 5G NAS security mode negotiation, with explicit evidence levels (cleartext / authenticated / unverified)
 
 
 pycrate_diameter
