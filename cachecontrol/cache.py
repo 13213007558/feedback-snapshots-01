@@ -63,6 +63,11 @@ class SeparateBodyBaseCache(BaseCache):
         cache.set_body(key)
 
     Similarly, the body should be loaded separately via ``get_body()``.
+
+    Implementations are encouraged to override :meth:`commit` so that a body
+    and its metadata become visible as a single, indivisible version: a
+    reader must never observe the metadata of one version alongside the body
+    of another.
     """
 
     def set_body(self, key: str, body: bytes) -> None:
@@ -73,3 +78,40 @@ class SeparateBodyBaseCache(BaseCache):
         Return the body as file-like object.
         """
         raise NotImplementedError()
+
+    def get_with_body(
+        self, key: str
+    ) -> tuple[bytes, IO[bytes]] | tuple[None, None]:
+        """Return ``(metadata, body_file)`` belonging to a single version.
+
+        A plain sequence of :meth:`get` followed by :meth:`get_body` can be
+        interleaved with a concurrent replacement, pairing the metadata of one
+        version with the body of another. Implementations that can replace a
+        body and its metadata atomically should override this method to
+        snapshot the two together. The default implementation preserves the
+        historical two-call behaviour for backends that cannot do better
+        (e.g. an in-memory dictionary where the body and metadata are one
+        value).
+        """
+        metadata = self.get(key)
+        if metadata is None:
+            return None, None
+        return metadata, self.get_body(key)
+
+    def commit(
+        self,
+        key: str,
+        metadata: bytes,
+        body: bytes,
+        expires: int | datetime | None = None,
+    ) -> None:
+        """Store ``metadata`` and ``body`` as one atomic, consistent version.
+
+        After this call returns, any subsequent :meth:`get` /
+        :meth:`get_body` pair must return the metadata and body of the same
+        version. The default implementation preserves the historical
+        ``set()`` then ``set_body()`` ordering; storage backends that can
+        guarantee stronger atomicity should override it.
+        """
+        self.set(key, metadata, expires=expires)
+        self.set_body(key, body)

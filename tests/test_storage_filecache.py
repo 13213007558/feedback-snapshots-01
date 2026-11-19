@@ -161,12 +161,15 @@ class TestSeparateBodyFileCache(FileCacheTestsMixin):
         assert response2.content == body
 
         # OK now let's violate some abstraction boundaries to make sure body
-        # actually came from separate file.
+        # actually came from separate file. The metadata never contains the
+        # payload, and the body lives in the file the metadata points at.
         with open(self.cache._fn(url), "rb") as f:
             assert body not in f.read()
-        with open(self.cache._fn(url) + ".body", "rb") as f:
+        body_path = self.cache._body_path(url)
+        assert body_path is not None
+        with open(body_path, "rb") as f:
             assert body == f.read()
-        with open(self.cache._fn(url) + ".body", "wb") as f:
+        with open(body_path, "wb") as f:
             f.write(b"CORRUPTED")
         response2 = sess.get(url)
         assert response2.from_cache

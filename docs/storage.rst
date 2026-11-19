@@ -66,6 +66,15 @@ The body of the request is stored in a separate file than metadata, and streamed
 
 It requires `filelock`_ be installed as it prevents multiple threads from writing to the same file at the same time.
 
+Each entry is published as an indivisible version: the body is fully written
+to a unique, immutable file first and only then referenced by an atomically
+replaced metadata file. A cache hit therefore always returns the headers,
+declared length and body bytes of the *same* version -- an interrupted
+download or two processes updating the same key at once can never splice old
+metadata onto a different body. Normal hits are still streamed from the body
+file. Body files from a publish that died before its metadata was committed
+can be reclaimed with the cache's ``gc()`` method.
+
 .. note::
 
   You can install this dependency automatically with pip

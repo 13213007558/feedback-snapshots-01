@@ -232,7 +232,9 @@ class TestCacheControllerResponse:
             )
         cache.set(self.url, data)
         with BytesIO(b"body") as body:
-            monkeypatch.setattr(cache, "get_body", Mock(return_value=body))
+            monkeypatch.setattr(
+                cache, "get_with_body", Mock(return_value=(data, body))
+            )
             assert cc._load_from_cache(self.req()) is None
             assert body.closed
 

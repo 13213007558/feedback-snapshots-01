@@ -153,15 +153,19 @@ class CacheController:
 
         cache_url = request.url
         assert cache_url is not None
-        cache_data = self.cache.get(cache_url)
+
+        if isinstance(self.cache, SeparateBodyBaseCache):
+            # Snapshot the metadata and the body file together so a concurrent
+            # replacement cannot splice one version's headers onto another
+            # version's body.
+            cache_data, body_file = self.cache.get_with_body(cache_url)
+        else:
+            cache_data = self.cache.get(cache_url)
+            body_file = None
+
         if cache_data is None:
             logger.debug("No cache entry available")
             return None
-
-        if isinstance(self.cache, SeparateBodyBaseCache):
-            body_file = self.cache.get_body(cache_url)
-        else:
-            body_file = None
 
         result: HTTPResponse | None = None
         try:
@@ -321,15 +325,20 @@ class CacheController:
         if isinstance(self.cache, SeparateBodyBaseCache):
             # We pass in the body separately; just put a placeholder empty
             # string in the metadata.
-            self.cache.set(
-                cache_url,
-                self.serializer.dumps(request, response, b""),
-                expires=expires_time,
-            )
+            serialized = self.serializer.dumps(request, response, b"")
             # body is None can happen when, for example, we're only updating
-            # headers, as is the case in update_cached_response().
-            if body is not None:
-                self.cache.set_body(cache_url, body)
+            # headers, as is the case in update_cached_response(). In that
+            # case the body already on disk must stay attached to the new
+            # metadata, so we only rewrite the metadata.
+            if body is None:
+                self.cache.set(cache_url, serialized, expires=expires_time)
+            else:
+                # Commit the body and its metadata as a single version: a
+                # concurrent reader must never pair this metadata with the
+                # previous (or a half-written) body.
+                self.cache.commit(
+                    cache_url, serialized, body, expires=expires_time
+                )
         else:
             self.cache.set(
                 cache_url,
