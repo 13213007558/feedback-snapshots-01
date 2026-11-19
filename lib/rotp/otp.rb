@@ -19,7 +19,10 @@ module ROTP
     #     Used in the provisioning URL
     # @option options provisioning_params [Hash] ({})
     #     Additional non-standard params you may want appended to the
-    #     provisioning URI. Ex. `image: 'https://example.com/icon.png'`
+    #     provisioning URI. Ex. `image: 'https://example.com/icon.png'`.
+    #     Keys matching a standard parameter (secret, issuer, algorithm,
+    #     digits, period, counter) in any case are ignored so extensions
+    #     cannot override the values used to generate codes.
     # @option options skip_default_uri_params [Boolean] (true)
     #     When true, parameters that match the RFC defaults (SHA1, 6 digits,
     #     30 second period) are omitted from the provisioning URI. Set to

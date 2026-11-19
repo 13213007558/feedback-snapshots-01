@@ -85,16 +85,22 @@ RSpec.describe ROTP::OTP::URI do
     expect(uri.to_s).to eq 'otpauth://totp/%20%20alice%40google.com?secret=JBSWY3DPEHPK3PXP'
   end
 
-  it 'replaces colons in the issuer with underscores' do
+  it 'percent-encodes colons in the issuer instead of rewriting them' do
     otp = ROTP::TOTP.new('JBSWY3DPEHPK3PXP', issuer: 'Big:Corporation')
     uri = described_class.new(otp, account_name: 'alice@bigco.com')
-    expect(uri.to_s).to eq 'otpauth://totp/Big_Corporation:alice%40bigco.com?secret=JBSWY3DPEHPK3PXP&issuer=Big_Corporation'
+    expect(uri.to_s).to eq 'otpauth://totp/Big%3ACorporation:alice%40bigco.com?secret=JBSWY3DPEHPK3PXP&issuer=Big%3ACorporation'
   end
 
-  it 'replaces colons in the account name with underscores' do
+  it 'percent-encodes colons in the account name instead of rewriting them' do
     otp = ROTP::TOTP.new('JBSWY3DPEHPK3PXP')
     uri = described_class.new(otp, account_name: 'Alice:Smith')
-    expect(uri.to_s).to eq 'otpauth://totp/Alice_Smith?secret=JBSWY3DPEHPK3PXP'
+    expect(uri.to_s).to eq 'otpauth://totp/Alice%3ASmith?secret=JBSWY3DPEHPK3PXP'
+  end
+
+  it 'omits an issuer that is empty after stripping' do
+    otp = ROTP::TOTP.new('JBSWY3DPEHPK3PXP', issuer: '   ')
+    uri = described_class.new(otp, account_name: 'alice@bigco.com')
+    expect(uri.to_s).to eq 'otpauth://totp/alice%40bigco.com?secret=JBSWY3DPEHPK3PXP'
   end
 
   it 'handles email account names with sub-addressing' do
