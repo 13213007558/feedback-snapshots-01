@@ -132,6 +132,34 @@ class takes the raw file contents in its constructor and implements:
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
 - `dump()` walks the hierarchy and writes each object to a file.
 
+## Checksum layers
+
+`uefi_firmware.checksum` checks the three checksums a firmware volume
+carries, one at a time. Each result records whether that layer matched,
+the raw offset of its stored checksum, and the byte range it covers:
+
+- `volume_header`: 16-bit sum over the header and block map, `[0, hdrlen)`,
+  stored at `0x32`.
+- `ffs_header`: 8-bit sum over a 24-byte FFS header (32 with the large-file
+  `ExtendedSize`), stored at `0x10`. Bytes `0x10`, `0x11` and the State byte
+  `0x17` are zero while summing.
+- `file_data`: 8-bit sum over the file body, stored at `0x11`. It exists
+  only when the file's attribute `0x40` is set; otherwise `0x11` is a fixed
+  filler (`0xAA` in FFS2, `0x5A` in FFS1) and the body is unchecked.
+
+```python
+from uefi_firmware.checksum import verify_volume, format_report
+
+print(format_report(verify_volume(image)))
+```
+
+There is no combined "this image is valid" result, by design. A volume
+header can match while a file inside it does not, and free space, file
+alignment padding and the contents of a volume extended header are outside
+every range. Checksums are not signatures: they use no key, name no
+publisher, and can be recomputed after an edit. A matching checksum means
+the bytes agree with a public sum, not that the vendor shipped them.
+
 ## Features
 
 Supported formats:
