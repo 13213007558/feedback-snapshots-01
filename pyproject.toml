@@ -82,7 +82,7 @@ find = { namespaces = false }
 target-version = "py39"
 line-length = 150
 indent-width = 4
-extend-exclude = [ "build", "dist", "docs" ]
+extend-exclude = [ "build", "dist", "docs", "examples" ]
 
 # Set what ruff should check for.
 # See https://docs.astral.sh//ruff/rules/ for a list of rules.

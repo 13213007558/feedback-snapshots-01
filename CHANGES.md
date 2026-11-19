@@ -98,6 +98,16 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **Strict Directive Validation**: Added opt-in strict validation of dict-based directives, shared
+between the site settings and the view decorators. Enable with `CSP_STRICT = True` to get a
+`csp.E003` system check for `CONTENT_SECURITY_POLICY`/`CONTENT_SECURITY_POLICY_REPORT_ONLY` and
+decoration-time `CSPStrictError` exceptions from `@csp`, `@csp_update` and `@csp_replace`. The
+validator distinguishes legal explicit removal (`None`), flag directives with ambiguous empty
+values, and conflicting `'none'` source combinations, and reports unknown directives that would be
+silently dropped. Deployer-specific extension directives can be registered with
+`CSP_EXTRA_DIRECTIVES`. Each diagnostic points back to the original config item. See
+`examples/strict_mode_example.py` for a runnable demonstration.
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 

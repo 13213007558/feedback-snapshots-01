@@ -12,6 +12,7 @@ from django.core.checks import Error, register
 from packaging.version import Version
 
 from csp.constants import NONCE
+from csp.strict import registered_extra_directives, strict_mode_enabled, validate_directives
 
 if TYPE_CHECKING:
     from django.apps.config import AppConfig
@@ -125,5 +126,40 @@ def check_exclude_url_prefixes_is_not_string(app_configs: Sequence[AppConfig] | 
                     id="csp.E002",
                 )
             )
+
+    return errors
+
+
+@register(checks.Tags.security)
+def check_strict_directives(app_configs: Sequence[AppConfig] | None, **kwargs: Any) -> list[Error]:
+    """
+    Validate DIRECTIVES in the dict-based settings when CSP_STRICT is enabled.
+
+    Reports directives that would be silently dropped, flag directives with
+    ambiguous empty values, and conflicting 'none' source combinations. Each
+    error points back to the original config item.
+    """
+    # Skip check for django-csp < 4.0.
+    if Version(version("django-csp")) < Version("4.0a1"):
+        return []
+
+    if not strict_mode_enabled():
+        return []
+
+    extra_directives = registered_extra_directives()
+    errors = []
+    keys = (
+        "CONTENT_SECURITY_POLICY",
+        "CONTENT_SECURITY_POLICY_REPORT_ONLY",
+    )
+    for key in keys:
+        config = getattr(settings, key, None)
+        if not isinstance(config, dict):
+            continue
+        directives = config.get("DIRECTIVES")
+        if not isinstance(directives, dict):
+            continue
+        for issue in validate_directives(directives, origin=f'{key}["DIRECTIVES"]', extra_directives=extra_directives):
+            errors.append(Error(str(issue), id="csp.E003"))
 
     return errors

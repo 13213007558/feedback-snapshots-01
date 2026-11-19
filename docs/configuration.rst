@@ -92,6 +92,53 @@ a more slightly strict policy and is used to test the policy without breaking th
         def my_view(request): ...
 
 
+Strict Validation
+=================
+
+Dict-based configuration is lenient by design: unknown directives are silently
+dropped, an empty value on a flag directive such as ``upgrade-insecure-requests``
+is rendered as a bare flag (silently enabling it), and ``'none'`` combined with
+other sources is ignored by browsers. To catch these before deploying, enable
+strict validation:
+
+.. code-block:: python
+
+    CSP_STRICT = True
+
+    # Deployer-specific extension directives that would otherwise be reported
+    # as unknown.
+    CSP_EXTRA_DIRECTIVES = ["x-acme-tracking"]
+
+With ``CSP_STRICT`` enabled, the same validation runs in two places:
+
+* A Django system check (``csp.E003``) validates ``DIRECTIVES`` in both
+  ``CONTENT_SECURITY_POLICY`` and ``CONTENT_SECURITY_POLICY_REPORT_ONLY``
+  when running ``manage.py check``.
+* The ``@csp``, ``@csp_update`` and ``@csp_replace`` decorators validate their
+  view-local policy at decoration time and raise
+  ``csp.exceptions.CSPStrictError`` on ambiguous config.
+
+Every diagnostic points back to the original config item, e.g.
+``CONTENT_SECURITY_POLICY["DIRECTIVES"]['upgrade-insecure-requests']`` or
+``@csp_replace on view 'my_view'['script-src']``.
+
+Strict validation distinguishes:
+
+* **Explicit removal** — a value of Python ``None`` is legal and unambiguous;
+  the directive is omitted from the header.
+* **Ambiguous flag values** — flag directives (``upgrade-insecure-requests``,
+  ``block-all-mixed-content``) must be ``True`` (enable) or ``None``/``False``
+  (omit). An empty list or empty string is rejected.
+* **Conflicting sources** — ``'none'`` combined with other sources is rejected,
+  as browsers ignore ``'none'`` in that case.
+* **Unknown directives** — rejected unless registered via
+  ``CSP_EXTRA_DIRECTIVES``.
+
+Without ``CSP_STRICT``, existing lenient configurations keep working unchanged.
+
+See ``examples/strict_mode_example.py`` for a runnable demonstration that ends
+with a summary of which directives are kept and which are removed.
+
 Policy Settings
 ===============
 

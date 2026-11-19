@@ -3,12 +3,24 @@ from __future__ import annotations
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
+from csp.strict import registered_extra_directives, strict_mode_enabled, validate_directives_or_raise
+
 if TYPE_CHECKING:
     from django.http import HttpResponseBase
 
     # A generic Django view function
     _VIEW_T = Callable[..., HttpResponseBase]
     _VIEW_DECORATOR_T = Callable[[_VIEW_T], _VIEW_T]
+
+
+def _strict_validate(config: dict[str, Any] | None, decorator_name: str, view_func: _VIEW_T) -> None:
+    """Run strict validation on a view-local policy when CSP_STRICT is enabled."""
+    if config and strict_mode_enabled():
+        validate_directives_or_raise(
+            config,
+            origin=f"@{decorator_name} on view {view_func.__qualname__!r}",
+            extra_directives=registered_extra_directives(),
+        )
 
 
 def csp_exempt(REPORT_ONLY: bool | None = None) -> _VIEW_DECORATOR_T:
@@ -47,6 +59,8 @@ def csp_update(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, 
         raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp_update"))
 
     def decorator(f: _VIEW_T) -> _VIEW_T:
+        _strict_validate(config, "csp_update", f)
+
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
@@ -66,6 +80,8 @@ def csp_replace(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False,
         raise RuntimeError(DECORATOR_DEPRECATION_ERROR.format(fname="csp_replace"))
 
     def decorator(f: _VIEW_T) -> _VIEW_T:
+        _strict_validate(config, "csp_replace", f)
+
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
@@ -90,6 +106,8 @@ def csp(config: dict[str, Any] | None = None, REPORT_ONLY: bool = False, **kwarg
         processed_config = {k: [v] if isinstance(v, str) else v for k, v in config.items()}
 
     def decorator(f: _VIEW_T) -> _VIEW_T:
+        _strict_validate(config, "csp", f)
+
         @wraps(f)
         def _wrapped(*a: Any, **kw: Any) -> HttpResponseBase:
             resp = f(*a, **kw)
