@@ -5,4 +5,5 @@ python-doubleratchet - A Python implementation of the Double Ratchet algorithm.
     installation
     getting_started
     serialization_and_migration
+    send_failure_contract
     API Documentation <doubleratchet/package>

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- Documented the send failure contract: failure before/after message key derivation, retry semantics and
+  recovery from skipped sending chain indices
+- `examples/send_failure_contract.py` and `tests/test_send_failure_contract.py` demonstrating the contract
+  with two live parties
+
+### Fixed
+- `encrypt_message` and `decrypt_message` are now serialized per instance, preventing a concurrent receive
+  from rolling back a concurrent send and reusing a message key
+- `KDFChain.step` now rejects KDF output of the wrong length before advancing the chain
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed

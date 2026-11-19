@@ -115,11 +115,23 @@ class KDFChain:
 
         Returns:
             ``length`` bytes of output data, derived from the internal KDF key and the input data.
+
+        Raises:
+            ValueError: if the KDF returns a different number of bytes than requested. In this case, the
+                chain is left unchanged.
         """
 
         key_length = len(self.__key)
 
         output_data = await self.__kdf.derive(self.__key, data, key_length + length)
+
+        # A KDF that returns a different number of bytes than requested is unusable. Reject it before
+        # touching the chain state: the step must either produce exactly the requested output and advance
+        # the chain, or leave the chain completely unchanged.
+        if len(output_data) != key_length + length:
+            raise ValueError(
+                f"The KDF returned {len(output_data)} bytes, but {key_length + length} bytes were requested."
+            )
 
         self.__length += 1
         self.__key = output_data[:key_length]

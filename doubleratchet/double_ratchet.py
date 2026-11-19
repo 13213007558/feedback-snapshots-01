@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+import asyncio
 import copy
 import itertools
 import json
@@ -42,6 +43,13 @@ class DoubleRatchet(ABC):
         self.__skipped_message_keys: SkippedMessageKeys
         self.__aead: Type[AEAD]
         self.__diffie_hellman_ratchet: DiffieHellmanRatchet
+
+        # Sending and receiving both mutate the Diffie-Hellman ratchet, and receiving replaces it with a
+        # clone on success. Without serialization, a concurrent send could advance a chain that a concurrent
+        # receive then overwrites with its older clone, causing message keys to be handed out twice. The lock
+        # is deliberately not part of the serialized state.
+        self.__operation_lock: Optional[asyncio.Lock] = None
+        self.__operation_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
     @classmethod
     async def encrypt_initial_message(
@@ -213,6 +221,25 @@ class DoubleRatchet(ABC):
         """
 
         return self.__diffie_hellman_ratchet.receiving_chain_length
+
+    def __get_operation_lock(self) -> asyncio.Lock:
+        """
+        Returns:
+            The lock serializing sending and receiving on this instance, bound to the current event loop.
+
+        Note:
+            The lock is created lazily because it binds to one event loop on first use. A restored instance
+            may be used from a different loop than the one it was serialized in, so a lock bound to another
+            loop is replaced. Concurrent use from multiple event loops is not supported, as the ratchet
+            state itself is not synchronized across loops.
+        """
+
+        loop = asyncio.get_running_loop()
+        if self.__operation_lock is None or self.__operation_lock_loop is not loop:
+            self.__operation_lock = asyncio.Lock()
+            self.__operation_lock_loop = loop
+
+        return self.__operation_lock
 
     ####################
     # abstract methods #
@@ -393,16 +420,31 @@ class DoubleRatchet(ABC):
 
         Returns:
             The encrypted message including the header to send to the recipient.
+
+        Note:
+            Deriving the message key advances the sending chain and is not undone if encryption or the
+            caller's subsequent transmission fails. A failed send therefore consumes exactly one message
+            key: retrying with :meth:`encrypt_message` uses the next key and the next header index, it never
+            reuses the key of the failed attempt. Use the returned message index to detect gaps on the
+            receiving side, which handles messages that were never delivered via its skipped message keys.
+
+        Raises:
+            Exception: any exception raised by the KDF or the AEAD implementation. If the exception happens
+                before the message key was derived (e.g. in the KDF), the sending chain is unchanged and the
+                next attempt uses the same index. If it happens after the message key was derived (e.g. in
+                the AEAD), the key is spent and the next attempt uses the next index, regardless of whether
+                a ciphertext was produced or transmitted.
         """
 
-        message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
-        ciphertext = await self.__aead.encrypt(
-            message,
-            message_key,
-            self._build_associated_data(associated_data, header)
-        )
+        async with self.__get_operation_lock():
+            message_key, header = await self.__diffie_hellman_ratchet.next_encryption_key()
+            ciphertext = await self.__aead.encrypt(
+                message,
+                message_key,
+                self._build_associated_data(associated_data, header)
+            )
 
-        return EncryptedMessage(header=header, ciphertext=ciphertext)
+            return EncryptedMessage(header=header, ciphertext=ciphertext)
 
     async def decrypt_message(self, message: EncryptedMessage, associated_data: bytes) -> bytes:
         """
@@ -427,41 +469,45 @@ class DoubleRatchet(ABC):
         # clone on success.
         # https://signal.org/docs/specifications/doubleratchet/#decrypting-messages
 
-        diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
-        skipped_message_keys: Optional[SkippedMessageKeys] = None
-        skipped_message_key_key = (message.header.ratchet_pub, message.header.sending_chain_length)
+        # The lock keeps a concurrent send from advancing the sending chain between the clone and the
+        # replacement below, which would otherwise silently roll the sending chain back.
+        async with self.__get_operation_lock():
+            diffie_hellman_ratchet = copy.deepcopy(self.__diffie_hellman_ratchet)
+            skipped_message_keys: Optional[SkippedMessageKeys] = None
+            skipped_message_key_key = (message.header.ratchet_pub, message.header.sending_chain_length)
 
-        # Get the message key, either from the skipped message keys or from the Diffie-Hellman ratchet clone
-        message_key: bytes
-        try:
-            message_key = self.__skipped_message_keys[skipped_message_key_key]
-        except KeyError:
-            message_key, skipped_message_keys = \
-                await diffie_hellman_ratchet.next_decryption_key(message.header)
+            # Get the message key, either from the skipped message keys or from the Diffie-Hellman ratchet
+            # clone
+            message_key: bytes
+            try:
+                message_key = self.__skipped_message_keys[skipped_message_key_key]
+            except KeyError:
+                message_key, skipped_message_keys = \
+                    await diffie_hellman_ratchet.next_decryption_key(message.header)
 
-        # Decrypt the message (or at least attempt to do so). At this point, the internal state of this
-        # instance remains untouched.
-        plaintext = await self.__aead.decrypt(
-            message.ciphertext,
-            message_key,
-            self._build_associated_data(associated_data, message.header)
-        )
+            # Decrypt the message (or at least attempt to do so). At this point, the internal state of this
+            # instance remains untouched.
+            plaintext = await self.__aead.decrypt(
+                message.ciphertext,
+                message_key,
+                self._build_associated_data(associated_data, message.header)
+            )
 
-        # Following decryption success, apply relevant changes to the internal state.
+            # Following decryption success, apply relevant changes to the internal state.
 
-        # In case a skipped message key was used, remove it.
-        self.__skipped_message_keys.pop(skipped_message_key_key, None)
+            # In case a skipped message key was used, remove it.
+            self.__skipped_message_keys.pop(skipped_message_key_key, None)
 
-        # Store new skipped message keys and limit their number.
-        if skipped_message_keys is not None:
-            self.__skipped_message_keys.update(skipped_message_keys)
-            self.__skipped_message_keys = OrderedDict(itertools.islice(
-                self.__skipped_message_keys.items(),
-                max(len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys, 0),
-                None
-            ))
+            # Store new skipped message keys and limit their number.
+            if skipped_message_keys is not None:
+                self.__skipped_message_keys.update(skipped_message_keys)
+                self.__skipped_message_keys = OrderedDict(itertools.islice(
+                    self.__skipped_message_keys.items(),
+                    max(len(self.__skipped_message_keys) - self.__max_num_skipped_message_keys, 0),
+                    None
+                ))
 
-        # Store the clone.
-        self.__diffie_hellman_ratchet = diffie_hellman_ratchet
+            # Store the clone.
+            self.__diffie_hellman_ratchet = diffie_hellman_ratchet
 
-        return plaintext
+            return plaintext
