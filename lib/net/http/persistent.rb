@@ -148,6 +148,22 @@ autoload :OpenSSL, 'openssl'
 # thread is done making requests.  If you don't call shutdown, that's OK.
 # Ruby will automatically garbage collect and shutdown your HTTP connections
 # when the thread terminates.
+#
+# === Streaming Responses
+#
+# When #request is called with a block the response body is handed to it
+# without being read first.  The connection is only returned to the pool when
+# the body was consumed completely.  If the block exits early the remaining
+# body is read to the end when its socket position is still known, and the
+# connection is closed otherwise:
+#
+# * an exception, Thread#raise or Thread#kill aborts the response and closes
+#   the connection
+# * a +break+ or +throw+ from inside <code>response.read_body</code> closes
+#   the connection, as the position within the body is unknown
+# * a +break+ or +throw+ before the body was touched drains the remaining
+#   body and keeps the connection
+# * a body shorter than its Content-Length closes the connection
 
 class Net::HTTP::Persistent
 
@@ -637,7 +653,15 @@ class Net::HTTP::Persistent
       net_http_args.concat [nil, nil, nil, nil]
     end
 
-    connection = @pool.checkout net_http_args
+    connection = nil
+
+    # Checkout and checkin must not be interrupted by Thread#raise or
+    # Thread#kill, otherwise a borrowed connection may never be returned.
+    # Opening, resetting and the caller's block stay interruptible so
+    # timeouts raised from another thread still work.
+    Thread.handle_interrupt Exception => :never do
+      connection = @pool.checkout net_http_args
+    end
 
     begin
       http = connection.http
@@ -681,7 +705,9 @@ class Net::HTTP::Persistent
 
       raise Error, "host down: #{address}:#{port}"
     ensure
-      @pool.checkin net_http_args
+      Thread.handle_interrupt Exception => :never do
+        @pool.checkin net_http_args
+      end
     end
   end
 
@@ -936,11 +962,38 @@ class Net::HTTP::Persistent
   end
 
   ##
+  # Tracks how much of a streamed response body a caller's block consumed.
+  #
+  # A connection may only be returned to the pool for reuse when the response
+  # body was consumed completely.  Otherwise the remaining bytes would be read
+  # as part of the next response on that connection.
+
+  class RequestBodyState # :nodoc:
+    attr_accessor :response
+    attr_accessor :started
+    attr_accessor :finished
+    attr_accessor :aborted
+    attr_accessor :bytes
+
+    def initialize
+      @response = nil
+      @started  = false
+      @finished = false
+      @aborted  = false
+      @bytes    = 0
+    end
+  end
+
+  ##
   # Makes a request on +uri+.  If +req+ is nil a Net::HTTP::Get is performed
   # against +uri+.
   #
   # If a block is passed #request behaves like Net::HTTP#request (the body of
   # the response will not have been read).
+  #
+  # A connection is only returned to the pool when its response was consumed
+  # completely.  When the block exits early the remaining body is drained when
+  # its position is still known and the connection is closed otherwise.
   #
   # +req+ must be a Net::HTTPGenericRequest subclass (see Net::HTTP for a list).
 
@@ -948,26 +1001,42 @@ class Net::HTTP::Persistent
     uri      = URI uri
     req      = request_setup req || uri
     response = nil
+    state    = RequestBodyState.new if block
 
     connection_for uri do |connection|
-      http = connection.http
+      http   = connection.http
+      closed = false
 
       begin
         connection.requests += 1
 
-        response = http.request req, &block
+        response = http.request req, &track_body(state, block)
+
+        state.response ||= response if state
 
         if req.connection_close? or
           (response.http_version <= '1.0' and
             not response.connection_keep_alive?) or
-            response.connection_close? then
-          finish connection
+            response.connection_close? or
+            not body_consumed?(state, response) then
+          closed = true
+          discard_connection connection
         end
-      rescue Exception # make sure to close the connection when it was interrupted
-        finish connection
+      rescue Exception # close the connection when the request was interrupted
+        unless closed
+          closed = true
+          discard_connection connection
+        end
 
         raise
       ensure
+        unless closed
+          closed = true
+          # The response body was not consumed completely, so the remaining
+          # bytes must not reach the next request on this connection.
+          discard_connection connection unless body_consumed?(state, response)
+        end
+
         connection.last_use = Time.now
       end
     end
@@ -975,6 +1044,226 @@ class Net::HTTP::Persistent
     @http_versions["#{uri.hostname}:#{uri.port}"] ||= response.http_version
 
     response
+  end
+
+  ##
+  # Closes +connection+ so it will not be reused with unread response bytes.
+  #
+  # Interrupts are masked so the cleanup and the following checkin complete
+  # even when the calling thread is being killed.
+  #
+  # :nodoc:
+
+  def discard_connection connection
+    Thread.handle_interrupt Exception => :never do
+      finish connection
+    end
+  end
+
+  ##
+  # Returns true when the response body was consumed completely, so the
+  # connection may be reused.
+  #
+  # +state+ is nil when the caller did not pass a block, in which case
+  # Net::HTTP has read the entire body before returning.
+  #
+  # :nodoc:
+
+  def body_consumed? state, response
+    return complete_body?(response) unless state
+
+    response = state.response || response
+    return false unless response
+    return false if state.aborted
+    return false unless state.finished
+
+    return true if response.instance_variable_get(:@body_exist) == false
+
+    length = response.content_length
+    return true if length.nil? # read to the end of a chunked or EOF body
+
+    state.bytes == length
+  rescue StandardError
+    false
+  end
+
+  ##
+  # Returns true when +response+'s body matches its Content-Length.
+  #
+  # A short body means the peer closed the connection before sending the
+  # whole response, so the connection must not be reused.
+  #
+  # :nodoc:
+
+  def complete_body? response
+    return true unless response
+
+    return true if response.instance_variable_get(:@body_exist) == false
+
+    body = response.body
+    return true if body.nil? or not body.respond_to?(:bytesize)
+
+    length = response.content_length
+    return true if length.nil?
+
+    body.bytesize == length
+  rescue StandardError
+    false
+  end
+
+  ##
+  # Wraps the caller's request block so the consumption of the response body
+  # can be observed.
+  #
+  # Returns nil when the caller did not pass a block.
+  #
+  # :nodoc:
+
+  def track_body state, block
+    return nil unless block
+
+    proc do |response|
+      state.response ||= response
+      observe_body state, response
+
+      completed = false
+
+      begin
+        result = block.call response
+        completed = true
+        result
+      ensure
+        unless completed
+          if $! or Thread.current.status == 'aborting' then
+            # An exception or Thread#kill: the connection outcome is unknown,
+            # it will be closed.
+            abort_body state, response
+          elsif state.started and not state.finished then
+            # break/throw out of a partially read body: the socket position
+            # is no longer known, so the connection must be closed.
+            abort_body state, response
+          else
+            # break/throw before touching the body.  The socket position is
+            # still known, so draining the body keeps the connection clean.
+            drain_body state, response
+          end
+        end
+      end
+    end
+  end
+
+  ##
+  # Reads the rest of +response+'s body while no caller code is running.
+  #
+  # On success the connection may be reused.  Any failure marks the response
+  # body as unusable so the connection will be closed.
+  #
+  # :nodoc:
+
+  def drain_body state, response
+    return if state.finished
+
+    Thread.handle_interrupt Exception => :never do
+      begin
+        response.read_body
+      rescue Exception
+        abort_body state, response
+      end
+    end
+  end
+
+  ##
+  # Installs body-consumption tracking on +response+.
+  #
+  # :nodoc:
+
+  def observe_body state, response
+    original = response.method :read_body
+
+    response.define_singleton_method :read_body do |dest = nil, &chunk|
+      if state.aborted then
+        if dest or chunk then
+          raise IOError, "#{self.class}\#read_body called twice"
+        end
+
+        return instance_variable_get :@body
+      elsif state.finished then
+        # Already consumed, behave like the original method, particularly for
+        # the Net::HTTPResponse#reading_body call that follows the user block.
+        return original.call dest, &chunk
+      end
+
+      state.started = true
+      completed     = false
+
+      begin
+        result = if chunk then
+          delivered = proc do |part|
+            state.bytes += part.bytesize
+            chunk.call part
+          end
+
+          original.call dest, &delivered
+        elsif dest then
+          counter = CountingDestination.new dest
+          value   = original.call counter
+
+          state.bytes += counter.bytes
+
+          # Keep the caller's own object as the response body.
+          if instance_variable_get(:@body).equal? counter then
+            instance_variable_set :@body, dest
+          end
+
+          value
+        else
+          value = original.call
+          state.bytes += value.bytesize if value.respond_to?(:bytesize)
+          value
+        end
+
+        completed      = true
+        state.finished = true
+        result
+      ensure
+        unless completed
+          state.aborted = true
+          # Prevent Net::HTTPResponse#reading_body from guessing where the
+          # body ends and reading into the next response on this connection.
+          instance_variable_set :@read, true
+        end
+      end
+    end
+  end
+
+  ##
+  # Forwards body fragments to a caller's destination while counting them.
+  #
+  # :nodoc:
+
+  class CountingDestination
+    attr_reader :bytes
+
+    def initialize dest
+      @dest  = dest
+      @bytes = 0
+    end
+
+    def << part
+      @bytes += part.bytesize
+      @dest << part
+      self
+    end
+  end
+
+  ##
+  # Marks the response body as unusable and stops any further reads.
+  #
+  # :nodoc:
+
+  def abort_body state, response
+    state.aborted = true
+    response.instance_variable_set :@read, true
   end
 
   ##

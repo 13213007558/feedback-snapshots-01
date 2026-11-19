@@ -1,3 +1,16 @@
+=== 4.0.8 / 2026-11-19
+
+Bug fixes:
+
+* Close connections whose streamed response body was interrupted instead of
+  returning unread bytes to the pool.  A block exiting via an exception,
+  break, throw, Thread#raise or Thread#kill at a partially read body, and a
+  body shorter than its Content-Length now close the connection.  Exiting
+  before the body was touched drains it and keeps the connection.
+
+* Do not let Thread#raise or Thread#kill interrupt pool checkout, checkin or
+  connection cleanup, so borrowed connections are always returned.
+
 === 4.0.6 / 2024-12-04
 
 Bug fixes:
