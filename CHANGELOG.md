@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- `doubleratchet.migration_tools`: verifiable, lossless migration of pre-stable Double Ratchet JSON state.
+  Adds a read-only `preflight_check` that classifies archives and rejects ambiguous versions, missing keys and
+  contradictory data; `migrate_json`/`migrate_json_file` that preserve skipped message keys, chains and
+  counters, keep a byte-for-byte backup and never overwrite the original on failure; and `redact_archive` for
+  secret-free logging. Missing key material is reported, never replaced with randomly generated keys.
+- `tests/test_migration_path.py` and `examples/migrate_session.py`: end-to-end coverage of pre/post-upgrade
+  out-of-order message recovery, mutual replies and duplicate-message rejection after migration.
+
 ### Changed
 - Import certain typing features directly from typing rather than typing-extensions
 - Only require typing-extensions when it's really needed

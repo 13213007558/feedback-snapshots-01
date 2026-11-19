@@ -8,6 +8,7 @@ Package: doubleratchet
     Module: kdf_chain <kdf_chain>
     Module: kdf <kdf>
     Module: migrations <migrations>
+    Module: migration_tools <migration_tools>
     Module: models <models>
     Module: symmetric_key_ratchet <symmetric_key_ratchet>
     Module: types <types>

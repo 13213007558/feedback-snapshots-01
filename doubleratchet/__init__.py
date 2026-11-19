@@ -14,6 +14,20 @@ from .double_ratchet import DoubleRatchet as DoubleRatchet
 from .kdf import KDF as KDF
 from .kdf_chain import KDFChain as KDFChain
 from .migrations import InconsistentSerializationException as InconsistentSerializationException
+from .migration_tools import (
+    MigrationError as MigrationError,
+    MigrationResult as MigrationResult,
+    PRE_STABLE as PRE_STABLE,
+    PreflightReport as PreflightReport,
+    STABLE as STABLE,
+    UNKNOWN_FORMAT as UNKNOWN_FORMAT,
+    detect_format as detect_format,
+    migrate_json as migrate_json,
+    migrate_json_file as migrate_json_file,
+    preflight_check as preflight_check,
+    redact_archive as redact_archive,
+    strict_parse_double_ratchet as strict_parse_double_ratchet
+)
 from .models import (
     DiffieHellmanRatchetModel as DiffieHellmanRatchetModel,
     DoubleRatchetModel as DoubleRatchetModel,
