@@ -134,6 +134,34 @@ JSON Output:
 ]
 ```
 
+## Bounded Witness Generation
+
+`plyara.witness` turns a parsed rule into a short candidate byte string, or reports that the bounded
+search did not find one. It never runs YARA or another solver; a separate byte matcher in the same
+module re-checks each candidate.
+
+```python
+import plyara
+from plyara.witness import generate_witness
+
+rule = plyara.Plyara().parse_string(
+    'rule demo { strings: $a = "MZ" $b = { 90 [1-2] C3 } '
+    'condition: $b at 0 and $a in (4..8) and filesize >= 8 }'
+)[0]
+
+result = generate_witness(rule, max_length=64)
+print(result.status, result.candidate_hex)
+print(result.evidence)
+```
+
+The status is one of `witness`, `no_witness_within_bound` or `undecided`. The supported fragment
+contains text and bounded hex strings, `and`/`or`/`not`, `at`, `in` and `filesize` comparisons.
+Regular expressions, unbounded hex jumps, string modifiers, module functions and other constructs
+are reported as `undecided`. `no_witness_within_bound` means only that the finite search failed; it
+is not a proof that the rule is unsatisfiable for every input. `result.bound` records the length and
+candidate budgets plus the work performed, and `result.evidence` records the atoms satisfied by a
+witness.
+
 # Additional Information
 
 ## Reusing The Parser
