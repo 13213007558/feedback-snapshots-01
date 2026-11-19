@@ -46,7 +46,7 @@ a more slightly strict policy and is used to test the policy without breaking th
     from csp.constants import NONE, SELF
 
     CONTENT_SECURITY_POLICY = {
-        "EXCLUDE_URL_PREFIXES": ["/excluded-path/"],
+        "EXCLUDE_URLS": ["/excluded-path"],
         "DIRECTIVES": {
             "default-src": [SELF, "cdn.example.net"],
             "frame-ancestors": [SELF],
@@ -56,7 +56,7 @@ a more slightly strict policy and is used to test the policy without breaking th
     }
 
     CONTENT_SECURITY_POLICY_REPORT_ONLY = {
-        "EXCLUDE_URL_PREFIXES": ["/excluded-path/"],
+        "EXCLUDE_URLS": ["/excluded-path"],
         "DIRECTIVES": {
             "default-src": [NONE],
             "connect-src": [SELF],
@@ -98,9 +98,31 @@ Policy Settings
 At the top level of the policy dictionary, these are the keys that can be used to configure the
 policy.
 
-``EXCLUDE_URL_PREFIXES``
-    A ``tuple`` or ``list`` of URL prefixes to exclude from CSP protection. URLs beginning with any
-    of these strings will not get the Content-Security-Policy response headers at all.
+``EXCLUDE_URLS``
+    A ``tuple`` or ``list`` of URL path patterns to exclude from CSP protection. Each pattern is
+    matched against **whole URL path segments** of the path Django hands to the view
+    (``request.path_info``), so deployment under a sub-path does not change the result.
+
+    A pattern matches the directory itself and every sub-path beneath it, but never a sibling
+    directory whose name merely starts with the same characters. For example,
+    ``EXCLUDE_URLS = ["/reports"]`` excludes:
+
+    * ``/reports`` (the directory itself)
+    * ``/reports/assets/logo.png`` (its sub-paths)
+
+    while the sibling directory ``/reports-backup/secret.js`` keeps its CSP headers.
+
+    Patterns must:
+
+    * start with ``/`` (for example, ``"/admin"`` rather than ``"admin"``);
+    * not end with ``/`` — write ``"/admin"``, not ``"/admin/"``;
+    * be literal paths — glob or regex characters (``*``, ``?``, ``[``, ``]``) are not supported.
+
+    The root path ``"/"`` is valid and matches every path on the site. Misconfigured patterns raise
+    a system check error (``csp.E004``) instead of being silently interpreted.
+
+    The enforced policy (``CONTENT_SECURITY_POLICY``) and the report-only policy
+    (``CONTENT_SECURITY_POLICY_REPORT_ONLY``) each evaluate their own list independently.
 
     .. warning::
 
@@ -108,6 +130,18 @@ policy.
        The typical browser security model for JavaScript considers all paths alike. A Cross-Site
        Scripting flaw on, e.g., ``excluded-page/`` can therefore be leveraged to access everything
        on the same origin.
+
+``EXCLUDE_URL_PREFIXES``
+    .. deprecated:: 4.1
+
+       Use ``EXCLUDE_URLS`` instead. A system check warning (``csp.W003``) is raised when this
+       setting is present.
+
+    A ``tuple`` or ``list`` of URL prefixes matched as **character prefixes** against
+    ``request.path_info``. Because matching is purely textual, ``"/reports"`` also excludes a
+    sibling directory such as ``/reports-backup``, which is usually unintended. The setting keeps
+    working for backwards compatibility while configurations are migrated to the path-segment based
+    ``EXCLUDE_URLS``.
 
 ``REPORT_PERCENTAGE``
     Percentage of requests that should see the ``report-uri`` directive.  Use this to throttle the

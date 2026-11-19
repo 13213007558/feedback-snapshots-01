@@ -2,7 +2,13 @@ from django.test.utils import override_settings
 from django.utils.functional import lazy
 
 from csp.constants import NONCE, NONE, SELF
-from csp.utils import DEFAULT_DIRECTIVES, build_policy, default_config
+from csp.utils import (
+    DEFAULT_DIRECTIVES,
+    build_policy,
+    default_config,
+    url_is_excluded,
+    url_matches_pattern,
+)
 
 
 def policy_eq(a: str, b: str) -> None:
@@ -375,3 +381,32 @@ def test_boolean_directives() -> None:
         with override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {directive: False}}):
             policy = build_policy()
             policy_eq("default-src 'self'", policy)
+
+
+def test_url_matches_pattern_directory_and_sub_paths() -> None:
+    assert url_matches_pattern("/reports", "/reports")
+    assert url_matches_pattern("/reports/assets/logo.png", "/reports")
+    assert url_matches_pattern("/reports/assets", "/reports/assets")
+
+
+def test_url_does_not_match_prefixed_sibling() -> None:
+    assert not url_matches_pattern("/reports-backup/secret.js", "/reports")
+    assert not url_matches_pattern("/reporting", "/reports")
+
+
+def test_url_does_not_match_parent_or_unrelated_path() -> None:
+    assert not url_matches_pattern("/reports", "/reports/assets")
+    assert not url_matches_pattern("/elsewhere", "/reports")
+
+
+def test_url_matches_pattern_root() -> None:
+    assert url_matches_pattern("/", "/")
+    assert url_matches_pattern("/anything/here", "/")
+
+
+def test_url_is_excluded_combines_legacy_prefixes_and_segment_patterns() -> None:
+    assert url_is_excluded("/reports", patterns=["/reports"])
+    assert url_is_excluded("/reports/x", patterns=["/reports"])
+    assert not url_is_excluded("/reports-backup/x", patterns=["/reports"])
+    assert url_is_excluded("/reports-backup/x", prefixes=["/reports"])
+    assert not url_is_excluded("/elsewhere", prefixes=["/reports"], patterns=["/reports"])

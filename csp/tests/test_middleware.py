@@ -79,6 +79,90 @@ def test_exclude() -> None:
     assert HEADER not in response
 
 
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URLS": ["/reports"]})
+def test_exclude_urls_matches_directory_itself() -> None:
+    request = rf.get("/reports")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER not in response
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URLS": ["/reports"]})
+def test_exclude_urls_matches_sub_paths() -> None:
+    request = rf.get("/reports/assets/logo.png")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER not in response
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URLS": ["/reports"]})
+def test_exclude_urls_does_not_match_prefixed_sibling() -> None:
+    # A sibling directory that only shares the character prefix must stay protected.
+    request = rf.get("/reports-backup/secret.js")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER in response
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URLS": ["/reports/assets"]})
+def test_exclude_urls_does_not_match_parent_directory() -> None:
+    request = rf.get("/reports")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER in response
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URLS": ["/reports"]})
+def test_exclude_urls_uses_path_info_under_sub_path_deployment() -> None:
+    # Deployed under /sub, Django hands "/reports" to the view even though the full path is
+    # "/sub/reports". The exclusion must follow request.path_info, not request.path.
+    request = rf.get("/reports", SCRIPT_NAME="/sub")
+    assert request.path == "/sub/reports"
+    assert request.path_info == "/reports"
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER not in response
+
+    sibling = rf.get("/reports-backup/secret.js", SCRIPT_NAME="/sub")
+    sibling_response = HttpResponse()
+    mw.process_response(sibling, sibling_response)
+    assert HEADER in sibling_response
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": ["example.com"]}, "EXCLUDE_URLS": ["/reports"]},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF]}},
+)
+def test_enforced_and_report_only_exclusions_are_evaluated_separately() -> None:
+    request = rf.get("/reports")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    # Only the enforced policy excludes this URL; the report-only header is still sent.
+    assert HEADER not in response
+    assert HEADER_REPORT_ONLY in response
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": ["example.com"]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF]}, "EXCLUDE_URLS": ["/reports"]},
+)
+def test_report_only_exclusion_does_not_disable_enforced_header() -> None:
+    request = rf.get("/reports")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER in response
+    assert HEADER_REPORT_ONLY not in response
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"EXCLUDE_URL_PREFIXES": ["/reports"]})
+def test_legacy_prefix_exclusion_still_matches_sibling() -> None:
+    # The legacy setting keeps its character-prefix behaviour until sites migrate.
+    request = rf.get("/reports-backup/secret.js")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert HEADER not in response
+
+
 @override_settings(
     CONTENT_SECURITY_POLICY=None,
     CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF]}},

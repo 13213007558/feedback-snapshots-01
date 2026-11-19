@@ -6,7 +6,7 @@ import os
 import warnings
 from dataclasses import asdict, dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
@@ -14,7 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.utils import DIRECTIVES_T, build_policy, url_is_excluded
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -70,6 +70,17 @@ class CSPMiddleware(MiddlewareMixin):
         nonce = partial(self._make_nonce, request)
         setattr(request, "csp_nonce", CheckableLazyObject(nonce))
 
+    @staticmethod
+    def _is_excluded(request: HttpRequest, policy: dict[str, Any] | None) -> bool:
+        config = policy or {}
+        # Match against `request.path_info`, the path Django hands to the view,
+        # so deployment under a sub-path does not change which URLs are excluded.
+        return url_is_excluded(
+            path=request.path_info,
+            prefixes=config.get("EXCLUDE_URL_PREFIXES", None) or (),
+            patterns=config.get("EXCLUDE_URLS", None) or (),
+        )
+
     def process_response(self, request: HttpRequest, response: HttpResponseBase) -> HttpResponseBase:
         # Check for debug view
         exempted_debug_codes = (
@@ -79,27 +90,25 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
+        policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
         policy_parts = self.get_policy_parts(request=request, response=response)
         csp = build_policy(**asdict(policy_parts))
         if csp:
-            # Only set header if not already set and not an excluded prefix and not exempted.
+            # Only set header if not already set and not an excluded URL and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt", False) is False
             no_header = HEADER not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
+            is_not_excluded = not self._is_excluded(request, policy)
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER] = csp
 
+        policy_ro = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
         csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
         if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
+            # Only set header if not already set and not an excluded URL and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
             no_header = HEADER_REPORT_ONLY not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
+            is_not_excluded = not self._is_excluded(request, policy_ro)
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER_REPORT_ONLY] = csp_ro
 

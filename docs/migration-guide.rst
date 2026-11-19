@@ -90,7 +90,7 @@ The new settings would be:
     from csp.constants import SELF
 
     CONTENT_SECURITY_POLICY = {
-        "EXCLUDE_URL_PREFIXES": ["/admin"],
+        "EXCLUDE_URLS": ["/admin"],
         "DIRECTIVES": {
             "default-src": [SELF, "*.example.com"],
             "script-src": [SELF, "js.cdn.com/example/"],
@@ -190,6 +190,36 @@ decorator now requires parentheses when used with and without arguments. For exa
 
 Look for uses of the following decorators in your code: ``@csp``, ``@csp_update``, ``@csp_replace``,
 and ``@csp_exempt``.
+
+Migrating EXCLUDE_URL_PREFIXES to EXCLUDE_URLS
+==============================================
+
+The ``EXCLUDE_URL_PREFIXES`` setting matches character prefixes, so a prefix such as
+``"/reports"`` also excludes sibling directories like ``"/reports-backup"``. The replacement
+``EXCLUDE_URLS`` setting matches whole URL path segments instead.
+
+Rename the key and drop any trailing slash. A pattern matches the directory itself and every
+sub-path beneath it:
+
+.. code-block:: python
+
+    # Before
+    CONTENT_SECURITY_POLICY = {
+        "EXCLUDE_URL_PREFIXES": ["/reports/"],
+        "DIRECTIVES": {...},
+    }
+
+    # After
+    CONTENT_SECURITY_POLICY = {
+        "EXCLUDE_URLS": ["/reports"],
+        "DIRECTIVES": {...},
+    }
+
+With the new configuration, ``/reports`` and ``/reports/assets/logo.png`` are excluded while
+``/reports-backup/secret.js`` keeps its CSP headers. Patterns must start with ``/``, must not end
+with ``/`` and must be literal paths; ambiguous entries fail the system checks with ``csp.E004``
+rather than being treated as the new rule. Using the old setting raises the deprecation warning
+``csp.W003``, and the enforced and report-only policies are checked independently.
 
 Migrating Custom Middleware
 ===========================

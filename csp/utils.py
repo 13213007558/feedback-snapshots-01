@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Sequence
 from itertools import chain
 from typing import Any, Callable
 
@@ -9,6 +10,41 @@ from django.conf import settings
 from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
+
+
+def _path_segments(path: str) -> list[str]:
+    """Split a URL path into its non-empty segments, dropping leading/trailing empties."""
+    return [segment for segment in path.split("/") if segment]
+
+
+def url_matches_pattern(path: str, pattern: str) -> bool:
+    """
+    Match a URL path against an exclusion pattern by path segment rather than by
+    character prefix.
+
+    The pattern matches the path itself and any sub-path below it, but never a
+    sibling directory whose name merely starts with the same characters. For
+    example, ``/reports`` matches ``/reports`` and ``/reports/assets/x.js`` but
+    not ``/reports-backup/x.js``.
+    """
+    path_segments = _path_segments(path)
+    pattern_segments = _path_segments(pattern)
+    return path_segments[: len(pattern_segments)] == pattern_segments
+
+
+def url_is_excluded(path: str, prefixes: Sequence[str] = (), patterns: Sequence[str] = ()) -> bool:
+    """
+    Return whether ``path`` is excluded from a CSP header.
+
+    ``prefixes`` are matched using the legacy character-prefix behaviour while
+    ``patterns`` are matched using whole path segments. Matching is performed
+    against the path Django hands to the view (``request.path_info``), so a
+    sub-path deployment prefix does not affect the result.
+    """
+    if prefixes and path.startswith(tuple(prefixes)):
+        return True
+    return any(url_matches_pattern(path, pattern) for pattern in patterns)
+
 
 DEFAULT_DIRECTIVES = {
     # Fetch Directives

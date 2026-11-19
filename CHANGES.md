@@ -1,6 +1,20 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Add `EXCLUDE_URLS`, a path-segment based replacement for `EXCLUDE_URL_PREFIXES`. Patterns match
+  the directory itself and its sub-paths without also matching sibling directories whose names
+  share a character prefix. Matching uses `request.path_info`, the path Django hands to the view,
+  so deploying under a sub-path does not change which URLs are excluded.
+- Deprecate `EXCLUDE_URL_PREFIXES`; using it raises the `csp.W003` system check warning. The
+  legacy character-prefix behaviour is unchanged until configurations are migrated.
+- Add `csp.E004` system check errors for ambiguous or invalid `EXCLUDE_URLS` patterns (missing
+  leading slash, trailing slash, glob/regex characters, or non-string entries) instead of silently
+  interpreting them as the new rule.
+- Enforced and report-only policies evaluate their URL exclusions independently.
+
 4.0
 ===
 
