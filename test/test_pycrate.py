@@ -40,6 +40,7 @@ from test.test_ether  import *
 from test.test_csn1   import *
 from test.test_asn1rt import *
 from test.test_mobile import *
+from test.test_m3ua_audit import *
 from test.test_gsmrr  import *
 from test.test_sms    import *
 from test.test_crypto import *
@@ -266,6 +267,7 @@ class TestPycrate(unittest.TestCase):
         test_nas_5g()
         test_5gsid()
         test_sigtran()
+        self.test_m3ua_audit()
         test_sccp()
         test_isup()
         test_gtpv0()
@@ -275,6 +277,35 @@ class TestPycrate(unittest.TestCase):
         test_diameter()
         test_pfcp()
         test_bssap()
+    
+    # mobile / M3UA state and DATA correlation
+    def test_m3ua_audit(self):
+        print('[<>] testing pycrate_mobile M3UA audit')
+        test_fixtures_decode()
+        test_transcript_parser()
+        test_normal_activation_is_ok()
+        test_data_after_deactivation_is_violation()
+        test_mid_capture_is_insufficient_not_violation()
+        test_missing_activation_is_insufficient()
+        test_asp_down_before_data_is_violation()
+        test_ntfy_inactive_is_observed_state_change()
+        test_ntfy_active_establishes_state()
+        test_endpoint_pair_isolated()
+        test_heartbeat_is_not_activation()
+        test_data_on_another_routing_context()
+        test_data_without_routing_context_never_borrows_other_rc()
+        test_repeated_data_is_retransmission()
+        test_duplicate_control_is_reported_but_idempotent()
+        test_multiple_rcs_in_one_data()
+        test_decode_error_is_not_traffic()
+        test_feed_api_and_incremental_state()
+        test_report_is_json_serialisable()
+        test_format_report_cites_messages()
+        test_shipped_transcripts()
+        test_ntfy_asp_failure_is_pending_not_illegal()
+        test_ntfy_as_pending_is_not_illegal()
+        test_new_asp_session_resets_traffic_state()
+        test_no_findings_for_control_only()
     
     # mobile / GSM RR
     def test_gsmrr(self):

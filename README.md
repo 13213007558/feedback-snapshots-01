@@ -317,6 +317,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *ISUP*: structures for ISUP messages as defined in ITU-T Q.763
 * *SIGTRAN*: generic structures for SIGTRAN (i.e. M2UA, M2PA, MTP3 and M3UA) messages
 * *M3UA*: structures dedicated to the M3UA format from RFC 4666
+* *M3UAAudit*: offline correlation of M3UA DATA messages with the ASP/AS state actually observed before them in a SIGTRAN transcript
 * *TS102225*: structures for SIM card's Secured Packets from ETSI TS 102.225
 * *TS23038*: structures and routines for SMS encoding from TS 23.038
 * *TS23040_SMS*: structures for the SMS transport protocol from TS 23.040
@@ -445,7 +446,7 @@ All the methods useful for working with ASN.1 objects at runtime can be found in
 Tools
 =====
 
-Four different tools are provided (yet):
+Several tools are provided:
 * *pycrate_showmedia.py* parses some media files (jpg, bmp, gif, mp3, png, tiff, mpeg4) and pretty print the file structure on the standard output.
 * *pycrate_asn1compile.py* compiles ASN.1 source file(s) and produce a Python source file that makes use of the ASN.1 runtime.
    This source file is then usable to encode / decode any ASN.1 object from the compiled ASN.1 specification.
@@ -453,6 +454,7 @@ Four different tools are provided (yet):
 * *pycrate_map_op_info.py* prints prototypes and various information related to TCAP-MAP (Mobile Application Part) 
    and CAMEL operations and application-contexts.
 * *pycrate_gtp_type_info.py* prints prototypes and various information related to GTP messages and transactions as in version 0, 1 or 2.
+* *pycrate_m3ua_audit.py* replays a short M3UA transcript and reports, for each DATA message, whether a valid ASP/AS state was observed for the same endpoints and Routing Context before it.
 
 
 Examples
