@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+Added
+~~~~~
+-   Add ``SESSION_READONLY_ENDPOINTS`` to mark selected Flask endpoints as read-only. Matching requests can still read session data and emit ``Vary: Cookie``, but never write to the backend (no upsert, deletion or TTL refresh) and never set a session cookie. A session modification on such an endpoint raises ``ReadOnlySessionError`` whose message identifies both the endpoint and the rule that blocked the write; rules may be endpoint names, ``fnmatch`` patterns, compiled regular expressions or callables.
+
 0.8.0 - 2024-03-26
 ------------------
 

@@ -13,6 +13,9 @@ class Defaults:
     # Clean up settings for non TTL backends (SQL, PostgreSQL, etc.)
     SESSION_CLEANUP_N_REQUESTS = None
 
+    # Endpoints that must read session data without writing it
+    SESSION_READONLY_ENDPOINTS = ()
+
     # Redis settings
     SESSION_REDIS = None
 

@@ -78,6 +78,7 @@ class DynamoDBSessionInterface(ServerSideSessionInterface):
         serialization_format: str = Defaults.SESSION_SERIALIZATION_FORMAT,
         table_name: str = Defaults.SESSION_DYNAMODB_TABLE,
         table_exists: Optional[bool] = Defaults.SESSION_DYNAMODB_TABLE_EXISTS,
+        readonly_endpoints=Defaults.SESSION_READONLY_ENDPOINTS,
     ):
 
         # NOTE: The name client is a bit misleading as we're using the resource API of boto3 as opposed to the service API
@@ -110,6 +111,7 @@ class DynamoDBSessionInterface(ServerSideSessionInterface):
             permanent,
             sid_length,
             serialization_format,
+            readonly_endpoints=readonly_endpoints,
         )
 
     def _create_table(self):

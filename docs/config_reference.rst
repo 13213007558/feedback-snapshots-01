@@ -52,12 +52,45 @@ These are specific to Flask-Session.
    .. versionadded:: 0.6.0
 
 .. py:data:: SESSION_SERIALIZATION_FORMAT
-   
+
    The serialization format to use. Can be `'msgpack'`` or `'json'`. Set to `'msgpack'`` for a more efficient serialization format. Set to `'json'`` for a human-readable format.
-   
+
    Default: ``'msgpack'``
 
    .. versionadded:: 0.7.0
+
+.. py:data:: SESSION_READONLY_ENDPOINTS
+
+   A sequence of rules selecting Flask endpoints whose requests must treat the
+   session as read-only. Requests handled by a matching endpoint may still read
+   session data, but any attempt to modify it raises
+   :class:`~flask_session.base.ReadOnlySessionError`, and the response is never
+   persisted: no backend upsert, deletion or TTL refresh takes place and no
+   ``Set-Cookie`` header is issued. The response still carries
+   ``Vary: Cookie`` when the session was accessed.
+
+   Each rule can be one of:
+
+   - an endpoint name string (``"api.profile"``); strings containing wildcards
+     are interpreted as ``fnmatch`` patterns (``"api.*"``);
+   - a compiled regular expression, matched with :meth:`re.Pattern.fullmatch`;
+   - a callable taking the endpoint name and returning a truthy value.
+
+   The error message names both the endpoint and the specific rule that blocked
+   the write, making the offending rule easy to locate. Endpoints not selected
+   by any rule keep their normal read/write behavior.
+
+   .. code-block:: python
+
+      import re
+
+      app.config["SESSION_READONLY_ENDPOINTS"] = (
+          "api.health",
+          re.compile(r"^api\.reports\..+"),
+          lambda endpoint: endpoint is not None and endpoint.startswith("metrics."),
+      )
+
+   Default: ``()`` (all endpoints are writable)
 
 .. deprecated:: 0.7.0
     ``SESSION_USE_SIGNER``

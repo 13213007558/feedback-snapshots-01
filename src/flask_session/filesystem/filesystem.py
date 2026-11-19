@@ -50,6 +50,7 @@ class FileSystemSessionInterface(ServerSideSessionInterface):
         cache_dir: str = Defaults.SESSION_FILE_DIR,
         threshold: int = Defaults.SESSION_FILE_THRESHOLD,
         mode: int = Defaults.SESSION_FILE_MODE,
+        readonly_endpoints=Defaults.SESSION_READONLY_ENDPOINTS,
     ):
 
         # Deprecation warnings
@@ -83,7 +84,13 @@ class FileSystemSessionInterface(ServerSideSessionInterface):
         )
 
         super().__init__(
-            app, key_prefix, use_signer, permanent, sid_length, serialization_format
+            app,
+            key_prefix,
+            use_signer,
+            permanent,
+            sid_length,
+            serialization_format,
+            readonly_endpoints=readonly_endpoints,
         )
 
     def _retrieve_session_data(self, store_id: str) -> Optional[dict]:

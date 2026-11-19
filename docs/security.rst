@@ -49,6 +49,28 @@ As one tool among others that can mitigate session fixation, is regenerating the
         app.session_interface.regenerate(session)
         # your response ...
 
+
+Read-only endpoints
+-------------------
+
+Some endpoints only need to inspect the session (for example status, health or
+reporting endpoints) and must not extend its lifetime or update the backend.
+Configure ``SESSION_READONLY_ENDPOINTS`` to mark such endpoints as read-only
+per Flask endpoint name, wildcard pattern, regular expression or callable.
+
+A read-only request:
+
+- can read session data as usual, and the response still sends
+  ``Vary: Cookie`` when the session is accessed;
+- never writes to the session backend, so neither the stored data nor its TTL
+  changes and no session cookie is issued;
+- raises :class:`~flask_session.base.ReadOnlySessionError` if business code
+  attempts to modify the session. The error message identifies the endpoint and
+  the exact rule that blocked the write.
+
+Endpoints that are not selected by a rule remain fully writable, including
+routes explicitly configured by the application.
+
 .. _Flask: https://flask.palletsprojects.com/en/2.3.x/security/#set-cookie-options
 .. _MDN: https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies
 .. _OWASP: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html

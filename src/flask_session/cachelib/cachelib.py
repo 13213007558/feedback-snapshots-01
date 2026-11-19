@@ -37,6 +37,7 @@ class CacheLibSessionInterface(ServerSideSessionInterface):
         permanent: bool = Defaults.SESSION_PERMANENT,
         sid_length: int = Defaults.SESSION_ID_LENGTH,
         serialization_format: str = Defaults.SESSION_SERIALIZATION_FORMAT,
+        readonly_endpoints=Defaults.SESSION_READONLY_ENDPOINTS,
     ):
 
         if client is None:
@@ -50,7 +51,13 @@ class CacheLibSessionInterface(ServerSideSessionInterface):
         self.cache = client
 
         super().__init__(
-            None, key_prefix, use_signer, permanent, sid_length, serialization_format
+            None,
+            key_prefix,
+            use_signer,
+            permanent,
+            sid_length,
+            serialization_format,
+            readonly_endpoints=readonly_endpoints,
         )
 
     def _retrieve_session_data(self, store_id: str) -> Optional[dict]:

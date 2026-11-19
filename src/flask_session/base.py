@@ -1,7 +1,10 @@
+import re
 import secrets
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import suppress
+from fnmatch import fnmatchcase
+from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple, Union
 
 try:
     import cPickle as pickle
@@ -10,10 +13,9 @@ except ImportError:
 
 import random
 from datetime import timedelta as TimeDelta
-from typing import Any, Dict, Optional
 
 import msgspec
-from flask import Flask, Request, Response
+from flask import Flask, Request, Response, request
 from flask.sessions import SessionInterface as FlaskSessionInterface
 from flask.sessions import SessionMixin
 from itsdangerous import BadSignature, Signer, want_bytes
@@ -21,6 +23,85 @@ from werkzeug.datastructures import CallbackDict
 
 from ._utils import retry_query
 from .defaults import Defaults
+
+
+class ReadOnlySessionError(RuntimeError):
+    """Raised when session data is modified while handling a read-only request.
+
+    The error message identifies both the Flask endpoint that was handled and
+    the read-only rule (as configured through ``SESSION_READONLY_ENDPOINTS``)
+    that matched it, so the offending rule can be located quickly.
+    """
+
+
+ReadOnlyRule = Union[str, Pattern[str], Callable[[Optional[str]], bool]]
+
+
+class ReadOnlyRuleMatcher:
+    """Matches the current request's Flask endpoint against read-only rules.
+
+    Each entry of ``SESSION_READONLY_ENDPOINTS`` is normalized into a
+    ``(description, predicate)`` pair. The description is embedded in any
+    :class:`ReadOnlySessionError` so the rule that blocked a write can be
+    identified directly.
+
+    Accepted rule types:
+
+    - ``str``: matched literally, or as a ``fnmatch`` wildcard pattern
+      (e.g. ``"api.*"``).
+    - compiled regular expression (``re.compile``): matched with
+      :meth:`re.Pattern.fullmatch` against the endpoint.
+    - callable: called with the endpoint; a truthy return value matches. The
+      callable's ``__name__`` is used as the rule description.
+    """
+
+    def __init__(self, rules: Optional[Tuple[ReadOnlyRule, ...]] = None):
+        self._rules: List[Tuple[str, Callable[[Optional[str]], bool]]] = []
+        for rule in rules or ():
+            self._rules.append(self._normalize(rule))
+
+    @staticmethod
+    def _normalize(
+        rule: ReadOnlyRule,
+    ) -> Tuple[str, Callable[[Optional[str]], bool]]:
+        if isinstance(rule, str):
+            if any(char in rule for char in ("*", "?", "[")):
+                return (
+                    f"pattern {rule!r}",
+                    lambda endpoint: bool(endpoint) and fnmatchcase(endpoint, rule),
+                )
+            return (f"endpoint {rule!r}", lambda endpoint: endpoint == rule)
+
+        if isinstance(rule, re.Pattern):
+            return (
+                f"regex {rule.pattern!r}",
+                lambda endpoint: bool(endpoint)
+                and rule.fullmatch(endpoint) is not None,
+            )
+
+        if callable(rule):
+            description = getattr(rule, "__name__", repr(rule))
+            return (f"callable {description!r}", lambda endpoint: bool(rule(endpoint)))
+
+        raise TypeError(
+            "SESSION_READONLY_ENDPOINTS entries must be a string, a compiled "
+            f"regular expression or a callable, got {type(rule).__name__}: {rule!r}"
+        )
+
+    def matched_rule(self, endpoint: Optional[str]) -> Optional[str]:
+        """Return the description of the first matching rule, else ``None``."""
+        for description, predicate in self._rules:
+            if predicate(endpoint):
+                return description
+        return None
+
+    def current_rule(self) -> Optional[str]:
+        """Return the description of the rule matching the active request."""
+        try:
+            endpoint = request.endpoint
+        except RuntimeError:
+            return None
+        return self.matched_rule(endpoint)
 
 
 class ServerSideSession(CallbackDict, SessionMixin):
@@ -70,10 +151,26 @@ class ServerSideSession(CallbackDict, SessionMixin):
 
         CallbackDict.__init__(self, initial, on_update)
         self.sid = sid
+        # Initialized before any mutation so the write guard is available even
+        # while setting the permanent flag below. The interface attaches the
+        # real matcher (or leaves it None) for every session it opens.
+        self.readonly_matcher: Optional[ReadOnlyRuleMatcher] = None
         if permanent:
             self.permanent = permanent
         self.modified = False
         self.accessed = False
+
+    def _ensure_writable(self) -> None:
+        """Raise if the current request is handled by a read-only endpoint."""
+        if self.readonly_matcher is None:
+            return
+        rule = self.readonly_matcher.current_rule()
+        if rule is not None:
+            endpoint = request.endpoint
+            raise ReadOnlySessionError(
+                f"Cannot modify the session on read-only endpoint {endpoint!r}; "
+                f"the write was blocked by SESSION_READONLY_ENDPOINTS rule {rule}."
+            )
 
     def __getitem__(self, key: str) -> Any:
         self.accessed = True
@@ -84,11 +181,37 @@ class ServerSideSession(CallbackDict, SessionMixin):
         return super().get(key, default)
 
     def setdefault(self, key: str, default: Any = None) -> Any:
+        self._ensure_writable()
         self.accessed = True
         return super().setdefault(key, default)
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._ensure_writable()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        self._ensure_writable()
+        super().__delitem__(key)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        self._ensure_writable()
+        super().update(*args, **kwargs)
+
+    def pop(self, *args: Any) -> Any:
+        self._ensure_writable()
+        return super().pop(*args)
+
+    def popitem(self) -> Tuple[Any, Any]:
+        self._ensure_writable()
+        return super().popitem()
+
+    def __ior__(self, other: Any) -> "ServerSideSession":
+        self._ensure_writable()
+        return super().__ior__(other)
+
     def clear(self) -> None:
         """Clear the session except for the '_permanent' key."""
+        self._ensure_writable()
         permanent = self.get("_permanent", False)
         super().clear()
         self["_permanent"] = permanent
@@ -164,6 +287,7 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         sid_length: int = Defaults.SESSION_ID_LENGTH,
         serialization_format: str = Defaults.SESSION_SERIALIZATION_FORMAT,
         cleanup_n_requests: Optional[int] = Defaults.SESSION_CLEANUP_N_REQUESTS,
+        readonly_endpoints: Optional[Tuple[ReadOnlyRule, ...]] = None,
     ):
         self.app = app
         self.key_prefix = key_prefix
@@ -179,6 +303,9 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         self.sid_length = sid_length
         self.has_same_site_capability = hasattr(self, "get_cookie_samesite")
         self.cleanup_n_requests = cleanup_n_requests
+        self.readonly_matcher = (
+            ReadOnlyRuleMatcher(readonly_endpoints) if readonly_endpoints else None
+        )
 
         # Cleanup settings for non-TTL databases only
         if getattr(self, "ttl", None) is False:
@@ -260,6 +387,7 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
 
     def regenerate(self, session: ServerSideSession) -> None:
         """Regenerate the session id for the given session. Can be used by calling ``flask.session_interface.regenerate()``."""
+        session._ensure_writable()
         if session:
             # Remove the old session from storage
             self._delete_session(self._get_store_id(session.sid))
@@ -268,6 +396,12 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
             session.sid = new_sid
             # Mark the session as modified to ensure it gets saved
             session.modified = True
+
+    def _current_readonly_rule(self) -> Optional[str]:
+        """Return the matched read-only rule description, if any."""
+        if self.readonly_matcher is None:
+            return None
+        return self.readonly_matcher.current_rule()
 
     # METHODS OVERRIDE FLASK SESSION INTERFACE
 
@@ -288,6 +422,20 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         # behaves differently based on those values. ie. session.get("is_authenticated")
         if session.accessed:
             response.vary.add("Cookie")
+
+        readonly_rule = self._current_readonly_rule()
+
+        # Read-only requests never write to the backend (no TTL refresh,
+        # upsert or deletion) and never issue a new session cookie.
+        if readonly_rule is not None:
+            if session.modified:
+                endpoint = request.endpoint
+                raise ReadOnlySessionError(
+                    f"Cannot persist a modified session on read-only endpoint "
+                    f"{endpoint!r}; the write was blocked by "
+                    f"SESSION_READONLY_ENDPOINTS rule {readonly_rule}."
+                )
+            return
 
         # If the session is empty, do not save it to the database or set a cookie
         if not session:
@@ -336,14 +484,14 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
         # If there's no session ID, generate a new one
         if not sid:
             sid = self._generate_sid(self.sid_length)
-            return self.session_class(sid=sid, permanent=self.permanent)
+            return self._make_session(sid=sid, permanent=self.permanent)
         # If the session ID is signed, unsign it
         if self.use_signer:
             try:
                 sid = self._unsign(app, sid)
             except BadSignature:
                 sid = self._generate_sid(self.sid_length)
-                return self.session_class(sid=sid, permanent=self.permanent)
+                return self._make_session(sid=sid, permanent=self.permanent)
 
         # Retrieve the session data from the database
         store_id = self._get_store_id(sid)
@@ -351,11 +499,22 @@ class ServerSideSessionInterface(FlaskSessionInterface, ABC):
 
         # If the saved session exists, load the session data from the document
         if saved_session_data is not None:
-            return self.session_class(saved_session_data, sid=sid)
+            return self._make_session(saved_session_data, sid=sid)
 
         # If the saved session does not exist, create a new session
         sid = self._generate_sid(self.sid_length)
-        return self.session_class(sid=sid, permanent=self.permanent)
+        return self._make_session(sid=sid, permanent=self.permanent)
+
+    def _make_session(
+        self,
+        initial: Optional[Dict[str, Any]] = None,
+        sid: Optional[str] = None,
+        permanent: Optional[bool] = None,
+    ) -> ServerSideSession:
+        """Create a session instance and attach the read-only rule matcher."""
+        session = self.session_class(initial=initial, sid=sid, permanent=permanent)
+        session.readonly_matcher = self.readonly_matcher
+        return session
 
     # METHODS TO BE IMPLEMENTED BY SUBCLASSES
 

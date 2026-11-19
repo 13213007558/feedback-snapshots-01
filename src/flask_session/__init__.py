@@ -125,6 +125,11 @@ class Session:
         SESSION_CLEANUP_N_REQUESTS = config.get(
             "SESSION_CLEANUP_N_REQUESTS", Defaults.SESSION_CLEANUP_N_REQUESTS
         )
+        SESSION_READONLY_ENDPOINTS = tuple(
+            config.get(
+                "SESSION_READONLY_ENDPOINTS", Defaults.SESSION_READONLY_ENDPOINTS
+            )
+        )
 
         common_params = {
             "app": app,
@@ -133,6 +138,7 @@ class Session:
             "permanent": SESSION_PERMANENT,
             "sid_length": SESSION_ID_LENGTH,
             "serialization_format": SESSION_SERIALIZATION_FORMAT,
+            "readonly_endpoints": SESSION_READONLY_ENDPOINTS,
         }
 
         SESSION_TYPE = SESSION_TYPE.lower()
