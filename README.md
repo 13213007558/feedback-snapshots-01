@@ -312,6 +312,7 @@ This subdirectory implements most of the 3GPP NAS protocol formats:
 * *NAS*: provides two functions to parse any uplink and downlink mobile NAS messages
 * *NASLTE*: provides two functions to parse LTE uplink and downlink NAS messages
 * *NAS5G*: provides one function to parse 5G uplink and downlink mobile NAS messages
+* *NAS5G_Slice*: exact S-NSSAI evidence (absent SD vs zero SD, mapped home identity) and registration-scoped network-slice policy checks for observed 5GMM transcripts
 * *PPP*: structures for NCP and LCP protocols used for PPP connection estabishment, as defined in RFC 1661, 1332 and 1334
 * *SCCP*: structures for SCCP user-data and management messages as defined in ITU-T Q.713
 * *ISUP*: structures for ISUP messages as defined in ITU-T Q.763

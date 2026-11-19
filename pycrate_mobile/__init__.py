@@ -29,7 +29,7 @@
 #*/
 #
 __all__ = ['GSMTAP', 'MCC_MNC', 'PPP', 'SIGTRAN', 'SCCP', 'ISUP',
-           'TS24007', 'NAS', 'NASLTE', 'NAS5G',
+           'TS24007', 'NAS', 'NASLTE', 'NAS5G', 'NAS5G_Slice',
            'TS24008_IE', 'TS24008_MM', 'TS24008_GMM', 'TS24008_CC', 'TS24008_SM',
            'TS23038', 'TS23040_SMS', 'TS23041_CBS', 'TS24011_PPSMS', 'TS24080_SS',
            'TS24301_IE', 'TS24301_EMM', 'TS24301_ESM',

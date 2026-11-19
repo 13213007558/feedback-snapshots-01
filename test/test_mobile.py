@@ -55,6 +55,16 @@ from pycrate_mobile.TS24501_IE      import (
     FGSIDTYPE,
     FGSIDFMT,
     )
+from pycrate_mobile.NAS5G_Slice     import (
+    SNSSAIEvidence,
+    SNSliceAnalyzer,
+    SNSliceManifest,
+    decode_snssai,
+    decode_nssai,
+    decode_rejected_nssai,
+    analyze_nas_messages,
+    REGISTRATION_REQUEST_TYPES,
+    )
 #
 from pycrate_core.elt               import _with_json
 
@@ -370,6 +380,403 @@ def test_5gsid(vals=fgsid_vals):
         assert(ident.to_bytes() == buf)
         ident = FGSID(val=val)
         assert(ident.to_bytes() == buf)
+
+
+# 5G NAS slice evidence tests
+#
+# The sample S-NSSAIs below all use SST 1.  They differ only in the SD
+# dimension, so a policy that treats an absent SD as 0 (or vice-versa) fails
+# the exact-identity assertions.
+
+def _slice_tlv(tag, value):
+    return bytes((tag, len(value))) + value
+
+
+def _slice_nssai(*snssais):
+    body = b''.join(bytes((len(s),)) + s for s in snssais)
+    return _slice_tlv(0x2f, body)
+
+
+def _slice_allowed(*snssais):
+    body = b''.join(bytes((len(s),)) + s for s in snssais)
+    return _slice_tlv(0x15, body)
+
+
+def _slice_configured(*snssais):
+    body = b''.join(bytes((len(s),)) + s for s in snssais)
+    return _slice_tlv(0x31, body)
+
+
+def _slice_rejected(*items):
+    # items are (snssai_bytes, cause)
+    body = b''.join(bytes(((len(s) << 4) | cause,)) + s for s, cause in items)
+    return _slice_tlv(0x11, body)
+
+
+# SST-only, SST + explicit zero SD and SST + non-zero SD
+_snssai_sst = b'\x01'
+_snssai_sd0 = b'\x01\x00\x00\x00'
+_snssai_sd1 = b'\x01\x00\x00\x01'
+
+# Base messages observed in the existing test corpus, reused as skeletons.
+_slice_reg_req = unhexlify('7e004179000d0100f1100000000022222222222e02e0e0')
+_slice_reg_acc = unhexlify('7e00420100')
+_slice_reg_cpl = unhexlify('7e0043')
+
+
+def _slice_pdu(base, *ies):
+    return base + b''.join(ies)
+
+
+def test_snssai_sd_identity():
+    # missing SD is its own exact identity, not SD 0
+    sst = decode_snssai(_snssai_sst)
+    sd0 = decode_snssai(_snssai_sd0)
+    sd1 = decode_snssai(_snssai_sd1)
+    assert( sst.valid and sd0.valid and sd1.valid )
+    assert( sst.identity == (1, None) )
+    assert( sd0.identity == (1, 0) )
+    assert( sd1.identity == (1, 1) )
+    assert( sst.sd_present is False )
+    assert( sd0.sd_present is True and sd0.sd == 0 )
+    assert( sst != sd0 and sst != sd1 and sd0 != sd1 )
+    assert( sst.same_serving_slice(sst) )
+    assert( not sst.same_serving_slice(sd0) )
+    # raw bytes are exact and retained
+    assert( sst.raw == _snssai_sst and sd0.raw == _snssai_sd0 )
+    assert( sst.describe() == 'SST=1, SD=absent' )
+    assert( sd0.describe() == 'SST=1, SD=0x000000' )
+    #
+    # a mapped home S-NSSAI is a second identity, not a replacement
+    full = decode_snssai(b'\x01\x00\x00\x00\x02\x00\x00\x01')
+    assert( full.valid )
+    assert( full.identity == (1, 0) )
+    assert( full.mapped_identity == (2, 1) )
+    assert( full.describe() == 'SST=1, SD=0x000000, mapped=2/0x000001' )
+    #
+    # unsupported lengths are unknown, never normalised into a shorter value
+    for raw in (b'', b'\x01\x00\x00', b'\x01\x02\x03\x04\x05\x06\x07\x08\x09'):
+        bad = decode_snssai(raw)
+        assert( not bad.valid )
+        assert( bad.identity is None )
+    #
+    # 2 octets is a partial SD, not an exact identity
+    two = decode_snssai(b'\x01\x02')
+    assert( not two.valid and two.identity is None )
+    assert( two.unknown )
+    #
+    # 6/7 octets have an incomplete mapped SD: serving part is exact but the
+    # home part cannot be used for a home match
+    partial = decode_snssai(b'\x01\x00\x00\x00\x02\x00')
+    assert( not partial.valid )
+    assert( partial.mapped_identity == (2, None) )
+    assert( any('partial mapped SD' in i for i in partial.unknown) )
+
+
+def test_nssai_list_decoding():
+    raw = _slice_nssai(_snssai_sst, _snssai_sd0, _snssai_sd1)[2:]
+    entries, issues = decode_nssai(raw)
+    assert( issues == [] )
+    assert( [e.identity for e in entries] == [(1, None), (1, 0), (1, 1)] )
+    #
+    # rejected entries carry their cause nibble and exact identity
+    rejected, issues = decode_rejected_nssai(bytes((0x11,)) + _snssai_sst + bytes((0x41,)) + _snssai_sd0)
+    assert( issues == [] )
+    assert( rejected[0][0].identity == (1, None) and rejected[0][1] == 1 )
+    assert( rejected[1][0].identity == (1, 0) and rejected[1][1] == 1 )
+    #
+    # a zero-length TLV is reported, not silently skipped
+    entries, issues = decode_nssai(b'\x00')
+    assert( entries and not entries[0].valid and issues )
+
+
+def test_slice_registration_manifest():
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sst, _snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0, _snssai_sst))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl),
+                                    home_plmn='00101')
+    assert( isinstance(manifest, SNSliceManifest) )
+    assert( len(manifest.messages) == 3 )
+    assert( len(manifest.procedures) == 1 )
+    proc = manifest.procedures[0]
+    assert( proc.state == 'confirmed' )
+    # both exact slices are authorized, each from message 2
+    assert( manifest.is_authorized((1, 0)) )
+    assert( manifest.is_authorized((1, None)) )
+    # SD 1 was neither requested nor allowed
+    assert( not manifest.is_authorized((1, 1)) )
+    #
+    # provenance: the authorization is from the Registration Accept, while
+    # the request is from the Registration Request
+    auth = manifest.check((1, 0))
+    assert( auth['allowed'] and auth['message_index'] == 2 )
+    assert( auth['message_name'] == '5GMMRegistrationAccept' )
+    req_items = manifest.get_items(kind='requested')
+    assert( {i.message_index for i in req_items} == {1} )
+    assert( {i.message_name for i in req_items} == {'5GMMRegistrationRequest'} )
+    #
+    # a request alone is not an authorization
+    manifest2 = analyze_nas_messages((pdu_req,), home_plmn='00101')
+    assert( not manifest2.is_authorized((1, None)) )
+    assert( manifest2.check((1, None))['reason'] == 'requested_only' )
+
+
+def test_slice_allowed_needs_confirmation():
+    # Allowed NSSAI in the accept but no Registration Complete observed
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc))
+    assert( not manifest.is_authorized((1, 0)) )
+    assert( manifest.check((1, 0))['reason'] == 'unconfirmed_allowed_claim' )
+    assert( manifest.get_network_claims() )
+    #
+    # with require_complete=False, the accept itself is enough
+    manifest = analyze_nas_messages((pdu_req, pdu_acc), require_complete=False)
+    assert( manifest.is_authorized((1, 0)) )
+
+
+def test_slice_rejected_is_not_authorized():
+    # rejected S-NSSAI must not be authorized just because SST matches an
+    # allowed one; exact SD presence still matters
+    pdu_req = _slice_pdu(_slice_reg_req,
+                         _slice_nssai(_snssai_sst, _snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc,
+                         _slice_allowed(_snssai_sd0),
+                         _slice_rejected((_snssai_sst, 1),
+                                         (_snssai_sd1, 1)))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl))
+    assert( manifest.is_authorized((1, 0)) )
+    assert( not manifest.is_authorized((1, None)) )
+    assert( not manifest.is_authorized((1, 1)) )
+    assert( manifest.check((1, None))['reason'] == 'rejected_in_procedure' )
+    #
+    # rejection message provenance is the Registration Accept
+    rej = manifest.get_items(kind='rejected')
+    assert( rej and all(i.message_name == '5GMMRegistrationAccept' for i in rej) )
+    assert( all(i.message_index == 2 for i in rej) )
+
+
+def test_slice_allowed_rejected_conflict():
+    # same exact identity in Allowed and Rejected: contradictory, not
+    # authorized
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc,
+                         _slice_allowed(_snssai_sd0),
+                         _slice_rejected((_snssai_sd0, 1)))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl))
+    assert( not manifest.is_authorized((1, 0)) )
+    allowed = manifest.get_items(kind='allowed')
+    assert( allowed and allowed[0].status == 'conflict' )
+
+
+def test_slice_reregistration_revokes_old_allowed():
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    analyzer = SNSliceAnalyzer()
+    analyzer.add_message(pdu_req, direction='ul')
+    analyzer.add_message(pdu_acc, direction='dl')
+    analyzer.add_message(_slice_reg_cpl, direction='dl')
+    assert( analyzer.manifest.is_authorized((1, 0)) )
+    #
+    # a second registration request starts a new procedure: the old Allowed
+    # list must not carry over, even before the new accept arrives
+    analyzer.add_message(pdu_req, direction='ul')
+    manifest = analyzer.result()
+    assert( not manifest.is_authorized((1, 0)) )
+    assert( len(manifest.procedures) == 2 )
+    assert( manifest.procedures[0].state == 'confirmed' )
+    assert( manifest.procedures[1].state == 'unanswered' )
+    assert( manifest.check((1, 0))['reason'] == 'superseded_authorization' )
+    #
+    # a new accept granting a different exact slice does not revive the old
+    # one
+    analyzer2 = SNSliceAnalyzer()
+    analyzer2.add_message(pdu_req, direction='ul')
+    analyzer2.add_message(pdu_acc, direction='dl')
+    analyzer2.add_message(_slice_reg_cpl, direction='dl')
+    analyzer2.add_message(_slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd1)), direction='ul')
+    analyzer2.add_message(_slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd1)), direction='dl')
+    analyzer2.add_message(_slice_reg_cpl, direction='dl')
+    manifest2 = analyzer2.result()
+    assert( manifest2.is_authorized((1, 1)) )
+    assert( not manifest2.is_authorized((1, 0)) )
+
+
+def test_slice_configuration_update_is_claim_only():
+    # Allowed NSSAI in a Configuration Update Command is a network claim,
+    # not a registration authorization, even after its Complete message
+    pdu_cfg = _slice_pdu(unhexlify('7e0054'), _slice_allowed(_snssai_sd1),
+                         _slice_configured(_snssai_sd1))
+    manifest = analyze_nas_messages(
+        (unhexlify('7e0054') + _slice_allowed(_snssai_sd1), unhexlify('7e0055')))
+    assert( not manifest.is_authorized((1, 1)) )
+    assert( manifest.get_network_claims() )
+    assert( manifest.check((1, 1))['reason'] == 'configuration_claim_only' )
+
+
+def test_slice_nested_payload_context():
+    # Same registration-accept bytes observed inside a security wrapper keep
+    # their message context and are marked protected.
+    inner = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    secured = unhexlify('7e0100000000') + b'\x01' + inner
+    analyzer = SNSliceAnalyzer()
+    analyzer.add_message(secured, direction='dl')
+    analyzer.add_message(_slice_reg_cpl, direction='dl')
+    manifest = analyzer.result()
+    assert( manifest.is_authorized((1, 0)) )
+    item = manifest.get_authorizations()[0]
+    assert( item.secured is True )
+    assert( item.message_index == 1 )
+    assert( item.message_name == '5GMMRegistrationAccept' )
+    #
+    # the same inner bytes observed unprotected are a separate message and
+    # the manifest keeps both contexts
+    analyzer2 = SNSliceAnalyzer()
+    analyzer2.add_message(inner, direction='dl')
+    analyzer2.add_message(_slice_reg_cpl, direction='dl')
+    manifest2 = analyzer2.result()
+    assert( manifest2.is_authorized((1, 0)) )
+    assert( manifest2.get_authorizations()[0].secured is False )
+
+
+def test_slice_mapped_home_pairing():
+    # Mapped NSSAI entries pair with requested entries by position; the
+    # home identity is not substituted for the serving identity
+    mapped_a = b'\x02\x00\x00\x05'
+    mapped_b = b'\x02\x00\x00\x06'
+    pdu_req = _slice_pdu(
+        _slice_reg_req,
+        _slice_nssai(_snssai_sd0, _snssai_sd1),
+        _slice_tlv(0x35, bytes((len(mapped_a),)) + mapped_a +
+                         bytes((len(mapped_b),)) + mapped_b))
+    manifest = analyze_nas_messages((pdu_req,), home_plmn='00101')
+    proc = manifest.procedures[0]
+    assert( [i.identity for i in proc.requested] == [(1, 0), (1, 1)] )
+    assert( [i.identity for i in proc.mapped] == [(2, 5), (2, 6)] )
+    paired = proc.get_mapped((1, 1))
+    assert( len(paired) == 1 and paired[0].identity == (2, 6) )
+    assert( proc.home_plmn == '00101' )
+    #
+    # mapped identity does not authorize the serving or home slice by itself
+    assert( not manifest.is_authorized((2, 5)) )
+
+
+def test_slice_configuration_does_not_consume_registration():
+    # A Configuration Update Command must not become the current registration
+    # procedure, neither before nor after a Registration Accept.
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    pdu_cfg = unhexlify('7e0054') + _slice_allowed(_snssai_sd1)
+    analyzer = SNSliceAnalyzer()
+    analyzer.add_message(pdu_req, direction='ul')
+    analyzer.add_message(pdu_cfg, direction='dl')
+    analyzer.add_message(unhexlify('7e0055'), direction='ul')
+    analyzer.add_message(pdu_acc, direction='dl')
+    analyzer.add_message(_slice_reg_cpl, direction='dl')
+    manifest = analyzer.result()
+    # configuration did not replace the registration procedure
+    assert( len(manifest.procedures) == 2 )
+    assert( manifest.procedures[0].kind == 'registration' )
+    assert( manifest.procedures[0].state == 'confirmed' )
+    assert( manifest.procedures[1].kind == 'configuration' )
+    assert( manifest.is_authorized((1, 0)) )
+    assert( not manifest.is_authorized((1, 1)) )
+
+
+def test_slice_nested_dl_transport_context():
+    # A Registration Accept embedded in a DL NAS Transport keeps the context
+    # of its enclosing message; the same inner bytes observed separately are
+    # a different observation.
+    inner = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd1))
+    # DL NAS transport: payload container type 1 (N1 SM), len 16-bit
+    outer = (unhexlify('7e0068') + b'\x01' +
+             len(inner).to_bytes(2, 'big') + inner)
+    analyzer = SNSliceAnalyzer()
+    analyzer.add_message(outer, direction='dl')
+    analyzer.add_message(_slice_reg_cpl, direction='dl')
+    manifest = analyzer.result()
+    assert( manifest.is_authorized((1, 1)) )
+    auth = manifest.get_authorizations()[0]
+    assert( auth.nested_in is not None )
+    assert( auth.message_index == 1 )
+    # outer message is recorded too, and the nested one is not duplicated
+    assert( len(manifest.messages) == 2 )
+
+
+def test_slice_unknown_never_authorized():
+    # Unknown or partial forms must not become rules or authorizations, even
+    # when an Allowed NSSAI container carries them.
+    two = b'\x01\x02'
+    partial = b'\x01\x00\x00\x00\x02\x00'
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(two, partial))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(two, partial))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl))
+    assert( manifest.get_authorizations() == [] )
+    assert( not manifest.is_authorized((1, 0)) )
+    assert( not manifest.is_authorized((1, None)) )
+    proc = manifest.procedures[0]
+    assert( any('partial' in u or '2-octet' in u for u in proc.unknown) )
+
+
+def test_slice_identity_type_validation():
+    # Policy lookups require an explicit (SST, SD) tuple; a bare SST or a
+    # list cannot silently match.
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl))
+    for bad in (1, [1, 0], ('1', 0)):
+        try:
+            manifest.is_authorized(bad)
+        except Exception:
+            pass
+        else:
+            raise AssertionError('invalid identity was accepted: %r' % (bad,))
+
+
+def test_slice_deregistration_revokes_authorization():
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    # MT de-registration request, type 71
+    mt_dereg = unhexlify('7e0047') + b'\x01\x00\x04\x00\x00\x00\x00'
+    manifest = analyze_nas_messages(
+        (pdu_req, pdu_acc, _slice_reg_cpl, mt_dereg))
+    assert( not manifest.is_authorized((1, 0)) )
+    assert( manifest.check((1, 0))['reason'] == 'superseded_authorization' )
+
+
+def test_slice_extended_rejected_nssai():
+    # Extended Rejected NSSAI must participate in the same exact-identity
+    # check as the plain Rejected NSSAI list.
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0),
+                         _slice_tlv(0x68, b'\x00\x10' + _snssai_sst))
+    manifest = analyze_nas_messages((pdu_acc, _slice_reg_cpl))
+    assert( manifest.is_authorized((1, 0)) )
+    assert( not manifest.is_authorized((1, None)) )
+    rej = manifest.get_items(kind='rejected')
+    assert( rej and rej[0].field == 'ExtRejectedNSSAI' )
+    assert( rej[0].identity == (1, None) )
+    #
+    # conflict across the two rejection lists is not an authorization
+    pdu_acc2 = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0),
+                          _slice_tlv(0x68, b'\x00\x40\x01\x00\x00\x00'))
+    manifest2 = analyze_nas_messages((pdu_acc2, _slice_reg_cpl))
+    assert( not manifest2.is_authorized((1, 0)) )
+
+
+def test_slice_manifest_report():
+    pdu_req = _slice_pdu(_slice_reg_req, _slice_nssai(_snssai_sd0))
+    pdu_acc = _slice_pdu(_slice_reg_acc, _slice_allowed(_snssai_sd0))
+    manifest = analyze_nas_messages((pdu_req, pdu_acc, _slice_reg_cpl))
+    text = str(manifest)
+    assert( 'procedure 1' in text )
+    assert( '5GMMRegistrationRequest' in text )
+    assert( '5GMMRegistrationAccept' in text )
+    data = manifest.to_dict()
+    assert( data['authorizations'] )
+    assert( data['authorizations'][0]['message_name'] == '5GMMRegistrationAccept' )
+    assert( data['authorizations'][0]['evidence']['raw'] == '01000000' )
+    # exact identity is a JSON-safe tuple of (SST, SD)
+    assert( data['authorizations'][0]['identity'] == (1, 0) )
 
 
 def test_sigtran(sigtran_pdu=sigtran_pdu + m3ua_pdu):
