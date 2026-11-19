@@ -1,0 +1,16 @@
+= New Features
+
+* The content_security_policy_nonce plugin now supports a
+  content_security_policy_nonce! method for declaring the nonce before
+  the response headers are finalized. This allows streaming responses
+  with lazily generated bodies to use the same nonce value in the
+  Content-Security-Policy header and in inline script and style tags
+  rendered while the body is being iterated.
+
+* The content_security_policy_nonce plugin now raises a RodaError if a
+  nonce is requested for the first time after the response headers have
+  been finalized. In that case the nonce could not be added to the
+  Content-Security-Policy header, so inline script and style tags using
+  it would be blocked. Streaming responses that do not use inline
+  scripts do not need to request a nonce, and no nonce is added to the
+  header for them.
