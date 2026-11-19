@@ -140,17 +140,36 @@ def format_listeners(data: dict) -> str:
 
 
 def format_config(data: dict) -> str:
-    """Format config output for display."""
+    """Format config output for display.
+
+    Accepts the summary mapping from ``show config`` (name -> entry) and
+    renders the same fields the JSON response carries: name, value, source
+    and whether the setting is set. A redacted value stays redacted in the
+    text form.
+    """
     lines = []
 
-    # Sort keys for consistent output
     for key in sorted(data.keys()):
         value = data[key]
+        if isinstance(value, dict) and "source" in value and "set" in value:
+            lines.append(_format_config_entry(key, value))
+            continue
         if isinstance(value, list):
             value = ", ".join(str(v) for v in value)
         lines.append(f"{key}: {value}")
 
     return "\n".join(lines)
+
+
+def _format_config_entry(key: str, entry: dict) -> str:
+    flags = "source=%s, %s" % (
+        entry.get("source"), "set" if entry.get("set") else "not set")
+    if entry.get("sensitive"):
+        flags += ", sensitive"
+    value = entry.get("value")
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value)
+    return f"{key}: {value} ({flags})"
 
 
 def format_help(data: dict) -> str:

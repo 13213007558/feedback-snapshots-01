@@ -6,6 +6,7 @@ import os
 
 from gunicorn.errors import ConfigError
 from gunicorn.app.base import Application
+from gunicorn.config import SOURCE_APPLICATION
 from gunicorn import util
 
 
@@ -22,16 +23,19 @@ class WSGIApplication(Application):
             if not os.path.exists(config_file):
                 raise ConfigError("%r not found" % config_file)
 
-            self.cfg.set("default_proc_name", config_file)
+            self.cfg.set("default_proc_name", config_file,
+                         source=SOURCE_APPLICATION)
             self.app_uri = config_uri
 
             if has_logging_config(config_file):
-                self.cfg.set("logconfig", config_file)
+                self.cfg.set("logconfig", config_file,
+                             source=SOURCE_APPLICATION)
 
             return
 
         if len(args) > 0:
-            self.cfg.set("default_proc_name", args[0])
+            self.cfg.set("default_proc_name", args[0],
+                         source=SOURCE_APPLICATION)
             self.app_uri = args[0]
 
     def load_config(self):

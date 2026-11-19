@@ -24,5 +24,25 @@ class ConfigError(Exception):
     """ Exception raised on config error """
 
 
+class ConfigReloadError(ConfigError):
+    """A reload could not read or validate the configuration.
+
+    The running master keeps the previous settings. ``diagnostic`` holds the
+    redacted configuration summary so the caller can report it without
+    rebuilding it, and ``__str__`` returns the same text.
+    """
+
+    def __init__(self, message, diagnostic=None, summary=None):
+        super().__init__(message)
+        self.message = message
+        self.diagnostic = diagnostic
+        self.summary = summary or {}
+
+    def __str__(self):
+        if self.diagnostic:
+            return self.diagnostic
+        return self.message
+
+
 class AppImportError(Exception):
     """ Exception raised when loading an application """

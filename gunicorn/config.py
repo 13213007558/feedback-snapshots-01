@@ -19,6 +19,7 @@ import ssl
 import sys
 import textwrap
 import warnings
+from collections.abc import Mapping
 
 from gunicorn import __version__, util
 from gunicorn.errors import ConfigError
@@ -26,6 +27,19 @@ from gunicorn.reloader import reloader_engines
 
 KNOWN_SETTINGS = []
 PLATFORM = sys.platform
+
+# Where a setting's current value came from. The labels match the precedence
+# documented in docs/content/configure.md.
+SOURCE_DEFAULT = "default"
+SOURCE_FRAMEWORK = "framework"
+SOURCE_CONFIG_FILE = "config file"
+SOURCE_ENVIRONMENT = "environment"
+SOURCE_CMDLINE = "command line"
+SOURCE_APPLICATION = "application"
+SOURCE_PROGRAMMATIC = "programmatic"
+
+# Shown in place of a value the config summary must not disclose.
+REDACTED = "***"
 
 
 def make_settings(ignore=None):
@@ -37,6 +51,61 @@ def make_settings(ignore=None):
             continue
         settings[setting.name] = setting.copy()
     return settings
+
+
+def is_sensitive_value(value, value_type=None):
+    """Whether a setting value is secret by its type alone.
+
+    Mappings can carry credentials under keys that are not knowable in
+    advance (a logging config, a Paste global, an application setting
+    registered by a plugin), and the same goes for a list holding mappings,
+    so such a value is withheld from a shared summary. A setting that stores
+    a secret in a plain string, or in a list of strings, marks its class with
+    ``sensitive = True``.
+    """
+    if isinstance(value, Mapping):
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(item, Mapping) for item in value)
+    if isinstance(value, (bytes, bytearray)):
+        return True
+    return value_type in (dict, "dict")
+
+
+def format_config_summary(summary):
+    """Render a config summary as text.
+
+    ``summary`` is the mapping returned by :meth:`Config.config_summary`.
+    The rendering is the single text form used by the control CLI and by
+    reload diagnostics, so both disclose exactly the same fields.
+    """
+    if not summary:
+        return "(no settings)"
+    width = max(len(name) for name in summary)
+    lines = []
+    for name in sorted(summary):
+        entry = summary[name]
+        state = "set" if entry["set"] else "not set"
+        flags = "source=%s, %s" % (entry["source"], state)
+        if entry["sensitive"]:
+            flags += ", sensitive"
+        lines.append("%s = %s (%s)" % (
+            name.ljust(width), entry["value"], flags))
+    return "\n".join(lines)
+
+
+def format_config_error(error, summary):
+    """Build the diagnostic shown when a reload must keep the old config.
+
+    The same summary is used as the control plane's, so a failed reload does
+    not disclose more than ``gunicornc show config`` does.
+    """
+    lines = ["Reload failed; keeping the running configuration: %s" % error,
+             "", "Configuration summary:"]
+    text = format_config_summary(summary)
+    if text:
+        lines.extend("  " + line for line in text.splitlines())
+    return "\n".join(lines)
 
 
 def auto_int(_, x):
@@ -78,10 +147,55 @@ class Config:
             raise AttributeError("Invalid access!")
         super().__setattr__(name, value)
 
-    def set(self, name, value):
+    def set(self, name, value, source=SOURCE_PROGRAMMATIC):
         if name not in self.settings:
             raise AttributeError("No configuration setting for: %s" % name)
-        self.settings[name].set(value)
+        setting = self.settings[name]
+        try:
+            setting.set(value, source)
+        except Exception as e:
+            # A validator message can quote the value it rejected. Withhold
+            # it when the setting is sensitive, so the error printed on
+            # startup or reload does not disclose more than a summary would.
+            if setting.sensitive or is_sensitive_value(value, setting.type):
+                message = "Invalid value for %s (value withheld)" % name
+                try:
+                    error = type(e)(message)
+                except TypeError:
+                    error = ConfigError(message)
+                raise error from None
+            raise
+
+    def config_summary(self):
+        """Return the shareable view of the whole configuration.
+
+        Every registered setting is included, including ones a plugin added
+        to ``KNOWN_SETTINGS``. Each entry keeps the name, the source that
+        selected the value and whether it was set at all. A sensitive value
+        is replaced by ``REDACTED``; see :meth:`Setting.is_sensitive`.
+
+        This is the single summary used by the control socket, the CLI text
+        output and the reload failure diagnostic.
+        """
+        return {
+            name: setting.summary_entry()
+            for name, setting in sorted(self.settings.items())
+        }
+
+    def is_sensitive_setting(self, name, value=None):
+        """Whether a value for ``name`` must be withheld from diagnostics.
+
+        ``value`` defaults to the current value. Use it to check a raw value
+        that failed validation before it was stored.
+        """
+        setting = self.settings.get(name)
+        if setting is None:
+            return False
+        if setting.sensitive:
+            return True
+        if value is None:
+            return setting.is_sensitive()
+        return is_sensitive_value(value, setting.type)
 
     def validate(self):
         """Check settings against each other once everything is loaded.
@@ -319,10 +433,18 @@ class Setting:
     desc = None
     nargs = None
     const = None
+    # Marks a value whose disclosure would leak a credential or secret. A
+    # setting plugin can set this on its Setting subclass. Values whose type
+    # already says they are secret (a dict, a list of dicts, bytes) are
+    # recognized without the marker; see ``is_sensitive_value``.
+    sensitive = False
 
     def __init__(self):
+        # Source of the current value: default, config file, command line...
+        # Set before the default so the default is recorded as such.
+        self.source = SOURCE_DEFAULT
         if self.default is not None:
-            self.set(self.default)
+            self.set(self.default, source=SOURCE_DEFAULT)
 
     def add_option(self, parser):
         if not self.cli:
@@ -360,10 +482,53 @@ class Setting:
     def get(self):
         return self.value
 
-    def set(self, val):
+    def set(self, val, source=SOURCE_PROGRAMMATIC):
         if not callable(self.validator):
             raise TypeError('Invalid validator: %s' % self.name)
         self.value = self.validator(val)
+        self.source = source
+
+    def has_value(self):
+        """Whether a source other than the default supplied the value."""
+        return self.source != SOURCE_DEFAULT
+
+    def is_sensitive(self):
+        """Whether the config summary must hide this value.
+
+        A setting is sensitive when its class carries an explicit
+        ``sensitive`` marker, or when the value itself is secret by type: a
+        mapping passed through a validator that accepts arbitrary payloads,
+        or bytes.
+        """
+        return bool(self.sensitive) or is_sensitive_value(self.value, self.type)
+
+    def summary_entry(self, redact=None):
+        """Return the value disclosed in a configuration summary.
+
+        The name, selected source and whether the setting has a value are
+        always visible. The value is replaced by ``REDACTED`` when the
+        setting is sensitive; a plugin can pass an alternative marker.
+        """
+        entry = {
+            "name": self.name,
+            "section": self.section,
+            "source": self.source,
+            "set": self.has_value(),
+            "sensitive": self.is_sensitive(),
+        }
+        if entry["sensitive"]:
+            entry["value"] = REDACTED if redact is None else redact
+        else:
+            entry["value"] = self._summary_value()
+        return entry
+
+    def _summary_value(self):
+        value = self.value
+        if callable(value):
+            return "<{}()>".format(getattr(value, "__qualname__", "callable"))
+        if isinstance(value, type):
+            return value.__name__
+        return value
 
     def __lt__(self, other):
         return (self.section == other.section and
@@ -371,11 +536,17 @@ class Setting:
     __cmp__ = __lt__
 
     def __repr__(self):
+        # Keep the value out of the repr when it is sensitive: the repr ends
+        # up in tracebacks and logs.
+        if self.is_sensitive():
+            value = REDACTED
+        else:
+            value = self.value
         return "<%s.%s object at %x with value %r>" % (
             self.__class__.__module__,
             self.__class__.__name__,
             id(self),
-            self.value,
+            value,
         )
 
 
@@ -1243,6 +1414,8 @@ class Env(Setting):
     meta = "ENV"
     validator = validate_list_string
     default = []
+    # The values are arbitrary, so they can carry credentials.
+    sensitive = True
 
     desc = """\
         Set environment variables in the execution environment.
@@ -2711,6 +2884,8 @@ class PasteGlobalConf(Setting):
     meta = "CONF"
     validator = validate_list_string
     default = []
+    # key=value pairs supplied by the deployer, possibly credentials.
+    sensitive = True
 
     desc = """\
         Set a PasteDeploy global config variable in ``key=value`` form.

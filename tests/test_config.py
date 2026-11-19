@@ -622,3 +622,125 @@ class TestGetDefaultControlSocket:
             result = _get_default_control_socket()
             assert result == os.path.join(tmpdir, '.gunicorn', 'gunicorn.ctl')
             assert result.endswith('.gunicorn/gunicorn.ctl')
+
+
+# Tests for the shareable configuration summary
+
+def _summary_by_name(summary):
+    return {name: entry for name, entry in summary.items()}
+
+
+class TestConfigSummary:
+    """The summary keeps names, sources and set state, and hides secrets."""
+
+    def test_source_and_set_state(self):
+        c = config.Config()
+        c.set("workers", 3, source=config.SOURCE_CMDLINE)
+
+        entry = c.config_summary()["workers"]
+        assert entry["name"] == "workers"
+        assert entry["source"] == config.SOURCE_CMDLINE
+        assert entry["set"] is True
+        assert entry["value"] == 3
+
+        unused = c.config_summary()["bind"]
+        assert unused["source"] == config.SOURCE_DEFAULT
+        assert unused["set"] is False
+
+    def test_sensitive_marker_redacts_value(self, tmp_path):
+        class PluginToken(config.Setting):
+            name = "plugin_token"
+            section = "Plugins"
+            validator = config.validate_string
+            default = None
+            sensitive = True
+            desc = "A token registered by a plugin."
+
+        c = config.Config()
+        c.settings["plugin_token"] = PluginToken()
+        c.set("plugin_token", "do-not-share", source=config.SOURCE_CONFIG_FILE)
+
+        entry = c.config_summary()["plugin_token"]
+        assert entry["value"] == config.REDACTED
+        assert entry["sensitive"] is True
+        assert entry["source"] == config.SOURCE_CONFIG_FILE
+        assert entry["set"] is True
+
+    def test_mapping_values_are_redacted_by_type(self):
+        c = config.Config()
+        c.set("logconfig_dict", {"handlers": {"h": {"password": "nope"}}})
+
+        entry = c.config_summary()["logconfig_dict"]
+        assert entry["value"] == config.REDACTED
+        assert entry["sensitive"] is True
+        assert "nope" not in repr(c.config_summary())
+
+    def test_raw_env_redacted(self):
+        c = config.Config()
+        c.set("raw_env", ["API_TOKEN=secret-value"])
+
+        entry = c.config_summary()["raw_env"]
+        assert entry["value"] == config.REDACTED
+        assert entry["set"] is True
+
+    def test_names_are_visible_for_redacted_values(self):
+        c = config.Config()
+        c.set("logconfig_dict", {"version": 1})
+
+        summary = c.config_summary()
+        assert "logconfig_dict" in summary
+        assert summary["logconfig_dict"]["source"] == config.SOURCE_PROGRAMMATIC
+
+    def test_validator_error_withholds_sensitive_value(self):
+        c = config.Config()
+        c.set("raw_env", ["A=1"])
+
+        with pytest.raises(Exception) as exc_info:
+            c.set("raw_env", 42)
+        assert "Invalid value for raw_env (value withheld)" in str(exc_info.value)
+
+    def test_summary_text_matches_entries(self):
+        c = config.Config()
+        c.set("workers", 2, source=config.SOURCE_CONFIG_FILE)
+        summary = c.config_summary()
+        text = config.format_config_summary(summary)
+
+        assert "workers" in text
+        assert "source=config file" in text
+        assert "set" in text
+
+    def test_reload_error_diagnostic_uses_summary(self):
+        c = config.Config()
+        c.set("workers", 2)
+        c.set("logconfig_dict", {"secret": "value"})
+        diagnostic = config.format_config_error(
+            "Invalid value for logconfig_dict (value withheld)",
+            c.config_summary())
+
+        assert "Reload failed; keeping the running configuration" in diagnostic
+        assert "logconfig_dict" in diagnostic
+        assert "value" not in diagnostic.split("logconfig_dict")[1].splitlines()[0][3:]
+
+
+def test_plugin_setting_is_summarized():
+    """A setting a plugin appends to KNOWN_SETTINGS is in the summary."""
+    class PluginRuntimeSecret(config.Setting):
+        name = "plugin_runtime_secret"
+        section = "Plugins"
+        validator = config.validate_string
+        default = None
+        sensitive = True
+        desc = "Registered by a plugin"
+
+    config.KNOWN_SETTINGS.append(PluginRuntimeSecret)
+    try:
+        c = config.Config()
+        c.set("plugin_runtime_secret", "keep-out",
+              source=config.SOURCE_CONFIG_FILE)
+
+        entry = c.config_summary()["plugin_runtime_secret"]
+        assert entry["value"] == config.REDACTED
+        assert entry["source"] == config.SOURCE_CONFIG_FILE
+        assert entry["set"] is True
+    finally:
+        config.KNOWN_SETTINGS.remove(PluginRuntimeSecret)

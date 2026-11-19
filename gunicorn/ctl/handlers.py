@@ -128,15 +128,25 @@ class CommandHandlers:
 
     def show_config(self) -> dict:
         """
-        Return current effective configuration.
+        Return the shareable view of the running configuration.
+
+        Every registered setting is listed, including ones a plugin added.
+        Each entry keeps the setting name, the source that selected the
+        value and whether it was set; sensitive values are replaced by
+        ``***``. The same mapping is what the CLI text form renders and what
+        a failed reload reports, so no response discloses more than another.
 
         Returns:
-            Dictionary of configuration values
+            Mapping of setting name to its summary entry
         """
         cfg = self.arbiter.cfg
-        config = {}
+        summary = getattr(cfg, "config_summary", None)
+        if callable(summary):
+            return summary()
 
-        # Get commonly needed config values
+        # Compatibility with a config object that predates the summary API:
+        # fall back to the handful of settings the command used to expose.
+        config = {}
         config_keys = [
             'bind', 'workers', 'worker_class', 'threads', 'timeout',
             'graceful_timeout', 'keepalive', 'max_requests',
@@ -569,7 +579,7 @@ class CommandHandlers:
             "show all": "Show all processes (arbiter, web workers, dirty workers)",
             "show workers": "List HTTP workers with their status",
             "show dirty": "List dirty workers and apps",
-            "show config": "Show current effective configuration",
+            "show config": "Show the shareable configuration summary",
             "show stats": "Show server statistics",
             "show listeners": "Show bound sockets",
             "worker add [N]": "Spawn N workers (default 1)",

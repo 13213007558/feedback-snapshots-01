@@ -13,6 +13,7 @@ import socket
 
 from gunicorn.errors import HaltServer, AppImportError
 from gunicorn.pidfile import Pidfile
+from gunicorn.config import format_config_error
 from gunicorn import sock, systemd, util
 
 from gunicorn import __version__, SERVER_SOFTWARE
@@ -527,11 +528,25 @@ class Arbiter:
         # exec the process using the original environment
         os.execvpe(self.START_CTX[0], self.START_CTX['args'], environ)
 
+    def _report_reload_failure(self, error):
+        """Report a reload that could not load the new configuration.
+
+        The running settings stay in place. The message carries the same
+        redacted summary ``gunicornc show config`` returns, so the diagnostic
+        and the structured response disclose the same fields.
+        """
+        summary = getattr(error, "summary", None)
+        if not summary:
+            summary = self.cfg.config_summary()
+        diagnostic = format_config_error(error, summary)
+        self.log.error("%s", diagnostic)
+
     def reload(self):
         # Track reload stats
         self._stats['reloads'] += 1
 
         old_address = self.cfg.address
+        old_cfg = self.cfg
 
         # reset old environment
         for k in self.cfg.env:
@@ -546,8 +561,17 @@ class Arbiter:
                 except KeyError:
                     pass
 
-        # reload conf
-        self.app.reload()
+        # reload conf. A failure keeps the previous configuration and is
+        # reported with the same redacted summary as the control plane.
+        try:
+            self.app.reload()
+        except Exception as e:
+            self.cfg = old_cfg
+            self.app.cfg = old_cfg
+            self._report_reload_failure(e)
+            # A failed reload must not take the master down or recycle
+            # workers: the previous generation keeps serving.
+            return
         self.setup(self.app)
 
         # reopen log files

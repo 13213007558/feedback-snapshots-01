@@ -1023,3 +1023,42 @@ class TestDirtyArbiterOrphanCleanup:
             mock_dirty_arbiter.assert_called_once()
             call_kwargs = mock_dirty_arbiter.call_args[1]
             assert call_kwargs.get('pidfile') == pidfile_path
+
+
+class TestReloadFailureKeepsConfig:
+    """A reload that cannot load the new settings keeps the running ones."""
+
+    @mock.patch('gunicorn.arbiter.Arbiter.spawn_worker')
+    @mock.patch('gunicorn.arbiter.Arbiter.manage_workers')
+    def test_failed_reload_keeps_previous_config(self, mock_manage, mock_spawn):
+        app = ReloadableConfigApplication()
+        arbiter = gunicorn.arbiter.Arbiter(app)
+        arbiter.LISTENERS = [mock.Mock()]
+        arbiter.pidfile = None
+        old_cfg = arbiter.cfg
+        old_workers = old_cfg.workers
+        old_summary = old_cfg.config_summary()
+
+        def failing_reload():
+            app.cfg.set('logconfig_dict', {'broken': True})
+            raise gunicorn.errors.ConfigReloadError(
+                'Invalid value for logconfig_dict (value withheld)',
+                summary=old_summary)
+
+        app.reload = failing_reload
+        with mock.patch.object(arbiter.log, 'error') as mock_error:
+            arbiter.reload()
+
+        # The running settings and worker count are untouched.
+        assert arbiter.cfg is old_cfg
+        assert arbiter.app.cfg is old_cfg
+        assert arbiter.cfg.workers == old_workers
+        mock_spawn.assert_not_called()
+        mock_manage.assert_not_called()
+
+        # The diagnostic carries the same redacted summary as the control
+        # plane and does not leak the rejected value.
+        message = mock_error.call_args[0][1]
+        assert 'Reload failed; keeping the running configuration' in message
+        assert 'logconfig_dict' in message
+        assert 'broken' not in message

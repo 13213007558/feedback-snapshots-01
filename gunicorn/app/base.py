@@ -9,7 +9,16 @@ import traceback
 
 from gunicorn import util
 from gunicorn.arbiter import Arbiter
-from gunicorn.config import Config, get_default_config_file
+from gunicorn.config import (
+    Config,
+    REDACTED,
+    SOURCE_APPLICATION,
+    SOURCE_CMDLINE,
+    SOURCE_CONFIG_FILE,
+    SOURCE_ENVIRONMENT,
+    get_default_config_file,
+)
+from gunicorn.errors import ConfigReloadError
 from gunicorn import debug
 
 
@@ -24,19 +33,26 @@ class BaseApplication:
         self.callable = None
         self.prog = prog
         self.logger = None
+        self._last_config_error = None
+        self._reloading = False
         self.do_load_config()
 
     def do_load_config(self):
         """
         Loads the configuration
         """
+        self._last_config_error = None
         try:
             self.load_default_config()
             self.load_config()
             self.cfg.validate()
         except Exception as e:
-            print("\nError: %s" % str(e), file=sys.stderr)
-            sys.stderr.flush()
+            self._last_config_error = e
+            # On reload the arbiter reports the failure together with the
+            # redacted summary, so the plain message is not printed twice.
+            if not self._reloading:
+                print("\nError: %s" % str(e), file=sys.stderr)
+                sys.stderr.flush()
             sys.exit(1)
 
     def load_default_config(self):
@@ -58,7 +74,21 @@ class BaseApplication:
         raise NotImplementedError
 
     def reload(self):
-        self.do_load_config()
+        # Keep the last good settings so a failed reload does not wipe out a
+        # working configuration, and can report a summary that matches the
+        # running state.
+        previous = self.cfg
+        self._reloading = True
+        try:
+            self.do_load_config()
+        except SystemExit as e:
+            self.cfg = previous
+            error = self._last_config_error or e
+            raise ConfigReloadError(
+                str(error),
+                summary=previous.config_summary()) from None
+        finally:
+            self._reloading = False
         if self.cfg.spew:
             debug.spew()
 
@@ -110,10 +140,16 @@ class Application(BaseApplication):
             sys.modules[module_name] = mod
             spec.loader.exec_module(mod)
         except Exception:
-            print("Failed to read config file: %s" % filename, file=sys.stderr)
-            traceback.print_exc()
-            sys.stderr.flush()
-            sys.exit(1)
+            # On reload the arbiter reports the failure with the redacted
+            # summary, so a traceback that may quote config values is not
+            # printed a second time.
+            if not self._reloading:
+                print("Failed to read config file: %s" % filename,
+                      file=sys.stderr)
+                traceback.print_exc()
+                sys.stderr.flush()
+            raise ConfigReloadError(
+                "Failed to read config file: %s" % filename)
 
         return vars(mod)
 
@@ -141,9 +177,14 @@ class Application(BaseApplication):
             if k not in self.cfg.settings:
                 continue
             try:
-                self.cfg.set(k.lower(), v)
+                self.cfg.set(k.lower(), v, source=SOURCE_CONFIG_FILE)
             except Exception:
-                print("Invalid value for %s: %s\n" % (k, v), file=sys.stderr)
+                if self.cfg.is_sensitive_setting(k.lower(), v):
+                    print("Invalid value for %s: %s\n" % (k, REDACTED),
+                          file=sys.stderr)
+                else:
+                    print("Invalid value for %s: %s\n" % (k, v),
+                          file=sys.stderr)
                 sys.stderr.flush()
                 raise
 
@@ -166,7 +207,7 @@ class Application(BaseApplication):
         # Load up the any app specific configuration
         if cfg:
             for k, v in cfg.items():
-                self.cfg.set(k.lower(), v)
+                self.cfg.set(k.lower(), v, source=SOURCE_APPLICATION)
 
         env_args = parser.parse_args(self.cfg.get_cmd_args_from_env())
 
@@ -185,7 +226,7 @@ class Application(BaseApplication):
                 continue
             if k == "args":
                 continue
-            self.cfg.set(k.lower(), v)
+            self.cfg.set(k.lower(), v, source=SOURCE_ENVIRONMENT)
 
         # Lastly, update the configuration with any command line settings.
         for k, v in vars(args).items():
@@ -193,7 +234,7 @@ class Application(BaseApplication):
                 continue
             if k == "args":
                 continue
-            self.cfg.set(k.lower(), v)
+            self.cfg.set(k.lower(), v, source=SOURCE_CMDLINE)
 
         # current directory might be changed by the config now
         # set up import paths and follow symlinks

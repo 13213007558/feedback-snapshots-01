@@ -8,7 +8,7 @@ import os
 from paste.deploy import loadapp
 
 from gunicorn.app.wsgiapp import WSGIApplication
-from gunicorn.config import get_default_config_file
+from gunicorn.config import SOURCE_FRAMEWORK, get_default_config_file
 
 
 def get_wsgi_app(config_uri, name=None, defaults=None):
@@ -52,10 +52,12 @@ def serve(app, global_conf, **local_conf):
 
     class PasterServerApplication(WSGIApplication):
         def load_config(self):
-            self.cfg.set("default_proc_name", config_file)
+            self.cfg.set("default_proc_name", config_file,
+                         source=SOURCE_FRAMEWORK)
 
             if has_logging_config(config_file):
-                self.cfg.set("logconfig", config_file)
+                self.cfg.set("logconfig", config_file,
+                             source=SOURCE_FRAMEWORK)
 
             if gunicorn_config_file:
                 self.load_config_from_file(gunicorn_config_file)
@@ -66,7 +68,7 @@ def serve(app, global_conf, **local_conf):
 
             for k, v in local_conf.items():
                 if v is not None:
-                    self.cfg.set(k.lower(), v)
+                    self.cfg.set(k.lower(), v, source=SOURCE_FRAMEWORK)
 
         def load(self):
             return app

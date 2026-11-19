@@ -85,7 +85,7 @@ gunicorn> quit
 | `show all` | Overview of all processes (arbiter, web workers, dirty workers) |
 | `show workers` | List HTTP workers with status |
 | `show dirty` | List dirty workers and apps |
-| `show config` | Show current effective configuration |
+| `show config` | Show the shareable configuration summary |
 | `show stats` | Show server statistics |
 | `show listeners` | Show bound sockets |
 | `help` | Show available commands |
@@ -216,6 +216,27 @@ fi
 ```
 
 ## Security
+
+### Configuration summary
+
+`show config` returns a summary that is safe to share, for example with a
+colleague on a shared machine. It lists every registered setting, including
+ones added by a plugin, and keeps the setting name, the source that selected
+the value (`default`, `config file`, `environment`, `command line`,
+`application` or `programmatic`) and whether the setting was set at all.
+
+A value is replaced by `***` in both the JSON response and the text output
+when:
+
+- its `Setting` subclass sets `sensitive = True`; a plugin registering a
+  setting that carries a credential should set this, and
+- the value is a mapping (or a list holding mappings), such as a logging
+  configuration or a Paste global, whose keys are not known in advance.
+
+The same summary is printed when a reload (`HUP`) rejects the new
+configuration and the master keeps running with the previous settings, so a
+failed reload does not disclose more than `show config` does. A rejected
+sensitive value is left out of the validator's error message too.
 
 The control socket uses filesystem permissions for access control:
 

@@ -1,6 +1,17 @@
 <span id="news"></span>
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- Control interface: `show config` now returns a shareable summary instead of
+  raw values. Every registered setting, including ones added by a plugin, is
+  listed with the source that selected it and whether it is set; a value
+  marked `sensitive` on its `Setting` class, or stored in a mapping, is shown
+  as `***`. The same summary is printed when a reload rejects the new
+  configuration and the master keeps the previous settings.
+
 ## 27.0.1 - 2026-11-12
 
 ### Bug Fixes

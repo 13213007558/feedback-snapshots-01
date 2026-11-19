@@ -166,6 +166,27 @@ class TestShowConfig:
         assert result["bind"] == ['127.0.0.1:8000']
 
 
+class TestShowConfigSummary:
+    """show config returns the redacted summary shared with text output."""
+
+    def test_show_config_uses_summary(self):
+        from gunicorn.config import Config
+
+        arbiter = MockArbiter()
+        arbiter.cfg = Config()
+        arbiter.cfg.set("workers", 7, source="command line")
+        arbiter.cfg.set("logconfig_dict", {"handlers": {"h": {"password": "x"}}})
+        handlers = CommandHandlers(arbiter)
+
+        result = handlers.show_config()
+
+        assert result["workers"]["value"] == 7
+        assert result["workers"]["source"] == "command line"
+        assert result["workers"]["set"] is True
+        assert result["logconfig_dict"]["value"] == "***"
+        assert result["logconfig_dict"]["sensitive"] is True
+
+
 class TestShowListeners:
     """Tests for show listeners command."""
 
@@ -466,3 +487,26 @@ class TestHelp:
         assert "worker add [N]" in commands
         assert "reload" in commands
         assert "shutdown [graceful|quick]" in commands
+
+
+class TestConfigOutputConsistency:
+    """JSON and text output disclose the same fields."""
+
+    def test_text_matches_json(self):
+        from gunicorn.config import Config
+        from gunicorn.ctl.cli import format_config
+
+        arbiter = MockArbiter()
+        arbiter.cfg = Config()
+        arbiter.cfg.set("workers", 2, source="command line")
+        arbiter.cfg.set("raw_env", ["TOKEN=abc"])
+        handlers = CommandHandlers(arbiter)
+
+        result = handlers.show_config()
+        text = format_config(result)
+
+        assert "workers: 2" in text
+        assert "source=command line" in text
+        assert "raw_env: ***" in text
+        assert "abc" not in text
+        assert "raw_env: ***" in text
