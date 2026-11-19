@@ -10,6 +10,7 @@ import io
 import os
 import posixpath
 import stat
+from typing import ClassVar
 from urllib.parse import urljoin
 
 import paramiko
@@ -24,6 +25,15 @@ from storages.utils import setting
 
 @deconstructible
 class SFTPStorage(ClosingContextManager, BaseStorage):
+    # Maps the per-alias ``host_key_policy`` setting to the paramiko policy
+    # that decides what happens when the server presents an unknown or
+    # changed host key (i.e. a key rotation).
+    host_key_policies: ClassVar = {
+        "reject": paramiko.RejectPolicy,
+        "auto-add": paramiko.AutoAddPolicy,
+        "warning": paramiko.WarningPolicy,
+    }
+
     def __init__(self, **settings):
         super().__init__(**settings)
         self._ssh = None
@@ -39,13 +49,35 @@ class SFTPStorage(ClosingContextManager, BaseStorage):
             "uid": setting("SFTP_STORAGE_UID"),
             "gid": setting("SFTP_STORAGE_GID"),
             "known_host_file": setting("SFTP_KNOWN_HOST_FILE"),
+            "host_key_policy": setting("SFTP_HOST_KEY_POLICY", "reject"),
             "root_path": setting("SFTP_STORAGE_ROOT", ""),
             "base_url": setting("SFTP_BASE_URL") or setting("MEDIA_URL"),
         }
 
-    def _connect(self):
-        self._ssh = paramiko.SSHClient()
+    def _get_host_key_policy(self):
+        # Allow passing a ready-made policy instance/class directly while the
+        # documented configuration uses the names above.
+        if not isinstance(self.host_key_policy, str):
+            return self.host_key_policy
+        try:
+            return self.host_key_policies[self.host_key_policy]()
+        except KeyError:
+            allowed = ", ".join(sorted(self.host_key_policies))
+            raise ValueError(
+                "Unknown host_key_policy '{}'. Valid values are: {}".format(
+                    self.host_key_policy, allowed
+                )
+            )
 
+    def _connect(self):
+        # A fresh client on every (re)connect means a rebuilt connection
+        # re-runs this alias' own host key verification rather than reusing
+        # state left over from a previous connection.
+        self._ssh = paramiko.SSHClient()
+        self._sftp = None
+
+        # Each storage alias carries its own trust store, so two aliases can
+        # point at independently maintained known_hosts files.
         known_host_file = self.known_host_file or os.path.expanduser(
             os.path.join("~", ".ssh", "known_hosts")
         )
@@ -53,8 +85,8 @@ class SFTPStorage(ClosingContextManager, BaseStorage):
         if os.path.exists(known_host_file):
             self._ssh.load_host_keys(known_host_file)
 
-        # and automatically add new host keys for hosts we haven't seen before.
-        self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # The policy expresses this alias' rule for rotated/unknown host keys.
+        self._ssh.set_missing_host_key_policy(self._get_host_key_policy())
 
         try:
             self._ssh.connect(self.host, **self.params)
@@ -69,6 +101,13 @@ class SFTPStorage(ClosingContextManager, BaseStorage):
                 self._connect()
             else:
                 raise paramiko.AuthenticationException(e)
+        except paramiko.SSHException:
+            # Host key verification failures (unknown or mismatching key) land
+            # here. Tear the half-open connection down and propagate: no SFTP
+            # session must be handed back for an unverified host.
+            self._ssh.close()
+            self._ssh = None
+            raise
 
         if self._ssh.get_transport():
             self._sftp = self._ssh.open_sftp()

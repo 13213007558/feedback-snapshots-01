@@ -38,6 +38,36 @@ To put static files on SFTP via ``collectstatic`` on Django >= 4.2 you'd include
 The settings documented in the following sections include both the key for ``OPTIONS`` (and subclassing) as
 well as the global value. Given the significant improvements provided by the new API, migration is strongly encouraged.
 
+Multiple SFTP aliases
+~~~~~~~~~~~~~~~~~~~~~
+
+Each alias carries its own host key trust store and rotation rule. This lets a
+production server and a partner server, whose host keys are maintained by
+different people, be configured independently. A key present in one alias'
+trust file can never authorize the other alias' connection::
+
+  STORAGES = {
+      "production_sftp": {
+          "BACKEND": "storages.backends.sftpstorage.SFTPStorage",
+          "OPTIONS": {
+              "host": "sftp.production.example",
+              "known_host_file": "/etc/django/known_hosts/production",
+              "host_key_policy": "reject",
+          },
+      },
+      "partner_sftp": {
+          "BACKEND": "storages.backends.sftpstorage.SFTPStorage",
+          "OPTIONS": {
+              "host": "sftp.partner.example",
+              "known_host_file": "/etc/django/known_hosts/partner",
+              "host_key_policy": "auto-add",
+          },
+      },
+  }
+
+On a rebuilt connection each alias reloads its own ``known_host_file`` and
+re-applies its own ``host_key_policy``; no state is shared between the two.
+
 Settings
 ~~~~~~~~
 
@@ -116,6 +146,37 @@ Settings
   Default: ``None``
 
   Absolute path of know host file, if it isn't set ``"~/.ssh/known_hosts"`` will be used.
+  This is the trust store for this storage alias only: when you define several
+  SFTP aliases (for example a production server and a partner server maintained
+  by different teams), give each alias its own file. A key trusted in one
+  alias' file is never used to authorize a connection made by another alias.
+
+``host_key_policy`` or ``SFTP_HOST_KEY_POLICY``
+
+  Default: ``"reject"``
+
+  The rule this alias applies when the server presents a host key that is
+  missing from, or no longer matches, its ``known_host_file`` (for example after
+  a key rotation). The value is one of:
+
+  ``"reject"``
+    Refuse the connection. The rotated key must first be added out of band to
+    this alias' ``known_host_file``. This is the secure default and means a
+    changed key never produces a usable SFTP session.
+
+  ``"auto-add"``
+    Automatically trust and save keys for hosts not seen before (the historical
+    behavior). A key that is already known but has changed is still rejected.
+
+  ``"warning"``
+    Accept unknown keys but log a warning. A changed key is still rejected.
+
+  A ready-made ``paramiko`` policy object may be passed instead of a string
+  when constructing the storage directly.
+
+  Each alias evaluates its own policy on every connection, including
+  reconnections, so two aliases can follow different rotation rules
+  independently.
 
 ``base_url`` or ``SFTP_BASE_URL``
 

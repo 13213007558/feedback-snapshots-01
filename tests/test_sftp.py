@@ -2,7 +2,9 @@ import io
 import os
 import socket
 import stat
+import tempfile
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import paramiko
@@ -255,3 +257,235 @@ class SFTPStorageFileTest(TestCase):
         self.file.write(b"foo")
         self.file.close()
         self.assertTrue(mock_sftp.putfo.called)
+
+
+class SFTPStorageHostKeyVerificationTest(TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.production_known_hosts = os.path.join(
+            self.temp_dir.name, "production_known_hosts"
+        )
+        self.partner_known_hosts = os.path.join(
+            self.temp_dir.name, "partner_known_hosts"
+        )
+        open(self.production_known_hosts, "w").close()
+        open(self.partner_known_hosts, "w").close()
+
+        self.production = sftpstorage.SFTPStorage(
+            host="sftp.production.example",
+            known_host_file=self.production_known_hosts,
+            host_key_policy="reject",
+        )
+        self.partner = sftpstorage.SFTPStorage(
+            host="sftp.partner.example",
+            known_host_file=self.partner_known_hosts,
+            host_key_policy="auto-add",
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    @patch("paramiko.SSHClient")
+    def test_each_alias_loads_its_own_trust_file_and_policy(self, mock_ssh):
+        self.production._connect()
+        client = mock_ssh.return_value
+        client.load_host_keys.assert_called_once_with(self.production_known_hosts)
+        self.assertIsInstance(
+            client.set_missing_host_key_policy.call_args[0][0],
+            paramiko.RejectPolicy,
+        )
+        self.assertEqual("sftp.production.example", client.connect.call_args[0][0])
+
+    @patch("paramiko.SSHClient")
+    def test_partner_alias_uses_its_own_trust_file_and_policy(self, mock_ssh):
+        self.partner._connect()
+        client = mock_ssh.return_value
+        client.load_host_keys.assert_called_once_with(self.partner_known_hosts)
+        self.assertIsInstance(
+            client.set_missing_host_key_policy.call_args[0][0],
+            paramiko.AutoAddPolicy,
+        )
+        with self.assertRaises(AssertionError):
+            client.load_host_keys.assert_any_call(self.production_known_hosts)
+
+    @patch("paramiko.SSHClient")
+    def test_host_verification_runs_before_the_connection(self, mock_ssh):
+        self.production._connect()
+        client = mock_ssh.return_value
+        calls = client.mock_calls
+        connect_index = calls.index(call.connect("sftp.production.example"))
+        self.assertIn(call.load_host_keys(self.production_known_hosts), calls)
+        self.assertLess(
+            calls.index(call.load_host_keys(self.production_known_hosts)),
+            connect_index,
+        )
+        self.assertLess(
+            calls.index(
+                call.set_missing_host_key_policy(
+                    client.set_missing_host_key_policy.call_args[0][0]
+                )
+            ),
+            connect_index,
+        )
+
+    @patch("paramiko.SSHClient")
+    def test_bad_host_key_blocks_the_sftp_session(self, mock_ssh):
+        client = mock_ssh.return_value
+        client.connect.side_effect = paramiko.BadHostKeyException(
+            "sftp.production.example",
+            MagicMock(),
+            MagicMock(),
+        )
+        with self.assertRaises(paramiko.BadHostKeyException):
+            self.production._connect()
+        # No SFTP session is handed back for an unverified host.
+        client.open_sftp.assert_not_called()
+        self.assertIsNone(self.production._sftp)
+        # The half-open connection is torn down rather than reused.
+        client.close.assert_called_once_with()
+        self.assertIsNone(self.production._ssh)
+
+    @patch("paramiko.SSHClient")
+    def test_unknown_host_key_is_rejected_by_the_strict_alias(self, mock_ssh):
+        client = mock_ssh.return_value
+        client.connect.side_effect = paramiko.SSHException(
+            "Server '[sftp.production.example]' not found in known_hosts"
+        )
+        with self.assertRaises(paramiko.SSHException):
+            self.production._connect()
+        client.open_sftp.assert_not_called()
+        self.assertIsNone(self.production._sftp)
+
+    @patch("paramiko.SSHClient")
+    def test_foreign_trust_file_cannot_authorize_this_connection(self, mock_ssh):
+        # The partner's trust store is presented, but this alias only trusts
+        # its own file. The presented key therefore fails verification.
+        self.production.known_host_file = self.partner_known_hosts
+        client = mock_ssh.return_value
+        client.connect.side_effect = paramiko.BadHostKeyException(
+            "sftp.production.example",
+            MagicMock(),
+            MagicMock(),
+        )
+        with self.assertRaises(paramiko.BadHostKeyException):
+            self.production._connect()
+        client.open_sftp.assert_not_called()
+        # Only the foreign file was consulted; this alias' own file was not.
+        client.load_host_keys.assert_called_once_with(self.partner_known_hosts)
+        with self.assertRaises(AssertionError):
+            client.load_host_keys.assert_any_call(self.production_known_hosts)
+        # The lazy accessor must not return a usable session either.
+        self.assertRaises(
+            paramiko.BadHostKeyException, getattr, self.production, "sftp"
+        )
+
+    @patch("paramiko.SSHClient")
+    def test_write_uses_a_session_that_passed_host_verification(self, mock_ssh):
+        self.production._save("foo", File(io.BytesIO(b"foo"), "foo"))
+        client = mock_ssh.return_value
+        # Host verification precedes any SFTP operation.
+        client.set_missing_host_key_policy.assert_called_once()
+        client.load_host_keys.assert_called_once_with(self.production_known_hosts)
+        calls = client.mock_calls
+        connect_index = calls.index(call.connect("sftp.production.example"))
+        self.assertLess(
+            calls.index(call.load_host_keys(self.production_known_hosts)),
+            connect_index,
+        )
+        # The session used for writing is the one opened after verification.
+        self.assertEqual(client.open_sftp.return_value, self.production.sftp)
+        client.open_sftp.return_value.putfo.assert_called_once()
+
+    @patch("paramiko.SSHClient")
+    def test_read_uses_a_session_that_passed_host_verification(self, mock_ssh):
+        self.production._read("foo")
+        client = mock_ssh.return_value
+        client.load_host_keys.assert_called_once_with(self.production_known_hosts)
+        self.assertEqual(client.open_sftp.return_value, self.production.sftp)
+        client.open_sftp.return_value.open.assert_called_once_with("foo", "rb")
+
+    @patch("paramiko.SSHClient")
+    def test_reconnect_reapplies_this_alias_configuration(self, mock_ssh):
+        self.production._connect()
+        self.production._connect()
+        client = mock_ssh.return_value
+        # A fresh client rebuilds trust from this alias' own file every time.
+        self.assertEqual(
+            client.load_host_keys.call_args_list,
+            [
+                call(self.production_known_hosts),
+                call(self.production_known_hosts),
+            ],
+        )
+        self.assertEqual(2, client.set_missing_host_key_policy.call_count)
+        for policy_call in client.set_missing_host_key_policy.call_args_list:
+            self.assertIsInstance(policy_call[0][0], paramiko.RejectPolicy)
+        with self.assertRaises(AssertionError):
+            client.load_host_keys.assert_any_call(self.partner_known_hosts)
+
+    @patch("paramiko.SSHClient")
+    def test_failed_verification_on_reconnect_does_not_reuse_old_session(
+        self, mock_ssh
+    ):
+        self.production._connect()
+        first_session = self.production._sftp
+        self.assertIsNotNone(first_session)
+
+        # Simulate a rebuilt connection whose key no longer matches.
+        mock_ssh.reset_mock()
+        second_client = mock_ssh.return_value
+        second_client.connect.side_effect = paramiko.BadHostKeyException(
+            "sftp.production.example",
+            MagicMock(),
+            MagicMock(),
+        )
+        with self.assertRaises(paramiko.BadHostKeyException):
+            self.production._connect()
+        second_client.open_sftp.assert_not_called()
+        self.assertIsNone(self.production._sftp)
+        self.assertIsNone(self.production._ssh)
+
+    def test_host_key_policy_strings_map_to_paramiko_policies(self):
+        for name, policy_class in (
+            ("reject", paramiko.RejectPolicy),
+            ("auto-add", paramiko.AutoAddPolicy),
+            ("warning", paramiko.WarningPolicy),
+        ):
+            storage = sftpstorage.SFTPStorage(host="foo", host_key_policy=name)
+            self.assertIsInstance(storage._get_host_key_policy(), policy_class)
+
+    def test_unknown_host_key_policy_is_rejected(self):
+        storage = sftpstorage.SFTPStorage(
+            host="foo", host_key_policy="trust-everything"
+        )
+        with self.assertRaises(ValueError):
+            storage._get_host_key_policy()
+
+    def test_host_key_policy_accepts_a_policy_instance(self):
+        policy = paramiko.WarningPolicy()
+        storage = sftpstorage.SFTPStorage(host="foo", host_key_policy=policy)
+        self.assertIs(storage._get_host_key_policy(), policy)
+
+    def test_default_host_key_policy_is_strict(self):
+        storage = sftpstorage.SFTPStorage(host="foo")
+        self.assertEqual(storage.host_key_policy, "reject")
+        self.assertIsInstance(storage._get_host_key_policy(), paramiko.RejectPolicy)
+
+    @patch("paramiko.SSHClient")
+    def test_sftp_accessor_reconnects_with_alias_configuration(self, mock_ssh):
+        client = mock_ssh.return_value
+        client.connect.side_effect = paramiko.BadHostKeyException(
+            "sftp.production.example",
+            MagicMock(),
+            MagicMock(),
+        )
+        client.get_transport.return_value.is_active.return_value = False
+        self.production._ssh = client
+        self.production._sftp = None
+
+        self.assertRaises(
+            paramiko.BadHostKeyException, getattr, self.production, "sftp"
+        )
+
+        client.load_host_keys.assert_called_once_with(self.production_known_hosts)
+        client.open_sftp.assert_not_called()

@@ -9,6 +9,15 @@ General
 
 - Add support for Django 5.2
 
+SFTP
+----
+
+- Add the per-alias ``host_key_policy`` option (``reject`` by default, also
+  ``auto-add`` and ``warning``) to control how unknown or rotated host keys are
+  handled. ``known_host_file`` is applied independently per alias and reloaded
+  on every (re)connect, and failed host key verification now closes the
+  half-open connection and propagates instead of returning an SFTP session
+
 1.14.6 (2025-04-01)
 *******************
 
