@@ -20,6 +20,7 @@ from django.utils.timezone import make_naive
 from storages.base import BaseStorage
 from storages.compress import CompressedFileMixin
 from storages.compress import CompressStorageMixin
+from storages.url_policy import SignedUrlParameterPolicy
 from storages.utils import ReadBytesWrapper
 from storages.utils import check_location
 from storages.utils import clean_name
@@ -96,6 +97,20 @@ def _filter_download_params(params):
         for (key, value) in params.items()
         if key in s3transfer.constants.ALLOWED_DOWNLOAD_ARGS
     }
+
+
+# Response metadata that S3 presigned GET URLs are able to override. Names use
+# boto3's PascalCase convention and map to the Response* query parameters.
+S3_DEFAULT_ALLOWED_URL_PARAMETERS = frozenset(
+    [
+        "ResponseCacheControl",
+        "ResponseContentDisposition",
+        "ResponseContentEncoding",
+        "ResponseContentLanguage",
+        "ResponseContentType",
+        "ResponseExpires",
+    ]
+)
 
 
 @deconstructible
@@ -373,6 +388,11 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             else:
                 self.cloudfront_signer = None
 
+        self.url_parameter_policy = SignedUrlParameterPolicy(
+            allowed_parameters=self.allowed_url_parameters,
+            aliases=self.url_parameter_aliases,
+        )
+
     def get_cloudfront_signer(self, key_id, key):
         cache_key = f"{key_id}:{key}"
         if cache_key not in self.__class__._signers:
@@ -441,6 +461,11 @@ class S3Storage(CompressStorageMixin, BaseStorage):
             "use_threads": setting("AWS_S3_USE_THREADS", True),
             "transfer_config": setting("AWS_S3_TRANSFER_CONFIG", None),
             "client_config": setting("AWS_S3_CLIENT_CONFIG", None),
+            "allowed_url_parameters": setting(
+                "AWS_S3_ALLOWED_URL_PARAMETERS",
+                tuple(S3_DEFAULT_ALLOWED_URL_PARAMETERS),
+            ),
+            "url_parameter_aliases": setting("AWS_S3_URL_PARAMETER_ALIASES", {}),
         }
 
     def __getstate__(self):
@@ -665,7 +690,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
         else:
             return make_naive(entry.last_modified)
 
-    def url(self, name, parameters=None, expire=None, http_method=None):
+    def url(self, name, parameters=None, expire=None, http_method=None, alias=None):
         # Preserve the trailing slash after normalizing the path.
         name = self._normalize_name(clean_name(name))
         params = parameters.copy() if parameters else {}
@@ -688,6 +713,9 @@ class S3Storage(CompressStorageMixin, BaseStorage):
 
             return url
 
+        # Enforce the allow-list before the S3 signing API is ever called so a
+        # rejected parameter never reaches boto3 or an error message.
+        params = self.url_parameter_policy.resolve(params, alias=alias)
         params["Bucket"] = self.bucket.name
         params["Key"] = name
 

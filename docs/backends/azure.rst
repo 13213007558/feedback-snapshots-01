@@ -257,3 +257,43 @@ You can specify these parameters by::
 
     az_storage = AzureStorage()
     az_url = az_storage.url(blob_name, parameters={'content_type': 'text/html;'})
+
+Restricting overridable URL parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Because ``url()`` parameters are forwarded directly to ``generate_blob_sas``,
+an untrusted caller could otherwise override any response header of a signed
+link (for example turning an inline preview link into a forced download). Two
+settings control what is permitted:
+
+``allowed_url_parameters`` or ``AZURE_ALLOWED_URL_PARAMETERS``
+
+  Default: ``("cache_control", "content_disposition", "content_encoding",
+  "content_language", "content_type")``
+
+  The response metadata parameters that callers may override. Names use the
+  Azure SDK's snake_case keyword convention, which differs from S3's
+  PascalCase ``Response*`` names. Any parameter not on this list is rejected
+  with a ``SuspiciousOperation`` *before* the SAS is generated, and the error
+  message contains only the parameter names — never the values, the account
+  key, or the connection string. Set this to an empty tuple to allow every
+  parameter (the historical behavior).
+
+``url_parameter_aliases`` or ``AZURE_URL_PARAMETER_ALIASES``
+
+  Default: ``{}``
+
+  A mapping of alias name to default parameters applied when calling
+  ``url(name, alias=...)``. Alias keys must appear in
+  ``allowed_url_parameters``; explicit ``parameters`` take precedence over an
+  alias's defaults. For example::
+
+      AZURE_URL_PARAMETER_ALIASES = {
+          "download": {
+              "content_disposition": 'attachment; filename="report.pdf"',
+          },
+      }
+
+      storage.url("report.pdf")                   # inline preview
+      storage.url("report.pdf", alias="download")  # forced download
+

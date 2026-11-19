@@ -19,6 +19,7 @@ from django.utils import timezone
 from django.utils.deconstruct import deconstructible
 
 from storages.base import BaseStorage
+from storages.url_policy import SignedUrlParameterPolicy
 from storages.utils import clean_name
 from storages.utils import get_available_overwrite_name
 from storages.utils import safe_join
@@ -115,6 +116,18 @@ def _get_valid_path(s):
 # Max len according to azure's docs
 _AZURE_NAME_MAX_LEN = 1024
 
+# Response metadata that a blob SAS can override. Names use the Azure SDK's
+# snake_case keyword convention, which differs from S3's PascalCase names.
+AZURE_DEFAULT_ALLOWED_URL_PARAMETERS = frozenset(
+    [
+        "cache_control",
+        "content_disposition",
+        "content_encoding",
+        "content_language",
+        "content_type",
+    ]
+)
+
 
 @deconstructible
 class AzureStorage(BaseStorage):
@@ -132,6 +145,11 @@ class AzureStorage(BaseStorage):
                 self.account_name = parsed["AccountName"]
             if not self.account_key and "AccountKey" in parsed:
                 self.account_key = parsed["AccountKey"]
+
+        self.url_parameter_policy = SignedUrlParameterPolicy(
+            allowed_parameters=self.allowed_url_parameters,
+            aliases=self.url_parameter_aliases,
+        )
 
     def get_default_settings(self):
         return {
@@ -155,6 +173,11 @@ class AzureStorage(BaseStorage):
             "token_credential": setting("AZURE_TOKEN_CREDENTIAL"),
             "api_version": setting("AZURE_API_VERSION", None),
             "client_options": setting("AZURE_CLIENT_OPTIONS", {}),
+            "allowed_url_parameters": setting(
+                "AZURE_ALLOWED_URL_PARAMETERS",
+                tuple(AZURE_DEFAULT_ALLOWED_URL_PARAMETERS),
+            ),
+            "url_parameter_aliases": setting("AZURE_URL_PARAMETER_ALIASES", {}),
         }
 
     def _get_service_client(self):
@@ -293,9 +316,11 @@ class AzureStorage(BaseStorage):
         # azure expects time in UTC
         return datetime.utcnow() + timedelta(seconds=expire)
 
-    def url(self, name, expire=None, parameters=None, mode="r"):
+    def url(self, name, expire=None, parameters=None, mode="r", alias=None):
         name = self._get_valid_path(name)
-        params = parameters or {}
+        # Enforce the allow-list before generate_blob_sas is called so a
+        # rejected parameter never reaches the Azure SDK or an error message.
+        params = self.url_parameter_policy.resolve(parameters, alias=alias)
         permission = BlobSasPermissions.from_string(mode)
 
         if expire is None:

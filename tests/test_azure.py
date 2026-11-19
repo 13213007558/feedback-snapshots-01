@@ -11,6 +11,7 @@ from django.test import override_settings
 from django.utils.timezone import make_aware
 
 from storages.backends import azure_storage
+from storages.url_policy import SignedUrlParameterError
 
 
 class AzureStorageTest(TestCase):
@@ -234,6 +235,85 @@ class AzureStorageTest(TestCase):
                 permission=mock.ANY,
                 expiry=fixed_time + timedelta(seconds=100),
             )
+
+    @mock.patch("storages.backends.azure_storage.generate_blob_sas")
+    def test_url_preview_passes_native_response_headers_to_sas(
+        self, generate_blob_sas_mocked
+    ):
+        generate_blob_sas_mocked.return_value = "foo_token"
+        blob_mock = mock.MagicMock()
+        blob_mock.url = "https://ret_foo.blob.core.windows.net/test/file.pdf"
+        self.storage._client.get_blob_client.return_value = blob_mock
+        self.storage.account_name = self.account_name
+
+        self.storage.url(
+            "file.pdf",
+            expire=100,
+            parameters={"content_type": "application/pdf"},
+        )
+        _args, called_kwargs = generate_blob_sas_mocked.call_args
+        self.assertEqual(called_kwargs["content_type"], "application/pdf")
+
+    @mock.patch("storages.backends.azure_storage.generate_blob_sas")
+    def test_url_download_alias_applies_defaults_before_sas(
+        self, generate_blob_sas_mocked
+    ):
+        generate_blob_sas_mocked.return_value = "foo_token"
+        blob_mock = mock.MagicMock()
+        blob_mock.url = "https://ret_foo.blob.core.windows.net/test/file.pdf"
+        self.storage._client.get_blob_client.return_value = blob_mock
+        self.storage.account_name = self.account_name
+        self.storage.url_parameter_aliases = {
+            "download": {"content_disposition": 'attachment; filename="file.pdf"'}
+        }
+        self.storage.url_parameter_policy = (
+            azure_storage.SignedUrlParameterPolicy(
+                allowed_parameters=(
+                    azure_storage.AZURE_DEFAULT_ALLOWED_URL_PARAMETERS
+                ),
+                aliases=self.storage.url_parameter_aliases,
+            )
+        )
+
+        self.storage.url("file.pdf", expire=100, alias="download")
+        _args, called_kwargs = generate_blob_sas_mocked.call_args
+        self.assertEqual(
+            called_kwargs["content_disposition"],
+            'attachment; filename="file.pdf"',
+        )
+
+    @mock.patch("storages.backends.azure_storage.generate_blob_sas")
+    def test_url_rejects_disallowed_parameter_before_sas(
+        self, generate_blob_sas_mocked
+    ):
+        # Azure's snake_case name differs from S3's PascalCase; the policy
+        # must speak the native dialect.
+        with self.assertRaises(SignedUrlParameterError) as ctx:
+            self.storage.url(
+                "file.pdf",
+                expire=100,
+                parameters={"ResponseContentDisposition": "attachment"},
+            )
+        generate_blob_sas_mocked.assert_not_called()
+        self.assertIn("ResponseContentDisposition", str(ctx.exception))
+
+    @mock.patch("storages.backends.azure_storage.generate_blob_sas")
+    def test_url_rejects_sensitive_parameter_without_leaking_value(
+        self, generate_blob_sas_mocked
+    ):
+        secret_value = "DefaultEndpointsProtocol=https;AccountKey=SECRET"
+        with self.assertRaises(SignedUrlParameterError) as ctx:
+            self.storage.url(
+                "file.pdf", expire=100, parameters={"snapshot": secret_value}
+            )
+        generate_blob_sas_mocked.assert_not_called()
+        self.assertNotIn(secret_value, str(ctx.exception))
+
+    @mock.patch("storages.backends.azure_storage.generate_blob_sas")
+    def test_url_rejects_unknown_alias(self, generate_blob_sas_mocked):
+        with self.assertRaises(SignedUrlParameterError):
+            self.storage.url("file.pdf", expire=100, alias="missing")
+        generate_blob_sas_mocked.assert_not_called()
 
     def test_container_client_default_params(self):
         storage = azure_storage.AzureStorage()

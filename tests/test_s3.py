@@ -24,6 +24,7 @@ from django.utils.timezone import is_aware
 from moto import mock_aws
 
 from storages.backends import s3
+from storages.url_policy import SignedUrlParameterError
 from tests.utils import NonSeekableContentFile
 
 
@@ -796,6 +797,91 @@ class S3StorageTests(TestCase):
         parsed_url = urlparse(url)
         self.assertEqual(parsed_url.path, "/filename.mp4")
         self.assertEqual(parsed_url.query, "version=10")
+
+    def _presigned_params(self, name, **kwargs):
+        self.storage.connection.meta.client.generate_presigned_url.reset_mock()
+        self.storage.bucket.name = "bucket"
+        self.storage.url(name, **kwargs)
+        call = (
+            self.storage.connection.meta.client.generate_presigned_url.call_args
+        )
+        return call.kwargs["Params"]
+
+    def test_url_preview_passes_response_metadata_to_signer(self):
+        params = self._presigned_params(
+            "file.pdf",
+            parameters={"ResponseContentType": "application/pdf"},
+        )
+        self.assertEqual(params["ResponseContentType"], "application/pdf")
+        self.assertEqual(params["Bucket"], "bucket")
+        self.assertEqual(params["Key"], "file.pdf")
+
+    def test_url_download_alias_applies_defaults_before_signing(self):
+        self.storage.url_parameter_aliases = {
+            "download": {
+                "ResponseContentDisposition": 'attachment; filename="file.pdf"'
+            }
+        }
+        self.storage.url_parameter_policy = s3.SignedUrlParameterPolicy(
+            allowed_parameters=s3.S3_DEFAULT_ALLOWED_URL_PARAMETERS,
+            aliases=self.storage.url_parameter_aliases,
+        )
+        params = self._presigned_params("file.pdf", alias="download")
+        self.assertEqual(
+            params["ResponseContentDisposition"],
+            'attachment; filename="file.pdf"',
+        )
+
+    def test_url_alias_can_be_overridden_by_caller_parameters(self):
+        self.storage.url_parameter_aliases = {
+            "preview": {"ResponseContentType": "application/pdf"}
+        }
+        self.storage.url_parameter_policy = s3.SignedUrlParameterPolicy(
+            allowed_parameters=s3.S3_DEFAULT_ALLOWED_URL_PARAMETERS,
+            aliases=self.storage.url_parameter_aliases,
+        )
+        params = self._presigned_params(
+            "file.pdf",
+            parameters={"ResponseContentType": "image/png"},
+            alias="preview",
+        )
+        self.assertEqual(params["ResponseContentType"], "image/png")
+
+    def test_url_rejects_parameter_missing_from_policy_before_signing(self):
+        secret_value = "AKIA-FAKE-SECRET"
+        with self.assertRaises(SignedUrlParameterError) as ctx:
+            self.storage.url(
+                "file.pdf",
+                parameters={
+                    "VersionId": secret_value,
+                    "ResponseContentType": "x",
+                },
+            )
+        # The signer must never have been reached.
+        self.assertFalse(
+            self.storage.connection.meta.client.generate_presigned_url.called
+        )
+        message = str(ctx.exception)
+        self.assertIn("VersionId", message)
+        self.assertNotIn(secret_value, message)
+        # Allowed metadata in the same call is named nowhere as offending.
+        self.assertNotIn("ResponseContentType", message)
+
+    def test_url_rejects_unknown_alias(self):
+        with self.assertRaises(SignedUrlParameterError):
+            self.storage.url("file.pdf", alias="nope")
+        self.assertFalse(
+            self.storage.connection.meta.client.generate_presigned_url.called
+        )
+
+    def test_url_policy_can_be_loosened_via_setting(self):
+        storage = s3.S3Storage(
+            allowed_url_parameters=(),
+            url_parameter_aliases={},
+        )
+        # An empty allow-list restores the historical pass-through behavior.
+        params = storage.url_parameter_policy.resolve({"VersionId": "v1"})
+        self.assertEqual(params, {"VersionId": "v1"})
 
     @skipIf(threading is None, "Test requires threading")
     def test_connection_threading(self):

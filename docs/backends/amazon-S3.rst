@@ -104,6 +104,44 @@ Settings
 
   The number of seconds that a generated URL is valid for.
 
+``allowed_url_parameters`` or ``AWS_S3_ALLOWED_URL_PARAMETERS``
+
+  Default: ``("ResponseCacheControl", "ResponseContentDisposition",
+  "ResponseContentEncoding", "ResponseContentLanguage", "ResponseContentType",
+  "ResponseExpires")``
+
+  The response metadata parameters that callers are allowed to override when
+  generating a presigned URL through :meth:`S3Storage.url`. Any parameter not
+  on this list is rejected with a ``SuspiciousOperation`` *before* the boto3
+  signing API is called. The error message only contains the offending
+  parameter names, never their values or any credentials.
+
+  Parameter names use boto3's PascalCase convention (the ``Response*``
+  presigned-URL parameters), which differs from Azure's snake_case names.
+
+  Set this to an empty tuple to restore the historical behavior where every
+  parameter is passed through to the signing API.
+
+``url_parameter_aliases`` or ``AWS_S3_URL_PARAMETER_ALIASES``
+
+  Default: ``{}``
+
+  A mapping of alias name to a dictionary of default parameters applied when
+  calling ``url(name, alias=...)``. Every key used in an alias must be listed
+  in ``allowed_url_parameters``. Parameters passed explicitly to ``url()``
+  take precedence over an alias's defaults. For example, define a
+  ``"download"`` alias whose ``ResponseContentDisposition`` forces the browser
+  to save the file, while the default (no alias) remains an inline preview::
+
+      AWS_S3_URL_PARAMETER_ALIASES = {
+          "download": {
+              "ResponseContentDisposition": 'attachment; filename="report.pdf"',
+          },
+      }
+
+      storage.url("report.pdf")                                   # inline preview
+      storage.url("report.pdf", alias="download")                # forced download
+
 ``url_protocol`` or ``AWS_S3_URL_PROTOCOL``
 
   Default: ``https:``

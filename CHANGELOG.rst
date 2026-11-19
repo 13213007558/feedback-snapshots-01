@@ -8,6 +8,23 @@ General
 -------
 
 - Add support for Django 5.2
+- Add a signed-URL response metadata allow-list with configurable aliases so
+  administrators can restrict which response headers callers may override.
+  Parameters outside the policy are rejected with a ``SuspiciousOperation``
+  before the storage signing API is called, and the error never contains
+  parameter values or storage credentials.
+
+S3
+--
+
+- Add ``AWS_S3_ALLOWED_URL_PARAMETERS`` and ``AWS_S3_URL_PARAMETER_ALIASES``
+  settings and an ``alias`` argument to ``S3Storage.url()``.
+
+Azure
+-----
+
+- Add ``AZURE_ALLOWED_URL_PARAMETERS`` and ``AZURE_URL_PARAMETER_ALIASES``
+  settings and an ``alias`` argument to ``AzureStorage.url()``.
 
 1.14.6 (2025-04-01)
 *******************
