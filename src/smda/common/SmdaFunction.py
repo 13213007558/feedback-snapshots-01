@@ -87,6 +87,255 @@ REQUIRED_FUNCTION_METADATA = frozenset(
 )
 
 
+def _instructionSpan(offset, instruction_bytes):
+    """Return the half-open byte span of a serialized instruction, or None if malformed.
+
+    The byte string is the only place an instruction carries its length, so an odd-length
+    string describes half a byte and has no span. Character content is deliberately not
+    checked here: it is not part of the ownership/address contract and some callers rely on
+    loading a report whose bytes are merely undecodable, not structurally contradictory.
+    """
+    if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset < MAX_ADDRESS_VALUE:
+        return None
+    if not isinstance(instruction_bytes, str) or not instruction_bytes or len(instruction_bytes) % 2:
+        return None
+    end = offset + len(instruction_bytes) // 2
+    if end > MAX_ADDRESS_VALUE:
+        return None
+    return offset, end
+
+
+def _integerBlockMap(blocks):
+    """Return the block map keyed by integer start, refusing a key that resolves twice."""
+    normalized = {}
+    for raw_start, block in blocks.items():
+        if isinstance(raw_start, bool):
+            raise ValueError("serialized function block keys must be integers")
+        try:
+            start = int(raw_start)
+        except (TypeError, ValueError):
+            raise ValueError("serialized function block keys must be integers") from None
+        if start in normalized:
+            raise ValueError(f"serialized function blocks repeat start address 0x{start:x}")
+        normalized[start] = block
+    return normalized
+
+
+def _integerReferenceMap(field_name, references, with_targets):
+    """Return a reference map with integer keys, refusing what cannot describe an address.
+
+    Conversion is explicit rather than left to `int()` inside the assignment so that a
+    repeated source after normalization ("16" and "016") is refused instead of silently
+    overwriting one entry.
+    """
+    normalized = {}
+    for raw_source, raw_value in references.items():
+        if isinstance(raw_source, bool):
+            raise ValueError(f"serialized function {field_name} keys must be integers")
+        try:
+            source = int(raw_source)
+        except (TypeError, ValueError):
+            raise ValueError(f"serialized function {field_name} keys must be integers") from None
+        if not 0 <= source < MAX_ADDRESS_VALUE:
+            raise ValueError(f"serialized function {field_name} keys must fit in a 64-bit address space")
+        if source in normalized:
+            raise ValueError(f"serialized function {field_name} repeats source address 0x{source:x}")
+        if with_targets:
+            if not isinstance(raw_value, (list, tuple)):
+                raise ValueError(f"serialized function {field_name} must map addresses to lists")
+            targets = []
+            for target in raw_value:
+                if isinstance(target, bool) or not isinstance(target, int):
+                    raise ValueError(f"serialized function {field_name} targets must be integers")
+                if not 0 <= target < MAX_ADDRESS_VALUE:
+                    raise ValueError(f"serialized function {field_name} targets must fit in a 64-bit address space")
+                targets.append(target)
+            normalized[source] = targets
+        else:
+            normalized[source] = raw_value
+    return normalized
+
+
+def _validatedStringRefs(function_offset, stringrefs, instruction_offsets):
+    """Refuse a string reference whose instruction address is not in the function.
+
+    Two serialized shapes exist: Dalvik reports a list of ``{string, ins_addr, data_addr,
+    type}`` entries, and the other backends a ``{ins_addr: {...}}`` map (older reports use
+    ``{ins_addr: str}``). Both name the instruction that references the string, so a source
+    outside the function's own instructions is a contradiction, not an external reference.
+    Map keys arrive as numeric strings through JSON just like every other address key.
+    """
+    if not stringrefs:
+        return
+    if isinstance(stringrefs, list):
+        sources = [entry.get("ins_addr") for entry in stringrefs if isinstance(entry, dict)]
+    elif isinstance(stringrefs, dict):
+        sources = []
+        for raw_source in stringrefs:
+            if isinstance(raw_source, bool):
+                raise ValueError(f"serialized function 0x{function_offset:x} has a non-integer string ref source")
+            try:
+                sources.append(int(raw_source))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has a non-integer string reference source"
+                ) from None
+    else:
+        raise ValueError(f"serialized function 0x{function_offset:x} stringrefs must be a list or dictionary")
+    for source in sources:
+        if isinstance(source, bool) or not isinstance(source, int):
+            raise ValueError(f"serialized function 0x{function_offset:x} has a non-integer string reference source")
+        if source not in instruction_offsets:
+            raise ValueError(
+                f"serialized function 0x{function_offset:x} has a string reference from 0x{source:x}, "
+                f"which is not an instruction in the function"
+            )
+
+
+def _validatedExceptionMetadata(function_offset, architecture_metadata, block_starts, instruction_offsets, span):
+    """Refuse exception metadata whose endpoints contradict the recovered blocks.
+
+    ``try_ranges`` and the typed Dalvik ``exception_edges`` describe handler entry points that
+    must be recoverable as block starts, and edges that must leave a real instruction. A handler
+    target that lands inside a block but not at its start cannot be entered, and a source that
+    is no instruction cannot throw; both make later CFG or xref analysis read an edge that is
+    not there. Targets outside the function's own span are left alone: a handler may live in a
+    block shared with other functions.
+    """
+    if not architecture_metadata:
+        return
+    span_start, span_end = span if span else (None, None)
+    for try_range in architecture_metadata.get("try_ranges") or []:
+        if not isinstance(try_range, dict):
+            raise ValueError(f"serialized function 0x{function_offset:x} has a non-dictionary try range")
+        targets = []
+        for handler in try_range.get("handlers") or []:
+            if isinstance(handler, dict) and handler.get("target_addr") is not None:
+                targets.append(handler["target_addr"])
+        if try_range.get("catch_all_addr") is not None:
+            targets.append(try_range["catch_all_addr"])
+        for target in targets:
+            if isinstance(target, bool) or not isinstance(target, int):
+                raise ValueError(f"serialized function 0x{function_offset:x} has a non-integer handler target")
+            if target in block_starts:
+                continue
+            if span_start is not None and span_start <= target < span_end:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has an exception handler at 0x{target:x}, "
+                    f"which points inside the function but is not a block start"
+                )
+    for edge in architecture_metadata.get("exception_edges") or []:
+        if not isinstance(edge, dict):
+            raise ValueError(f"serialized function 0x{function_offset:x} has a non-dictionary exception edge")
+        source = edge.get("from_addr")
+        if source is not None:
+            if isinstance(source, bool) or not isinstance(source, int):
+                raise ValueError(f"serialized function 0x{function_offset:x} has a non-integer exception source")
+            if source not in instruction_offsets:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has an exception edge from 0x{source:x}, "
+                    f"which is not an instruction in the function"
+                )
+        target = edge.get("to_addr")
+        if target is not None:
+            if isinstance(target, bool) or not isinstance(target, int):
+                raise ValueError(f"serialized function 0x{function_offset:x} has a non-integer exception target")
+            if target not in block_starts and span_start is not None and span_start <= target < span_end:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has an exception edge to 0x{target:x}, "
+                    f"which points inside the function but is not a block start"
+                )
+
+
+def _validatedFunctionStructure(function_dict, blocks, blockrefs, apirefs, outrefs):
+    """Refuse a function whose blocks, instructions and intra-function edges disagree.
+
+    A report that parses but describes overlapping instructions, a block keyed somewhere
+    other than its first instruction, or an edge into no block at all is not repaired here:
+    silently dropping or reordering the conflicting record would hand the caller a report
+    whose CFG is not the one that was serialized. The checks below were measured to hold on
+    every bundled fixture across all five backends, and each raises with the contradiction
+    named rather than normalizing the input.
+
+    Two shapes that look like contradictions but are produced by SMDA itself stay legal:
+    a block-reference key with no targets, which `getNormalizedBlockRefs()` emits for an
+    exception-handler address it could not map onto a recovered block, and a block-reference
+    target outside this function's own instruction span, which is an external reference.
+    """
+    function_offset = function_dict["offset"]
+    block_starts = set()
+    instruction_spans = []
+    instruction_offsets = set()
+    for block_start, block in blocks.items():
+        if block_start in block_starts:
+            raise ValueError(f"serialized function blocks repeat start address 0x{block_start:x}")
+        block_starts.add(block_start)
+        if not block:
+            continue
+        if block[0][0] != block_start:
+            raise ValueError(
+                f"serialized block 0x{block_start:x} does not start at its first instruction 0x{block[0][0]:x}"
+            )
+        previous_end = None
+        for instruction in block:
+            span = _instructionSpan(instruction[0], instruction[1])
+            if span is None:
+                raise ValueError(f"serialized instruction at 0x{instruction[0]:x} carries invalid bytes")
+            start, end = span
+            if previous_end is not None and start != previous_end:
+                raise ValueError(
+                    f"serialized block 0x{block_start:x} is not contiguous: "
+                    f"0x{start:x} does not follow 0x{previous_end:x}"
+                )
+            previous_end = end
+            instruction_spans.append((start, end))
+            instruction_offsets.add(start)
+    if instruction_spans:
+        ordered = sorted(instruction_spans)
+        for (previous_start, previous_end), (start, _end) in zip(ordered, ordered[1:], strict=False):
+            if start < previous_end:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has overlapping instructions "
+                    f"0x{previous_start:x} and 0x{start:x}"
+                )
+        span_start, span_end = ordered[0][0], max(end for _start, end in ordered)
+        if any(start < function_offset < end for start, end in ordered):
+            raise ValueError(f"serialized function 0x{function_offset:x} starts inside one of its own instructions")
+    else:
+        span_start = span_end = None
+    for source, targets in blockrefs.items():
+        if source not in block_starts:
+            if targets:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has a block reference from 0x{source:x}, "
+                    f"which is not a block start"
+                )
+            continue
+        for target in targets:
+            if target in block_starts:
+                continue
+            if span_start is not None and span_start <= target < span_end:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has a block reference from 0x{source:x} "
+                    f"to 0x{target:x}, which points inside the function but is not a block start"
+                )
+    for field_name, references in (("apirefs", apirefs), ("outrefs", outrefs)):
+        for source in references:
+            if source not in instruction_offsets:
+                raise ValueError(
+                    f"serialized function 0x{function_offset:x} has {field_name} from 0x{source:x}, "
+                    f"which is not an instruction in the function"
+                )
+    _validatedExceptionMetadata(
+        function_offset,
+        function_dict.get("architecture_metadata") or {},
+        block_starts,
+        instruction_offsets,
+        (span_start, span_end) if instruction_spans else None,
+    )
+    return instruction_offsets
+
+
 class LazyIntKeyDict(dict):
     def __new__(cls, data=None):
         # Pickle reconstructs dict subclasses via __new__ + update, bypassing
@@ -806,11 +1055,6 @@ class SmdaFunction:
             references = function_dict.get(reference_field)
             if not isinstance(references, dict):
                 raise ValueError(f"serialized function {reference_field} must be a dictionary")
-            if reference_field in ("blockrefs", "outrefs") and any(
-                not isinstance(targets, (list, tuple)) or not all(isinstance(target, int) for target in targets)
-                for targets in references.values()
-            ):
-                raise ValueError(f"serialized function {reference_field} must map addresses to lists")
         if not isinstance(function_dict.get("inrefs"), list):
             raise ValueError("serialized function inrefs must be a list")
         metadata = function_dict.get("metadata")
@@ -822,9 +1066,23 @@ class SmdaFunction:
         if not isinstance(architecture_metadata, dict):
             raise ValueError("serialized function architecture metadata must be a dictionary")
         # checked after the container shape so each malformed field reports itself
-        addresses = [function_dict["offset"], *(int(address) for address in blocks)]
-        if any(isinstance(a, bool) or not isinstance(a, int) or not 0 <= a < MAX_ADDRESS_VALUE for a in addresses):
+        offsets = [function_dict["offset"], *(int(address) for address in blocks)]
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < MAX_ADDRESS_VALUE
+            for value in offsets
+        ):
             raise ValueError("serialized function addresses must be in the 64-bit space")
+        integer_blockrefs = _integerReferenceMap("blockrefs", function_dict["blockrefs"], with_targets=True)
+        integer_apirefs = _integerReferenceMap("apirefs", function_dict["apirefs"], with_targets=False)
+        integer_outrefs = _integerReferenceMap("outrefs", function_dict["outrefs"], with_targets=True)
+        integer_blocks = _integerBlockMap(blocks)
+        instruction_offsets = _validatedFunctionStructure(
+            function_dict,
+            integer_blocks,
+            integer_blockrefs,
+            integer_apirefs,
+            integer_outrefs,
+        )
         smda_function = cls(None)
         smda_function.smda_report = smda_report
         smda_function.offset = function_dict["offset"]
@@ -834,10 +1092,10 @@ class SmdaFunction:
         smda_function._sorted_block_keys = sorted(smda_function.blocks.keys())
         smda_function._basic_blocks = None
         smda_function._instructions_by_offset = None
-        smda_function.apirefs = LazyIntKeyDict(function_dict["apirefs"])
-        smda_function.blockrefs = LazyIntKeyDict(function_dict["blockrefs"])
+        smda_function.apirefs = LazyIntKeyDict(integer_apirefs)
+        smda_function.blockrefs = LazyIntKeyDict(integer_blockrefs)
         smda_function.inrefs = function_dict["inrefs"]
-        smda_function.outrefs = LazyIntKeyDict(function_dict["outrefs"])
+        smda_function.outrefs = LazyIntKeyDict(integer_outrefs)
         # provide some legacy support by assuming functions are not exported for SMDA reports < 1.7.0
         smda_function.is_exported = function_dict.get("is_exported", False)
         smda_function.architecture_metadata = architecture_metadata
@@ -850,6 +1108,7 @@ class SmdaFunction:
         smda_function.strongly_connected_components = metadata["strongly_connected_components"]
         smda_function.tfidf = metadata["tfidf"]
         stringrefs = function_dict.get("stringrefs", {})
+        _validatedStringRefs(smda_function.offset, stringrefs, instruction_offsets)
         function_architecture = None
         if smda_report is not None:
             function_architecture = smda_report.architecture

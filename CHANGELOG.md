@@ -79,6 +79,20 @@ past roughly six lines it belongs in the PR the entry links.
 ### Removed
 
 ### Fixed
+- **(report)** Refuse a structurally self-contradictory report at `SmdaReport.fromDict` instead of loading a CFG
+  whose analysis inputs disagree. A report could parse field by field and still describe overlapping instructions,
+  a block keyed somewhere other than its first instruction, one function re-serialized under a second offset, a
+  block reference or exception handler pointing inside a function but not at a block start, `apirefs`/`outrefs`/
+  `stringrefs` sourced from an address that is not an instruction, an `xcfg` key disagreeing with its own function
+  offset, or `xdata_refs_from`/`xdata_refs_to` naming different edge sets; each loaded without complaint and then
+  polluted xref, dominator and nesting analysis. Every check raises `ValueError` naming the contradiction and
+  aborts the whole load, so no half-built report escapes. Shapes that are legitimate stay accepted: references and
+  data-ref targets outside the image, `inrefs` into bytes no function owns, empty block-reference keys from an
+  unmapped exception handler, block-reference targets in another function, and CIL/Dalvik addresses that are file
+  offsets rather than image virtual addresses. *Measured on all 48 bundled `tests/*_xored` fixtures across all five
+  backends:* every `toDict()` round-trip reloads with identical function, block and instruction counts; the only
+  two test constructions that now fail were already describing duplicate ownership, and their setups were moved to
+  translated copies that keep the same synthesis defect under test.
 
 ### Security
 

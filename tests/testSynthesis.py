@@ -154,10 +154,27 @@ class SmdaSynthesisTestSuite(unittest.TestCase):
         offsets = sorted(int(offset) for offset in report_dict["xcfg"])
         template = report_dict["xcfg"][str(offsets[0])]
         far_offset = offsets[0] + SmdaConfig.MAX_IMAGE_SIZE * 4
+        delta = far_offset - offsets[0]
 
+        # translate the function together with the bytes it owns: leaving the blocks behind
+        # would describe one function's instructions as another's, which the load boundary
+        # now refuses before synthesis gets a chance to measure the span
         moved = copy.deepcopy(template)
         moved["offset"] = far_offset
-        moved["blocks"] = {str(far_offset): next(iter(template["blocks"].values()))}
+        moved["blocks"] = {
+            str(int(block_start) + delta): [
+                [instruction[0] + delta, instruction[1], instruction[2], instruction[3]] for instruction in block
+            ]
+            for block_start, block in template["blocks"].items()
+        }
+        moved["blockrefs"] = {
+            str(int(source) + delta): [int(target) + delta for target in targets]
+            for source, targets in template["blockrefs"].items()
+        }
+        moved["outrefs"] = {}
+        moved["apirefs"] = {}
+        moved["inrefs"] = []
+        report_dict["xcfg"].pop(str(offsets[0]))
         report_dict["xcfg"][str(far_offset)] = moved
 
         for output_format in (FORMAT_PE, FORMAT_ELF, FORMAT_MACHO):
@@ -438,8 +455,27 @@ class SynthesisRobustnessTestSuite(unittest.TestCase):
         code = bytes.fromhex("5589e5b8010000005dc3") + b"\x90" * 6 + bytes.fromhex("5589e531c05dc3")
         report_dict = Disassembler(SmdaConfig()).disassembleBuffer(code, 0x1000, 32).toDict()
         first = next(iter(report_dict["xcfg"]))
+        template = copy.deepcopy(report_dict["xcfg"][first])
         far = int(first) + 0x90000000
-        report_dict["xcfg"][far] = dict(copy.deepcopy(report_dict["xcfg"][first]), offset=far)
+        # the blocks keep their relative layout but move to their own addresses, so the
+        # report describes one owner per instruction while the function offset still sits
+        # 0x90000000 above the code it covers
+        delta = 0x2000 - int(first)
+        template["offset"] = far
+        template["blocks"] = {
+            str(int(block_start) + delta): [
+                [instruction[0] + delta, instruction[1], instruction[2], instruction[3]] for instruction in block
+            ]
+            for block_start, block in template["blocks"].items()
+        }
+        template["blockrefs"] = {
+            str(int(source) + delta): [int(target) + delta for target in targets]
+            for source, targets in template["blockrefs"].items()
+        }
+        template["outrefs"] = {}
+        template["apirefs"] = {}
+        template["inrefs"] = []
+        report_dict["xcfg"][far] = template
         report_dict["code_sections"] = []
         report = SmdaReport.fromDict(report_dict)
 

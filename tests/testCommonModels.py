@@ -224,6 +224,159 @@ class TestCommonModels(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     SmdaReport.fromDict(candidate)
 
+    @staticmethod
+    def _small_report_dict():
+        code = bytes.fromhex("5589e5b8010000005dc3") + b"\x90" * 6 + bytes.fromhex("5589e531c05dc3")
+        report = Disassembler(SmdaConfig()).disassembleBuffer(code, 0x1000, 32)
+        # route through JSON so keys arrive as the strings a loaded report actually carries
+        return json.loads(json.dumps(report.toDict()))
+
+    def test_report_rejects_a_block_whose_key_is_not_its_first_instruction(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = next(iter(function["blocks"]))
+        function["blocks"][str(int(block_start) + 0x100)] = function["blocks"].pop(block_start)
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("does not start at its first instruction", str(raised.exception))
+
+    def test_report_rejects_overlapping_instructions_inside_a_block(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block = next(iter(function["blocks"].values()))
+        block.insert(1, [block[0][0] + 1, "90", "nop", ""])
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("does not follow", str(raised.exception))
+
+    def test_report_rejects_a_block_reference_that_dangles_inside_the_function(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = int(next(iter(function["blocks"])))
+        # a target one byte into the first instruction: inside the function's byte span but
+        # not a block start, so the recovered CFG would describe an edge no block can serve
+        function["blockrefs"] = {str(block_start): [block_start + 1]}
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("points inside the function", str(raised.exception))
+
+    def test_report_keeps_external_block_reference_targets(self):
+        # a tailcall or an exception handler can name code outside the recovered function;
+        # only a target inside the function's own span has to be a block start
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = int(next(iter(function["blocks"])))
+        function["blockrefs"] = {str(block_start): [0xDEAD0000]}
+
+        restored = SmdaReport.fromDict(report_dict)
+
+        self.assertEqual(restored.getFunction(block_start).blockrefs[block_start], [0xDEAD0000])
+
+    def test_report_rejects_duplicate_block_ownership_across_functions(self):
+        report_dict = self._small_report_dict()
+        offsets = sorted(int(offset) for offset in report_dict["xcfg"])
+        duplicate = copy.deepcopy(report_dict["xcfg"][str(offsets[0])])
+        duplicate["offset"] = offsets[0] + 0x1000
+        report_dict["xcfg"][str(duplicate["offset"])] = duplicate
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("in both functions", str(raised.exception))
+
+    def test_report_rejects_a_function_key_that_disagrees_with_its_offset(self):
+        report_dict = self._small_report_dict()
+        offsets = sorted(int(offset) for offset in report_dict["xcfg"])
+        function = report_dict["xcfg"][str(offsets[0])]
+        function["offset"] = offsets[0] + 0x1000
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("declares offset", str(raised.exception))
+
+    def test_report_rejects_data_reference_directions_that_disagree(self):
+        report_dict = self._small_report_dict()
+        report_dict["xdata_refs_from"] = {"4096": [8192]}
+        report_dict["xdata_refs_to"] = {}
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("not inverses", str(raised.exception))
+
+    def test_report_keeps_an_external_data_reference_target(self):
+        # data references legitimately leave the image on some samples; the two maps only
+        # have to agree with each other
+        report_dict = self._small_report_dict()
+        report_dict["xdata_refs_from"] = {"4096": [0xDEAD0000]}
+        report_dict["xdata_refs_to"] = {"3735879680": [4096]}
+
+        restored = SmdaReport.fromDict(report_dict)
+
+        self.assertEqual(restored.data_refs_from[4096], [0xDEAD0000])
+        self.assertEqual(restored.data_refs_to[0xDEAD0000], [4096])
+
+    def test_a_rejected_report_does_not_build_a_partial_object(self):
+        # loading must fail whole: a half-built report would let a caller keep reading a CFG
+        # that dropped the conflicting function instead of refusing the input
+        report_dict = self._small_report_dict()
+        offsets = sorted(int(offset) for offset in report_dict["xcfg"])
+        duplicate = copy.deepcopy(report_dict["xcfg"][str(offsets[0])])
+        duplicate["offset"] = offsets[0] + 0x1000
+        report_dict["xcfg"][str(duplicate["offset"])] = duplicate
+
+        self.assertRaises(ValueError, SmdaReport.fromDict, report_dict)
+
+    def test_report_rejects_an_exception_handler_inside_a_block(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = int(next(iter(function["blocks"])))
+        function["architecture_metadata"] = {
+            "try_ranges": [
+                {
+                    "start_addr": block_start,
+                    "end_addr": block_start + 4,
+                    "handlers": [{"target_addr": block_start + 1}],
+                }
+            ]
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("exception handler", str(raised.exception))
+
+    def test_report_rejects_an_exception_edge_from_a_non_instruction(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = int(next(iter(function["blocks"])))
+        function["architecture_metadata"] = {
+            "exception_edges": [{"kind": "exception", "from_addr": block_start + 0x40, "to_addr": block_start}]
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("exception edge from", str(raised.exception))
+
+    def test_report_rejects_a_string_reference_from_a_non_instruction(self):
+        report_dict = self._small_report_dict()
+        function = report_dict["xcfg"][next(iter(report_dict["xcfg"]))]
+        block_start = int(next(iter(function["blocks"])))
+        function["stringrefs"] = [{"string": "x", "ins_addr": block_start + 0x40, "data_addr": None, "type": "ascii"}]
+
+        with self.assertRaises(ValueError) as raised:
+            SmdaReport.fromDict(report_dict)
+
+        self.assertIn("string reference from", str(raised.exception))
+
     def test_function_rejects_malformed_container_fields(self):
         function_dict = SmdaFunction().toDict()
         malformed_fields = {

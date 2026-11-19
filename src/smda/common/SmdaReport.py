@@ -1,4 +1,5 @@
 import base64
+import bisect
 import datetime
 import io
 import json
@@ -446,10 +447,83 @@ class SmdaReport:
     @staticmethod
     def _validatedFunctionAddress(function_addr):
         """xcfg keys become function offsets; the synthesizers pack them unsigned."""
-        address = int(function_addr)
+        if isinstance(function_addr, bool):
+            raise ValueError("serialized report xcfg addresses must be integers")
+        try:
+            address = int(function_addr)
+        except (TypeError, ValueError):
+            raise ValueError("serialized report xcfg addresses must be integers") from None
         if not 0 <= address < MAX_ADDRESS_VALUE:
             raise ValueError("serialized report xcfg addresses must be in the 64-bit space")
         return address
+
+    @staticmethod
+    def _validatedDataRefs(report_dict):
+        """Load the two data-reference maps only if they describe the same edge set.
+
+        ``xdata_refs_from`` and ``xdata_refs_to`` are serialized as inverses of one relation,
+        so a report where one direction names an edge the other lacks describes two different
+        binaries. An absent or empty pair is legal: older reports predate the ``x``-prefixed
+        fields, and a report without data references serializes both as empty dicts.
+        """
+        refs_from = {int(source): sorted(targets) for source, targets in report_dict.get("xdata_refs_from", {}).items()}
+        refs_to = {int(target): sorted(sources) for target, sources in report_dict.get("xdata_refs_to", {}).items()}
+        if refs_from or refs_to:
+            inverse = {}
+            for source, targets in refs_from.items():
+                for target in targets:
+                    inverse.setdefault(target, []).append(source)
+            inverse = {target: sorted(sources) for target, sources in inverse.items()}
+            if inverse != refs_to:
+                raise ValueError("serialized report xdata_refs_from and xdata_refs_to are not inverses of one another")
+        return refs_from, refs_to
+
+    @staticmethod
+    def _validatedOwnership(functions):
+        """Refuse a report in which two functions claim the same instructions.
+
+        The CFG model is one function per instruction and no instruction overlap, which every
+        recovery pass and the synthesizers rely on. ``fromDict`` used to accept a report that
+        re-serialized one function's blocks under a second offset: each function parsed cleanly,
+        and only the cross-function ordering showed the duplication. Function offsets are
+        allowed to sit at or outside their own body (CIL addresses methods by file offset, while
+        a shared exception-handler body may open a block ahead of the method), but not inside an
+        instruction another function owns.
+        """
+        spans = []
+        owners = {}
+        function_offsets = set(functions)
+        for function_offset, function in functions.items():
+            for block in function.blocks.values():
+                for instruction in block:
+                    start = instruction.offset
+                    end = start + len(instruction.bytes or "") // 2
+                    if start in owners:
+                        raise ValueError(
+                            f"serialized report has instructions at 0x{start:x} in both functions "
+                            f"0x{owners[start]:x} and 0x{function_offset:x}"
+                        )
+                    owners[start] = function_offset
+                    spans.append((start, end, function_offset))
+        spans.sort()
+        for (previous_start, previous_end, previous_owner), (start, _end, owner) in zip(spans, spans[1:], strict=False):
+            if start < previous_end:
+                raise ValueError(
+                    f"serialized report has overlapping instructions in functions "
+                    f"0x{previous_owner:x} and 0x{owner:x} (0x{previous_start:x}, 0x{start:x})"
+                )
+        ordered_starts = [start for start, _end, _owner in spans]
+        for function_offset in function_offsets:
+            if function_offset in owners:
+                continue
+            index = bisect.bisect_right(ordered_starts, function_offset) - 1
+            if index >= 0:
+                start, end, owner = spans[index]
+                if start < function_offset < end:
+                    raise ValueError(
+                        f"serialized report has function 0x{function_offset:x} starting inside an instruction "
+                        f"owned by function 0x{owner:x}"
+                    )
 
     @classmethod
     def fromDict(cls, report_dict) -> Optional["SmdaReport"]:
@@ -551,23 +625,31 @@ class SmdaReport:
         smda_report.timestamp = (
             datetime.datetime.strptime(timestamp_raw, "%Y-%m-%dT%H-%M-%S") if timestamp_raw else None
         )
-        smda_report.data_refs_from = {int(k): sorted(v) for k, v in report_dict.get("xdata_refs_from", {}).items()}
-        smda_report.data_refs_to = {int(k): sorted(v) for k, v in report_dict.get("xdata_refs_to", {}).items()}
+        smda_report.data_refs_from, smda_report.data_refs_to = cls._validatedDataRefs(report_dict)
         binary_info = BinaryInfo(b"")
         binary_info.architecture = smda_report.architecture
         binary_info.abi = smda_report.abi
         binary_info.base_addr = smda_report.base_addr
         binary_info.binary_size = smda_report.binary_size
         binary_info.oep = smda_report.oep
-        smda_report.xcfg = {
-            cls._validatedFunctionAddress(function_addr): SmdaFunction.fromDict(
+        xcfg = {}
+        for function_addr, function_dict in report_dict["xcfg"].items():
+            function_offset = cls._validatedFunctionAddress(function_addr)
+            if function_offset in xcfg:
+                raise ValueError(f"serialized report repeats function address 0x{function_offset:x}")
+            function = SmdaFunction.fromDict(
                 function_dict,
                 binary_info=binary_info,
                 version=smda_report.smda_version,
                 smda_report=smda_report,
             )
-            for function_addr, function_dict in report_dict["xcfg"].items()
-        }
+            if function.offset != function_offset:
+                raise ValueError(
+                    f"serialized report function keyed at 0x{function_offset:x} declares offset 0x{function.offset:x}"
+                )
+            xcfg[function_offset] = function
+        cls._validatedOwnership(xcfg)
+        smda_report.xcfg = xcfg
         smda_report._num_blocks = sum(f.num_blocks for f in smda_report.xcfg.values())
         smda_report._num_instructions = sum(f.num_instructions for f in smda_report.xcfg.values())
         smda_report.xheader = bytes.fromhex(report_dict["xheader"]) if "xheader" in report_dict else None
