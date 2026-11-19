@@ -4,6 +4,7 @@
 
 import os
 import signal
+import ssl
 import logging
 from unittest import mock
 
@@ -759,6 +760,69 @@ class TestSighupReload:
         assert 'reloading the logger configuration failed' in \
             capsys.readouterr().err
         assert any('reloading the logger configuration failed' in str(call)
+                   for call in mock_error.call_args_list)
+
+    @mock.patch('gunicorn.arbiter.Arbiter.spawn_worker')
+    @mock.patch('gunicorn.arbiter.Arbiter.manage_workers')
+    def test_reload_valid_tls_switches_to_new_workers(self, mock_manage,
+                                                      mock_spawn, tmp_path):
+        """A reloaded certificate and key that load together are adopted:
+        new workers are spawned with the new configuration."""
+        cert = tmp_path / 'cert.pem'
+        key = tmp_path / 'key.pem'
+        cert.write_bytes(b'cert')
+        key.write_bytes(b'key')
+        app = ReloadableConfigApplication()
+        arbiter = gunicorn.arbiter.Arbiter(app)
+        arbiter.LISTENERS = [mock.Mock()]
+        arbiter.pidfile = None
+
+        app.settings_override = {
+            'certfile': str(cert),
+            'keyfile': str(key),
+        }
+        with mock.patch('gunicorn.arbiter.sock.ssl_context') as mock_ctx:
+            arbiter.reload()
+
+        mock_ctx.assert_called_once_with(arbiter.cfg)
+        assert arbiter.cfg.certfile == str(cert)
+        assert mock_spawn.call_count == arbiter.cfg.workers
+        mock_manage.assert_called_once()
+
+    @mock.patch('gunicorn.arbiter.Arbiter.spawn_worker')
+    @mock.patch('gunicorn.arbiter.Arbiter.manage_workers')
+    def test_reload_invalid_tls_keeps_previous_config(self, mock_manage,
+                                                      mock_spawn, tmp_path):
+        """A reloaded certificate and key that do not load together (the
+        key of a renewed pair has not arrived yet) abort the reload: the
+        previous configuration, listeners and workers are kept."""
+        cert = tmp_path / 'cert.pem'
+        cert.write_bytes(b'new cert without its key')
+        app = ReloadableConfigApplication()
+        arbiter = gunicorn.arbiter.Arbiter(app)
+        listener = mock.Mock()
+        arbiter.LISTENERS = [listener]
+        arbiter.pidfile = None
+        old_cfg = arbiter.cfg
+
+        app.settings_override = {
+            'certfile': str(cert),
+            'keyfile': str(tmp_path / 'key.pem'),
+        }
+        with mock.patch('gunicorn.arbiter.sock.ssl_context') as mock_ctx, \
+                mock.patch.object(arbiter.log, 'error') as mock_error:
+            mock_ctx.side_effect = ssl.SSLError(
+                '[SSL] PEM lib: key values mismatch')
+            arbiter.reload()
+
+        # no new workers, no listener churn, previous config restored
+        mock_spawn.assert_not_called()
+        mock_manage.assert_not_called()
+        listener.close.assert_not_called()
+        assert arbiter.cfg is old_cfg
+        assert arbiter.app.cfg is old_cfg
+        assert arbiter.LISTENERS == [listener]
+        assert any('TLS configuration reload failed' in str(call)
                    for call in mock_error.call_args_list)
 
 

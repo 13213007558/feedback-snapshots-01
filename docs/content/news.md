@@ -5,6 +5,10 @@
 
 ### Bug Fixes
 
+- SIGHUP reload: check that the reloaded TLS certificate and key load
+  together before switching new connections to new workers. A renewed pair
+  whose key has not arrived yet no longer takes the listeners down with it:
+  the reload is skipped and the previous configuration keeps serving.
 - ASGI: serve the next request on a kept-alive HTTP/1.1 connection as soon as
   the previous response is complete. It used to wait until the application
   returned, so a background task (Starlette, FastAPI) held up every request

@@ -547,7 +547,24 @@ class Arbiter:
                     pass
 
         # reload conf
+        old_cfg = self.cfg
         self.app.reload()
+
+        # check the reloaded TLS configuration before anything is
+        # switched over: a renewed certificate and its key can arrive
+        # separately, so make sure they load together. If they don't,
+        # keep the previous configuration, listeners and workers.
+        if self.app.cfg.is_ssl:
+            try:
+                sock.ssl_context(self.app.cfg)
+            except Exception as e:
+                self.log.error("TLS configuration reload failed (%s), "
+                               "keeping the previous configuration", e)
+                self.app.cfg = old_cfg
+                for k, v in old_cfg.env.items():
+                    os.environ[k] = v
+                return
+
         self.setup(self.app)
 
         # reopen log files
