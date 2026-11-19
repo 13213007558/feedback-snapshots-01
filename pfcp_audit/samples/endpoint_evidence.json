@@ -1,0 +1,932 @@
+{
+  "title": "PFCP endpoint-allocation evidence artifact",
+  "scenarios": [
+    {
+      "name": "legal",
+      "description": "legal allocations; shared group in A, dual-stack specified PDR in B",
+      "transcript": {
+        "name": "legal",
+        "description": "legal allocations; shared group in A, dual-stack specified PDR in B",
+        "messages": [
+          {
+            "label": "A-req",
+            "direction": "request",
+            "hex": "213200a2000000000000000000006400003c0005000a0000020039000d0200000000000001110a0000020001002400380002000a001d000400000064000200120014000100001500090101020304c000020b0001001d003800020014001d0004000000c80002000b0014000100001500020c070001001d00380002001e001d00040000012c0002000b0014000100001500020c070003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "B-req",
+            "direction": "request",
+            "hex": "2132009100000000000000000000c800003c0005000a0000020039000d0200000000000002220a0000020001001d003800020028001d0004000001900002000b0014000100001500020c0700010034003800020032001d0004000001f4000200220014000100001500190305060708c000023220010db80000000000000000000000500003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "A-rsp",
+            "direction": "response",
+            "hex": "2133004a000000000000011100006500003c0005000a0000030013000101000800140038000200140015000a09aaaa0001c633640a070008001400380002001e0015000a09aaaa0001c633640a07"
+          },
+          {
+            "label": "B-rsp",
+            "direction": "response",
+            "hex": "2133003200000000000002220000c900003c0005000a0000030013000101000800140038000200280015000a09bbbb0002c633641407"
+          }
+        ]
+      },
+      "audit": {
+        "sessions": {
+          "0x111": {
+            "session_seid": "0x111",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 0,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              100
+            ],
+            "response_sequences": [
+              101
+            ],
+            "global_cause": 1,
+            "endpoints": {
+              "10": {
+                "session_seid": "0x111",
+                "pdr_id": 10,
+                "side": "request",
+                "sequence_number": 100,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 69,
+                  "byte_length": 13
+                },
+                "flags": {
+                  "CHID": false,
+                  "CH": false,
+                  "V6": false,
+                  "V4": true
+                },
+                "teid": "0x01020304",
+                "choose_id": null,
+                "ipv4": "c000020b",
+                "ipv6": null,
+                "state": "specified",
+                "anomalies": [],
+                "group_key": null,
+                "notes": []
+              },
+              "20": {
+                "session_seid": "0x111",
+                "pdr_id": 20,
+                "side": "request",
+                "sequence_number": 100,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 1,
+                  "byte_offset": 109,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 40,
+                  "byte_length": 14
+                },
+                "response_cause": 1,
+                "response_sequence_number": 101,
+                "allocated_teid": "0xaaaa0001",
+                "allocated_ipv4": "c633640a",
+                "allocated_ipv6": null
+              },
+              "30": {
+                "session_seid": "0x111",
+                "pdr_id": 30,
+                "side": "request",
+                "sequence_number": 100,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 2,
+                  "byte_offset": 142,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 1,
+                  "byte_offset": 64,
+                  "byte_length": 14
+                },
+                "response_cause": 1,
+                "response_sequence_number": 101,
+                "allocated_teid": "0xaaaa0001",
+                "allocated_ipv4": "c633640a",
+                "allocated_ipv6": null
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x111",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  20,
+                  30
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 1,
+                    "byte_offset": 109,
+                    "byte_length": 6
+                  },
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 2,
+                    "byte_offset": 142,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [
+                  {
+                    "teid": "0xaaaa0001",
+                    "ipv4": "c633640a",
+                    "ipv6": null
+                  },
+                  {
+                    "teid": "0xaaaa0001",
+                    "ipv4": "c633640a",
+                    "ipv6": null
+                  }
+                ],
+                "verdicts": [],
+                "notes": []
+              }
+            ],
+            "notes": []
+          },
+          "0x222": {
+            "session_seid": "0x222",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 1,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              200
+            ],
+            "response_sequences": [
+              201
+            ],
+            "global_cause": 1,
+            "endpoints": {
+              "40": {
+                "session_seid": "0x222",
+                "pdr_id": 40,
+                "side": "request",
+                "sequence_number": 200,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 3,
+                  "byte_offset": 69,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 2,
+                  "byte_offset": 40,
+                  "byte_length": 14
+                },
+                "response_cause": 1,
+                "response_sequence_number": 201,
+                "allocated_teid": "0xbbbb0002",
+                "allocated_ipv4": "c6336414",
+                "allocated_ipv6": null
+              },
+              "50": {
+                "session_seid": "0x222",
+                "pdr_id": 50,
+                "side": "request",
+                "sequence_number": 200,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 4,
+                  "byte_offset": 102,
+                  "byte_length": 29
+                },
+                "flags": {
+                  "CHID": false,
+                  "CH": false,
+                  "V6": true,
+                  "V4": true
+                },
+                "teid": "0x05060708",
+                "choose_id": null,
+                "ipv4": "c0000232",
+                "ipv6": "20010db8000000000000000000000050",
+                "state": "specified",
+                "anomalies": [],
+                "group_key": null,
+                "notes": []
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x222",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  40
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 3,
+                    "byte_offset": 69,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [
+                  {
+                    "teid": "0xbbbb0002",
+                    "ipv4": "c6336414",
+                    "ipv6": null
+                  }
+                ],
+                "verdicts": [],
+                "notes": []
+              }
+            ],
+            "notes": []
+          }
+        },
+        "endpoint_verdicts": {
+          "0x111:10": [
+            "specified_endpoint"
+          ],
+          "0x111:20": [
+            "allocation_confirmed"
+          ],
+          "0x111:30": [
+            "allocation_confirmed"
+          ],
+          "0x222:40": [
+            "allocation_confirmed"
+          ],
+          "0x222:50": [
+            "specified_endpoint"
+          ]
+        },
+        "parse_failures": [],
+        "cross_session_violations": []
+      }
+    },
+    {
+      "name": "conflict",
+      "description": "shared group answered inconsistently; session B rejected",
+      "transcript": {
+        "name": "conflict",
+        "description": "shared group answered inconsistently; session B rejected",
+        "messages": [
+          {
+            "label": "A-req",
+            "direction": "request",
+            "hex": "2132009a000000000000000000006e00003c0005000a0000020039000d0200000000000001110a0000020001001d003800020015001d0004000000d20002000b0014000100001500020c070001001d00380002001f001d0004000001360002000b0014000100001500020c070001001c00380002003d001d0004000002620002000a001400010000150001040003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "B-req",
+            "direction": "request",
+            "hex": "2132005900000000000000000000d200003c0005000a0000020039000d0200000000000002220a0000020001001d003800020029001d00040000019a0002000b0014000100001500020c070003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "A-rsp",
+            "direction": "response",
+            "hex": "2133004a000000000000011100006f00003c0005000a0000030013000103000800140038000200150015000a09cccc0001c633641f070008001400380002001f0015000a09cccc0002c633642007"
+          },
+          {
+            "label": "B-rsp",
+            "direction": "response",
+            "hex": "2133001a00000000000002220000d300003c0005000a000003001300014b"
+          }
+        ]
+      },
+      "audit": {
+        "sessions": {
+          "0x111": {
+            "session_seid": "0x111",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 0,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              110
+            ],
+            "response_sequences": [
+              111
+            ],
+            "global_cause": 3,
+            "endpoints": {
+              "21": {
+                "session_seid": "0x111",
+                "pdr_id": 21,
+                "side": "request",
+                "sequence_number": 110,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 69,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 40,
+                  "byte_length": 14
+                },
+                "response_cause": 3,
+                "response_sequence_number": 111,
+                "allocated_teid": "0xcccc0001",
+                "allocated_ipv4": "c633641f",
+                "allocated_ipv6": null
+              },
+              "31": {
+                "session_seid": "0x111",
+                "pdr_id": 31,
+                "side": "request",
+                "sequence_number": 110,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 1,
+                  "byte_offset": 102,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 1,
+                  "byte_offset": 64,
+                  "byte_length": 14
+                },
+                "response_cause": 3,
+                "response_sequence_number": 111,
+                "allocated_teid": "0xcccc0002",
+                "allocated_ipv4": "c6336420",
+                "allocated_ipv6": null
+              },
+              "61": {
+                "session_seid": "0x111",
+                "pdr_id": 61,
+                "side": "request",
+                "sequence_number": 110,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 2,
+                  "byte_offset": 135,
+                  "byte_length": 5
+                },
+                "flags": {
+                  "CHID": false,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": null,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_requested",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": null,
+                  "anonymous": true
+                },
+                "notes": [
+                  "accepted/partial response without a CreatedPDR F-TEID for this PDR",
+                  "response captured but no CreatedPDR F-TEID for this PDR"
+                ]
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x111",
+                "choose_id": null,
+                "anonymous": true,
+                "member_pdr_ids": [
+                  61
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 2,
+                    "byte_offset": 135,
+                    "byte_length": 5
+                  }
+                ],
+                "distinct_allocated_endpoints": [],
+                "verdicts": [
+                  "response_missing"
+                ],
+                "notes": []
+              },
+              {
+                "session_seid": "0x111",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  21,
+                  31
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 0,
+                    "byte_offset": 69,
+                    "byte_length": 6
+                  },
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 1,
+                    "byte_offset": 102,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [
+                  {
+                    "teid": "0xcccc0001",
+                    "ipv4": "c633641f",
+                    "ipv6": null
+                  },
+                  {
+                    "teid": "0xcccc0002",
+                    "ipv4": "c6336420",
+                    "ipv6": null
+                  }
+                ],
+                "verdicts": [
+                  "group_conflict"
+                ],
+                "notes": [
+                  "selection group CHOOSE_ID=7 confirmed 2 distinct endpoints but must share one"
+                ]
+              }
+            ],
+            "notes": []
+          },
+          "0x222": {
+            "session_seid": "0x222",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 1,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              210
+            ],
+            "response_sequences": [
+              211
+            ],
+            "global_cause": 75,
+            "endpoints": {
+              "41": {
+                "session_seid": "0x222",
+                "pdr_id": 41,
+                "side": "request",
+                "sequence_number": 210,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 3,
+                  "byte_offset": 69,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_requested",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [
+                  "response cause 75 rejected the rule set",
+                  "response captured but no CreatedPDR F-TEID for this PDR"
+                ]
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x222",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  41
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 3,
+                    "byte_offset": 69,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [],
+                "verdicts": [
+                  "response_missing"
+                ],
+                "notes": []
+              }
+            ],
+            "notes": []
+          }
+        },
+        "endpoint_verdicts": {
+          "0x111:21": [
+            "allocation_confirmed"
+          ],
+          "0x111:31": [
+            "allocation_confirmed"
+          ],
+          "0x111:61": [
+            "allocation_requested",
+            "response_missing"
+          ],
+          "0x222:41": [
+            "response_failed"
+          ]
+        },
+        "parse_failures": [],
+        "cross_session_violations": []
+      }
+    },
+    {
+      "name": "incomplete",
+      "description": "session A response absent; session B allocation must not be borrowed",
+      "transcript": {
+        "name": "incomplete",
+        "description": "session A response absent; session B allocation must not be borrowed",
+        "messages": [
+          {
+            "label": "A-req",
+            "direction": "request",
+            "hex": "2132007a000000000000000000007800003c0005000a0000020039000d0200000000000001110a0000020001001d003800020016001d0004000000dc0002000b0014000100001500020c070001001d003800020020001d0004000001400002000b0014000100001500020c070003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "B-req",
+            "direction": "request",
+            "hex": "2132005900000000000000000000dc00003c0005000a0000020039000d0200000000000002220a0000020001001d00380002002a001d0004000001a40002000b0014000100001500020c070003000e006c000400000001002c00020200"
+          },
+          {
+            "label": "B-rsp",
+            "direction": "response",
+            "hex": "2133003200000000000002220000dd00003c0005000a00000300130001010008001400380002002a0015000a09dddd0003c633642807"
+          }
+        ]
+      },
+      "audit": {
+        "sessions": {
+          "0x111": {
+            "session_seid": "0x111",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 0,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              120
+            ],
+            "response_sequences": [],
+            "global_cause": null,
+            "endpoints": {
+              "22": {
+                "session_seid": "0x111",
+                "pdr_id": 22,
+                "side": "request",
+                "sequence_number": 120,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 69,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_requested",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": []
+              },
+              "32": {
+                "session_seid": "0x111",
+                "pdr_id": 32,
+                "side": "request",
+                "sequence_number": 120,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 1,
+                  "byte_offset": 102,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_requested",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": []
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x111",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  22,
+                  32
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 0,
+                    "byte_offset": 69,
+                    "byte_length": 6
+                  },
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 1,
+                    "byte_offset": 102,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [],
+                "verdicts": [
+                  "response_missing"
+                ],
+                "notes": []
+              }
+            ],
+            "notes": []
+          },
+          "0x222": {
+            "session_seid": "0x222",
+            "fseid_path": {
+              "path": "FSEID",
+              "ie_index": 1,
+              "byte_offset": 25,
+              "byte_length": 17
+            },
+            "request_sequences": [
+              220
+            ],
+            "response_sequences": [
+              221
+            ],
+            "global_cause": 1,
+            "endpoints": {
+              "42": {
+                "session_seid": "0x222",
+                "pdr_id": 42,
+                "side": "request",
+                "sequence_number": 220,
+                "message_type": 50,
+                "request_ie": {
+                  "path": "CreatePDR/PDI/FTEID",
+                  "ie_index": 2,
+                  "byte_offset": 69,
+                  "byte_length": 6
+                },
+                "flags": {
+                  "CHID": true,
+                  "CH": true,
+                  "V6": false,
+                  "V4": false
+                },
+                "teid": null,
+                "choose_id": 7,
+                "ipv4": null,
+                "ipv6": null,
+                "state": "allocation_confirmed",
+                "anomalies": [],
+                "group_key": {
+                  "choose_id": 7,
+                  "anonymous": false
+                },
+                "notes": [],
+                "response_ie": {
+                  "path": "CreatedPDR/FTEID",
+                  "ie_index": 0,
+                  "byte_offset": 40,
+                  "byte_length": 14
+                },
+                "response_cause": 1,
+                "response_sequence_number": 221,
+                "allocated_teid": "0xdddd0003",
+                "allocated_ipv4": "c6336428",
+                "allocated_ipv6": null
+              }
+            },
+            "groups": [
+              {
+                "session_seid": "0x222",
+                "choose_id": 7,
+                "anonymous": false,
+                "member_pdr_ids": [
+                  42
+                ],
+                "member_paths": [
+                  {
+                    "path": "CreatePDR/PDI/FTEID",
+                    "ie_index": 2,
+                    "byte_offset": 69,
+                    "byte_length": 6
+                  }
+                ],
+                "distinct_allocated_endpoints": [
+                  {
+                    "teid": "0xdddd0003",
+                    "ipv4": "c6336428",
+                    "ipv6": null
+                  }
+                ],
+                "verdicts": [],
+                "notes": []
+              }
+            ],
+            "notes": []
+          }
+        },
+        "endpoint_verdicts": {
+          "0x111:22": [
+            "allocation_requested",
+            "response_missing"
+          ],
+          "0x111:32": [
+            "allocation_requested",
+            "response_missing"
+          ],
+          "0x222:42": [
+            "allocation_confirmed"
+          ]
+        },
+        "parse_failures": [],
+        "cross_session_violations": []
+      }
+    }
+  ],
+  "flag_mutations": [
+    {
+      "name": "ch_cleared_on_allocation_request",
+      "target_ie": "CreatePDR/PDI/FTEID",
+      "changed_byte_offset": 113,
+      "original_flags_byte": "0c",
+      "mutated_flags_byte": "08",
+      "mutated_request_hex": "213200a2000000000000000000006400003c0005000a0000020039000d0200000000000001110a0000020001002400380002000a001d000400000064000200120014000100001500090101020304c000020b0001001d003800020014001d0004000000c80002000b00140001000015000208070001001d00380002001e001d00040000012c0002000b0014000100001500020c070003000e006c000400000001002c00020200",
+      "endpoint_state": "inconclusive",
+      "anomalies": [
+        "truncated_fteid",
+        "pycrate_structured_decode_failed",
+        "chid_without_ch"
+      ],
+      "interpreted_as_address": false
+    },
+    {
+      "name": "v4_presence_flipped_on_specified_endpoint",
+      "target_ie": "CreatePDR/PDI/FTEID",
+      "changed_byte_offset": 73,
+      "original_flags_byte": "01",
+      "mutated_flags_byte": "00",
+      "mutated_request_hex": "213200a2000000000000000000006400003c0005000a0000020039000d0200000000000001110a0000020001002400380002000a001d000400000064000200120014000100001500090001020304c000020b0001001d003800020014001d0004000000c80002000b0014000100001500020c070001001d00380002001e001d00040000012c0002000b0014000100001500020c070003000e006c000400000001002c00020200",
+      "endpoint_state": "inconclusive",
+      "anomalies": [
+        "trailing_bytes",
+        "no_address_flag"
+      ],
+      "interpreted_as_address": false
+    }
+  ]
+}
