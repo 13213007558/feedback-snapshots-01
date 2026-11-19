@@ -305,6 +305,12 @@ Setting +hmac_secret+ is required to use the webauthn feature, as it is
 used for checking that the provided authentication challenges have not
 been modified.
 
+If you are adding webauthn to an existing installation that already uses
+the otp feature, note that setting +hmac_secret+ changes how otp keys are
+verified by default, and existing raw otp keys may stop working.  You must
+handle that before enabling webauthn, as described in the otp feature
+section above and the {TOTP to WebAuthn migration guide}[rdoc-ref:doc/guides/totp_to_webauthn_migration.rdoc].
+
 === active_sessions feature
 
 Setting +hmac_secret+ is required to use the active_sessions feature,

@@ -1,0 +1,1232 @@
+= TOTP 用户接入 WebAuthn：接入设计与迁移核对
+
+本文面向已经使用 TOTP、并且保留恢复码作为备用路径的账户，说明如何
+基于 Rodauth 的 feature 组合开放 WebAuthn。内容包括：
+
+* 需要启用哪些 feature，以及它们之间的依赖和冲突；
+* “注册完成”“能用来登录”“达到敏感操作所需强度”三个判定口径；
+* 换设备中途离开、只带旧设备、使用恢复码的完整流转；
+* 在 SQLite 和 WebAuthn 测试替身上可以自动核对的状态；
+* 实施者据此判断迁移何时可以推进的最小条件。
+
+本文只描述接入设计和核对口径，不要求一次性改完产品。建议先按
+“WebAuthn 作为 TOTP 之外的第二因子”灰度，再考虑 passwordless 和
+autofill。
+
+== 结论先行
+
+第一阶段的目标应是“TOTP 用户可以选择额外注册 WebAuthn，并继续保留
+TOTP 和恢复码”，而不是立即把所有 TOTP 用户改成 passwordless。
+原因如下：
+
+* Rodauth 的 +two_factor_authenticated?+ 只要求
+  +authenticated_by+ 数组长度至少为 2，并不区分第二因子是 TOTP、
+  WebAuthn 还是恢复码。仅凭 +authenticated?+ 不能证明“本次用的是
+  WebAuthn”。
+* +webauthn_login+ 的 passwordless 登录只把 +authenticated_by+ 设为
+  <tt>['webauthn']</tt>。如果账户还配置了 TOTP 或恢复码，
+  +uses_two_factor_authentication?+ 为真，会话仍处于半认证状态，
+  必须再完成一个因子。产品上不能把“WebAuthn 登录成功”直接当成
+  “已完成两因子”。
+* 现有 +webauthn+ 注册默认 <tt>'requireResidentKey' => false</tt>。在
+  启用 +webauthn_autofill+ 的 conditional mediation 之前，必须重新
+  注册 resident key，否则旧凭据不会出现在自动填充候选中。
+
+第一阶段推荐配置：
+
+  plugin :rodauth do
+    enable :login, :logout, :otp, :recovery_codes, :webauthn
+
+    # webauthn 依赖 require_domain 和 require_hmac_secret
+    domain "example.com"
+    hmac_secret ENV["RODAUTH_HMAC_SECRET"]
+
+    # 保留恢复码作为备用路径，迁移早期不要自动删除
+    auto_add_recovery_codes? true
+    auto_remove_recovery_codes? false
+
+    # 密码账户增删 WebAuthn 凭据时要求再次输入密码
+    two_factor_modifications_require_password? true
+  end
+
+建议同时启用：
+
+* +audit_logging+：把 +webauthn_setup+、+two_factor_authentication+、
+  +webauthn_auth_failure+、+webauthn_remove+ 写入
+  +account_authentication_audit_logs+，便于核对“哪个因子完成了
+  两因子”。
+* +confirm_password+：对高敏感操作要求重新输入密码。它不增加第二
+  因子，只保证密码新鲜度。
+* +active_sessions+：首次 MFA 设置会清理其他会话。已有 TOTP 用户
+  在注册 WebAuthn 前 +two_factor_authentication_setup?+ 已经为真，
+  因此新增 WebAuthn 不应触发“首次 MFA 清会话”的逻辑。
+* +webauthn_modify_email+：新增或删除凭据时发邮件，便于迁移期监控。
+
+第一阶段不建议启用：
+
+* +webauthn_autofill+：需要 resident key，旧凭据不满足。
+* +webauthn_verify_account+：面向新账户验证，不解决已有 TOTP 用户。
+* 把 +webauthn_login_user_verification_additional_factor?+ 当作默认
+  两因子来源：它依赖客户端/认证器上报的 UV，见后文风险一节。
+
+== Feature 组合与依赖关系
+
+Rodauth 的实际依赖关系：
+
+* +webauthn+ 依赖 +two_factor_base+、+require_domain+、
+  +require_hmac_secret+。
+* +recovery_codes+ 依赖 +two_factor_base+。
+* +webauthn_login+ 依赖 +login+、+webauthn+。
+* +webauthn_autofill+ 依赖 +webauthn_login+。
+* +confirm_password+ 单独提供密码再确认，不提供第二因子。
+
+因此“TOTP + 恢复码 + WebAuthn”的最小组合是：
+
+  enable :login, :logout, :otp, :recovery_codes, :webauthn
+
+如果要支持不输入密码的 WebAuthn 登录，再额外启用 +webauthn_login+。
+如果要支持登录页自动填充，再在完成 resident key 重注册后启用
++webauthn_autofill+。
+
+=== 恢复码的主/备语义
+
++recovery_codes_primary?+ 是按 feature 集合判断的，不是按账户判断：
+
+  (features & [:otp, :sms_codes, :webauthn]).empty?
+
+只要启用了 +otp+ 或 +webauthn+，恢复码就是备用因子。即使某个账户
+实际没有任何 TOTP/WebAuthn 凭据，只要 +account_recovery_codes+ 还有
+记录，+possible_authentication_methods+ 仍会包含
+<tt>'recovery_code'</tt>，+two_factor_authentication_setup?+ 仍为真。
+这对迁移收尾很关键：恢复码会单独把账户留在两因子状态。
+
+=== hmac_secret 与既有 TOTP key 的兼容性
+
+WebAuthn 必须有 +hmac_secret+；但 +otp+ 在 +hmac_secret+ 存在时默认
++otp_keys_use_hmac? true+，会把数据库里的 raw TOTP key 再做一次 HMAC
+后才用于验证。如果历史 TOTP 是在没有 +hmac_secret+ 时创建的，直接
+打开 +hmac_secret+ 会导致这些用户的 TOTP 验证全部失败。
+
+README.rdoc 的 “otp feature” 一节已经说明没有平滑迁移。本迁移必须
+先完成以下三选一，再谈 WebAuthn 上线：
+
+1. 迁移前统一重新挂载 TOTP。需要用户在线，成本最高，但最干净。
+2. 永久设置 <tt>otp_keys_use_hmac? false</tt>，保留 raw key。接受
+   “数据库泄露即可用于 TOTP”的已知风险。
+3. 增加迁移标记，让 +otp_keys_use_hmac?+ 按账户或按 key 返回
+   false/true。旧 key 走 raw，新 key 走 HMAC。需要额外字段或标记表。
+
+在没有完成这个判定之前，不能把 +hmac_secret+ 当成“只是给 WebAuthn
+用的配置”。自动化核对必须覆盖“旧 raw TOTP 在新配置下仍能通过”，
+或者确认全部 TOTP 已重新挂载。
+
+== 三个判定口径
+
+为避免“注册成功、登录成功、能改密码”互相混淆，把状态拆成三个独立
+判定。每个判定只依赖 Rodauth 已有的公开方法或数据库行。
+
+=== 判定 A：注册完成
+
+“注册完成”不等于“页面提交成功”，必须同时满足：
+
+1. <tt>DB[:account_webauthn_keys].where(account_id: id).count >= 1</tt>。
+2. 该行 +public_key+ 非空，+sign_count+ 为整数。
+3. 该行的 +webauthn_id+ 与客户端保存的 +credential.rawId+ 一致。
+4. 该账户的 +account_webauthn_user_ids+ 有且只有一行。
+5. 用该凭据做一次独立的 +webauthn_auth+ 能成功，并使
+   +authenticated_by+ 增加 <tt>'webauthn'</tt>。
+
+只检查数据库行不能证明私钥还在设备上。WebAuthn 测试替身
++WebAuthn::FakeClient+ 可以在同一进程内重新生成断言，因此“注册完成”
+的自动化判定应当用“新 session 用同一 client 完成一次
++webauthn_auth+”来证明。
+
+注意：+webauthn_setup+ 的 GET 会先调用 +account_webauthn_user_id+，
+这会向 +account_webauthn_user_ids+ 插入一行，即使用户从未提交
+attestation。因此“user id 行存在”不是注册完成的证据；只有
++webauthn_keys+ 行存在才是。
+
++webauthn_setup+ 提交成功时，如果当前会话还没有完成两因子，会自动
+执行 +two_factor_update_session('webauthn')+，把 <tt>'webauthn'</tt>
+加入 +authenticated_by+。已有 TOTP 用户通常在设置 WebAuthn 前已完成
+TOTP 两因子（<tt>authenticated_by == ['password', 'totp']</tt>），
+此时 +two_factor_authenticated?+ 已为真，因此不会重复追加；但自动化
+核对仍应显式检查 +authenticated_by+，不能假设。
+
+=== 判定 B：能用来登录
+
+分两种登录形态：
+
+* 第二因子登录：先 +login+ 得到 <tt>authenticated_by ==
+  ['password']</tt>，再访问 +webauthn-auth+ 并提交 WebAuthn 断言。
+  成功后 <tt>authenticated_by == ['password', 'webauthn']</tt>，
+  +authenticated?+ 为真，+authenticated_webauthn_id+ 等于本次凭据 id。
+* passwordless 登录（启用 +webauthn_login+ 时）：+webauthn-login+ 成功
+  后 <tt>authenticated_by == ['webauthn']</tt>。如果该账户还有 TOTP
+  或恢复码，+uses_two_factor_authentication?+ 为真，
+  +authenticated?+ 为假，仍会被要求补一个因子。
+
+因此“能用来登录”在本方案里定义为：
+
+* 能作为第二因子完成 +require_authentication+；或
+* 在没有 TOTP/恢复码的账户上能单独登录。
+
+判定 B 的自动化口径：
+
+  authenticated_by == ['password', 'webauthn']
+  && rodauth.authenticated?
+  && rodauth.authenticated_webauthn_id == expected_webauthn_id
+
+对于 passwordless 账户（无密码、无 TOTP、无恢复码），额外要求：
+
+  authenticated_by == ['webauthn'] && rodauth.authenticated?
+
+=== 判定 C：敏感操作所需认证强度
+
+Rodauth 没有“单次敏感操作”的内置等级，但可以把现有守卫组合成可执行
+的强度定义：
+
+* 基础：+require_authentication+。它要求登录，并在
+  +two_factor_partially_authenticated?+ 为真时要求第二因子。对已有
+  TOTP 用户，这意味着“密码 + 任一第二因子”。
+* 第二因子来源：+two_factor_authenticated?+ 只看
+  <tt>authenticated_by.length >= 2</tt>，不区分 TOTP、WebAuthn 或
+  恢复码。敏感操作若要求“必须是 WebAuthn”，必须额外断言
+  +authenticated_by.include?('webauthn')+，不能只看 +authenticated?+。
+* 密码新鲜度：+confirm_password+ 的 +require_password_authentication+
+  或 +password_grace_period+ 的 +password_recently_entered?+。
+* 会话新鲜度：+session_expiration+、+active_sessions+。
+* 账户修改自带密码校验：+change_password+、+change_login+、
+  +close_account+ 在 +modifications_require_password?+ 为真时要求
+  当前密码；+webauthn_setup+、+webauthn_remove+ 在
+  +two_factor_modifications_require_password?+ 为真时要求密码。
+
+建议把敏感操作分成两级，并在路由上显式调用：
+
+  # 一级：要求两因子，但不限定第二因子类型
+  rodauth.require_authentication
+
+  # 二级：要求 WebAuthn 是本次第二因子，且密码在近期输入过
+  rodauth.require_authentication
+  unless rodauth.authenticated_by&.include?('webauthn')
+    # 重定向到提示页或 multifactor-auth
+  end
+  rodauth.require_password_authentication
+
+自动化核对 C 的口径：
+
+* 只有 <tt>authenticated_by == ['password']</tt> 的会话访问敏感路由，
+  必须被重定向到 +multifactor-auth+ 或 +recovery-auth+。
+* <tt>authenticated_by == ['password', 'recovery_code']</tt> 的会话
+  能通过一级，但不应通过“必须是 WebAuthn”的二级。
+* <tt>authenticated_by == ['password', 'webauthn']</tt> 的会话能通过
+  二级；若密码不在 +password_grace_period+ 内，仍应被
+  +confirm_password+ 拦截。
+
+=== 关于 user verification
+
++webauthn_user_verification+ 默认是 <tt>'discouraged'</tt>。
++webauthn_login+ 的 +webauthn_login_user_verification_additional_factor?+
+只有在客户端报告 <tt>user_verified?</tt> 时才会追加
+<tt>'webauthn-verification'</tt>，并把 +authenticated_by+ 变成
+<tt>['webauthn', 'webauthn-verification']</tt>。这依赖客户端/认证器
+如实上报 UV，适合作为“同一认证器内的第二因子”，不适合替代“设备持有
++ 知识/恢复码”的独立因子。
+
+需要注意：Rodauth 调用 +webauthn_credential.verify(challenge, ...)+ 时
+没有把 +webauthn_user_verification+ 传给 gem 的 +verify+，因此
+<tt>'required'</tt> 只影响发给浏览器的 options，服务端并不会强制检查
+UV 标志。自动化核对若要验证 UV，必须显式读取
+<tt>webauthn_credential.response.authenticator_data.user_verified?</tt>，
+不能假设配置已经强制。
+
+== 完整流转
+
+以下状态名对应“自动核对清单”的编号。所有状态都假设账户有密码，
+且第一阶段保留 TOTP 和恢复码。
+
+=== S0：迁移前（仅 TOTP + 恢复码）
+
+数据库预期：
+
+* +account_otp_keys+ 一行；
+* +account_recovery_codes+ 若干行；
+* +account_webauthn_keys+、+account_webauthn_user_ids+ 为空。
+
+会话预期：
+
+* 新登录后 <tt>authenticated_by == ['password']</tt>；
+* +two_factor_partially_authenticated?+ 为真；
+* 访问 +change-password+、+close-account+、+recovery-codes+ 等会被
+  重定向到 +multifactor-auth+。
+
+如果迁移前 TOTP 是 raw key 且现在准备引入 +hmac_secret+，必须先完成
+上一节的兼容性判定。S0 的“TOTP 仍可用”是迁移前置条件，不是 WebAuthn
+带来的新状态。
+
+=== S1：注册 WebAuthn（正常完成）
+
+前置：用户已通过密码 + TOTP，<tt>authenticated_by ==
+['password', 'totp']</tt>，+authenticated?+ 为真。
+
+操作：GET +/webauthn-setup+，客户端 +navigator.credentials.create+，
+然后 POST。
+
+数据库预期：
+
+* 新增一行 +account_webauthn_keys+，其 +webauthn_id+ 等于
+  <tt>credential.rawId</tt>。
+* +account_webauthn_user_ids+ 仍只有一行（GET 时已插入）。
+* +account_otp_keys+、+account_recovery_codes+ 不变。
+
+会话预期：
+
+* +authenticated_by+ 保持 <tt>['password', 'totp']</tt>，因为已经
+  两因子，+webauthn_setup+ 不会重复追加 <tt>'webauthn'</tt>。
+* +authenticated_webauthn_id+ 仍为 nil。
+* +possible_authentication_methods+ 新增 <tt>'webauthn'</tt>。
+
+注册完成判定见“判定 A”。必须再用该凭据完成一次 +webauthn_auth+，
+仅 POST 返回 “WebAuthn authentication is now setup” 不足以证明
+私钥可用，尤其在换设备场景中。
+
+=== S2：换设备中途离开（注册未完成）
+
+这是最容易产生脏状态的路径。用户在旧设备上完成 TOTP 后打开
++/webauthn-setup+，浏览器弹出系统认证器，但用户取消或离开页面。
+
+实际行为：
+
+* GET +/webauthn-setup+ 已经调用 +account_webauthn_user_id+，所以
+  +account_webauthn_user_ids+ 会多一行。
+* 但没有 +webauthn_keys+ 行。
+* 本次 GET 调用 +webauthn_credential_challenge_hmac+，session 中会保存
+  本次 challenge 的 HMAC 和时间戳；下一次 GET 会覆盖它。
+* 用户下次再访问 +/webauthn-setup+，Rodauth 会生成新 challenge，
+  +excludeCredentials+ 由 +account_webauthn_ids+ 生成，仍为空。
+
+因此“中途离开”的自动化判定：
+
+  DB[:account_webauthn_keys].count == 0
+  && DB[:account_webauthn_user_ids].count == 1
+  && 下一次 GET /webauthn-setup 仍能成功提交
+
+（+webauthn_setup?+ 只能在请求内的 +rodauth+ 实例上调用；测试断言如果
+拿不到当前请求实例，用 <tt>DB[:account_webauthn_keys].empty?</tt>
+等价表达。）
+
+并且要验证：用户重新进入 +/webauthn-setup+ 仍能成功注册。
++account_webauthn_user_ids+ 的残留不是错误，也不应该清理；它是
+WebAuthn user id 的稳定标识，删除后重新生成会导致同一账户的
++user.id+ 变化。
+
+如果用户在同一 session 打开两个标签页，两个 GET 会各自生成 challenge，
+后一个覆盖前一个的 session HMAC。此时用第一个标签页的 challenge 提交
+会失败（+webauthn_credential_challenge_hmac_match?+ 不匹配），必须刷新
+页面重新获取。这属于预期行为；自动化核对应覆盖“旧 challenge 提交失败、
+新 challenge 提交成功”，而不是把它当 bug。
+
+=== S3：换设备完成，旧设备仍在
+
+用户在新设备上注册了第二个 WebAuthn 凭据，但旧设备没有删除。
+
+数据库预期：
+
+* +account_webauthn_keys+ 两行，两个不同的 +webauthn_id+。
+* +account_webauthn_user_ids+ 仍只有一行。
+* +account_recovery_codes+ 在 +auto_add_recovery_codes? false+ 时不变；
+  在 +true+ 时 +add_webauthn_credential+ 会调用
+  +auto_add_missing_recovery_codes+，把恢复码补齐到上限，但不会超过
+  +recovery_codes_limit+。
+
+会话预期：
+
+* 新设备注册成功后，当前 session 的 +authenticated_by+ 仍是
+  <tt>['password', 'totp']</tt>。
+* 用新设备做 +webauthn_auth+ 后，<tt>authenticated_by ==
+  ['password', 'webauthn']</tt>。
+* 用旧设备做 +webauthn_auth+ 同样能成功，直到旧凭据被删除。
+
+这是迁移期最重要的“双设备共存”状态。产品上应提示用户保留旧设备
+至少一个恢复周期，并在新设备完成一次真实登录后再删除旧凭据。
+
+=== S4：只带旧设备
+
+用户在新设备上注册了 WebAuthn，但出门只带了旧设备。旧设备可能只
+注册过 TOTP，也可能也注册过 WebAuthn。
+
+* 旧设备有旧 WebAuthn 凭据：+webauthn-auth+ 的 +allowCredentials+
+  会包含所有 +account_webauthn_ids+，旧凭据可以完成第二因子。
+* 旧设备只有 TOTP：TOTP 仍是可用第二因子，+multifactor-auth+ 会同时
+  显示 WebAuthn 和 TOTP 链接；TOTP 验证通过后
+  <tt>authenticated_by == ['password', 'totp']</tt>。
+* 旧设备什么第二因子都没有：进入 S5 恢复码路径。
+
+自动化核对应覆盖：
+
+* 两个凭据都能各自完成 +webauthn_auth+；
+* 删除其中一个后，另一个仍能完成；
+* 删除旧凭据后，旧 client 的断言必须失败；
+* 删除旧凭据不会删除 +account_webauthn_user_ids+。该行只在
+  +two_factor_remove+ 或关闭账户时删除。
+
+=== S5：使用恢复码
+
+恢复码路径不依赖设备，是迁移期的兜底。+recovery_auth+ 在验证成功后
+调用 +two_factor_authenticate('recovery_code')+，并把该码从数据库删除。
+
+会话预期：
+
+* <tt>authenticated_by == ['password', 'recovery_code']</tt>。
+* +authenticated?+ 为真。
+* +authenticated_webauthn_id+ 为 nil。
+* +account_recovery_codes+ 行数减 1。
+* 同一个恢复码再次提交必须失败，因为行已被删除。
+
++recovery_code_match?+ 只在 +recovery_codes_primary?+ 为真时才会在删除
+后立刻补一个新码。本方案启用了 +otp+ 和 +webauthn+，所以
++recovery_codes_primary?+ 为假，不会自动补码。用户需要在已认证 session
+中访问 +/recovery-codes+ 并重新生成；+auto_add_recovery_codes?+ 只影响
++otp_add_key+ / +sms_confirm+ / +add_webauthn_credential+ 时是否补齐，
+不影响恢复码认证。
+
+=== S6：恢复码耗尽或只剩恢复码
+
+当用户删除了最后一个 TOTP 和最后一个 WebAuthn 凭据，但
++auto_remove_recovery_codes? false+，恢复码仍留在表中。此时：
+
+* +possible_authentication_methods+ 为
+  <tt>['password', 'recovery_code']</tt>。
+* +two_factor_authentication_setup?+ 为真。
+* +two_factor_partially_authenticated?+ 为真。
+* 用户新登录后必须走 +/recovery-auth+ 才能通过
+  +require_authentication+。
+
+这是一个“有 MFA 配置但没有设备型第二因子”的状态。它可以作为迁移期
+的临时状态，但不能长期保留，因为恢复码是一次性的；耗尽后用户会被
+锁在敏感操作之外，只能靠密码重置等账户恢复流程。
+
+自动化核对必须显式覆盖“恢复码耗尽后的新登录”：
+
+  authenticated_by == ['password']
+  && possible_authentication_methods == ['password', 'recovery_code']
+  && DB[:account_recovery_codes].empty?
+
+（+possible_authentication_methods+ 是 +rodauth+ 实例方法，测试中通过
++/state+ 路由读取；不要在 +app.rodauth+ 配置类上调用。）
+
+此时访问 +/change-password+ 应被重定向到 +/recovery-auth+，而不是
+直接允许或直接报错。
+
+=== S7：删除最后一个 WebAuthn 后的收尾
+
+如果同时启用 +auto_remove_recovery_codes? true+，删除最后一个
+WebAuthn 且没有 TOTP/SMS 时，+auto_remove_recovery_codes+ 会清空
+恢复码。随后 +possible_authentication_methods+ 只剩
+<tt>['password']</tt>，+two_factor_authentication_setup?+ 变为假，
+账户退回单因子。
+
+这是“完成迁移到纯 WebAuthn”的目标状态，但不应该在迁移早期启用
++auto_remove_recovery_codes? true+，否则用户会在还没准备好时失去
+所有备用路径。
+
+=== S8：TOTP 关闭但 WebAuthn 保留
+
+用户通过 WebAuthn 完成两因子后关闭 TOTP。此时：
+
+* +account_otp_keys+ 删除。
+* +account_webauthn_keys+ 保留。
+* +possible_authentication_methods+ 为
+  <tt>['password', 'recovery_code', 'webauthn']</tt>。
+* +two_factor_authentication_setup?+ 仍为真。
+
++otp-disable+ 在密码账户上仍要求 Password；如果当前 session 是通过
++webauthn+ 完成两因子的，+authenticated?+ 为真，可以进入
++/otp-disable+，但 +two_factor_modifications_require_password?+ 默认
+沿用 +modifications_require_password?+，因此仍会要求密码。
+
+自动化核对要区分“TOTP 关闭成功”和“恢复码被误删”：在
++auto_remove_recovery_codes? false+ 下，恢复码应保持不变。
+
+=== S9：全部 MFA 关闭
+
+通过 +/multifactor-disable+ 或依次关闭 TOTP/WebAuthn，最终：
+
+* +account_otp_keys+、+account_webauthn_keys+、
+  +account_webauthn_user_ids+、+account_recovery_codes+ 全空；
+* +possible_authentication_methods+ 为 <tt>['password']</tt>；
+* +two_factor_authentication_setup?+ 为假。
+
+这是“回滚到单因子”的状态，用于迁移失败时快速回退。
+
+== 自动核对清单
+
+以下清单按“迁移闸门”组织。所有断言都可以写成普通 minitest，
+不需要新增依赖。
+
+=== 测试夹具约定
+
+* SQLite 连接串为 <tt>sqlite:/</tt>，+RODAUTH_SPEC_MIGRATE=1+ 由
+  +spec/spec_helper.rb+ 自动执行 +spec/migrate_ci+。
+* 每个 spec 在事务中回滚，账户 +foo@example.com+、密码
+  <tt>0123456789</tt> 已预置。
+* +WebAuthn::FakeClient.new(origin)+ 的 +origin+ 必须与
+  +webauthn_origin+ 一致。测试中显式使用
+  <tt>'http://www.example.com'</tt>，或 <tt>first_request.base_url</tt>，
+  不要混用。
+* +create+ / +get+ 支持 +user_verified:+、+sign_count:+ 参数，可覆盖
+  UV、克隆计数器等场景。
+* 表单测试直接 +fill_in 'webauthn_setup'+ / +fill_in 'webauthn_auth'+；
+  JS 只负责填隐藏字段，所以无需真实浏览器。
+
+=== G0：迁移前置闸门（必须先通过）
+
+目的：确认打开 +hmac_secret+ 与 +webauthn+ 不会打断既有 TOTP。
+
+操作：
+
+1. 用旧配置（无 +hmac_secret+）为账户挂载 TOTP，记录
+   <tt>DB[:account_otp_keys].get(:key)</tt>。
+2. 用新配置（有 +hmac_secret+、启用 +webauthn+）登录，提交下一时间步
+   的 TOTP。
+3. 若采用 <tt>otp_keys_use_hmac? false</tt>，检查数据库中仍是原 raw key。
+4. 若采用按 key 迁移，检查旧 key 走 raw 分支、新挂载 key 走 HMAC 分支，
+   两条路径都能通过。
+
+必须为真：
+
+  authenticated_by == ['password', 'totp']
+  && rodauth.authenticated?
+  && DB[:account_otp_keys].get(:key) == legacy_key   # 方案 2 或 3 的旧 key 分支
+
+失败含义：阻塞迁移。这是最容易在上线当天造成“所有 TOTP 用户无法
+登录”的问题。
+
+注意：不要在启用 +webauthn+ 的同一配置里让 +hmac_secret+ 为 nil；
++require_hmac_secret+ 会在 +post_configure+ 报配置问题。G0 的两阶段
+必须分开 app 运行。
+
+=== G1：注册完成闸门
+
+操作：
+
+1. 登录后完成 TOTP，记录 <tt>authenticated_by ==
+   ['password', 'totp']</tt>。
+2. GET +/webauthn-setup+，记录 challenge；检查
+   <tt>DB[:account_webauthn_user_ids].count == 1</tt>、
+   <tt>DB[:account_webauthn_keys].count == 0</tt>。
+3. POST 合法 attestation。
+4. 新 session 仅用密码登录，直接用同一 client 完成 +webauthn_auth+。
+
+必须为真：
+
+  DB[:account_webauthn_keys].count == 1
+  && DB[:account_webauthn_user_ids].count == 1
+  && key[:sign_count].is_a?(Integer)
+  && !key[:last_use].nil?
+  && authenticated_by == ['password', 'webauthn']
+  && rodauth.authenticated?
+  && rodauth.authenticated_webauthn_id == key[:webauthn_id]
+
+并且注册提交后的当前 session 仍应满足：
+
+  authenticated_by == ['password', 'totp']
+  && rodauth.authenticated_webauthn_id.nil?
+
+失败含义：阻塞“注册完成”判定。只有新 session 的 +webauthn_auth+ 通过，
+才能认为凭据真正可用。
+
+=== G2：中途离开 / 双标签闸门
+
+操作：
+
+1. GET +/webauthn-setup+（标签 A），再 GET 一次（标签 B）。
+2. 记录两次 challenge 和隐藏字段
+   +webauthn_setup_challenge_hmac+。
+3. 用标签 A 的 challenge 和 A 的 HMAC 提交。
+4. 用当前页面渲染出的新 challenge 提交。
+
+必须为真：
+
+  challenge_a != challenge_b
+  && hmac_a != hmac_b
+  && DB[:account_webauthn_keys].count == 0   # A 提交后
+  && DB[:account_webauthn_user_ids].count == 1
+  && 第二次提交成功，keys.count == 1
+
+只 GET 不提交时还应满足：
+
+  DB[:account_webauthn_keys].count == 0
+  && DB[:account_webauthn_user_ids].count == 1
+  && 再次 GET 仍返回可提交的 webauthn-setup 表单
+
+说明：+webauthn_credential_challenge_hmac_match?+ 在 session 中只保留
+最后一次 GET 的 HMAC/时间戳，因此旧标签失败是预期行为。
+
+失败含义：不阻塞功能，但会阻塞“中途离开可恢复”的验收。必须确认
+用户刷新页面后能重新注册。
+
+=== G3：双设备 / 只带旧设备闸门
+
+操作：
+
+1. 用 client1 注册凭据 1，用 client2 注册凭据 2。
+2. 在独立 session 分别用 client1、client2 完成 +webauthn_auth+。
+3. 用 client2 删除 client1 的凭据。
+4. 再用 client1 完成 +webauthn_auth+。
+
+必须为真：
+
+  DB[:account_webauthn_keys].select_map(:webauthn_id).uniq.length == 2
+  && DB[:account_webauthn_user_ids].count == 1
+  && 两次 auth 都得到 ['password', 'webauthn']
+  && authenticated_webauthn_id 分别等于对应 id
+  && 删除后 keys.count == 1
+  && DB[:account_webauthn_user_ids].count == 1
+  && client1 的 auth 失败
+
+失败含义：阻塞“换设备 / 只带旧设备”的验收。尤其要确认删除凭据不会
+删除 +account_webauthn_user_ids+。
+
+=== G4：恢复码闸门
+
+操作：
+
+1. 记录 <tt>codes_before = DB[:account_recovery_codes].select_map(:code)</tt>。
+2. 新 session 走 +/recovery-auth+，用 <tt>codes_before.first</tt>。
+3. 同一码再次提交。
+4. 在恢复码认证后的 session 访问 +/recovery-codes+ 和
+   +/webauthn-setup+。
+
+必须为真：
+
+  authenticated_by == ['password', 'recovery_code']
+  && rodauth.authenticated?
+  && rodauth.authenticated_webauthn_id.nil?
+  && DB[:account_recovery_codes].count == codes_before.length - 1
+  && 同一码第二次提交失败，行数不再变化
+  && 恢复码 session 能进入 /recovery-codes 和 /webauthn-setup
+
+失败含义：阻塞“恢复码备用路径”的验收。恢复码必须一次性，且不能
+因为启用 WebAuthn 而失效。
+
+=== G5：敏感操作强度闸门
+
+在 +enable :login, :logout, :otp, :recovery_codes, :webauthn,
+:change_password, :confirm_password+ 下：
+
+操作与必须为真：
+
+1. 仅密码 session 访问 +/change-password+：必须被重定向到
+   +/multifactor-auth+ 或 +/recovery-auth+。
+2. 密码 + TOTP session 访问 +/change-password+：允许进入页面；提交时
+   仍要求 Password。
+3. 密码 + 恢复码 session 访问 +/change-password+：按默认 Rodauth
+   行为允许进入页面；如果产品要求“敏感操作必须是设备型因子”，必须
+   在路由层额外拒绝 <tt>'recovery_code'</tt>。注意，一旦拒绝，用户
+   在恢复码认证后会被再次重定向到 +/multifactor-auth+，因此要确保
+   此时仍有 TOTP/WebAuthn 可用，或给出一条账户恢复流程。
+4. 密码 + WebAuthn session 访问 +/change-password+：允许；若再调用
+   +require_password_authentication+ 且密码不在 grace period 内，必须
+   重定向到 +/confirm-password+。
+5. +webauthn-setup+ / +webauthn-remove+：仅密码 session 必须被
+   +require_authentication+ 挡住；密码 + TOTP session 可以进入，但
+   在 +two_factor_modifications_require_password? true+ 时提交必须带
+   正确密码；密码 + WebAuthn session 在
+   +two_factor_modifications_require_password? false+ 时可以不带密码
+   直接增删。
+
+失败含义：阻塞敏感操作的强度定义。Rodauth 不会自动区分恢复码和
+WebAuthn 的强度，产品必须自己决定是否额外拒绝恢复码。
+
+=== G6：收尾闸门
+
+在 <tt>auto_remove_recovery_codes? false</tt> 下：
+
+1. 注册 TOTP + WebAuthn。
+2. 通过 WebAuthn 完成两因子，关闭 TOTP。
+3. 删除最后一个 WebAuthn 凭据。
+4. 新 session 仅密码登录。
+
+必须为真：
+
+  DB[:account_otp_keys].count == 0
+  && DB[:account_recovery_codes].count == 16   # 或迁移前的数量不变
+  && possible_authentication_methods == ['password', 'recovery_code']
+  && two_factor_partially_authenticated? == true
+  && /change-password 重定向到 /recovery-auth
+
+如果启用 <tt>auto_remove_recovery_codes? true</tt>，同一场景下恢复码
+会变成 0，账户退回单因子。这只能在阶段 3/4 之后作为预期行为，不能
+在阶段 1/2 打开。
+
+失败含义：阻塞收尾。+auto_remove_recovery_codes? true+ 在错误阶段
+打开会让用户失去所有备用路径。
+
+=== G7：passwordless 闸门（仅在启用 +webauthn_login+ 时）
+
+1. 账户有密码 + TOTP + WebAuthn 时，+webauthn-login+ 成功，检查
+   <tt>authenticated_by == ['webauthn']</tt>，但 +authenticated?+ 为假。
+2. 随后访问 +/change-password+，必须被要求补 TOTP 或恢复码。
+3. 设置 <tt>webauthn_login_user_verification_additional_factor? true</tt>，
+   用 <tt>user_verified: true</tt> 的 +get+，检查
+   <tt>authenticated_by == ['webauthn', 'webauthn-verification']</tt>，
+   +authenticated?+ 为真。
+4. 用 <tt>user_verified: false</tt> 的 +get+，检查不会被追加
+   <tt>'webauthn-verification'</tt>，仍处于半认证。
+5. 无密码、无 TOTP、无恢复码的账户，+webauthn-login+ 成功即为
+   <tt>['webauthn']</tt> 且 +authenticated?+ 为真。
+
+失败含义：阻塞 passwordless 阶段。不要把“WebAuthn 登录成功”直接
+等同于“完成两因子”。
+
+=== G8：autofill 闸门（仅在启用 +webauthn_autofill+ 时）
+
+1. 检查 +webauthn_authenticator_selection+ 返回
+   <tt>'residentKey' => 'required'</tt> 且 <tt>'requireResidentKey' => true</tt>
+   （+webauthn_autofill+ 会在 +webauthn_authenticator_selection+ 上合并）。
+2. 用 +WebAuthn::FakeClient+ 的 +create+ 注册。
+3. 检查登录页的 +login_field_autocomplete_value+ 含 <tt>webauthn</tt>
+   （只在 +request.path_info == login_path+ 时追加）。
+4. 不带 +login+ 参数调用 +webauthn-login+，检查能从 credential id 反查
+   账户（+account_from_webauthn_login+）。
+5. 删除该凭据后，同样的 +webauthn-login+ 必须失败并返回
+   +invalid_webauthn_id+ 原因。
+
+失败含义：阻塞 autofill 阶段。FakeClient 不会真正实现 resident key，
+G8 只能验证 Rodauth 侧的 options 和路由，不能验证浏览器行为。
+
+== 参考实现
+
+以下片段只使用仓库已有依赖：minitest、rack-test、capybara、
+webauthn/fake_client、rotp、Sequel、SQLite。建议新增
++spec/webauthn_totp_migration_spec.rb+，保持与 +spec/webauthn_spec.rb+、
++spec/two_factor_spec.rb+ 相同风格。
+
+本文档只摘录 G1–G4、G6 的完整用例；G0（旧 TOTP 兼容性）和
+G5（敏感操作强度）的完整可运行版本在
++spec/webauthn_totp_migration_spec.rb+ 中，G7/G8 需要额外启用
++webauthn_login+ / +webauthn_autofill+ 后单独补充。
+
+=== 测试夹具与辅助方法
+
+  require_relative 'spec_helper'
+  require 'rotp'
+
+  begin
+    require 'webauthn/fake_client'
+  rescue LoadError
+  else
+    describe 'Rodauth TOTP to WebAuthn migration' do
+      SECRET_LENGTH = (ROTP::Base32.respond_to?(:random_base32) ?
+        ROTP::Base32.random_base32 : ROTP::Base32.random).length
+      ORIGIN = 'http://www.example.com'
+
+      def enable_totp
+        secret = page.html.match(
+          /Secret: ([a-z2-7]{#{SECRET_LENGTH}})/
+        )[1]
+        totp = ROTP::TOTP.new(secret)
+        fill_in 'Password', :with=>'0123456789' if page.has_field?('Password')
+        fill_in 'Authentication Code', :with=>totp.now
+        click_button 'Setup TOTP Authentication'
+        totp
+      end
+
+      def register_webauthn(client)
+        visit '/webauthn-setup'
+        challenge = JSON.parse(
+          page.find('#webauthn-setup-form')['data-credential-options']
+        )['challenge']
+        fill_in 'Password', :with=>'0123456789' if page.has_field?('Password')
+        fill_in 'webauthn_setup',
+          :with=>client.create(challenge: challenge).to_json
+        click_button 'Setup WebAuthn Authentication'
+      end
+
+      def auth_webauthn(client)
+        visit '/webauthn-auth'
+        challenge = JSON.parse(
+          page.find('#webauthn-auth-form')['data-credential-options']
+        )['challenge']
+        fill_in 'webauthn_auth',
+          :with=>client.get(challenge: challenge).to_json
+        click_button 'Authenticate Using WebAuthn'
+      end
+
+      def session_state
+        visit '/state'
+        JSON.parse(page.body)
+      end
+
+      def db_state
+        {
+          :webauthn_keys=>DB[:account_webauthn_keys].count,
+          :webauthn_user_ids=>DB[:account_webauthn_user_ids].count,
+          :recovery_codes=>DB[:account_recovery_codes].count,
+          :otp_keys=>DB[:account_otp_keys].count
+        }
+      end
+
+      around do |&block|
+        DB.transaction(:rollback=>:always, :savepoint=>true,
+          :auto_savepoint=>true){super(&block)}
+      end
+
+      # ...
+    end
+  end
+
+测试专用 +/state+ 路由建议写成：
+
+  r.get 'state' do
+    JSON.generate({
+      authenticated_by: rodauth.authenticated_by,
+      authenticated: rodauth.authenticated?,
+      webauthn_id: rodauth.authenticated_webauthn_id,
+      setup: rodauth.webauthn_setup?,
+      methods: rodauth.possible_authentication_methods,
+      keys: DB[:account_webauthn_keys].count,
+      uids: DB[:account_webauthn_user_ids].count,
+      rec: DB[:account_recovery_codes].count,
+      otp: DB[:account_otp_keys].count,
+      partial: rodauth.send(:two_factor_partially_authenticated?),
+      uses2fa: rodauth.uses_two_factor_authentication?
+    })
+  end
+
+注意：+/state+ 路由必须放在 +r.rodauth+ 之后、任何 +r.redirect+ 之前，
+并且不能调用 +require_authentication+，否则未登录时无法读取状态。
+如果应用不允许新增调试路由，把上述断言换成直接读数据库，并在
++rodauth+ 路由块内读取 +rodauth+ 实例方法即可。
+
++app.rodauth+ 在 +Rodauth::ClassMethods#rodauth+ 中返回配置类，不是当前
+请求实例，不能直接调用 +authenticated_by+ 之类的实例方法。断言会话状态
+时应访问测试路由（如上例的 +/state+），或直接读数据库；
++session_state+ 返回的是 JSON 解析后的 Hash，使用
++session_state[:authenticated_by]+ 而不是数组本身。
+
+=== G1 参考用例
+
+  it "treats registration as complete only after a successful auth" do
+    rodauth do
+      enable :login, :logout, :otp, :recovery_codes, :webauthn
+      hmac_secret '123'
+      auto_add_recovery_codes? true
+    end
+    roda do |r|
+      r.rodauth
+      r.get('state') do
+        JSON.generate({
+          authenticated_by: rodauth.authenticated_by,
+          authenticated: rodauth.authenticated?,
+          webauthn_id: rodauth.authenticated_webauthn_id,
+          keys: DB[:account_webauthn_keys].count,
+          uids: DB[:account_webauthn_user_ids].count
+        })
+      end
+      r.redirect '/login' unless rodauth.logged_in?
+      view :content=>'ok'
+    end
+
+    login
+    client = WebAuthn::FakeClient.new(ORIGIN)
+
+    visit '/otp-setup'
+    enable_totp
+    session_state[:authenticated_by].must_equal ['password', 'totp']
+
+    register_webauthn(client)
+    page.find('#notice_flash').text.
+      must_equal 'WebAuthn authentication is now setup'
+
+    DB[:account_webauthn_keys].count.must_equal 1
+    DB[:account_webauthn_user_ids].count.must_equal 1
+    key = DB[:account_webauthn_keys].first
+    key[:sign_count].must_be_kind_of Integer
+    key[:last_use].wont_be_nil
+
+    session_state[:authenticated_by].must_equal ['password', 'totp']
+    session_state[:webauthn_id].must_be_nil
+
+    logout
+    login
+    auth_webauthn(client)
+    page.find('#notice_flash').text.
+      must_equal 'You have been multifactor authenticated'
+
+    session_state[:authenticated_by].
+      must_equal ['password', 'webauthn']
+    session_state[:webauthn_id].must_equal key[:webauthn_id]
+  end
+
+=== G2 参考用例
+
+  it "invalidates the abandoned tab's challenge" do
+    # 配置与 G1 相同
+    login
+    client = WebAuthn::FakeClient.new(ORIGIN)
+    visit '/otp-setup'
+    enable_totp
+
+    visit '/webauthn-setup'
+    a = JSON.parse(
+      page.find('#webauthn-setup-form')['data-credential-options']
+    )['challenge']
+    a_hmac = page.find(
+      'input[name=webauthn_setup_challenge_hmac]', visible: false
+    ).value
+
+    visit '/webauthn-setup'
+    b = JSON.parse(
+      page.find('#webauthn-setup-form')['data-credential-options']
+    )['challenge']
+    b_hmac = page.find(
+      'input[name=webauthn_setup_challenge_hmac]', visible: false
+    ).value
+
+    b.wont_equal a
+    b_hmac.wont_equal a_hmac
+
+    page.find(
+      'input[name=webauthn_setup_challenge]', visible: false
+    ).set(a)
+    page.find(
+      'input[name=webauthn_setup_challenge_hmac]', visible: false
+    ).set(a_hmac)
+    fill_in 'Password', :with=>'0123456789'
+    fill_in 'webauthn_setup',
+      :with=>client.create(challenge: a).to_json
+    click_button 'Setup WebAuthn Authentication'
+    page.find('#error_flash').text.
+      must_equal 'Error setting up WebAuthn authentication'
+
+    challenge = JSON.parse(
+      page.find('#webauthn-setup-form')['data-credential-options']
+    )['challenge']
+    fill_in 'Password', :with=>'0123456789'
+    fill_in 'webauthn_setup',
+      :with=>client.create(challenge: challenge).to_json
+    click_button 'Setup WebAuthn Authentication'
+    page.find('#notice_flash').text.
+      must_equal 'WebAuthn authentication is now setup'
+  end
+
+注意：Capybara 的 +fill_in+ 对 +type=hidden+ 字段可能不可见，因此用
++page.find(..., visible: false).set(...)+。
+
+=== G3 参考用例
+
+  it "keeps the new device working after removing the old one" do
+    # 配置与 G1 相同
+    login
+    old_client = WebAuthn::FakeClient.new(ORIGIN)
+    new_client = WebAuthn::FakeClient.new(ORIGIN)
+
+    visit '/otp-setup'
+    enable_totp
+
+    register_webauthn(old_client)
+    old_id = DB[:account_webauthn_keys].get(:webauthn_id)
+    register_webauthn(new_client)
+    ids = DB[:account_webauthn_keys].select_order_map(:webauthn_id)
+    ids.length.must_equal 2
+    ids.wont_include nil
+
+    logout
+    login
+    auth_webauthn(new_client)
+    session_state[:authenticated_by].
+      must_equal ['password', 'webauthn']
+    session_state[:webauthn_id].wont_equal old_id
+
+    visit '/webauthn-remove'
+    choose "webauthn-remove-#{old_id}"
+    click_button 'Remove WebAuthn Authenticator'
+    page.find('#notice_flash').text.
+      must_equal 'WebAuthn authenticator has been removed'
+
+    DB[:account_webauthn_keys].count.must_equal 1
+    DB[:account_webauthn_user_ids].count.must_equal 1
+
+    logout
+    login
+    visit '/webauthn-auth'
+    challenge = JSON.parse(
+      page.find('#webauthn-auth-form')['data-credential-options']
+    )['challenge']
+    fill_in 'webauthn_auth',
+      :with=>old_client.get(challenge: challenge).to_json
+    click_button 'Authenticate Using WebAuthn'
+    page.find('#error_flash').text.
+      must_equal 'Error authenticating using WebAuthn'
+  end
+
+=== G4 参考用例
+
+  it "consumes recovery codes exactly once" do
+    # 配置与 G1 相同
+    login
+    visit '/otp-setup'
+    enable_totp
+    codes = DB[:account_recovery_codes].select_map(:code)
+    codes.length.must_equal 16
+
+    logout
+    login
+    visit '/recovery-auth'
+    fill_in 'Recovery Code', :with=>codes.first
+    click_button 'Authenticate via Recovery Code'
+    page.find('#notice_flash').text.
+      must_equal 'You have been multifactor authenticated'
+
+    session_state[:authenticated_by].
+      must_equal ['password', 'recovery_code']
+    session_state[:authenticated].must_equal true
+    session_state[:webauthn_id].must_be_nil
+    DB[:account_recovery_codes].count.must_equal 15
+
+    logout
+    login
+    visit '/recovery-auth'
+    fill_in 'Recovery Code', :with=>codes.first
+    click_button 'Authenticate via Recovery Code'
+    page.find('#error_flash').text.
+      must_equal 'Error authenticating via recovery code'
+    DB[:account_recovery_codes].count.must_equal 15
+  end
+
+=== G6 参考用例
+
+  it "does not silently drop recovery codes" do
+    rodauth do
+      enable :login, :logout, :otp, :recovery_codes, :webauthn
+      hmac_secret '123'
+      auto_add_recovery_codes? true
+      auto_remove_recovery_codes? false
+    end
+
+    login
+    client = WebAuthn::FakeClient.new(ORIGIN)
+    visit '/otp-setup'
+    enable_totp
+    register_webauthn(client)
+
+    logout
+    login
+    auth_webauthn(client)
+
+    visit '/otp-disable'
+    fill_in 'Password', :with=>'0123456789' if page.has_field?('Password')
+    click_button 'Disable TOTP Authentication'
+    DB[:account_otp_keys].count.must_equal 0
+    DB[:account_recovery_codes].count.must_equal 16
+
+    visit '/webauthn-remove'
+    id = DB[:account_webauthn_keys].get(:webauthn_id)
+    choose "webauthn-remove-#{id}"
+    fill_in 'Password', :with=>'0123456789'
+    click_button 'Remove WebAuthn Authenticator'
+
+    DB[:account_webauthn_keys].count.must_equal 0
+    DB[:account_recovery_codes].count.must_equal 16
+    session_state[:methods].must_equal ['password', 'recovery_code']
+
+    logout
+    login
+    visit '/change-password'
+    page.current_path.must_equal '/recovery-auth'
+  end
+
+== 风险与边界
+
+=== 必须显式承认的限制
+
+1. +two_factor_authenticated?+ 只数因子个数，不区分因子类型。因此
+   “敏感操作必须是 WebAuthn”只能在路由层额外断言
+   +authenticated_by.include?('webauthn')+，不能在配置层声明。
+2. +webauthn_setup+ / +webauthn_remove+ 的密码要求由
+   +two_factor_modifications_require_password?+ 控制，不是“必须
+   WebAuthn 才能改凭据”的强制。若产品要求“只能用第二因子增删第二
+   因子”，需要自定义 +webauthn_modification_authenticated?+，或在
+   +before_webauthn_setup_route+ 中拒绝
+   <tt>authenticated_by == ['password']</tt> 的会话。
+3. +webauthn_user_verification+ 只影响发给浏览器的 options，Rodauth
+   调用 gem 的 +verify+ 时没有传入 +user_verification+，所以服务端
+   不会因为 <tt>'required'</tt> 而拒绝 UV=false 的断言。
+4. +webauthn_authentication_seconds+ 控制 challenge 的提交窗口，默认
+   600 秒。这不是 session 过期，也不是“注册完成”的时限；超过窗口后
+   必须重新 GET 拿新 challenge。
+5. +account_webauthn_user_ids+ 在第一次 GET +/webauthn-setup+ 时就插入。
+   中途离开会留下“有 user id、无 key”的合法状态，不应作为迁移失败
+   的信号，也不应清理。
+6. 恢复码在数据库中以明文存储，+recovery_codes.rdoc+ 已说明。迁移期
+   同时开放 WebAuthn 和恢复码时，数据库读取权限的收紧比 feature 组合
+   更重要。
+7. +auto_remove_recovery_codes? true+ 在移除最后一个设备型因子时会删
+   恢复码。迁移早期必须保持 false，否则用户可能在没有任何备用路径时
+   被迫重新注册。
+
+=== SQLite 特有核对点
+
+* +last_use+ 在 SQLite 中可能以字符串返回。Rodauth 在
+  +valid_webauthn_credential_auth?+ 中显式对 SQLite 使用
+  <tt>Sequel.cast(last_use, String)</tt>，再用 +where(last_use: 旧值)+
+  做并发保护。自动化核对不要直接比较 Ruby +Time+ 与数据库字符串；
+  用 +DB[:account_webauthn_keys].get(:last_use).to_s+，或让 Sequel 做
+  类型转换。
+* 不要把 +last_use+ 的字符串直接和 +Time.now+ 比较；只断言“非空/
+  发生变化”即可。
+* 复合主键 <tt>[:account_id, :webauthn_id]</tt> 在 SQLite 上会被 Sequel
+  映射为两列主键；+spec/migrate_ci+ 已验证可用，不需要额外索引。
+* +sign_count+ 是 +Integer+。如果数据库里出现 NULL，说明插入路径绕过
+  +webauthn_key_insert_hash+，应视为迁移失败。
+
+=== WebAuthn 测试替身的配合
+
++WebAuthn::FakeClient+ 的关键能力：
+
+* +create(challenge:, user_verified:, backup_eligibility:, ...)+：生成
+  attestation；默认 +user_verified false+，可显式传 true。
+* +get(challenge:, user_verified:, sign_count:, allow_credentials:, ...)+：
+  生成 assertion；+sign_count+ 可强制具体值，用于克隆/重放测试。
+* 每个 client 内部维护凭据和递增计数器；同一个 client 重复 +get+
+  会产生递增 sign count，正好用于验证
+  +valid_webauthn_credential_auth?+ 的并发保护。
+* +origin+ 必须与 +webauthn_origin+ 完全一致。
+* FakeClient 不会真正实现 resident key / autofill；G8 只能验证 Rodauth
+  侧行为。
+
+== 数据迁移
+
+WebAuthn 需要的表已经在 +spec/migrate_ci/001_tables.rb+ 中定义：
+
+* +account_webauthn_user_ids+：每个账户一行，+webauthn_id+ 唯一。
+* +account_webauthn_keys+：账户 + 凭据 id 复合主键，+public_key+ 非空、
+  +sign_count+ 非空、+last_use+ 非空。
+
+生产库如果还没有这两张表，按 README.rdoc 的 schema 段落新增即可，
+不需要改动 +accounts+ 或 +account_otp_keys+。需要额外新增的只有
+“按 key 判断 HMAC 模式”的迁移标记（如果采用第 3 种 TOTP 兼容方案），
+例如 +account_otp_keys+ 增加 +hmac_version+，或在应用层维护
++account_otp_hmac_versions+ 表。不要用 +created_at+ 推断，因为旧表可能
+没有该列。
+
+== 实施顺序与推进条件
+
+建议按以下阶段推进：
+
+1. 完成 G0：确认旧 TOTP 在 +hmac_secret+ 下仍可用，或完成 TOTP
+   重挂载/按 key 迁移。
+2. 加表、加 feature、加配置，但先只对内部账户开放 +/webauthn-setup+
+   入口；跑 G1、G2、G4。
+3. 开放给全部 TOTP 用户，但仍保留 TOTP 和恢复码；跑 G3、G5、G6。
+4. 观察至少一个恢复周期，确认 +webauthn_auth_failure+ 没有异常升高、
+   恢复码消耗没有异常。
+5. 再决定是否启用 +webauthn_login+（G7）。
+6. 再决定是否启用 +webauthn_autofill+（G8，需 resident key 重注册）。
+7. 最后才考虑 +auto_remove_recovery_codes? true+ 和关闭 TOTP。
+
+在阶段 2 结束时，实施者应能回答以下全部为“是”，才进入阶段 3：
+
+* G0 通过：旧 TOTP 在新配置下仍能完成两因子。
+* G1 通过：注册后的凭据能在新 session 完成 +webauthn_auth+。
+* G2 通过：中途离开/双标签不会留下不可恢复的脏状态，旧 challenge
+  被拒绝、新 challenge 被接受。
+* G3 通过：双设备各自可用；删除旧设备后旧 client 失败、新 client 仍
+  可用；+account_webauthn_user_ids+ 不因删除凭据而消失。
+* G4 通过：恢复码只能用一次；恢复码认证后可以进入敏感操作和凭据管理。
+* G5 通过：仅密码会话被挡在敏感操作之外；密码 + TOTP / 密码 +
+  WebAuthn / 密码 + 恢复码分别符合产品定义的强度。
+* G6 通过：+auto_remove_recovery_codes? false+ 下，关闭 TOTP 或删除
+  最后一个 WebAuthn 不会静默清空恢复码。
+
+只要有一项失败，就不应扩大 WebAuthn 入口。G0 和 G6 是“会让用户失去
+唯一登录方式”的两类问题，优先级高于 UI 和 autofill。
+
+== 附录
+
+=== 可选的账户级 TOTP 标记
+
+如果团队希望“旧 TOTP 用户不重挂载、但新用户使用 HMAC”，建议不要改
+Rodauth 核心 feature，而是在应用层加一个很薄的包装：
+
+  plugin :rodauth do
+    enable :login, :logout, :otp, :recovery_codes, :webauthn
+    hmac_secret ENV["RODAUTH_HMAC_SECRET"]
+
+    auth_class_eval do
+      def otp_keys_use_hmac?
+        # 只对迁移后新挂载的 key 启用 HMAC；旧 key 保持 raw
+        return false unless otp_exists?
+        DB[:account_otp_hmac_versions]
+          .where(account_id: session_value)
+          .get(:use_hmac) != false
+      end
+    end
+  end
+
+约束：
+
+* +otp_keys_use_hmac?+ 在一次请求中可能被多次调用，必须保持幂等。
+* 新增 +account_otp_hmac_versions+ 行时要与 +otp_add_key+ 在同一事务中
+  写入，否则会出现“key 已写入但标记未写入”的中间态。
+* 迁移完成后要把旧 key 全部重挂载，再删除这张表，避免长期维护两套
+  逻辑。
+* 自动化核对必须同时跑“旧 key”和“新 key”两条路径，不能只测新用户。
+
+如果不希望改数据库，也可以把标记放在 +account_otp_keys+ 的独立列上，
+但同样需要事务性写入；不要用 +num_failures+ 等有业务含义的列做标记。
+
+=== 敏感路由清单
+
+以下路由在启用对应 feature 时会出现，建议逐个确认强度：
+
+* +/change-password+：+require_account+（含 +require_authentication+）、
+  +change_password_requires_password?+ 默认 true；可叠加
+  +require_password_authentication+。
+* +/change-login+：+require_account+、+change_login_requires_password?+。
+* +/close-account+：+require_account+、+close_account_requires_password?+。
+* +/multifactor-manage+：+require_account+；会展示 setup/remove 链接，
+  但提交仍走各自守卫。
+* +/multifactor-disable+：+require_account+、+require_two_factor_setup+、
+  +two_factor_password_match?+。
+* +/webauthn-setup+、+/webauthn-remove+：
+  +webauthn_modification_authenticated?+ 或 +require_authentication+，
+  以及 +two_factor_password_match?+。
+* +/recovery-codes+：+require_account+，非 primary 时还会
+  +require_two_factor_setup+、+require_two_factor_authenticated+。
+* +/otp-setup+、+/otp-disable+、+/otp-auth+：见 +otp.rdoc+ 与
+  +two_factor_base.rdoc+。
+* +/webauthn-auth+：+require_login+、+require_account_session+、
+  +require_two_factor_not_authenticated('webauthn')+、
+  +require_webauthn_setup+。
+
+如果产品定义“恢复码不能用于敏感操作”，不要直接改 +recovery_auth+ 的
+全局行为，否则会与 +recovery_codes.rdoc+ 中“恢复码可用于备用”的设计
+冲突。应在具体路由前检查 +authenticated_by+，并在拒绝时提供可继续的
+第二因子（或明确的账户恢复入口），例如：
+
+  r.post "billing" do
+    rodauth.require_authentication
+    unless rodauth.authenticated_by.include?("webauthn")
+      r.redirect "/multifactor-auth"
+    end
+    # ...
+  end
+
+=== 文档与测试落点
+
+如果要把本文落到仓库里：
+
+* 新增 +doc/guides/totp_to_webauthn_migration.rdoc+，即本文。
+* 新增 +spec/webauthn_totp_migration_spec.rb+，实现 G0–G6。
+* 在 +www/pages/documentation.erb+ 的 Guides 列表增加一行。
+* 在 README.rdoc 的 +webauthn feature+ 段落补一句：“已有 otp 用户在
+  引入 +hmac_secret+ 前必须先处理 otp key 的 HMAC 兼容性”。
+* 不要修改 +lib/rodauth/features/webauthn.rb+ 的行为，除非产品明确
+  要求“敏感操作必须 WebAuthn”并接受自定义
+  +webauthn_modification_authenticated?+ 的语义变化。
+
+如果只需要设计评审材料，本文的“三个判定口径”“完整流转”
+“自动核对清单”“实施顺序与推进条件”四节可以直接作为验收清单。
