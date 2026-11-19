@@ -168,6 +168,12 @@ class BaseChannelLayer:
             raise TypeError(self.invalid_name_error.format("Group"))
         return True
 
+    def require_valid_topic_name(self, name):
+        """
+        Event broker topics follow the same naming rules as groups.
+        """
+        return self.require_valid_group_name(name)
+
     def valid_channel_names(self, names, receive=False):
         _non_empty_list = True if names else False
         _names_type = isinstance(names, list)

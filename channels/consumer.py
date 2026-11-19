@@ -52,6 +52,9 @@ class AsyncConsumer:
             self.base_send = async_to_sync(send)
         else:
             self.base_send = send
+        # Join any field-level event subscriptions before dispatch starts.
+        # Defaults to a no-op for consumers that don't declare any.
+        await self.join_event_subscriptions()
         # Pass messages in from channel layer or client to dispatch method
         try:
             if self.channel_layer is not None:
@@ -63,6 +66,19 @@ class AsyncConsumer:
         except StopConsumer:
             # Exit cleanly
             pass
+        finally:
+            await self.leave_event_subscriptions()
+
+    async def join_event_subscriptions(self):
+        """
+        Hook for joining field-level event subscriptions. Overridden by the
+        event consumer base classes; a no-op for ordinary consumers.
+        """
+
+    async def leave_event_subscriptions(self):
+        """
+        Hook for leaving field-level event subscriptions on shutdown.
+        """
 
     async def dispatch(self, message):
         """

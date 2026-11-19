@@ -312,3 +312,99 @@ Or you'll need to use async_to_sync:
     from asgiref.sync import async_to_sync
 
     async_to_sync(channel_layer.group_send)("chat", {"type": "chat.force_disconnect"})
+
+
+Field-Level Event Subscriptions
+-------------------------------
+
+Sometimes the same event must reach two kinds of subscribers: a fully
+permitted operations console that needs every field, and a summary-only
+monitoring screen that should never hold the detailed payload. The
+``channels.events`` module lets each subscriber declare the fields it is
+willing to receive before any business handler runs, so a monitoring
+connection does not retain data it never uses.
+
+A subscription is described by a ``Subscription``. Its ``fields`` is a list
+of dotted paths into the event; omit it (or pass ``None``) to keep receiving
+the complete event, which is the default and preserves the behaviour of
+existing consumers. The routing ``type`` key is always retained so the event
+is still dispatched to the matching handler.
+
+.. code-block:: python
+
+    from channels.events import AsyncEventConsumer
+
+    class ConsoleConsumer(AsyncEventConsumer):
+        # No ``fields``: the complete event is delivered.
+        event_subscriptions = [{"topic": "duty"}]
+
+        async def duty_alert(self, event):
+            ...
+
+    class MonitorScreenConsumer(AsyncEventConsumer):
+        # Only these fields (plus ``type``) ever reach this connection.
+        event_subscriptions = [
+            {"topic": "duty", "fields": ["id", "severity", "actor.name"]}
+        ]
+
+        async def duty_alert(self, event):
+            ...
+
+Events are published through an ``EventBroker`` built on top of the channel
+layer. Each subscriber receives its own deep-copied projection of the event,
+so two subscriptions with different selections cannot mutate one another:
+
+.. code-block:: python
+
+    from channels.events import EventBroker
+
+    broker = EventBroker()  # uses the default channel layer
+    await broker.publish(
+        "duty",
+        {
+            "type": "duty.alert",
+            "id": 4242,
+            "severity": "P1",
+            "actor": {"name": "alice", "contact": {"email": "alice@example.com"}},
+            "payload": {"raw": "internal diagnostics"},
+        },
+    )
+
+Nested fields are selected with dotted paths such as
+``"actor.contact.email"``. A path that selects a whole mapping (for example
+``"actor"``) delivers that mapping wholesale.
+
+Strict subscriptions
+********************
+
+Set ``reject_unknown=True`` on a subscription to refuse an event that
+contains any field it did not declare, instead of silently dropping the
+extra fields. The check is recursive into nested mappings, while a
+wholesale-declared mapping accepts anything nested inside it. Publishing
+then raises ``UnknownEventFieldError`` before any subscriber is delivered to,
+so a rejected event never produces a partial fan-out.
+
+.. code-block:: python
+
+    from channels.events import Subscription, UnknownEventFieldError
+
+    await broker.subscribe(
+        Subscription(
+            topic="duty",
+            channel_name=channel_name,
+            fields=["id", "severity", "actor.name"],
+            reject_unknown=True,
+        )
+    )
+
+Invalid declarations (an empty field list, a non-string path, or a path with
+empty segments) raise ``InvalidSubscription`` at subscription time rather
+than on the first published event.
+
+Synchronous consumers
+*********************
+
+``SyncEventConsumer`` mirrors ``AsyncEventConsumer`` for blocking handlers.
+The subscription lifecycle is managed for you; call the wrapped
+``subscribe``/``unsubscribe`` helpers from handler code when you need to join
+dynamically.

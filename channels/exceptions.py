@@ -63,3 +63,21 @@ class StopConsumer(Exception):
     """
 
     pass
+
+
+class InvalidSubscription(ValueError):
+    """
+    Raised when a field-level event subscription is declared with an invalid
+    field selection (for example a non-string field path or an empty list).
+    """
+
+    pass
+
+
+class UnknownEventFieldError(ValueError):
+    """
+    Raised when an event published to a strict subscription contains a field
+    that the subscription did not declare itself willing to accept.
+    """
+
+    pass
