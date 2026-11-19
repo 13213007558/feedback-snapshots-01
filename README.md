@@ -100,6 +100,45 @@ Installation
 $ pip install srp
 ```
 
+Anti-Enumeration Server
+-----------------------
+
+`srp.server` adds a pure-Python server integration that never reveals whether an
+account exists. Every identity receives an SRP challenge from the same public
+parameter set (SHA-256 / 2048-bit). Unknown identities are served a deterministic
+decoy record whose salt and verifier are bound to a server-side secret and to the
+identity; a decoy handshake performs the same cryptographic work as a real one but
+can never reach the authenticated state.
+
+```python
+import os
+from srp import _pysrp as srp
+from srp.server import SrpServer, SrpUserStore, AuthenticationFailed
+
+store = SrpUserStore()
+store.register(b'alice', b'testpassword')
+server = SrpServer(os.urandom(32), store)   # >=32-byte deployment secret
+
+usr      = srp.User(b'alice', b'testpassword', hash_alg=srp.SHA256, ng_type=srp.NG_2048)
+name, A  = usr.start_authentication()
+session  = server.begin_handshake(name, A)   # same (salt, B) shape for any identity
+salt, B  = session.get_challenge()
+M        = usr.process_challenge(salt, B)
+HAMK     = session.authenticate(M)           # raises AuthenticationFailed for decoys
+usr.verify_session(HAMK)
+assert usr.authenticated() and session.authenticated()
+```
+
+Rejection logging uses one fixed message with no identity or record type, and
+`SrpServer.prewarm_decoy(identities)` removes first-contact decoy derivation cost.
+The design, the recorded-cryptography comparison tests and the timing side channels
+that still require deployed measurement are documented in
+`srp/server/ANTI_ENUMERATION.md`. Run the checks with:
+
+```
+$ python -m unittest srp.server.test_anti_enumeration
+```
+
 Implementation
 --------------
 
