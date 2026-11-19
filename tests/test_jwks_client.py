@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import copy
 import http.client
@@ -809,3 +810,162 @@ class TestPyJWKClient:
                 jwks_client.get_jwk_set()
 
             assert http_error.closed
+
+
+def make_hmac_jwk(kid: str, secret: str) -> dict[str, Any]:
+    return {
+        "kty": "oct",
+        "kid": kid,
+        "use": "sig",
+        "alg": "HS256",
+        "k": base64.urlsafe_b64encode(secret.encode()).rstrip(b"=").decode(),
+    }
+
+
+def decode_with_client(jwks_client: PyJWKClient, token: str) -> dict[str, Any]:
+    signing_key = jwks_client.get_signing_key_from_jwt(token)
+    return jwt.decode(token, signing_key.key, algorithms=["HS256"])
+
+
+class TestPyJWKClientOffline:
+    def test_offline_client_requires_loaded_jwk_set(self) -> None:
+        jwks_client = PyJWKClient()
+
+        assert jwks_client.version == 0
+        with pytest.raises(PyJWKClientError, match="load_jwk_set"):
+            jwks_client.get_jwk_set()
+        with pytest.raises(PyJWKClientError, match="load_jwk_set"):
+            jwks_client.get_signing_key("any-kid")
+
+    def test_offline_client_never_fetches(self) -> None:
+        jwks_client = PyJWKClient()
+
+        with pytest.raises(PyJWKClientError, match="cannot fetch"):
+            jwks_client.fetch_data()
+
+    def test_load_jwk_set_rejects_non_object_payload(self) -> None:
+        jwks_client = PyJWKClient()
+
+        with pytest.raises(PyJWKClientError):
+            jwks_client.load_jwk_set(["not", "a", "dict"])
+
+        assert jwks_client.version == 0
+
+    def test_load_jwk_set_json(self) -> None:
+        jwks_client = PyJWKClient()
+        jwks_client.load_jwk_set_json(json.dumps({"keys": [make_hmac_jwk("k1", "s1")]}))
+
+        assert jwks_client.version == 1
+        assert jwks_client.get_signing_key("k1").key_id == "k1"
+
+    def test_load_verify_revoke_reload_lifecycle(self) -> None:
+        jwks_client = PyJWKClient()
+        payload = {"sub": "offline-user"}
+
+        # Load an initial set: both tokens verify.
+        jwks_client.load_jwk_set(
+            {"keys": [make_hmac_jwk("key-a", "secret-a"), make_hmac_jwk("key-b", "secret-b")]}
+        )
+        assert jwks_client.version == 1
+
+        token_a = jwt.encode(payload, "secret-a", algorithm="HS256", headers={"kid": "key-a"})
+        token_b = jwt.encode(payload, "secret-b", algorithm="HS256", headers={"kid": "key-b"})
+        assert decode_with_client(jwks_client, token_a)["sub"] == "offline-user"
+        assert decode_with_client(jwks_client, token_b)["sub"] == "offline-user"
+
+        # Revoke key-a: its tokens stop verifying, key-b keeps working.
+        jwks_client.revoke_key("key-a")
+        assert jwks_client.version == 2
+        assert jwks_client.revoked_key_ids == frozenset({"key-a"})
+        with pytest.raises(PyJWKClientError, match="revoked"):
+            jwks_client.get_signing_key_from_jwt(token_a)
+        assert decode_with_client(jwks_client, token_b)["sub"] == "offline-user"
+
+        # Revoking the same kid again is a no-op.
+        jwks_client.revoke_key("key-a")
+        assert jwks_client.version == 2
+
+        # Reload a new set that still publishes the revoked key plus a
+        # rotation key: the old token must still fail, the new one passes.
+        jwks_client.load_jwk_set(
+            {"keys": [make_hmac_jwk("key-a", "secret-a"), make_hmac_jwk("key-c", "secret-c")]}
+        )
+        assert jwks_client.version == 3
+        with pytest.raises(PyJWKClientError, match="revoked"):
+            jwks_client.get_signing_key_from_jwt(token_a)
+        token_c = jwt.encode(payload, "secret-c", algorithm="HS256", headers={"kid": "key-c"})
+        assert decode_with_client(jwks_client, token_c)["sub"] == "offline-user"
+
+    def test_revoke_all_signing_keys(self) -> None:
+        jwks_client = PyJWKClient()
+        jwks_client.load_jwk_set({"keys": [make_hmac_jwk("only", "secret")]})
+        jwks_client.revoke_key("only")
+
+        with pytest.raises(PyJWKClientError, match="revoked"):
+            jwks_client.get_signing_keys()
+
+    def test_revoked_key_not_served_from_signing_key_cache(self) -> None:
+        jwks_client = PyJWKClient(cache_keys=True)
+        jwks_client.load_jwk_set({"keys": [make_hmac_jwk("cached", "secret")]})
+
+        assert jwks_client.get_signing_key("cached").key_id == "cached"
+
+        jwks_client.revoke_key("cached")
+        with pytest.raises(PyJWKClientError, match="revoked"):
+            jwks_client.get_signing_key("cached")
+
+    def test_offline_client_without_jwk_set_cache(self) -> None:
+        jwks_client = PyJWKClient(cache_jwk_set=False)
+        jwks_client.load_jwk_set({"keys": [make_hmac_jwk("k1", "s1")]})
+
+        token = jwt.encode({"sub": "u"}, "s1", algorithm="HS256", headers={"kid": "k1"})
+        assert decode_with_client(jwks_client, token)["sub"] == "u"
+
+    def test_load_jwk_set_seeds_cache_of_online_client(self) -> None:
+        url = "https://example.com/.well-known/jwks.json"
+        jwks_client = PyJWKClient(url)
+        jwks_client.load_jwk_set({"keys": [make_hmac_jwk("seeded", "s")]})
+
+        with mock.patch("urllib.request.build_opener") as build_opener_mock:
+            assert jwks_client.get_signing_key("seeded").key_id == "seeded"
+            build_opener_mock.assert_not_called()
+
+
+@crypto_required
+class TestPyJWKClientOfflineRSA:
+    def test_load_revoke_reload_with_rsa_keys(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        from jwt.algorithms import RSAAlgorithm
+
+        def make_rsa_key(kid: str) -> tuple[Any, dict[str, Any]]:
+            private_key = rsa.generate_private_key(
+                public_exponent=65537, key_size=2048
+            )
+            jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+            jwk.update({"kid": kid, "use": "sig", "alg": "RS256"})
+            return private_key, jwk
+
+        old_private, old_jwk = make_rsa_key("rsa-old")
+        new_private, new_jwk = make_rsa_key("rsa-new")
+
+        jwks_client = PyJWKClient()
+        jwks_client.load_jwk_set({"keys": [old_jwk]})
+        old_token = jwt.encode(
+            {"sub": "rsa-user"}, old_private, algorithm="RS256", headers={"kid": "rsa-old"}
+        )
+        signing_key = jwks_client.get_signing_key_from_jwt(old_token)
+        assert jwt.decode(old_token, signing_key.key, algorithms=["RS256"])["sub"] == "rsa-user"
+
+        # Emergency revocation of the published key, then rotation.
+        jwks_client.revoke_key("rsa-old")
+        jwks_client.load_jwk_set({"keys": [old_jwk, new_jwk]})
+
+        with pytest.raises(PyJWKClientError, match="revoked"):
+            jwks_client.get_signing_key_from_jwt(old_token)
+
+        new_token = jwt.encode(
+            {"sub": "rsa-user"}, new_private, algorithm="RS256", headers={"kid": "rsa-new"}
+        )
+        signing_key = jwks_client.get_signing_key_from_jwt(new_token)
+        assert jwt.decode(new_token, signing_key.key, algorithms=["RS256"])["sub"] == "rsa-user"

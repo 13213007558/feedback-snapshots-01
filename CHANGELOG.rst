@@ -7,6 +7,16 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.1...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- Support offline JWKS operation in ``PyJWKClient``: creating the client
+  without a URI disables network access, ``load_jwk_set`` /
+  ``load_jwk_set_json`` load key material directly, and ``revoke_key``
+  disables an individual published key while the remaining keys keep
+  verifying. Revocations persist across reloads, and every update
+  increments the observable ``PyJWKClient.version`` counter.
+
 Changed
 ~~~~~~~
 

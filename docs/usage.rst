@@ -518,6 +518,35 @@ an error.
 requests. See :class:`~jwt.PyJWKClient` in the API reference for details on
 the caching parameters.
 
+Offline JWKS and key revocation
+-------------------------------
+
+Clusters without outbound network access can use ``PyJWKClient`` entirely
+offline: create it without a URI and load the JWKS document directly. An
+emergency configuration can also revoke an individual published key; the
+remaining keys keep verifying tokens, and the revocation persists even if a
+later reload still contains the revoked key. Every load and revocation
+increments the observable ``version`` counter, so a configuration push can
+confirm it took effect.
+
+.. code-block:: pycon
+
+    >>> import jwt
+    >>> from jwt import PyJWKClient
+    >>> jwks_client = PyJWKClient()  # no URI: never performs HTTP requests
+    >>> jwks_client.load_jwk_set_json(open("jwks.json").read())  # doctest: +SKIP
+    >>> jwks_client.version
+    1
+    >>> jwks_client.revoke_key("compromised-kid")
+    >>> jwks_client.version
+    2
+    >>> jwks_client.revoked_key_ids
+    frozenset({'compromised-kid'})
+    >>> signing_key = jwks_client.get_signing_key_from_jwt(token)  # doctest: +SKIP
+
+``load_jwk_set()`` also works on a client created with a URI, where it seeds
+the JWK Set cache with locally distributed key material.
+
 OIDC Login Flow
 ---------------
 
