@@ -46,13 +46,33 @@ class BaseHeuristic:
         return {}
 
     def apply(self, response: HTTPResponse) -> HTTPResponse:
+        # A heuristic may synthesize cache-control headers, but it must not
+        # weaken a revalidation requirement set by the origin. Capture the
+        # original directive before update_headers() gets a chance to mutate
+        # the response's headers in place.
+        original_cc = str(response.headers.get("cache-control", ""))
+        must_revalidate = "must-revalidate" in original_cc.lower()
+
         updated_headers = self.update_headers(response)
+
+        for header, value in updated_headers.items():
+            if header.lower() != "cache-control" or not must_revalidate:
+                continue
+            if "must-revalidate" not in str(value).lower():
+                updated_headers[header] = f"{value}, must-revalidate"
 
         if updated_headers:
             response.headers.update(updated_headers)
             warning_header_value = self.warning(response)
             if warning_header_value is not None:
                 response.headers.update({"Warning": warning_header_value})
+
+        if must_revalidate:
+            current_cc = response.headers.get("cache-control")
+            if current_cc is None:
+                response.headers["cache-control"] = "must-revalidate"
+            elif "must-revalidate" not in str(current_cc).lower():
+                response.headers["cache-control"] = f"{current_cc}, must-revalidate"
 
         return response
 
@@ -127,8 +147,18 @@ class LastModified(BaseHeuristic):
         if "expires" in headers:
             return {}
 
-        if "cache-control" in headers and headers["cache-control"] != "public":
-            return {}
+        if "cache-control" in headers:
+            # Heuristic freshness may only be synthesized when the origin did
+            # not provide explicit freshness or forbid caching. A
+            # must-revalidate directive does not prevent caching; it only
+            # requires revalidation once the heuristic lifetime has elapsed,
+            # and apply() makes sure that directive is preserved.
+            directives = {
+                directive.split("=", 1)[0].strip().lower()
+                for directive in headers["cache-control"].split(",")
+            }
+            if directives - {"public", "must-revalidate"}:
+                return {}
 
         if resp.status not in self.cacheable_by_default_statuses:
             return {}

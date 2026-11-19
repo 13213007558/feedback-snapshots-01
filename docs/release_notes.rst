@@ -11,6 +11,12 @@
 ======
 
 * Honor explicit expiration on cached permanent redirects.
+* Enforce ``must-revalidate`` before reusing a stale cached response, even when
+  the request sends ``max-stale``.
+* Honor request ``max-stale`` when reusing stale responses that do not require
+  revalidation.
+* Preserve ``must-revalidate`` when caching heuristics synthesize or replace
+  freshness headers, and across 304 revalidation.
 * Parse ``Cache-Control`` directive names case-insensitively.
 * Preserve the case of usernames and passwords in cache keys.
 * Preserve CRLF bytes in cached chunked response bodies.

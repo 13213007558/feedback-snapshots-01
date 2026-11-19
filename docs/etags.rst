@@ -71,6 +71,20 @@ If the server returns a `200 OK`, the cache will be updated
 accordingly.
 
 
+Stale Response Reuse
+====================
+
+A stale response is only reused without contacting the origin when the request
+explicitly permits it with the `max-stale` directive. A response that carries
+`must-revalidate` cannot be reused once stale, even when the request sends
+`max-stale`; CacheControl sends a conditional request instead and raises the
+transport error if the origin cannot be reached.
+
+Cached responses that are still fresh are served directly, without an
+outbound request, regardless of `max-stale`. In particular, a stale response
+is never returned as if it were fresh.
+
+
 Equal Priority Caching Benefits
 ===============================
 

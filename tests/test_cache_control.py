@@ -288,6 +288,44 @@ class TestCacheControllerResponse:
         result = cc.update_cached_response(req, resp)
         assert result is resp
 
+    def test_update_cached_response_preserves_must_revalidate(self):
+        """A 304 must not drop the origin's revalidation requirement.
+
+        This covers a heuristic rewriting ``Cache-Control`` on the 304 path.
+        """
+        cache = DictCache({})
+        cc = CacheController(cache)
+        url = "http://localhost/revalidate"
+        req = DummyRequest(url=url, headers={})
+        cached_resp = DummyResponse(
+            status=200,
+            headers={
+                "ETag": '"v1"',
+                "Content-Length": "7",
+                "Cache-Control": "public, max-age=60, must-revalidate",
+                "Date": time.strftime(TIME_FMT, time.gmtime()),
+            },
+        )
+        cc._cache_set(url, req, cached_resp, b"my body")
+
+        resp = DummyResponse(
+            status=304,
+            headers={
+                "ETag": '"v1"',
+                "Date": time.strftime(TIME_FMT, time.gmtime()),
+                "Cache-Control": "public",
+                "Content-Length": "999",
+            },
+        )
+        result = cc.update_cached_response(req, resp)
+
+        assert result.headers["ETag"] == '"v1"'
+        assert result.headers["Content-Length"] == "7"
+        assert "must-revalidate" in cc.parse_cache_control(result.headers)
+        stored = cc._load_from_cache(req)
+        assert stored is not None
+        assert "must-revalidate" in cc.parse_cache_control(stored.headers)
+
     def test_update_cached_response_with_valid_headers_separate_body(self, tmp_path):
         """
         If the local cache has the given URL ``update_cached_response()`` will:
@@ -415,6 +453,113 @@ class TestCacheControlRequest:
         r = self.req({})
         assert r == resp
         resp.close.assert_not_called()
+
+    def test_cache_request_max_stale_allows_stale_response(self):
+        earlier = time.time() - 3700  # epoch - 1h01m40s
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(headers={"cache-control": "max-age=3600", "date": date}, status=200)
+        self.c.cache = DictCache({self.url: resp})
+
+        r = self.req({"cache-control": "max-stale=3600"})
+        assert r is resp
+        resp.close.assert_not_called()
+
+    def test_cache_request_max_stale_limit_exceeded(self):
+        earlier = time.time() - 7400  # epoch - 2h03m20s, stale for > 1h
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(headers={"cache-control": "max-age=3600", "date": date}, status=200)
+        self.c.cache = DictCache({self.url: resp})
+
+        r = self.req({"cache-control": "max-stale=3600"})
+        assert not r
+        resp.close.assert_called_once_with()
+
+    def test_cache_request_max_stale_without_value_allows_any_staleness(self):
+        earlier = time.time() - 14 * 86400
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(headers={"cache-control": "max-age=3600", "date": date}, status=200)
+        self.c.cache = DictCache({self.url: resp})
+
+        r = self.req({"cache-control": "max-stale"})
+        assert r is resp
+        resp.close.assert_not_called()
+
+    def test_cache_request_invalid_max_stale_does_not_allow_staleness(self):
+        earlier = time.time() - 3700
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(headers={"cache-control": "max-age=3600", "date": date}, status=200)
+        self.c.cache = DictCache({self.url: resp})
+
+        r = self.req({"cache-control": "max-stale=garbage"})
+        assert not r
+        resp.close.assert_called_once_with()
+
+    def test_cache_request_must_revalidate_blocks_max_stale(self):
+        earlier = time.time() - 3700
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(
+            headers={
+                "cache-control": "max-age=3600, must-revalidate",
+                "date": date,
+                "etag": '"cached"',
+            },
+            status=200,
+        )
+        self.c.cache = DictCache({self.url: resp})
+
+        assert not self.req({"cache-control": "max-stale"})
+        assert not self.req({"cache-control": "max-stale=86400"})
+        assert resp.close.call_count == 2
+        # Keep the validator available for revalidation rather than purging it.
+        assert self.c.cache.get(self.url) is resp
+
+    def test_cache_request_must_revalidate_still_allows_fresh_hit(self):
+        now = time.strftime(TIME_FMT, time.gmtime())
+        resp = Mock(
+            headers={
+                "cache-control": "max-age=3600, must-revalidate",
+                "date": now,
+            },
+            status=200,
+        )
+        self.c.cache = DictCache({self.url: resp})
+
+        assert self.req({"cache-control": "max-stale"}) is resp
+        resp.close.assert_not_called()
+
+    def test_cache_request_max_age_cannot_extend_origin_freshness(self):
+        earlier = time.time() - 120
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(
+            headers={
+                "cache-control": "max-age=60, must-revalidate",
+                "date": date,
+                "etag": '"cached"',
+            },
+            status=200,
+        )
+        self.c.cache = DictCache({self.url: resp})
+
+        # The request wants an hour of freshness, but the origin only allowed
+        # one minute, so this stale copy must be revalidated.
+        assert not self.req({"cache-control": "max-age=3600"})
+        assert self.c.cache.get(self.url) is resp
+
+    def test_cache_request_without_etag_retains_last_modified(self):
+        earlier = time.time() - 3700
+        date = time.strftime(TIME_FMT, time.gmtime(earlier))
+        resp = Mock(
+            headers={
+                "cache-control": "max-age=3600, must-revalidate",
+                "date": date,
+                "last-modified": "Mon, 21 Jul 2014 17:45:39 GMT",
+            },
+            status=200,
+        )
+        self.c.cache = DictCache({self.url: resp})
+
+        assert not self.req({})
+        assert self.c.cache.get(self.url) is resp
 
     def test_cache_request_unfresh_max_age(self):
         earlier = time.time() - 3700  # epoch - 1h01m40s

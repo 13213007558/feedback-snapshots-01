@@ -139,6 +139,11 @@ class CacheController:
                         directive,
                         typ.__name__,
                     )
+                    if not required:
+                        # An optional directive with an invalid value must not
+                        # degrade into its valueless form. For example,
+                        # "max-stale=garbage" does not mean "max-stale".
+                        retval.pop(directive, None)
 
         return retval
 
@@ -218,8 +223,10 @@ class CacheController:
                 return False
             logger.debug("Ignoring cached response: no date")
 
-        if "etag" not in headers:
-            logger.debug("Purging cached response: stale or missing date, with no ETag")
+        if "etag" not in headers and "last-modified" not in headers:
+            logger.debug(
+                "Purging cached response: stale or missing date, with no validators"
+            )
             self.cache.delete(cache_url)
         return False
 
@@ -258,19 +265,20 @@ class CacheController:
                 logger.debug("Freshness lifetime from expires: %i", freshness_lifetime)
 
         # Permanent redirects are heuristically cacheable when the response
-        # does not provide an explicit freshness lifetime.
-        elif int(resp.status) in PERMANENT_REDIRECT_STATUSES:
+        # does not provide an explicit freshness lifetime. A redirect marked
+        # must-revalidate is not allowed to be reused indefinitely, though.
+        elif (
+            int(resp.status) in PERMANENT_REDIRECT_STATUSES
+            and "must-revalidate" not in resp_cc
+        ):
             logger.debug("Returning cached permanent redirect response")
             return True
 
-        # Determine if we are setting freshness limit in the
-        # request. Note, this overrides what was in the response.
-        max_age = request_cc.get("max-age")
-        if max_age is not None:
-            freshness_lifetime = max_age
-            logger.debug(
-                "Freshness lifetime from request max-age: %i", freshness_lifetime
-            )
+        # A request's max-age is a hard upper bound on the age it will accept;
+        # it is not part of the response's freshness lifetime and cannot make
+        # a response fresher than the origin allowed.
+        request_max_age = request_cc.get("max-age")
+        age_for_request_max_age = current_age
 
         min_fresh = request_cc.get("min-fresh")
         if min_fresh is not None:
@@ -280,9 +288,40 @@ class CacheController:
 
         # Return entry if it is fresh enough
         if freshness_lifetime > current_age:
+            if (
+                request_max_age is not None
+                and age_for_request_max_age > request_max_age
+            ):
+                logger.debug("Cached response is older than request max-age")
+                return False
             logger.debug('The response is "fresh", returning cached response')
             logger.debug("%i > %i", freshness_lifetime, current_age)
             return True
+
+        # The response is stale. A response carrying must-revalidate must not
+        # be reused without successful validation, even if the request permits
+        # stale responses via max-stale.
+        if "must-revalidate" in resp_cc:
+            logger.debug("Cached response is stale and must be revalidated")
+            return False
+
+        # A request's max-age also rejects a stale response once its age
+        # exceeds the requested bound.
+        if request_max_age is not None and age_for_request_max_age > request_max_age:
+            logger.debug("Cached response is older than request max-age")
+            return False
+
+        # A request can opt in to reusing a stale response. With no value,
+        # max-stale permits any amount of staleness; otherwise the value is
+        # the maximum number of seconds past expiration that is acceptable.
+        if "max-stale" in request_cc:
+            max_stale = request_cc["max-stale"]
+            staleness = current_age - freshness_lifetime
+            if max_stale is None or staleness <= max_stale:
+                logger.debug(
+                    "The response is stale, but accepted due to request max-stale"
+                )
+                return True
 
         return False
 
@@ -507,6 +546,13 @@ class CacheController:
 
         try:
             # A 304 updates the headers while keeping the cached body and its length.
+            # The origin's revalidation requirement must survive this update,
+            # including when a heuristic synthesized a replacement
+            # Cache-Control header for the 304.
+            had_must_revalidate = (
+                "must-revalidate"
+                in self.parse_cache_control(cached_response.headers)
+            )
             cached_response.headers.update(
                 {
                     k: v
@@ -514,6 +560,19 @@ class CacheController:
                     if k.lower() != "content-length"
                 }
             )
+            if (
+                had_must_revalidate
+                and "must-revalidate"
+                not in self.parse_cache_control(cached_response.headers)
+            ):
+                cache_control = cached_response.headers.get("cache-control")
+                if cache_control:
+                    cached_response.headers["cache-control"] = (
+                        f"{cache_control}, must-revalidate"
+                    )
+                else:
+                    cached_response.headers["cache-control"] = "must-revalidate"
+
             cached_response.status = 200
             self._cache_set(cache_url, request, cached_response)
         except BaseException:

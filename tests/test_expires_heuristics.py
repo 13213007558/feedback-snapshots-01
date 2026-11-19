@@ -129,6 +129,29 @@ def datetime_to_header(dt):
     return formatdate(calendar.timegm(dt.timetuple()))
 
 
+class TestHeuristicPreservesRevalidation:
+    def test_heuristic_does_not_drop_must_revalidate(self):
+        """A heuristic may synthesize freshness, but not weaken revalidation."""
+
+        class PublicHeuristic(BaseHeuristic):
+            def update_headers(self, resp):
+                return {"cache-control": "public"}
+
+        resp = DummyResponse(
+            200, {"Cache-Control": "public, max-age=1, must-revalidate"}
+        )
+        updated = PublicHeuristic().apply(resp)
+
+        assert updated.headers["cache-control"] == "public, must-revalidate"
+
+    def test_expires_after_keeps_must_revalidate(self):
+        """The bundled ExpiresAfter heuristic replaces Cache-Control; retain it."""
+        resp = DummyResponse(200, {"Cache-Control": "must-revalidate"})
+        updated = ExpiresAfter(hours=1).apply(resp)
+
+        assert "must-revalidate" in updated.headers["cache-control"]
+
+
 class TestModifiedUnitTests:
     def last_modified(self, period):
         return time.strftime(TIME_FMT, time.gmtime(self.time_now - period))
@@ -189,6 +212,30 @@ class TestModifiedUnitTests:
         assert ["expires"] == list(modified.keys())
         expected = datetime(*parsedate(modified["expires"])[:6], tzinfo=timezone.utc)
         assert expected > datetime.now(timezone.utc)
+
+    def test_last_modified_is_used_when_cache_control_public_must_revalidate(self):
+        """must-revalidate does not forbid heuristic freshness on its own."""
+        resp = DummyResponse(
+            200,
+            {
+                "Date": self.now,
+                "Last-Modified": self.week_ago,
+                "Cache-Control": "public, must-revalidate",
+            },
+        )
+        modified = self.heuristic.update_headers(resp)
+        assert ["expires"] == list(modified.keys())
+
+    def test_last_modified_is_not_used_when_cache_control_forbids_storage(self):
+        resp = DummyResponse(
+            200,
+            {
+                "Date": self.now,
+                "Last-Modified": self.week_ago,
+                "Cache-Control": "public, no-store",
+            },
+        )
+        assert self.heuristic.update_headers(resp) == {}
 
     def test_warning_not_added_when_response_more_recent_than_24_hours(self):
         resp = DummyResponse(200, {"Date": self.now, "Last-Modified": self.week_ago})
