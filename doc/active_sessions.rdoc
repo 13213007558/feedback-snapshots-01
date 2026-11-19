@@ -20,6 +20,12 @@ creation).  To prevent the sessions table from growing
 indefinitely, sessions that are passed either deadline are
 removed when checking if the current session is active.
 
+When the jwt_refresh feature is used, removing an active session
+(such as when revoking a device's access in security settings)
+also prevents the refresh token chain for that session from being
+used, so the revoked device can no longer obtain new access tokens,
+while other sessions for the account can still refresh normally.
+
 This depends on the logout feature.
 
 == Auth Value Methods

@@ -134,6 +134,18 @@ module Rodauth
 
     private
 
+    def before_refresh_token
+      # If the session is no longer active, do not allow the refresh token
+      # to be used to generate a new access token.  This ensures that
+      # removing the active session (such as when revoking a device in
+      # security settings) also prevents the related refresh token chain
+      # from being used to get new access tokens.  If the session does not
+      # have an active session id (such as sessions created before the
+      # active_sessions feature was enabled), allow the refresh.
+      no_longer_active_session if session[session_id_session_key] && !currently_active_session?
+      super if defined?(super)
+    end
+
     def after_refresh_token
       super if defined?(super)
       if prev_key = session[session_id_session_key]

@@ -458,6 +458,68 @@ describe 'Rodauth login feature' do
     end
   end
 
+  [true, false].each do |before|
+    it "prevents refresh token use for a revoked session while keeping other sessions when using active_sessions plugin, when loading jwt_refresh #{before ? "before" : "after"}" do
+      revoke = false
+      rodauth do
+        features = [:active_sessions, :jwt_refresh]
+        features.reverse! if before
+        enable :login, *features, :logout
+        hmac_secret '123'
+        jwt_secret '1'
+        before_refresh_token do
+          # Simulate the user revoking this device's session in the
+          # security settings while the refresh request is in flight.
+          remove_current_session if revoke
+        end
+      end
+      roda(:jwt) do |r|
+        r.rodauth
+        rodauth.require_authentication
+        rodauth.check_active_session
+        response[CONTENT_TYPE_KEY] = 'application/json'
+        {'hello' => 'world'}.to_json
+      end
+
+      # Register a refresh chain for each of the user's two devices.
+      res = jwt_refresh_login
+      refresh_token_1 = res.last['refresh_token']
+      access_token_1 = res.last['access_token']
+
+      @authorization = nil
+      res = jwt_refresh_login
+      refresh_token_2 = res.last['refresh_token']
+      access_token_2 = res.last['access_token']
+
+      # Device 1 initiates a refresh while its session is being revoked.
+      revoke = true
+      @authorization = access_token_1
+      res = json_request("/jwt-refresh", :refresh_token=>refresh_token_1)
+      jwt_refresh_validate(res)
+      refresh_token_1 = res.last['refresh_token']
+      access_token_1 = res.last['access_token']
+      revoke = false
+
+      # Once the revocation has taken effect, device 1's access token no
+      # longer works, and its refresh chain cannot mint new tokens.
+      @authorization = access_token_1
+      res = json_request("/")
+      res.must_equal [401, {'reason'=>'inactive_session', 'error'=>'This session has been logged out'}]
+
+      @authorization = access_token_1
+      res = json_request("/jwt-refresh", :refresh_token=>refresh_token_1)
+      res.must_equal [401, {'reason'=>'inactive_session', 'error'=>'This session has been logged out'}]
+
+      # Device 2's refresh chain still renews normally.
+      @authorization = access_token_2
+      res = json_request("/jwt-refresh", :refresh_token=>refresh_token_2)
+      jwt_refresh_validate(res)
+
+      res = json_request("/")
+      res.must_equal [200, {'hello'=>'world'}]
+    end
+  end
+
   it "should not return access_token for failed login attempt" do
     rodauth do
       enable :login, :create_account, :jwt_refresh, :logout
