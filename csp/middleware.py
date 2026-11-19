@@ -6,7 +6,7 @@ import os
 import warnings
 from dataclasses import asdict, dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
@@ -70,6 +70,20 @@ class CSPMiddleware(MiddlewareMixin):
         nonce = partial(self._make_nonce, request)
         setattr(request, "csp_nonce", CheckableLazyObject(nonce))
 
+    def process_view(
+        self,
+        request: HttpRequest,
+        view_func: Callable[..., HttpResponseBase],
+        view_args: list[Any],
+        view_kwargs: dict[str, Any],
+    ) -> None:
+        # Snapshot the name Django resolved so policy selection never depends on
+        # the request path or on whether `resolver_match` is still available.
+        resolver_match = getattr(request, "resolver_match", None)
+        view_name = getattr(resolver_match, "view_name", None)
+        if isinstance(view_name, str):
+            setattr(request, "_csp_view_name", view_name)
+
     def process_response(self, request: HttpRequest, response: HttpResponseBase) -> HttpResponseBase:
         # Check for debug view
         exempted_debug_codes = (
@@ -80,7 +94,7 @@ class CSPMiddleware(MiddlewareMixin):
             return response
 
         policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
+        csp = build_policy(**asdict(policy_parts), request=request)
         if csp:
             # Only set header if not already set and not an excluded prefix and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt", False) is False
@@ -92,7 +106,7 @@ class CSPMiddleware(MiddlewareMixin):
                 response[HEADER] = csp
 
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
+        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True, request=request)
         if csp_ro:
             # Only set header if not already set and not an excluded prefix and not exempted.
             is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
@@ -114,12 +128,12 @@ class CSPMiddleware(MiddlewareMixin):
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts = self.get_policy_parts(request=request, response=response, report_only=False)
-        return build_policy(**asdict(policy_parts))
+        return build_policy(**asdict(policy_parts), request=request)
 
     def build_policy_ro(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        return build_policy(**asdict(policy_parts_ro), report_only=True)
+        return build_policy(**asdict(policy_parts_ro), report_only=True, request=request)
 
     def get_policy_parts(
         self,

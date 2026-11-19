@@ -98,6 +98,15 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **Per-route policies**: Added a ``VIEW_POLICIES`` key to the
+  ``CONTENT_SECURITY_POLICY`` and ``CONTENT_SECURITY_POLICY_REPORT_ONLY``
+  settings. Entries are keyed by the resolved view name
+  (``request.resolver_match.view_name``) and override individual directives
+  for that route, so the same view can be restricted differently at each URL
+  it is mounted under. Unmatched routes keep the site-wide policy, route
+  policies compose with the view decorators, and the enforced and report-only
+  settings have independent route rules.
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 

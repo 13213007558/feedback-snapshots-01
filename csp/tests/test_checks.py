@@ -1,6 +1,11 @@
 from django.test.utils import override_settings
 
-from csp.checks import check_django_csp_lt_4_0, check_exclude_url_prefixes_is_not_string, migrate_settings
+from csp.checks import (
+    check_django_csp_lt_4_0,
+    check_exclude_url_prefixes_is_not_string,
+    check_view_policies_structure,
+    migrate_settings,
+)
 from csp.constants import NONCE
 
 
@@ -72,3 +77,22 @@ def test_check_exclude_url_prefixes_ro_is_not_string() -> None:
     error = errors[0]
     assert error.id == "csp.E002"
     assert error.msg == "EXCLUDE_URL_PREFIXES in CONTENT_SECURITY_POLICY_REPORT_ONLY settings must be a list or tuple."
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"VIEW_POLICIES": {"employees:profile": {"script-src": ["scripts.example.com"]}}},
+)
+def test_check_view_policies_structure_valid() -> None:
+    assert check_view_policies_structure(None) == []
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"VIEW_POLICIES": {"employees:profile": ["script-src"]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"VIEW_POLICIES": "employees:profile"},
+)
+def test_check_view_policies_structure_invalid() -> None:
+    errors = check_view_policies_structure(None)
+    assert len(errors) == 2
+    assert {error.id for error in errors} == {"csp.E003"}
+    assert any("CONTENT_SECURITY_POLICY" in error.msg for error in errors)
+    assert any("CONTENT_SECURITY_POLICY_REPORT_ONLY" in error.msg for error in errors)

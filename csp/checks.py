@@ -12,6 +12,7 @@ from django.core.checks import Error, register
 from packaging.version import Version
 
 from csp.constants import NONCE
+from csp.utils import invalid_view_policies
 
 if TYPE_CHECKING:
     from django.apps.config import AppConfig
@@ -126,4 +127,19 @@ def check_exclude_url_prefixes_is_not_string(app_configs: Sequence[AppConfig] | 
                 )
             )
 
+    return errors
+
+
+@register(checks.Tags.security)
+def check_view_policies_structure(app_configs: Sequence[AppConfig] | None, **kwargs: Any) -> list[Error]:
+    """
+    Check that VIEW_POLICIES entries are dictionaries keyed by resolved view name.
+
+    A malformed entry would otherwise be ignored and the route would silently
+    fall back to the site-wide policy, which can hide a missing restriction.
+    """
+    errors = []
+    for key in ("CONTENT_SECURITY_POLICY", "CONTENT_SECURITY_POLICY_REPORT_ONLY"):
+        for message in invalid_view_policies(getattr(settings, key, None)):
+            errors.append(Error(f"{message} (in {key})", id="csp.E003"))
     return errors

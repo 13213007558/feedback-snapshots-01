@@ -314,11 +314,62 @@ in terms of the latest implementation of the relevant spec.
     Related `note on MDN <prefetch_src_mdn_>`_.
 
 
+``VIEW_POLICIES``
+    A dictionary of policy overrides keyed by the **resolved view name**.
+    This lets you restrict a single view differently at each URL it is mounted
+    under, without changing the view itself.
+
+    The key must be the name Django puts in ``request.resolver_match.view_name``
+    (the fully qualified name, including any namespace, e.g.
+    ``"employees:profile"``). It is matched against the resolved name, not
+    against the request path or against the bare ``url_name``. A bare name
+    only matches routes registered without a namespace.
+
+    Each entry is a dictionary of directives merged over the site-wide
+    ``DIRECTIVES``. Only the directives present in the entry are overridden;
+    all other directives keep the site-wide value, and ``None`` removes a
+    directive. Routes without an entry use the site-wide policy unchanged.
+    An entry may also be a full policy dict with a ``DIRECTIVES`` key if you
+    want to share fragments between the two settings.
+
+    ``CONTENT_SECURITY_POLICY`` and ``CONTENT_SECURITY_POLICY_REPORT_ONLY``
+    each have their own ``VIEW_POLICIES``, so enforced and report-only rules
+    are configured independently. View decorators such as ``@csp_update`` are
+    applied on top of the selected route policy.
+
+    .. code-block:: python
+
+        from csp.constants import SELF
+
+        CONTENT_SECURITY_POLICY = {
+            "DIRECTIVES": {
+                "default-src": [SELF],
+                "script-src": ["cdn.example.com"],
+                "form-action": [SELF],
+            },
+            "VIEW_POLICIES": {
+                "employees:profile": {
+                    "script-src": ["scripts.employee.example.com"],
+                    "form-action": ["forms.employee.example.com"],
+                },
+                "help:profile": {
+                    "script-src": ["scripts.help.example.com"],
+                },
+            },
+        }
+
+    In this example the same view mounted at ``employees:profile`` and
+    ``help:profile`` gets a different ``script-src`` at each mount point, and
+    ``form-action`` is restricted only on the employee site. Any other route,
+    including a third mount point without an entry, keeps the site policy.
+
+
 Changing the Policy
 ~~~~~~~~~~~~~~~~~~~
 
 The policy can be changed on a per-view (or even per-request) basis. See
-the :ref:`decorator documentation <decorator-chapter>` for more details.
+the :ref:`decorator documentation <decorator-chapter>` for more details, and
+``VIEW_POLICIES`` above for choosing a policy by resolved route name.
 
 
 .. _Content-Security-Policy: https://www.w3.org/TR/CSP/

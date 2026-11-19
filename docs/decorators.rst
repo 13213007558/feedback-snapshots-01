@@ -10,6 +10,10 @@ need to expand or change the policy. django-csp includes four decorators to help
 All decorators take an optional keyword argument, ``REPORT_ONLY``, which defaults to ``False``. If
 set to ``True``, the decorator will update the report-only policy instead of the enforced policy.
 
+Decorators are applied on top of the policy selected for the route, so a route overridden with
+``VIEW_POLICIES`` (see :ref:`configuration <configuration-chapter>`) keeps its route-specific
+directives and then receives the decorator's changes.
+
 ``@csp_exempt``
 ===============
 
