@@ -132,6 +132,17 @@ class takes the raw file contents in its constructor and implements:
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
 - `dump()` walks the hierarchy and writes each object to a file.
 
+Intel ME manifests and `$CPD` directories export an `inventory` in their
+`to_dict()` output. It lists every directory entry by its slot, its declared
+physical range, its compression and the content actually obtained from it
+(the decompressed bytes when they are available). Entries that name the same
+range are reported as aliases and share one content record; entries whose
+ranges only partly overlap, or that hold identical bytes at different ranges,
+stay separate. `independent_content_count` counts physical ranges, so an
+extraction report does not count aliased bytes twice, and names never merge
+records. Use `build_content_inventory` in `uefi_firmware.me` to produce the
+same structure from a list of entries.
+
 ## Features
 
 Supported formats:

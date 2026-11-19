@@ -27,6 +27,7 @@
     3. This notice may not be removed or altered from any source distribution.
 '''
 import ctypes
+import hashlib
 import struct
 import os
 
@@ -74,6 +75,288 @@ class _ClaimLimit(object):
         print_error("Error: ME %s claim more than %d times their data." % (
             self.entries, MAX_CLAIMED_RATIO))
         return False
+
+
+def _sha256(data):
+    '''Return the hex digest of data, or None when there is no data.'''
+    if data is None:
+        return None
+    return hashlib.sha256(bytes(data)).hexdigest()
+
+
+def _text(value):
+    '''Return a displayable string for a name that may be bytes.'''
+    if isinstance(value, bytes):
+        return utf8_decode_safe(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _compression_name(compression):
+    if isinstance(compression, int) and \
+            0 <= compression < len(MeCompressionTypes):
+        return MeCompressionTypes[compression]
+    return "<unknown>"
+
+
+def _entry_id(entry, fallback):
+    '''Return the directory identity of an entry.
+
+    A CPD entry is identified by its slot in the entry table, which is
+    independent of whether the entry parsed. Entries without a slot, such as
+    ME modules found by walking headers, fall back to their parsed position.
+    '''
+    slot = getattr(entry, "entry_index", None)
+    if slot is None:
+        slot = fallback
+    return "entry-%d" % slot
+
+
+def _entry_range(entry):
+    '''Return the (start, end) range an entry claims in its table's data.
+
+    The range is the one the directory declares, not the length of any copy
+    an entry keeps: parsing a compressed entry may shorten that copy. CPD
+    entries and ME modules both record their declared range while parsing.
+    '''
+    if hasattr(entry, "physical_range"):
+        return entry.physical_range
+    start = getattr(entry, "offset", 0)
+    size = getattr(entry, "physical_size", None)
+    if size is None:
+        size = getattr(getattr(entry, "structure", None), "Size",
+                       len(getattr(entry, "data", b"") or b""))
+    return (start, start + size)
+
+
+def _entry_digests(entry):
+    '''Return the physical and derived (start, size, digest) for an entry.
+
+    Derived content is what was actually obtained from the entry: the
+    decompressed stream for a compressed entry that decompressed, otherwise
+    its parsed bytes. A digest identifies bytes; it never identifies the
+    directory entry that produced them, so equal digests never merge records.
+    '''
+    raw = getattr(entry, "raw_data", None)
+    if raw is None:
+        raw = getattr(entry, "data", b"") or b""
+    physical = (len(raw), _sha256(raw))
+
+    compression = getattr(entry, "compression", None)
+    if compression == COMP_TYPE_HUFFMAN:
+        # Huffman modules are decoded with their partition, not here.
+        derived = None
+    elif compression == COMP_TYPE_LZMA:
+        # None when the stream did not decompress, so the entry obtained
+        # no derived content even though it still holds physical bytes.
+        derived = getattr(entry, "decompressed", None)
+    else:
+        derived = getattr(entry, "data", None)
+
+    return (physical,
+            (derived is not None,
+             len(derived) if derived is not None else None,
+             _sha256(derived) if derived is not None else None))
+
+
+def _covered_bytes(ranges):
+    '''Return the number of bytes the union of (start, end) ranges covers.'''
+    covered = 0
+    reach = None
+    for start, end in sorted(ranges):
+        if end <= start:
+            continue
+        if reach is None or start > reach:
+            covered += end - start
+            reach = end
+        elif end > reach:
+            covered += end - reach
+            reach = end
+    return covered
+
+
+# A crafted table can make every entry overlap every other one. Overlap
+# pairs are reported up to this many; the inventory says when it stopped.
+MAX_OVERLAP_PAIRS = 4096
+
+
+def _overlap_pairs(groups):
+    '''Yield overlapping pairs of content groups, with their relation.
+
+    Groups are swept in start order so a table with many entries but no
+    overlaps stays linear. Exact aliases share one group and are never an
+    overlap, so only unique ranges are compared.
+    '''
+    ordered = sorted(
+        range(len(groups)),
+        key=lambda i: (groups[i]["range"][0], groups[i]["range"][1]))
+    active = []
+    for index in ordered:
+        start, end = groups[index]["range"]
+        active = [other for other in active
+                  if groups[other]["range"][1] > start]
+        for other in active:
+            other_range = groups[other]["range"]
+            if other_range[0] <= start and other_range[1] >= end:
+                # The earlier group covers this one.
+                kind = "contains"
+            elif start <= other_range[0] and end >= other_range[1]:
+                kind = "contained-by"
+            else:
+                kind = "partial"
+            yield groups[other], groups[index], kind
+        active.append(index)
+
+
+def _aliased_entries(entries):
+    '''Return (alias, first) pairs for entries that repeat a range.'''
+    seen = {}
+    aliased = []
+    for entry in entries:
+        key = _entry_range(entry)
+        if key in seen:
+            aliased.append((entry, seen[key]))
+        else:
+            seen[key] = entry
+    return aliased
+
+
+def build_content_inventory(entries, base_offset=0):
+    '''Describe directory entries, their physical ranges and their content.
+
+    Each directory entry is a record of its own: its identity is its slot in
+    the directory, never its name. Physical content is grouped by the exact
+    range it occupies. Entries sharing an exact range are aliases and name
+    one content record; entries whose ranges only overlap stay separate
+    records. Two entries are never merged because their decompressed bytes
+    match, and a name never groups records.
+
+    Args:
+        entries (list): Parsed CPD entries or ME modules.
+        base_offset (Optional[int]): Offset of the table in the input image.
+
+    Return:
+        dict: Records, content groups, aliases, overlaps and their counts.
+    '''
+    records = []
+    contents = {}
+    content_order = []
+
+    for position, entry in enumerate(entries):
+        start, end = _entry_range(entry)
+        size = max(0, end - start)
+        physical, derived = _entry_digests(entry)
+        identity = _entry_id(entry, position)
+
+        content_key = (start, end)
+        content = contents.get(content_key)
+        if content is None:
+            content_id = "content-%d" % len(content_order)
+            content = contents[content_key] = {
+                "id": content_id,
+                "offset": start,
+                "size": size,
+                "range": [start, end],
+                "absolute_range": [base_offset + start, base_offset + end],
+                "sha256": physical[1],
+                "sources": [],
+            }
+            content_order.append(content_key)
+        content_id = content["id"]
+        content["sources"].append(identity)
+
+        records.append({
+            "id": identity,
+            "name": _text(getattr(entry, "name", None)),
+            "entry_offset": getattr(entry, "entry_offset", None),
+            "offset": start,
+            "size": size,
+            "range": [start, end],
+            "absolute_range": [base_offset + start, base_offset + end],
+            "compression": getattr(entry, "compression", None),
+            "compression_name": _compression_name(
+                getattr(entry, "compression", None)),
+            "content_id": content_id,
+            "alias_of": None,
+            "derived": {
+                "available": derived[0],
+                "size": derived[1],
+                "sha256": derived[2],
+            },
+            "overlaps": [],
+        })
+
+    records_by_id = {record["id"]: record for record in records}
+
+    # An entry aliases the first entry that claimed the same range; a lone
+    # entry aliases nothing. The relation is by range, not by name.
+    for record in records:
+        first = contents[tuple(record["range"])]["sources"][0]
+        record["alias_of"] = None if first == record["id"] else first
+
+    aliases = [
+        {
+            "id": contents[key]["id"],
+            "entries": list(contents[key]["sources"]),
+            "range": contents[key]["range"],
+            "absolute_range": contents[key]["absolute_range"],
+            "size": contents[key]["size"],
+            "sha256": contents[key]["sha256"],
+        }
+        for key in content_order if len(contents[key]["sources"]) > 1
+    ]
+
+    overlaps = []
+    truncated = False
+    broken = False
+    groups = [contents[key] for key in content_order]
+    for first, second, kind in _overlap_pairs(groups):
+        first_start, first_end = first["range"]
+        second_start, second_end = second["range"]
+        start = max(first_start, second_start)
+        end = min(first_end, second_end)
+        # Every entry in an alias group has the same range, so each keeps
+        # the same overlap relation with each entry in the other group.
+        for first_id in first["sources"]:
+            for second_id in second["sources"]:
+                if len(overlaps) >= MAX_OVERLAP_PAIRS:
+                    truncated = True
+                    broken = True
+                    break
+                overlaps.append({
+                    "entries": [first_id, second_id],
+                    "kind": kind,
+                    "offset": start,
+                    "size": end - start,
+                    "range": [start, end],
+                    "absolute_range": [
+                        base_offset + start, base_offset + end],
+                })
+                records_by_id[first_id]["overlaps"].append(second_id)
+                records_by_id[second_id]["overlaps"].append(first_id)
+            if broken:
+                break
+        if broken:
+            break
+
+    return {
+        "entries": records,
+        "contents": [contents[key] for key in content_order],
+        "aliases": aliases,
+        "overlaps": overlaps,
+        "overlapsTruncated": truncated,
+        "entry_count": len(records),
+        # The count an extraction report should use: one per exact physical
+        # range. Names and derived digests are deliberately not keys here.
+        "independent_content_count": len(content_order),
+        "duplicate_entry_count": len(records) - len(content_order),
+        "claimed_bytes": sum(record["size"] for record in records),
+        # The bytes the declared ranges cover, each counted once. Entries
+        # that alias a range add to claimed_bytes but not to covered_bytes.
+        "covered_bytes": _covered_bytes(
+            contents[key]["range"] for key in content_order),
+    }
 
 
 class MeObject(StructuredObject, FirmwareObject):
@@ -126,7 +409,7 @@ class MeObject(StructuredObject, FirmwareObject):
 
 class MeModule(MeObject):
 
-    def __init__(self, data, structure_type, offset):
+    def __init__(self, data, structure_type, offset, module_offset=0):
         self.attrs = {}
         self.parse_structure(data, structure_type)
         self.structure_type = structure_type
@@ -170,7 +453,19 @@ class MeModule(MeObject):
 
         # print "Debug: module data 0x%08X - 0x%08X" % (
         #    self.offset, self.offset + self.structure.Size)
-        self.data = bytes(data[self.offset:self.offset + self.structure.Size])
+        # Coordinates within the manifest's module-header region: the view
+        # starts at module_offset, and the module's bytes at self.offset.
+        data_start = module_offset + self.offset
+        self.physical_size = self.structure.Size
+        self.physical_range = (data_start, data_start + self.structure.Size)
+        self.raw_data = bytes(
+            data[self.offset:self.offset + self.structure.Size])
+        self.data = self.raw_data
+
+        # The module's header is a directory entry in the manifest. Its
+        # identity is its slot among the module headers; its content range,
+        # like a CPD entry's, is the span the directory declares.
+        self.entry_offset = module_offset
 
     def process(self):
         if self.compression == COMP_TYPE_HUFFMAN:
@@ -422,6 +717,33 @@ class MeManifestHeader(MeObject):
         if self.huffman_llut is not None:
             self.huffman_llut.showinfo(ts="  %s" % ts)
 
+    def content_inventory(self):
+        '''Return the modules' directory identity, ranges and relations.
+
+        Only modules are directory entries: the variable modules and the
+        huffman table describe the partition rather than name a content
+        range. A module's range starts at its header, in the manifest data.
+        '''
+        return build_content_inventory(
+            self.modules, self.absolute_offset)
+
+    def to_dict(self):
+        '''Return the manifest plus the modules' alias and overlap relations.'''
+        return {
+            'partition': utf8_decode_safe(self.structure.PartitionName),
+            'headerVersion': self.attrs.get("header_version"),
+            'version': self.attrs.get("version"),
+            'numModules': self.structure.NumModules,
+            'inventory': self.content_inventory(),
+            'variableModules': [
+                {
+                    'tag': utf8_decode_safe(module.tag),
+                    'size': module.size,
+                }
+                for module in self.variable_modules
+            ],
+        }
+
     def _parse_mods(self):
         # Parse the module headers (two types of headers, specified by the
         # manifest).
@@ -434,8 +756,9 @@ class MeManifestHeader(MeObject):
                 # NumModules is larger than the module headers present.
                 break
             module = MeModule(
-                view[module_offset:],
-                self.header_type, module_offset + self.partition_offset)
+                view[module_offset:], self.header_type,
+                module_offset + self.partition_offset,
+                module_offset=module_offset)
             if not claims.claim(module.data):
                 break
             # print "Debug: found me module header (%s) at (%d)." %
@@ -548,13 +871,21 @@ class CPDEntry(MeObject):
             data[header_offset:header_offset + MeCpdEntryType.size],
             MeCpdEntryType)
         self.valid_header = False
+        self.entry_offset = header_offset
+        # The offset field holds the compression form above the mask, so
+        # those bits are flags rather than part of the range.
         self.offset = self.structure.Offset & self.OFFSET_MASK
         end = self.offset + self.structure.Size
+        # The range the directory declares, kept apart from any bytes an
+        # entry parses or derives from it.
+        self.physical_range = (self.offset, self.offset + self.structure.Size)
+        self.physical_size = self.structure.Size
         if end > len(data):
             # This is invalid, end of data out of bounds
             return
         self.valid_header = True
-        self.data = data[self.offset:end]
+        self.raw_data = bytes(data[self.offset:end])
+        self.data = self.raw_data
 
     def process(self):
         if not self.valid_header:
@@ -562,7 +893,9 @@ class CPDEntry(MeObject):
         self.name = self.structure.Name.rstrip(b'\0')
 
         # The manifest (.man) and metadata (.met) entries are not compressed.
-        compression = self.structure.Offset >> 24
+        # The offset field's top bits hold the form, but only below the
+        # huffman flag, so the offset's own high bit is not a form.
+        compression = (self.structure.Offset >> 24) & 0x01
         if self.name.endswith((".man", ".met")):
             self.compression = COMP_TYPE_NOT_COMPRESSED
         elif self.structure.Offset & self.HUFFMAN_FLAG:
@@ -622,6 +955,9 @@ class CPDManifestHeader(MeObject):
                 # NumModules is larger than the entry table.
                 break
             entry = CPDEntry(self.data, offset)
+            # The slot in the entry table identifies the directory entry,
+            # whether or not its bytes are within the data.
+            entry.entry_index = i
             if entry.valid_header and not claims.claim(entry.data):
                 break
             if entry.process():
@@ -635,9 +971,38 @@ class CPDManifestHeader(MeObject):
         for entry in self.modules:
             entry.showinfo("%s  " % ts)
 
-    def dump(self, parent, index=None):
+    def to_dict(self):
+        '''Return the entries plus their alias and overlap relations.'''
+        return {
+            'partition': utf8_decode_safe(self.partition_name),
+            'numEntries': self.structure.NumModules,
+            'flags': self.structure.Flags,
+            'inventory': build_content_inventory(
+                self.modules, self.container_offset),
+        }
+
+    def dump(self, parent="", index=None, unique=False):
+        '''Write the entries, one file each.
+
+        Args:
+            parent (str): Folder to write into.
+            index: Unused; containers call dump() with an index.
+            unique (Optional[bool]): Write only the first entry for each
+                physical range, so the number of files matches
+                independent_content_count. Off by default to keep the
+                historical one-file-per-entry behavior.
+        '''
+        aliased = {}
+        if unique:
+            aliased = dict((id(alias), first)
+                           for alias, first in _aliased_entries(self.modules))
         seen = {}
         for entry in self.modules:
+            if id(entry) in aliased:
+                print("Skipped: %s aliases %s" % (
+                    printable(safe_path_component(entry.name)),
+                    printable(safe_path_component(aliased[id(entry)].name))))
+                continue
             entry.dump(parent, duplicate=seen.get(entry.name, 0))
             seen[entry.name] = seen.get(entry.name, 0) + 1
 
@@ -688,6 +1053,24 @@ class PartitionEntry(MeObject):
             if manifest.process():
                 self.manifest = manifest
         return True
+
+    def to_dict(self):
+        '''Return the partition, its offset in the image and its manifest.
+
+        The manifest export already carries each directory entry's slot,
+        physical range, compression and derived content, plus the alias and
+        overlap relations between entries.
+        '''
+        result = {
+            'name': utf8_decode_safe(self.structure.Name),
+            'owner': utf8_decode_safe(self.structure.Owner),
+            'offset': self.structure.Offset,
+            'size': self.structure.Size,
+            'flags': self.structure.Flags,
+        }
+        if self.manifest is not None:
+            result['manifest'] = self.manifest.to_dict()
+        return result
 
     def showinfo(self, ts='', index=None):
         print("%s%s name= %s owner= %s offset= 0x%x size= 0x%x (%d bytes) flags= 0x%x" % (
@@ -746,6 +1129,16 @@ class MeContainer(MeObject):
             if entry.process():
                 self.partitions.append(entry)
         return True
+
+    def to_dict(self):
+        return {
+            'type': self.structure.Type,
+            'version': self.structure.Version,
+            'size': self.size,
+            'entries': self.structure.Entries,
+            'partitions': [partition.to_dict()
+                           for partition in self.partitions],
+        }
 
     def showinfo(self, ts='', index=None):
         print("%s%s type= 0x%x version= 0x%x size= 0x%x (%d bytes) entires= %d flags= 0x%x" % (
