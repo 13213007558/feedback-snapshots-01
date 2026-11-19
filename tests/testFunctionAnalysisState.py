@@ -171,6 +171,7 @@ class _RecordingDisassembly:
         self.thunk_functions = set()
         self.code_refs_from = AddressRefs()
         self.code_refs_to = AddressRefs()
+        self.ownership_decisions = []
 
     mergeCodeRefs = DisassemblyResult.mergeCodeRefs
 

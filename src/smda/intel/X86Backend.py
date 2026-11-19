@@ -410,23 +410,59 @@ class X86Backend(ArchBackend):
         d.tailcall_analyzer.addJump(i_address, jump_destination)
         if jump_destination:
             if jump_destination in d.disassembly.functions:
-                if (
-                    self._isEvidencedEntry(d, jump_destination)
-                    or not self._isBodyBehindReturn(d, jump_destination, state.start_addr, i_address + i_size)
-                    or not d.absorbFunction(jump_destination, state)
-                ):
+                if self._isEvidencedEntry(d, jump_destination):
                     # case = "TAILCALL!"
+                    d._recordOwnershipDecision(
+                        "tailcall",
+                        "branch_target_has_entry_evidence",
+                        jump_destination,
+                        source_addr=i_address,
+                        function_addr=state.start_addr,
+                        state=state,
+                    )
                     state.setSanelyEnding(True)
-                else:
+                elif not self._isBodyBehindReturn(d, jump_destination, state.start_addr, i_address + i_size):
+                    # case = "TAILCALL!"
+                    d._recordOwnershipDecision(
+                        "tailcall",
+                        "branch_target_not_body_behind_return",
+                        jump_destination,
+                        source_addr=i_address,
+                        function_addr=state.start_addr,
+                        state=state,
+                    )
+                    state.setSanelyEnding(True)
+                elif d.absorbFunction(
+                    jump_destination, state, basis="conditional_branch_to_body_behind_return", source_addr=i_address
+                ):
                     # case = "BODY-ANALYZED-FIRST": the body's prologue ranked it ahead of this
                     # function in the candidate order; it is undone and decoded here instead
                     state.addBlockToQueue(jump_destination)
+                else:
+                    # case = "TAILCALL!": the absorb was declined (a gap function, or this
+                    # function's own start), so the target keeps its owner
+                    d._recordOwnershipDecision(
+                        "tailcall",
+                        "absorb_declined",
+                        jump_destination,
+                        source_addr=i_address,
+                        function_addr=state.start_addr,
+                        state=state,
+                    )
+                    state.setSanelyEnding(True)
             elif jump_destination in d.fc_manager.getFunctionStartCandidates() and self._isEvidencedEntry(
                 d, jump_destination
             ):
                 # it's tough to decide whether this should be disassembled here or not. topic of "code-sharing functions".
                 # case = "TAILCALL?"
-                pass
+                d._recordOwnershipDecision(
+                    "deferred",
+                    "branch_target_is_unanalyzed_candidate",
+                    jump_destination,
+                    source_addr=i_address,
+                    function_addr=state.start_addr,
+                    state=state,
+                )
             else:
                 # case = "OFFSET-QUEUE"
                 state.addBlockToQueue(jump_destination)
@@ -528,10 +564,25 @@ class X86Backend(ArchBackend):
             d.tailcall_analyzer.addJump(i_address, jump_destination)
             if jump_destination in d.disassembly.functions:
                 # case = "TAILCALL!"
+                d._recordOwnershipDecision(
+                    "tailcall",
+                    "jump_target_is_owned_function_entry",
+                    jump_destination,
+                    source_addr=i_address,
+                    function_addr=state.start_addr,
+                    state=state,
+                )
                 state.setSanelyEnding(True)
             elif jump_destination in d.fc_manager.getFunctionStartCandidates():
                 # case = "TAILCALL?"
-                pass
+                d._recordOwnershipDecision(
+                    "deferred",
+                    "jump_target_is_unanalyzed_candidate",
+                    jump_destination,
+                    source_addr=i_address,
+                    function_addr=state.start_addr,
+                    state=state,
+                )
             else:
                 import_slot = self._resolveImportSlot(d, jump_destination)
                 if import_slot is not None and self._handleApiJumpTarget(d, state, i_address, import_slot, import_slot):
@@ -539,7 +590,14 @@ class X86Backend(ArchBackend):
                     state.setSanelyEnding(True)
                 elif state.isFirstInstruction():
                     # case = "STUB-TAILCALL!"
-                    pass
+                    d._recordOwnershipDecision(
+                        "stub",
+                        "unconditional_jump_at_function_entry",
+                        jump_destination,
+                        source_addr=i_address,
+                        function_addr=state.start_addr,
+                        state=state,
+                    )
                 else:
                     # case = "OFFSET-QUEUE"
                     state.addBlockToQueue(jump_destination)

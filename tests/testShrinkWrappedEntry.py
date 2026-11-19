@@ -461,8 +461,8 @@ class X86FunctionAnalyzedBeforeItsJumperTest(unittest.TestCase):
         absorb = RecursiveDisassembler.absorbFunction
         tripped = []
 
-        def absorbFunction(disassembler, function_addr, state):
-            absorbed = absorb(disassembler, function_addr, state)
+        def absorbFunction(disassembler, function_addr, state, **kwargs):
+            absorbed = absorb(disassembler, function_addr, state, **kwargs)
             if absorbed:
                 tripped.append(False)
             return absorbed

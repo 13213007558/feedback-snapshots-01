@@ -61,6 +61,9 @@ class FunctionAnalysisState:
         self.colliding_addresses = set()
         # functions undone so this one decodes them as its body, analyzed again if it fails
         self.absorbed_functions = []
+        # ownership decisions this analysis took; merged into the disassembly only when the
+        # analysis finalizes, so a reverted analysis takes its evidence down with it
+        self.ownership_decisions = []
         # set a flag that this tailcall has already been resolved so it does not have to be reanalyzed several times
         self.is_tailcall_function = False
         self.is_leaf_function = True
@@ -209,6 +212,7 @@ class FunctionAnalysisState:
         self.disassembly.data_map.update(self.data_bytes)
         self.disassembly.functions[self.start_addr] = self.getBlocks()
         self.disassembly.mergeCodeRefs(self.code_refs_from)
+        self.disassembly.ownership_decisions.extend(self.ownership_decisions)
         for dref in self.data_refs:
             self.disassembly.addDataRefs(dref[0], dref[1])
         if self.is_recursive:

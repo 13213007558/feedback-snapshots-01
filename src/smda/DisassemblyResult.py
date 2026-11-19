@@ -115,6 +115,8 @@ class DisassemblyResult:
         # address:string
         self.stringrefs = {}
         self.candidates = {}
+        # evidence for absorb/tailcall/split/refusal decisions, as OwnershipDecision records
+        self.ownership_decisions = []
         self._confidence_threshold = 0.0
         self.code_areas = []
         self.smda_version = ""

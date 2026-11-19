@@ -20,6 +20,7 @@ from smda.common.labelprovider.PdbSymbolProvider import PdbSymbolProvider
 from smda.common.labelprovider.PeSymbolProvider import PeSymbolProvider
 from smda.common.labelprovider.RustSymbolProvider import RustSymbolProvider
 from smda.common.labelprovider.WinApiResolver import WinApiResolver
+from smda.common.OwnershipDecision import OwnershipDecision
 from smda.common.TailcallAnalyzer import TailcallAnalyzer
 from smda.DisassemblyResult import DisassemblyResult
 
@@ -213,7 +214,43 @@ class RecursiveDisassembler:
         relative_end = relative_start + window_size
         return binary_info.binary[relative_start:relative_end]
 
-    def _revertGapFunction(self, colliding_addr, current_start_addr):
+    def _recordOwnershipDecision(
+        self, decision, basis, target_addr, source_addr=None, function_addr=None, previous_owner=None, state=None
+    ):
+        """Append evidence for one function-ownership decision.
+
+        Records taken while a function is being analyzed are buffered on its state and only
+        committed when the analysis finalizes (see FunctionAnalysisState); a reverted analysis
+        then takes its evidence down with the ownership it had booked. Pass no state for
+        decisions that are final the moment they are made (a refused candidate, the tailcall
+        pass, a restore).
+        """
+        if previous_owner is None:
+            previous_owner = self.disassembly.ins2fn.get(target_addr)
+        candidates = {}
+        involved_addresses = {target_addr, function_addr, previous_owner}
+        involved_addresses.discard(None)
+        fc_manager = self.fc_manager
+        for addr in involved_addresses:
+            candidate = fc_manager.candidates.get(addr) if fc_manager is not None else None
+            if candidate is not None:
+                candidates[addr] = OwnershipDecision.snapshotCandidate(candidate)
+        record = OwnershipDecision(
+            decision,
+            basis,
+            target_addr,
+            source_addr=source_addr,
+            function_addr=function_addr,
+            previous_owner=previous_owner,
+            candidates=candidates,
+        )
+        state_decisions = getattr(state, "ownership_decisions", None) if state is not None else None
+        if state_decisions is not None:
+            state_decisions.append(record)
+        else:
+            self.disassembly.ownership_decisions.append(record)
+
+    def _revertGapFunction(self, colliding_addr, current_start_addr, state=None):
         """When a tailcall-discovered candidate's analysis reaches bytes already
         claimed by a gap function, the gap function is almost certainly part of
         the candidate's body (the gap scan over-eagerly claimed the fall-through
@@ -237,6 +274,14 @@ class RecursiveDisassembler:
             return False
         if owner_fn not in self.disassembly.functions:
             return False
+        self._recordOwnershipDecision(
+            "reverted",
+            "gap_function_overlaps_tailcall_candidate",
+            owner_fn,
+            function_addr=current_start_addr,
+            previous_owner=owner_fn,
+            state=state,
+        )
         self._revertStoredFunction(owner_fn)
         self.fc_manager.updateAnalysisAborted(
             owner_fn, f"Reverted: absorbed by tailcall candidate 0x{current_start_addr:08x}"
@@ -268,7 +313,7 @@ class RecursiveDisassembler:
                     owner_state.data_refs.add((instruction[0], addr_to))
         owner_state.revertAnalysis()
 
-    def absorbFunction(self, function_addr, state):
+    def absorbFunction(self, function_addr, state, basis="absorbed_by_owning_function", source_addr=None):
         """Undo a function so the one being analyzed decodes its blocks as its own.
 
         For a function that turns out to be the body of another one: a prologue-shaped block
@@ -287,6 +332,9 @@ class RecursiveDisassembler:
         candidate = self.fc_manager.candidates.get(function_addr)
         if candidate is None or candidate.is_gap_candidate:
             return False
+        self._recordOwnershipDecision(
+            "absorbed", basis, function_addr, source_addr=source_addr, function_addr=state.start_addr, state=state
+        )
         self._revertStoredFunction(function_addr, with_refs=True)
         self.tailcall_analyzer.discardFunction(function_addr)
         self.fc_manager.updateAnalysisAborted(function_addr, f"Reverted: body of function 0x{state.start_addr:08x}")
@@ -299,6 +347,9 @@ class RecursiveDisassembler:
         for function_addr in absorbed_functions:
             if function_addr in self.disassembly.ins2fn:
                 continue
+            self._recordOwnershipDecision(
+                "restored", "absorbing_analysis_did_not_keep_bytes", function_addr, function_addr=function_addr
+            )
             candidate = self.fc_manager.candidates.get(function_addr)
             if candidate is not None:
                 candidate.analysis_aborted = False
@@ -315,6 +366,9 @@ class RecursiveDisassembler:
         for gap_function in gap_functions:
             if gap_function in self.disassembly.ins2fn:
                 continue
+            self._recordOwnershipDecision(
+                "restored", "reverted_gap_function_not_covered_again", gap_function, function_addr=gap_function
+            )
             candidate = self.fc_manager.candidates.get(gap_function)
             if candidate is not None:
                 candidate.analysis_aborted = False
@@ -335,6 +389,12 @@ class RecursiveDisassembler:
             state.data_bytes.update(known_table_bytes)
             state.table_bytes.update(known_table_bytes)
         if state.isProcessedFunction():
+            self._recordOwnershipDecision(
+                "refused",
+                "candidate_entry_already_owned",
+                start_addr,
+                function_addr=start_addr,
+            )
             self.fc_manager.updateAnalysisAborted(
                 start_addr,
                 f"collision with existing code of function 0x{self.disassembly.ins2fn[start_addr]:08x}",
@@ -345,6 +405,13 @@ class RecursiveDisassembler:
             return state
         declared_owner = self.fc_manager.declaredInteriorOwner(start_addr)
         if declared_owner is not None:
+            self._recordOwnershipDecision(
+                "refused",
+                "inside_declared_function_range",
+                start_addr,
+                function_addr=start_addr,
+                previous_owner=declared_owner,
+            )
             self.fc_manager.updateAnalysisAborted(
                 start_addr,
                 f"inside the declared range of function 0x{declared_owner:08x}",
@@ -453,7 +520,7 @@ class RecursiveDisassembler:
                         # not during the gap pass itself — gap candidates are
                         # expected to have independent analysis there.
                         gap_owner = ins2fn.get(i_address)
-                        if not as_gap and self._revertGapFunction(i_address, start_addr):
+                        if not as_gap and self._revertGapFunction(i_address, start_addr, state=state):
                             reverted_gap_functions.append(gap_owner)
                             add_instruction(i_address, i_size, i_mnemonic, i_op_str, i_bytes)
                         else:

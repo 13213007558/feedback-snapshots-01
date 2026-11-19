@@ -71,6 +71,17 @@ past roughly six lines it belongs in the PR the entry links.
 ## [Unreleased]
 
 ### Added
+- **(common)** Ownership-decision evidence explains why a jump target was merged into the current function or
+  kept as a tailcall. Every contested decision — absorb, tailcall, deferred-to-candidate, stub, tailcall-pass
+  split, gap-function revert, restore and candidate refusal — is recorded as an `OwnershipDecision` with the
+  branch it concerns, the function under analysis, the target's previous owner and a snapshot of the candidate
+  evidence (characteristics, call-reference sources, prologue score) at the involved addresses, covering in
+  particular the case where the target function was recovered before its caller. Records buffered on a function's
+  analysis state are committed only when the analysis finalizes, so a reverted analysis takes its evidence down
+  with the ownership it had booked; the IDA-style model (one owner per instruction, no overlap) is untouched.
+  `SmdaReport` carries the records as `ownership_decisions` and serializes them under `xownership_decisions`
+  (only when non-empty), so function ownership, cross references and the evidence itself survive a
+  `toDict()`/`fromDict()` round-trip unchanged.
 
 ### Changed
 

@@ -116,6 +116,14 @@ class TailcallAnalyzer:
                 if verbose:
                     LOGGER.debug("Old function:")
                     self.__printIntervals(self.__getFunctionIntervals(function))
+                disassembler._recordOwnershipDecision(
+                    "split",
+                    "jump_into_owned_function_body",
+                    tailcall["destination_addr"],
+                    source_addr=tailcall["source_addr"],
+                    function_addr=tailcall["destination_function"],
+                    previous_owner=tailcall["destination_function"],
+                )
                 function.revertAnalysis()
 
             # analyze the tailcall destination as function
@@ -131,15 +139,33 @@ class TailcallAnalyzer:
                     disassembler.analyzeFunction(tailcall["destination_function"])
                     function = self.__getFunctionByStartAddr(tailcall["destination_function"])
                     function.is_tailcall_function = True
+                    disassembler._recordOwnershipDecision(
+                        "reanalyzed",
+                        "previous_owner_truncated_at_shared_tail",
+                        tailcall["destination_function"],
+                        source_addr=tailcall["source_addr"],
+                        function_addr=tailcall["destination_function"],
+                        previous_owner=tailcall["destination_function"],
+                    )
                 except Exception as exc:
                     reraise_non_operational_exception(exc)
                     # print ("0x{:x} -> 0x{:x}".format(tailcall["destination_function"], tailcall["destination_addr"]))
-            elif verbose:
-                LOGGER.debug(
-                    "**** 0x{:x} IS NOW PART OF 0x{:x}".format(
-                        tailcall["destination_function"], tailcall["destination_addr"]
+            else:
+                if function is not None:
+                    disassembler._recordOwnershipDecision(
+                        "absorbed",
+                        "tailcall_target_absorbed_previous_owner",
+                        tailcall["destination_function"],
+                        source_addr=tailcall["source_addr"],
+                        function_addr=tailcall["destination_addr"],
+                        previous_owner=tailcall["destination_function"],
                     )
-                )
+                if verbose:
+                    LOGGER.debug(
+                        "**** 0x{:x} IS NOW PART OF 0x{:x}".format(
+                            tailcall["destination_function"], tailcall["destination_addr"]
+                        )
+                    )
 
             if verbose:
                 function = self.__getFunctionByStartAddr(tailcall["destination_function"])

@@ -6,7 +6,7 @@ table, misaligned, into the function after it.
 """
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from smda.common.RecursiveDisassembler import RecursiveDisassembler
 from smda.Disassembler import Disassembler
@@ -143,15 +143,22 @@ class RestoreRevertedGapFunctionsTest(unittest.TestCase):
     def testAbsorbedOnesAreSkippedAndFailedOnesStayAborted(self):
         absorbed, failing = 0x2000, 0x3000
         aborted, analyzed = [], []
-        candidate = SimpleNamespace(analysis_aborted=True, abortion_reason="Reverted")
+        candidate = SimpleNamespace(
+            analysis_aborted=True,
+            abortion_reason="Reverted",
+            call_ref_sources=set(),
+            getCharacteristics=lambda: "-----------",
+            getFunctionStartScore=lambda: 0,
+        )
         engine = SimpleNamespace(
-            disassembly=SimpleNamespace(ins2fn={absorbed: 0x1000}, functions={}),
+            disassembly=SimpleNamespace(ins2fn={absorbed: 0x1000}, functions={}, ownership_decisions=[]),
             fc_manager=SimpleNamespace(
                 candidates={failing: candidate},
                 updateAnalysisAborted=lambda addr, reason: aborted.append(addr),
             ),
             analyzeFunction=lambda addr, as_gap=False: analyzed.append((addr, as_gap)),
         )
+        engine._recordOwnershipDecision = MethodType(RecursiveDisassembler._recordOwnershipDecision, engine)
         RecursiveDisassembler._restoreRevertedGapFunctions(engine, [absorbed, failing])
         self.assertEqual(analyzed, [(failing, True)])
         self.assertEqual(aborted, [failing])

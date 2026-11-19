@@ -28,6 +28,7 @@ from smda.DisassemblyStatistics import DisassemblyStatistics
 from smda.SmdaConfig import SmdaConfig
 
 from .BinaryInfo import BinaryInfo
+from .OwnershipDecision import OwnershipDecision
 from .SmdaBasicBlock import SmdaBasicBlock
 from .SmdaFunction import MAX_ADDRESS_VALUE, SmdaFunction
 
@@ -145,6 +146,9 @@ class SmdaReport:
         self.xmetadata = {}
         # never leave this pointing at the shared class-level sentinel
         self.code_sections = []
+        # evidence for absorb/tailcall/split decisions; every construction path starts empty,
+        # the disassembly path below fills it from the result and fromDict from the serialized form
+        self.ownership_decisions = []
         if disassembly is not None:
             self.architecture = disassembly.binary_info.architecture
             self.abi = disassembly.binary_info.abi
@@ -182,6 +186,7 @@ class SmdaReport:
             self.xcfg = self._convertCfg(disassembly, config=config)
             self._num_blocks = sum(f.num_blocks for f in self.xcfg.values())
             self._num_instructions = sum(f.num_instructions for f in self.xcfg.values())
+            self.ownership_decisions = list(getattr(disassembly, "ownership_decisions", None) or [])
             self.xheader = disassembly.binary_info.getHeaderBytes()
             self.pe_header_hash = disassembly.binary_info.getPeHeaderHash()
             pairs = sorted((s, d) for s, ds in disassembly.data_refs_from.items() for d in ds)
@@ -468,6 +473,9 @@ class SmdaReport:
                 for targets in references.values()
             ):
                 raise ValueError(f"serialized report {field} must map addresses to lists")
+        ownership_decisions = report_dict.get("xownership_decisions", [])
+        if not isinstance(ownership_decisions, list) or any(not isinstance(d, dict) for d in ownership_decisions):
+            raise ValueError("serialized report xownership_decisions must be a list of dictionaries")
         code_sections = report_dict.get("code_sections", [])
         if not isinstance(code_sections, list) or any(
             not isinstance(section, (list, tuple)) or len(section) < 3 for section in code_sections
@@ -553,6 +561,7 @@ class SmdaReport:
         )
         smda_report.data_refs_from = {int(k): sorted(v) for k, v in report_dict.get("xdata_refs_from", {}).items()}
         smda_report.data_refs_to = {int(k): sorted(v) for k, v in report_dict.get("xdata_refs_to", {}).items()}
+        smda_report.ownership_decisions = [OwnershipDecision.fromDict(d) for d in ownership_decisions]
         binary_info = BinaryInfo(b"")
         binary_info.architecture = smda_report.architecture
         binary_info.abi = smda_report.abi
@@ -645,6 +654,10 @@ class SmdaReport:
                 )
             else:
                 report_dict["buffer"] = self._packBuffer(self.buffer)
+        # ownership evidence is optional: reports without contested decisions keep
+        # their previous serialized shape byte-for-byte
+        if self.ownership_decisions:
+            report_dict["xownership_decisions"] = [decision.toDict() for decision in self.ownership_decisions]
         return report_dict
 
     def toFile(self, output_filepath) -> None:
