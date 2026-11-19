@@ -36,11 +36,11 @@ import dataclasses
 import socket
 import struct
 
-from collections import Counter
+from collections import Counter, OrderedDict, deque
 
 from scapy.config import conf
 from scapy.data import IP_PROTOS
-from scapy.error import warning, Scapy_Exception
+from scapy.error import log_runtime, warning, Scapy_Exception
 from scapy.fields import (
     BitEnumField,
     BitField,
@@ -77,8 +77,12 @@ from scapy.layers.inet6 import IP6Field
 # Typing imports
 from typing import (
     Any,
+    Deque,
     Dict,
+    Iterator,
+    List,
     Optional,
+    Tuple,
 )
 
 
@@ -1476,8 +1480,400 @@ class NetflowDataflowsetV9(Packet):
         return pkt + pay
 
 
+# Reasons recorded on a data FlowSet that cannot be decoded. The original
+# bytes are always kept untouched; nothing is ever guessed from them.
+NETFLOW_REASON_MISSING_TEMPLATE = "missing-template"
+NETFLOW_REASON_WITHDRAWN_TEMPLATE = "withdrawn-template"
+NETFLOW_REASON_UNSUPPORTED_TEMPLATE = "unsupported-template"
+NETFLOW_REASON_PENDING_CAPACITY = "pending-capacity-exceeded"
+
+# Bounds on the per-exporter state. They keep a hostile or misbehaving export
+# from growing the session memory without limit.
+NETFLOW_DEFAULT_SCOPE_LIMIT = 256
+NETFLOW_DEFAULT_TEMPLATE_LIMIT = 256
+NETFLOW_DEFAULT_PENDING_LIMIT = 256
+
+
+@dataclasses.dataclass
+class NetflowTemplateEntry:
+    """A decoded template, scoped to one exporter and observation domain."""
+    record_len: int
+    record_cls: type
+    source: Tuple[Any, ...]
+    variable_length: bool = False
+    is_option: bool = False
+    option_len: int = 0
+    option_cls: Optional[type] = None
+    supported: bool = True
+
+
+class NetflowScope(object):
+    """Template and pending-data state for a single trusted transport session
+    and observation domain.
+
+    The state is never shared between scopes: dropping or replacing a template
+    here cannot affect another exporter.
+    """
+    def __init__(self, key, source, template_limit, pending_limit):
+        self.key = key
+        self.source = source
+        self.template_limit = template_limit
+        self.pending_limit = pending_limit
+        self.templates = OrderedDict()  # type: OrderedDict[int, NetflowTemplateEntry]
+        # Template IDs explicitly withdrawn (RFC 5101 section 8.4). A new
+        # definition clears the marker, so a redefinition is distinguishable
+        # from a template that was never seen in this scope. It is ordered and
+        # capped like the template table so it cannot grow without bound.
+        self.withdrawn = OrderedDict()  # type: OrderedDict[int, None]
+        self.pending = deque()  # type: Deque[NetflowDataflowsetV9]
+
+    def store_template(self, template_id, entry):
+        # type: (int, NetflowTemplateEntry) -> None
+        """Register or atomically redefine a template."""
+        self.withdrawn.pop(template_id, None)
+        if template_id in self.templates:
+            # Redefinition replaces the entry in place; the old layout must
+            # never be used again, including for data already buffered.
+            self.templates.pop(template_id)
+        elif len(self.templates) >= self.template_limit:
+            self.templates.popitem(last=False)
+        self.templates[template_id] = entry
+
+    def withdraw(self, template_id):
+        # type: (int) -> bool
+        existed = self.templates.pop(template_id, None) is not None
+        if template_id not in self.withdrawn:
+            if len(self.withdrawn) >= self.template_limit:
+                self.withdrawn.popitem(last=False)
+            self.withdrawn[template_id] = None
+        return existed
+
+    def queue_pending(self, dataflowset):
+        # type: (NetflowDataflowsetV9) -> None
+        """Buffer a data FlowSet that arrived before its template.
+
+        When the bounded queue is full, the oldest buffered FlowSet is evicted
+        and annotated with :data:`NETFLOW_REASON_PENDING_CAPACITY`; the new
+        FlowSet then takes its place. No state is shared across scopes.
+        """
+        if len(self.pending) >= self.pending_limit:
+            evicted = self.pending.popleft()
+            _netflow_mark(
+                evicted, NETFLOW_REASON_PENDING_CAPACITY, self.source
+            )
+        self.pending.append(dataflowset)
+
+
+def _netflow_mark(dataflowset, reason, source):
+    # type: (NetflowDataflowsetV9, str, Tuple[Any, ...]) -> None
+    """Attach the reason a data FlowSet could not be decoded, without touching
+    its raw bytes. The exporter identity comes from the trusted transport,
+    never from a record field."""
+    info = {
+        "reason": reason,
+        "templateID": dataflowset.templateID,
+        "exporter": source,
+    }
+    if dataflowset.process_information is None:
+        dataflowset.process_information = [info]
+    else:
+        dataflowset.process_information.append(info)
+
+
+def _netflow_transport_source(pkt):
+    # type: (Packet) -> Tuple[Any, ...]
+    """Identity of the trusted transport session carrying the packet.
+
+    Only the outer IP/UDP headers are used; exporter address fields inside the
+    records are deliberately ignored, as an exporter cannot be trusted to name
+    itself.
+    """
+    ip_layer = pkt.getlayer("IP") or pkt.getlayer("IPv6")
+    udp_layer = pkt.getlayer(UDP)
+    if ip_layer is None or udp_layer is None:
+        # No trustworthy transport context: keep the packet isolated instead
+        # of merging it with any real exporter.
+        return ("local", id(pkt))
+    return (
+        ip_layer.__class__.__name__,
+        ip_layer.src,
+        udp_layer.sport,
+        ip_layer.dst,
+        udp_layer.dport,
+    )
+
+
+def _netflow_scope_key(pkt, source):
+    # type: (Packet, Tuple[Any, ...]) -> Tuple[Any, ...]
+    """Build the (transport session, observation domain) scope key.
+
+    IPFIX scopes templates per Observation Domain ID (RFC 5101, section 4).
+    NetFlow V9 has no equivalent domain in the wire format and uses the
+    Source ID only as a source identifier, so its templates stay scoped to the
+    transport session alone.
+    """
+    header_v10 = pkt.getlayer(NetflowHeaderV10)
+    if header_v10 is not None:
+        return source + ("IPFIX", header_v10.ObservationDomainID)
+    return source + ("V9",)
+
+
+def _netflow_has_variable_length(template_fields):
+    # type: (List[NetflowTemplateFieldV9]) -> bool
+    # RFC 5101 section 3.2: a field length of 65535 marks a variable-length
+    # information element, which the fixed-length-only decoder cannot handle.
+    return any(field.fieldLength == 0xFFFF for field in template_fields)
+
+
+def _netflow_iter_layers(pkt, cls):
+    # type: (Packet, type) -> Iterator[Packet]
+    """Yield every layer of ``cls`` (including subclasses) in packet order."""
+    nth = 1
+    while True:
+        layer = pkt.getlayer(cls, nth, _subclass=True)
+        if layer is None:
+            return
+        yield layer
+        nth += 1
+
+
+def _netflow_build_template_entry(ntv9, source):
+    # type: (NetflowTemplateV9, Tuple[Any, ...]) -> NetflowTemplateEntry
+    llist = [
+        (tmpl.fieldLength, tmpl.fieldType)
+        for tmpl in ntv9.template_fields
+    ]
+    record_len = sum(length for length, _ in llist)
+    variable = _netflow_has_variable_length(ntv9.template_fields)
+    if not record_len or variable:
+        return NetflowTemplateEntry(
+            record_len=record_len,
+            record_cls=NetflowRecordV9,
+            source=source,
+            variable_length=variable,
+            supported=False,
+        )
+    record_cls = _GenNetflowRecordV9(NetflowRecordV9, llist)
+    return NetflowTemplateEntry(
+        record_len=record_len,
+        record_cls=record_cls,
+        source=source,
+    )
+
+
+def _netflow_decode_dataflowset(datafl, entry):
+    # type: (NetflowDataflowsetV9, NetflowTemplateEntry) -> None
+    """Re-dissect one data FlowSet using a known, supported template."""
+    # All data is stored in one record awaiting to be split. If fieldValue is
+    # absent the FlowSet has already been decoded: leave it untouched.
+    try:
+        data = datafl.records[0].fieldValue
+        datafl.records.pop(0)
+    except (IndexError, AttributeError):
+        return
+    res = []
+    if not entry.is_option:
+        tot_len = entry.record_len
+        cls = entry.record_cls
+        remaining = data
+        while len(remaining) >= tot_len:
+            res.append(cls(remaining[:tot_len]))
+            remaining = remaining[tot_len:]
+        datafl.records = res
+        if remaining:
+            if len(remaining) <= 4:
+                datafl.add_payload(conf.padding_layer(remaining))
+            else:
+                datafl.do_dissect_payload(remaining)
+    else:
+        scope_len = entry.record_len
+        scope_cls = entry.record_cls
+        option_len = entry.option_len
+        option_cls = entry.option_cls
+        if scope_len:
+            res.append(scope_cls(data[:scope_len]))
+        if option_len and option_cls is not None:
+            res.append(option_cls(data[scope_len:scope_len + option_len]))
+        if len(data) > scope_len + option_len:
+            res.append(
+                conf.padding_layer(data[scope_len + option_len:])
+            )
+        datafl.records = res
+        datafl.name = "Netflow DataFlowSet V9/10 - OPTIONS"
+
+
+class NetflowTemplateStore(object):
+    """Bounded, per-exporter template and pending-data store.
+
+    State is keyed by the trusted transport session plus the IPFIX observation
+    domain. Two exporters reusing the same template ID therefore get fully
+    independent layouts, and an operation on one scope never clears another.
+    """
+    def __init__(self, scope_limit=NETFLOW_DEFAULT_SCOPE_LIMIT,
+                 template_limit=NETFLOW_DEFAULT_TEMPLATE_LIMIT,
+                 pending_limit=NETFLOW_DEFAULT_PENDING_LIMIT):
+        self.scope_limit = scope_limit
+        self.template_limit = template_limit
+        self.pending_limit = pending_limit
+        self.scopes = OrderedDict()  # type: OrderedDict[Tuple[Any, ...], NetflowScope]
+
+    def get_scope(self, pkt):
+        # type: (Packet) -> NetflowScope
+        source = _netflow_transport_source(pkt)
+        key = _netflow_scope_key(pkt, source)
+        scope = self.scopes.get(key)
+        if scope is None:
+            if len(self.scopes) >= self.scope_limit:
+                # Evict the least recently seen scope; this never touches the
+                # other exporters still in use.
+                self.scopes.popitem(last=False)
+            scope = NetflowScope(
+                key, source, self.template_limit, self.pending_limit
+            )
+            self.scopes[key] = scope
+        else:
+            # Keep recently used scopes at the end for LRU eviction.
+            self.scopes.move_to_end(key)
+        return scope
+
+    def _flush_pending(self, scope, template_id):
+        # type: (NetflowScope, int) -> None
+        still_pending = deque()  # type: Deque[NetflowDataflowsetV9]
+        while scope.pending:
+            dataflowset = scope.pending.popleft()
+            if dataflowset.templateID != template_id:
+                still_pending.append(dataflowset)
+                continue
+            # Data buffered before its template: decode it now. A withdrawal
+            # followed by a redefinition lands here with the new layout, so the
+            # old definition can never be resurrected.
+            self._dispatch_dataflowset(scope, dataflowset)
+        scope.pending = still_pending
+
+    def _dispatch_dataflowset(self, scope, dataflowset):
+        # type: (NetflowScope, NetflowDataflowset) -> None
+        tid = dataflowset.templateID
+        entry = scope.templates.get(tid)
+        if entry is None:
+            if tid in scope.withdrawn:
+                # The layout was explicitly revoked. Keep the raw bytes and
+                # report the withdrawal instead of buffering indefinitely.
+                _netflow_mark(
+                    dataflowset,
+                    NETFLOW_REASON_WITHDRAWN_TEMPLATE,
+                    scope.source,
+                )
+                return
+            _netflow_mark(
+                dataflowset, NETFLOW_REASON_MISSING_TEMPLATE, scope.source
+            )
+            scope.queue_pending(dataflowset)
+            return
+        if not entry.supported:
+            _netflow_mark(
+                dataflowset, NETFLOW_REASON_UNSUPPORTED_TEMPLATE, scope.source
+            )
+            return
+        _netflow_decode_dataflowset(dataflowset, entry)
+
+    def process_packet(self, pkt):
+        # type: (Packet) -> Packet
+        """Learn templates, process withdrawals and decode data FlowSets."""
+        scope = self.get_scope(pkt)
+        # Template FlowSets: learn or atomically redefine layouts.
+        # Subclass-aware matching is required so that the IPFIX options
+        # FlowSet (a NetflowOptionsFlowsetV9 subclass) is handled too.
+        if pkt.haslayer(NetflowFlowsetV9, _subclass=True):
+            for current in _netflow_iter_layers(pkt, NetflowFlowsetV9):
+                for ntv9 in current.templates:
+                    if not ntv9.template_fields:
+                        # IPFIX template withdrawal (RFC 5101 section 8.4):
+                        # a template with zero field specifiers.
+                        if scope.withdraw(ntv9.templateID):
+                            log_runtime.debug(
+                                "Netflow: template %s withdrawn for scope %s",
+                                ntv9.templateID, scope.key,
+                            )
+                        continue
+                    entry = _netflow_build_template_entry(
+                        ntv9, scope.source
+                    )
+                    scope.store_template(ntv9.templateID, entry)
+                    self._flush_pending(scope, ntv9.templateID)
+        # Options template FlowSets.
+        if pkt.haslayer(NetflowOptionsFlowsetV9, _subclass=True):
+            for current in _netflow_iter_layers(
+                pkt, NetflowOptionsFlowsetV9
+            ):
+                scope_llist = [
+                    (field.scopeFieldlength, field.scopeFieldType)
+                    for field in current.scopes
+                ]
+                option_llist = [
+                    (field.optionFieldlength, field.optionFieldType)
+                    for field in current.options
+                ]
+                scope_len = sum(length for length, _ in scope_llist)
+                option_len = sum(length for length, _ in option_llist)
+                variable = (
+                    any(field.optionFieldlength == 0xFFFF
+                        for field in current.options)
+                    or any(length == 0xFFFF
+                           for length, _ in scope_llist)
+                )
+                if not scope_len + option_len or variable:
+                    entry = NetflowTemplateEntry(
+                        record_len=scope_len,
+                        record_cls=NetflowOptionsRecordScopeV9,
+                        source=scope.source,
+                        variable_length=variable,
+                        is_option=True,
+                        option_len=option_len,
+                        option_cls=NetflowOptionsRecordOptionV9,
+                        supported=False,
+                    )
+                else:
+                    scope_cls = _GenNetflowRecordV9(
+                        NetflowOptionsRecordScopeV9, scope_llist
+                    )
+                    option_cls = _GenNetflowRecordV9(
+                        NetflowOptionsRecordOptionV9, option_llist
+                    )
+                    entry = NetflowTemplateEntry(
+                        record_len=scope_len,
+                        record_cls=scope_cls,
+                        source=scope.source,
+                        is_option=True,
+                        option_len=option_len,
+                        option_cls=option_cls,
+                    )
+                scope.store_template(current.templateID, entry)
+                self._flush_pending(scope, current.templateID)
+        # Data FlowSets.
+        if pkt.haslayer(NetflowDataflowsetV9, _subclass=True):
+            for datafl in _netflow_iter_layers(pkt, NetflowDataflowsetV9):
+                self._dispatch_dataflowset(scope, datafl)
+        return pkt
+
+    def reset_transport(self, source):
+        # type: (Tuple[Any, ...]) -> None
+        """Drop every scope belonging to one transport session.
+
+        Used when the trusted transport is rebuilt: templates from the previous
+        connection must not survive into the new one. Other exporters are left
+        untouched.
+        """
+        for key in [key for key in self.scopes if key[:len(source)] == source]:
+            self.scopes.pop(key)
+
+
 def _netflowv9_defragment_packet(pkt, definitions, definitions_opts, ignored):
-    """Used internally to process a single packet during defragmenting"""
+    """Used internally to process a single packet during defragmenting.
+
+    The shared dictionaries keep the historical single-source behavior of
+    :func:`netflowv9_defragment`: callers processing one exporter at a time are
+    unaffected.
+    """
     # Dataflowset definitions
     if NetflowFlowsetV9 in pkt:
         current = pkt
@@ -1590,6 +1986,11 @@ def netflowv9_defragment(plist, verb=1):
     params:
      - plist: the list of mixed NetflowV9/10 packets.
      - verb: verbose print (0/1)
+
+    This keeps the historical single-source entry point: packets are handled
+    with one shared set of templates, as they are assumed to come from a
+    single exporter. For per-exporter scoping on a live flow use
+    :class:`NetflowSession`.
     """
     if not isinstance(plist, (PacketList, list)):
         plist = [plist]
@@ -1616,23 +2017,47 @@ def ipfix_defragment(*args, **kwargs):
 
 class NetflowSession(IPSession):
     """Session used to defragment NetflowV9/10 packets on the flow.
+
+    Templates are scoped to the trusted transport session (outer IP/UDP
+    headers) and, for IPFIX, to the Observation Domain ID. Two exporters
+    reusing the same template ID are therefore decoded independently.
+
+    Both the template table and the queue of data FlowSets waiting for a
+    template are bounded; see the ``scope_limit``, ``template_limit`` and
+    ``pending_limit`` parameters. Data that cannot be decoded keeps its raw
+    bytes and is annotated through the FlowSet ``process_information`` slot
+    with one of the ``NETFLOW_REASON_*`` reasons; it is never reinterpreted
+    using a guess.
+
     See help(scapy.layers.netflow) for more infos.
     """
-    def __init__(self, *args, **kwargs):
-        self.definitions = {}
-        self.definitions_opts = {}
-        self.ignored = set()
+    def __init__(self, *args,
+                 scope_limit=NETFLOW_DEFAULT_SCOPE_LIMIT,
+                 template_limit=NETFLOW_DEFAULT_TEMPLATE_LIMIT,
+                 pending_limit=NETFLOW_DEFAULT_PENDING_LIMIT,
+                 **kwargs):
+        self.template_store = NetflowTemplateStore(
+            scope_limit=scope_limit,
+            template_limit=template_limit,
+            pending_limit=pending_limit,
+        )
         super(NetflowSession, self).__init__(*args, **kwargs)
 
     def process(self, pkt: Packet) -> Optional[Packet]:
         pkt = super(NetflowSession, self).process(pkt)
         if not pkt:
             return
-        _netflowv9_defragment_packet(pkt,
-                                     self.definitions,
-                                     self.definitions_opts,
-                                     self.ignored)
+        self.template_store.process_packet(pkt)
         return pkt
+
+    def reset_transport(self, pkt: Packet) -> None:
+        """Forget every scope of the transport session carrying ``pkt``.
+
+        Call this when the trusted transport (e.g. a UDP association) is
+        rebuilt: templates learned over the previous association must not be
+        applied to the new one. Other exporters are unaffected.
+        """
+        self.template_store.reset_transport(_netflow_transport_source(pkt))
 
 
 class NetflowOptionsRecordScopeV9(NetflowRecordV9):

@@ -572,3 +572,360 @@ dscp_dataset = NetflowDataflowsetV9(
 
 # record is generated with 2 zero bytes of padding
 assert(raw(dscp_dataset) == b'\x01\x11\x00\x08\x2a\x00\x00\x00')
+
+
+############
+############
++ IPFix per-exporter template scoping
+~ netflow
+~ security
+
+# Two exporters send IPFIX over distinct trusted UDP/IP transports. They reuse
+# the same Observation Domain ID and the same template ID but with different
+# fixed-length layouts. All wire bytes below are hand built and the expected
+# addresses/counters are asserted independently; no network capture is used.
+
+= IPFix scoping - hand-built wire helpers and independent expectations
+
+import socket
+import struct
+
+NETFLOW_TEST_ODID = 7
+NETFLOW_TEST_TID = 256
+NETFLOW_TEST_COLLECTOR = "10.9.9.9"
+NETFLOW_TEST_EXPORTER_A = "10.0.0.1"
+NETFLOW_TEST_EXPORTER_B = "10.0.0.2"
+
+def ipfix_msg(payload, odid=NETFLOW_TEST_ODID):
+    # version=10, length, export time, sequence number, observation domain id
+    return struct.pack("!HHIII", 10, 16 + len(payload), 0, 0, odid) + payload
+
+def ipfix_template_set(spec, tid=NETFLOW_TEST_TID):
+    body = struct.pack("!HH", tid, len(spec))
+    for field_type, field_len in spec:
+        body += struct.pack("!HH", field_type, field_len)
+    body += b"\x00" * ((-len(body)) % 4)
+    return struct.pack("!HH", 2, 4 + len(body)) + body
+
+def ipfix_withdraw_set(tid=NETFLOW_TEST_TID):
+    # RFC 5101 section 8.4: template record with zero field specifiers
+    body = struct.pack("!HH", tid, 0)
+    return struct.pack("!HH", 2, 4 + len(body)) + body
+
+def ipfix_data_set(record_bytes, tid=NETFLOW_TEST_TID):
+    body = record_bytes + b"\x00" * ((-len(record_bytes)) % 4)
+    return struct.pack("!HH", tid, 4 + len(body)) + body
+
+def ipfix_wrap(exporter, payload, odid=NETFLOW_TEST_ODID):
+    return (
+        IP(src=exporter, dst=NETFLOW_TEST_COLLECTOR)
+        / UDP(sport=40000, dport=2055)
+        / NetflowHeader(ipfix_msg(payload, odid=odid))
+    )
+
+# Layout A (13 octets): IN_PKTS(2/4), PROTOCOL(4/1),
+# IPV4_SRC_ADDR(8/4), IPV4_DST_ADDR(12/4)
+LAYOUT_A = [(2, 4), (4, 1), (8, 4), (12, 4)]
+# Layout B (9 octets): IN_PKTS(2/2), IN_BYTES(1/4),
+# PROTOCOL(4/1), L4_SRC_PORT(7/2)
+LAYOUT_B = [(2, 2), (1, 4), (4, 1), (7, 2)]
+
+def record_a(pkts, proto, src_addr, dst_addr):
+    return (
+        struct.pack("!I", pkts)
+        + struct.pack("!B", proto)
+        + socket.inet_aton(src_addr)
+        + socket.inet_aton(dst_addr)
+    )
+
+def record_b(pkts, nbytes, proto, src_port):
+    return (
+        struct.pack("!H", pkts)
+        + struct.pack("!I", nbytes)
+        + struct.pack("!B", proto)
+        + struct.pack("!H", src_port)
+    )
+
+# Independent expected values, chosen so a wrong layout cannot match.
+EXPECT_A = (0x11223344, 6, "192.0.2.10", "198.51.100.20")
+EXPECT_B = (0x2211, 0x55667788, 17, 443)
+RAW_A = record_a(*EXPECT_A)
+RAW_B = record_b(*EXPECT_B)
+
+assert len(RAW_A) == 13
+assert len(RAW_B) == 9
+
+= IPFix scoping - data before template keeps raw bytes with a reason
+
+session = NetflowSession()
+
+early_a = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(RAW_A))
+)
+early_b = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_data_set(RAW_B))
+)
+early_a_ds = early_a[NetflowDataflowsetV9]
+early_b_ds = early_b[NetflowDataflowsetV9]
+
+# Nothing is decoded or guessed: the single raw record is preserved.
+assert early_a_ds.records[0].fieldValue.startswith(RAW_A)
+assert early_b_ds.records[0].fieldValue.startswith(RAW_B)
+assert early_a_ds.process_information[0]["reason"] == NETFLOW_REASON_MISSING_TEMPLATE
+assert early_b_ds.process_information[0]["reason"] == NETFLOW_REASON_MISSING_TEMPLATE
+# The exporter identity is taken from the trusted transport, not records.
+assert early_a_ds.process_information[0]["exporter"][1] == NETFLOW_TEST_EXPORTER_A
+assert early_b_ds.process_information[0]["exporter"][1] == NETFLOW_TEST_EXPORTER_B
+# The whole packet stays byte-identical.
+assert bytes(early_a) == bytes(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(RAW_A))
+)
+
+= IPFix scoping - same template ID, different per-exporter layouts
+
+# Interleave the two template definitions; the shared ID must not collide.
+session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_template_set(LAYOUT_A))
+)
+session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_template_set(LAYOUT_B))
+)
+
+scope_a = session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_A, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", NETFLOW_TEST_ODID)
+]
+scope_b = session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_B, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", NETFLOW_TEST_ODID)
+]
+assert scope_a is not scope_b
+assert scope_a.templates[NETFLOW_TEST_TID].source[1] == NETFLOW_TEST_EXPORTER_A
+assert scope_b.templates[NETFLOW_TEST_TID].source[1] == NETFLOW_TEST_EXPORTER_B
+assert scope_a.templates[NETFLOW_TEST_TID].record_len == 13
+assert scope_b.templates[NETFLOW_TEST_TID].record_len == 9
+
+# Data buffered before the templates is now flushed with each exporter's layout.
+rec_a = early_a_ds.records[0]
+rec_b = early_b_ds.records[0]
+assert (rec_a.IN_PKTS, rec_a.PROTOCOL, rec_a.IPV4_SRC_ADDR,
+        rec_a.IPV4_DST_ADDR) == EXPECT_A
+assert (rec_b.IN_PKTS, rec_b.IN_BYTES, rec_b.PROTOCOL,
+        rec_b.L4_SRC_PORT) == EXPECT_B
+
+= IPFix scoping - fresh interleaved data stays isolated
+
+fresh_a = record_a(0x01020304, 1, "10.10.10.10", "11.11.11.11")
+fresh_b = record_b(0x0101, 0x0A0B0C0D, 6, 8080)
+pkt_a = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(fresh_a))
+)
+pkt_b = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_data_set(fresh_b))
+)
+new_a = pkt_a[NetflowDataflowsetV9].records[0]
+new_b = pkt_b[NetflowDataflowsetV9].records[0]
+assert (new_a.IN_PKTS, new_a.IPV4_SRC_ADDR) == (0x01020304, "10.10.10.10")
+assert (new_b.IN_BYTES, new_b.L4_SRC_PORT) == (0x0A0B0C0D, 8080)
+
+= IPFix scoping - redefinition replaces the layout and never revives the old one
+
+# Exporter A switches to the B-shaped layout under the same template ID.
+session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_template_set(LAYOUT_B))
+)
+redef_bytes = record_b(0x7777, 0x88888888, 6, 22)
+pkt_redef = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(redef_bytes))
+)
+redef_rec = pkt_redef[NetflowDataflowsetV9].records[0]
+assert (redef_rec.IN_PKTS, redef_rec.IN_BYTES,
+        redef_rec.L4_SRC_PORT) == (0x7777, 0x88888888, 22)
+# The old 13-octet layout is gone from exporter A's scope.
+assert scope_a.templates[NETFLOW_TEST_TID].record_len == 9
+# Exporter B is unaffected by exporter A's redefinition.
+pkt_b_again = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_data_set(fresh_b))
+)
+assert pkt_b_again[NetflowDataflowsetV9].records[0].L4_SRC_PORT == 8080
+
+= IPFix scoping - withdrawal retains bytes and does not affect the other exporter
+
+session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_withdraw_set())
+)
+assert NETFLOW_TEST_TID not in scope_a.templates
+assert NETFLOW_TEST_TID in scope_a.withdrawn
+pkt_withdrawn = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(redef_bytes))
+)
+withdrawn_ds = pkt_withdrawn[NetflowDataflowsetV9]
+assert withdrawn_ds.process_information[0]["reason"] == \
+    NETFLOW_REASON_WITHDRAWN_TEMPLATE
+assert withdrawn_ds.records[0].fieldValue.startswith(redef_bytes)
+# Exporter B still decodes normally.
+pkt_b_live = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_data_set(fresh_b))
+)
+assert pkt_b_live[NetflowDataflowsetV9].records[0].IN_BYTES == 0x0A0B0C0D
+
+# A new definition clears the withdrawn marker and decoding resumes.
+session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_template_set(LAYOUT_B))
+)
+assert NETFLOW_TEST_TID not in scope_a.withdrawn
+pkt_resume = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(redef_bytes))
+)
+assert pkt_resume[NetflowDataflowsetV9].records[0].L4_SRC_PORT == 22
+
+= IPFix scoping - transport rebuild drops one exporter only
+
+session.reset_transport(ipfix_wrap(NETFLOW_TEST_EXPORTER_A, b""))
+# Exporter A templates are gone: new data is unknown again.
+pkt_rebuilt = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(redef_bytes))
+)
+assert pkt_rebuilt[NetflowDataflowsetV9].process_information[0]["reason"] == \
+    NETFLOW_REASON_MISSING_TEMPLATE
+rebuilt_scope = session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_A, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", NETFLOW_TEST_ODID)
+]
+# The rebuilt scope starts with no templates; nothing was carried over.
+assert rebuilt_scope.templates == {}
+# Exporter B scopes survive the rebuild of exporter A.
+pkt_b_survives = session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_B, ipfix_data_set(fresh_b))
+)
+assert pkt_b_survives[NetflowDataflowsetV9].records[0].L4_SRC_PORT == 8080
+assert NETFLOW_TEST_TID in session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_B, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", NETFLOW_TEST_ODID)
+].templates
+
+= IPFix scoping - observation domain isolation within one transport
+
+odid_session = NetflowSession()
+# Same exporter, two observation domains, same template ID, two layouts.
+odid_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_template_set(LAYOUT_A))
+)
+odid_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+               ipfix_template_set(LAYOUT_B), odid=9)
+)
+odid7 = odid_session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_A, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", 7)
+]
+odid9 = odid_session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_A, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", 9)
+]
+assert odid7.templates[NETFLOW_TEST_TID].record_len == 13
+assert odid9.templates[NETFLOW_TEST_TID].record_len == 9
+# Each domain decodes its own layout.
+pkt_dom7 = odid_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+               ipfix_data_set(RAW_A), odid=7)
+)
+assert pkt_dom7[NetflowDataflowsetV9].records[0].IPV4_SRC_ADDR == "192.0.2.10"
+pkt_dom9 = odid_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+               ipfix_data_set(RAW_B), odid=9)
+)
+assert pkt_dom9[NetflowDataflowsetV9].records[0].L4_SRC_PORT == 443
+
+= IPFix scoping - variable-length templates are unsupported and keep raw bytes
+
+varlen_session = NetflowSession()
+varlen_spec = [(8, 0xFFFF), (4, 1)]  # variable-length source address
+varlen_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+               ipfix_template_set(varlen_spec))
+)
+varlen_raw = b"\x04" + socket.inet_aton("9.9.9.9") + b"\x06"
+pkt_varlen = varlen_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, ipfix_data_set(varlen_raw))
+)
+varlen_ds = pkt_varlen[NetflowDataflowsetV9]
+assert varlen_ds.process_information[0]["reason"] == \
+    NETFLOW_REASON_UNSUPPORTED_TEMPLATE
+assert varlen_ds.records[0].fieldValue.startswith(varlen_raw)
+
+= IPFix scoping - pending and template tables are bounded
+
+bounded_session = NetflowSession(pending_limit=2)
+bounded_pkts = []
+for index in range(4):
+    payload = bytes([index]) * 9
+    bounded_pkts.append(
+        bounded_session.process(
+            ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+                       ipfix_data_set(payload), odid=99)
+        )
+    )
+
+bounded_scope = bounded_session.template_store.scopes[
+    ("IP", NETFLOW_TEST_EXPORTER_A, 40000, NETFLOW_TEST_COLLECTOR, 2055,
+     "IPFIX", 99)
+]
+assert len(bounded_scope.pending) == 2
+# The oldest FlowSet was evicted and annotated rather than silently dropped.
+assert bounded_pkts[0][NetflowDataflowsetV9].process_information[-1]["reason"] \
+    == NETFLOW_REASON_PENDING_CAPACITY
+
+# Template table bound inside a single scope.
+tmpl_session = NetflowSession(template_limit=3)
+template_sets = b"".join(
+    ipfix_template_set([(2, 4), (4, 1)], tid=300 + index)
+    for index in range(6)
+)
+tmpl_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A,
+               template_sets, odid=1)
+)
+tmpl_scope = list(tmpl_session.template_store.scopes.values())[0]
+assert len(tmpl_scope.templates) == 3
+assert list(tmpl_scope.templates.keys()) == [303, 304, 305]
+
+# Scope table bound across exporters; eviction never clears other live scopes.
+scope_session = NetflowSession(scope_limit=3)
+for index in range(6):
+    scope_session.process(
+        ipfix_wrap("10.1.%d.1" % index,
+                   ipfix_template_set(LAYOUT_A), odid=index)
+    )
+
+assert len(scope_session.template_store.scopes) == 3
+
+= IPFix scoping - options templates are scoped and flush pending data
+
+options_session = NetflowSession()
+# Hand-built IPFIX options template Set (id 3), template 300:
+# one scope (System, type 1, len 4) and one option
+# (SAMPLING_INTERVAL, type 34, len 4).
+options_body = (
+    struct.pack("!HHH", 300, 2, 1)
+    + struct.pack("!HH", 1, 4)
+    + struct.pack("!HH", 34, 4)
+    + b"\x00\x00"
+)
+options_set = struct.pack("!HH", 3, 4 + len(options_body)) + options_body
+options_record = struct.pack("!II", 42, 100)
+options_data = struct.pack("!HH", 300, 4 + len(options_record)) + options_record
+
+# Data first: pending, raw bytes kept.
+opt_pkt = options_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, options_data)
+)
+opt_ds = opt_pkt[NetflowDataflowsetV9]
+assert opt_ds.process_information[0]["reason"] == NETFLOW_REASON_MISSING_TEMPLATE
+# Template arrives: the buffered data is decoded in place.
+options_session.process(
+    ipfix_wrap(NETFLOW_TEST_EXPORTER_A, options_set)
+)
+assert len(opt_ds.records) == 2
+assert opt_ds.records[0].fields[list(opt_ds.records[0].fields)[0]] == 42
+assert opt_ds.records[1].SAMPLING_INTERVAL == 100
