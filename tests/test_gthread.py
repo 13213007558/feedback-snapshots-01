@@ -28,12 +28,19 @@ class FakeSocket:
         self.closed = False
         self.blocking = True
         self._fileno = id(self) % 65536
+        self._timeout = None
 
     def fileno(self):
         return self._fileno
 
     def setblocking(self, blocking):
         self.blocking = blocking
+
+    def settimeout(self, timeout):
+        self._timeout = timeout
+
+    def gettimeout(self):
+        return self._timeout
 
     def recv(self, size):
         if self.closed:
@@ -1950,3 +1957,89 @@ class TestSlowClientResilience:
 
         # wait_for_data should not be called for initialized connections
         conn.wait_for_data.assert_not_called()
+
+
+class TestFirstRequestTimeout:
+    """The optional first_request_timeout ingress budget on gthread."""
+
+    @staticmethod
+    def _worker(budget):
+        cfg = Config()
+        cfg.set("threads", 4)
+        cfg.set("worker_connections", 1000)
+        cfg.set("keepalive", 5)
+        cfg.set("first_request_timeout", budget)
+        return gthread.ThreadWorker(
+            age=1, ppid=os.getpid(), sockets=[], app=mock.Mock(),
+            timeout=30, cfg=cfg, log=mock.Mock())
+
+    @staticmethod
+    def _conn(cfg):
+        return gthread.TConn(cfg, FakeSocket(), ("127.0.0.1", 12345),
+                             ("127.0.0.1", 8000))
+
+    def test_disabled_by_default_arms_no_deadline(self):
+        conn = self._conn(Config())
+        assert conn.ingress_active is False
+        assert conn.ingress_deadline is None
+
+    def test_enabled_sets_a_deadline_and_active_flag(self):
+        cfg = Config()
+        cfg.set("first_request_timeout", 10)
+        conn = self._conn(cfg)
+        assert conn.ingress_active is True
+        assert conn.ingress_deadline is not None
+        assert conn.ingress_deadline > time.monotonic()
+
+    def test_parsing_first_request_graduates_connection(self):
+        worker = self._worker(10)
+        conn = self._conn(worker.cfg)
+        conn.initialized = True
+        conn.data_ready = True
+        req = mock.Mock()
+        req.headers = []
+        conn.parser = mock.Mock()
+        conn.parser.__next__ = mock.Mock(return_value=req)
+        worker.handle_request = mock.Mock(return_value=False)
+
+        worker.handle(conn)
+
+        # The preparation phase ended once the request was parsed.
+        assert conn.ingress_active is False
+        assert conn.ingress_deadline is None
+
+    def test_expired_budget_is_not_deferred_and_gets_closed(self):
+        worker = self._worker(10)
+        conn = self._conn(worker.cfg)
+        # Simulate the whole budget already having elapsed.
+        conn.ingress_deadline = time.monotonic() - 1
+        worker.nr_conns = 1
+
+        # handle() gives up rather than parking the connection; the worker's
+        # finish_request() then closes it like any non-keepalive result.
+        assert worker.handle(conn) is False
+        future = mock.Mock()
+        future.cancelled.return_value = False
+        future.result.return_value = False
+        worker.finish_request(conn, future)
+        assert conn.sock.closed is True
+
+    def test_pending_deadline_is_capped_by_ingress_budget(self):
+        worker = self._worker(2)
+        worker.cfg.set("keepalive", 30)
+        conn = self._conn(worker.cfg)
+        conn.ingress_active = True
+        conn.ingress_deadline = time.monotonic() + 2
+        conn.sock = mock.Mock()
+        worker.poller = mock.Mock()
+        worker.pending_conns = deque()
+
+        future = mock.Mock()
+        future.cancelled.return_value = False
+        future.result.return_value = gthread._DEFER
+        worker.finish_request(conn, future)
+
+        # The pending timeout is the ingress deadline, not the 30s keepalive.
+        assert conn.timeout <= time.monotonic() + 2
+        assert conn in worker.pending_conns
+

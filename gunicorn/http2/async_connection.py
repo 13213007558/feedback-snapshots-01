@@ -24,6 +24,32 @@ from .request import HTTP2Request
 from gunicorn.http.errors import ParseException
 
 
+class AsyncClock:
+    """Monotonic clock and timer scheduling for the event loop.
+
+    A seam so the per-stream ingress timers can be driven by a manual clock
+    in tests instead of real sleeps. The loop is resolved lazily because the
+    connection object is constructed before it is driven, including outside
+    a running loop in unit tests.
+    """
+
+    __slots__ = ('_loop',)
+
+    def __init__(self, loop=None):
+        self._loop = loop
+
+    def _ensure_loop(self):
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        return self._loop
+
+    def time(self):
+        return self._ensure_loop().time()
+
+    def call_later(self, delay, callback, *args):
+        return self._ensure_loop().call_later(delay, callback, *args)
+
+
 # Import h2 lazily to allow graceful fallback
 _h2 = None
 _h2_config = None
@@ -129,6 +155,15 @@ class AsyncHTTP2Connection:
         self._initialized = False
         self._receive_task = None
 
+        # Clock seam (the running loop in production; a manual clock in tests)
+        self.clock = AsyncClock()
+        # Optional per-stream first-request budget, from the
+        # first_request_timeout setting. 0 disables it.
+        self.first_request_timeout = getattr(cfg, "first_request_timeout", 0)
+        # Ingress timer handle per stream that has not answered yet. Each
+        # stream is timed from its HEADERS frame, independently of the others.
+        self._ingress_timers = {}
+
     async def initiate_connection(self):
         """Send initial HTTP/2 settings to client.
 
@@ -198,6 +233,9 @@ class AsyncHTTP2Connection:
             # That body came over HTTP/1, so no window credit is owed.
             stream.acked_size = stream.body_size
         self.streams[1] = stream
+        # Stream 1 begins here, so its preparation phase is timed like any
+        # other stream's.
+        self._arm_ingress_timer(1)
         return HTTP2Request(stream, self.cfg, self.client_addr)
 
     async def receive_data(self, timeout=None):
@@ -354,6 +392,10 @@ class AsyncHTTP2Connection:
         stream = HTTP2Stream(stream_id, self)
         self.streams[stream_id] = stream
 
+        # Time the request preparation phase of each stream on its own, from
+        # the moment its HEADERS frame is in.
+        self._arm_ingress_timer(stream_id)
+
         # Process headers
         stream.receive_headers(headers, end_stream=False)
 
@@ -363,6 +405,7 @@ class AsyncHTTP2Connection:
         except (ParseException, ValueError):
             # A bad request is a stream error, not a connection error
             # (RFC 9113 section 8.1.1).
+            self._disarm_ingress_timer(stream_id)
             self.streams.pop(stream_id, None)
             self._reset_quietly(stream_id, HTTP2ErrorCode.PROTOCOL_ERROR)
             return None
@@ -437,6 +480,7 @@ class AsyncHTTP2Connection:
         """Handle StreamReset event."""
         self._count_reset()
         stream_id = event.stream_id
+        self._disarm_ingress_timer(stream_id)
         stream = self.streams.get(stream_id)
 
         if stream is not None:
@@ -504,6 +548,8 @@ class AsyncHTTP2Connection:
 
     def _abort_all_streams(self):
         """The connection is gone: wake every stream still waiting on it."""
+        for stream_id in list(self._ingress_timers):
+            self._disarm_ingress_timer(stream_id)
         for stream in list(self.streams.values()):
             stream.signal_disconnect()
 
@@ -512,6 +558,39 @@ class AsyncHTTP2Connection:
         self._closed = True
         self._abort_all_streams()
         self._signal_window()
+
+    def _arm_ingress_timer(self, stream_id):
+        """Bound one stream's request preparation phase.
+
+        Timed from its HEADERS frame until its first response HEADERS. A
+        budget of 0 disables the mechanism, so an unanswered stream is left
+        to the ordinary timeouts.
+        """
+        budget = self.first_request_timeout
+        if budget <= 0:
+            return
+        self._disarm_ingress_timer(stream_id)
+        self._ingress_timers[stream_id] = self.clock.call_later(
+            budget, self._ingress_expired, stream_id)
+
+    def _disarm_ingress_timer(self, stream_id):
+        """Cancel a stream's ingress timer, if any."""
+        handle = self._ingress_timers.pop(stream_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _ingress_expired(self, stream_id):
+        """A stream never answered within its first-request budget."""
+        self._ingress_timers.pop(stream_id, None)
+        stream = self.streams.get(stream_id)
+        if stream is None or stream.state is StreamState.CLOSED:
+            return
+        # Reset only this stream: the other streams and the connection keep
+        # running and stay reusable (RFC 9113 section 8.1).
+        stream.reset(HTTP2ErrorCode.CANCEL)
+        self._reset_quietly(stream_id, HTTP2ErrorCode.CANCEL)
+        self.streams.pop(stream_id, None)
+        self._write_pending_nowait()
 
     def _reset_quietly(self, stream_id, error_code):
         """Queue RST_STREAM for a stream h2 knows about, ignoring a closed one."""
@@ -605,6 +684,10 @@ class AsyncHTTP2Connection:
             stream.close()
             self.cleanup_stream(stream_id)
             return False
+        # The first response HEADERS frame ends this stream's request
+        # preparation phase; the ordinary stream/connection rules apply to
+        # whatever follows.
+        self._disarm_ingress_timer(stream_id)
         return True
 
     async def send_response(self, stream_id, status, headers, body=None):
@@ -833,6 +916,7 @@ class AsyncHTTP2Connection:
 
         Safe on a stream h2 already closed and on a dead socket.
         """
+        self._disarm_ingress_timer(stream_id)
         stream = self.streams.get(stream_id)
         if stream is not None:
             stream.reset(error_code)
@@ -955,6 +1039,7 @@ class AsyncHTTP2Connection:
         RST_STREAM(INTERNAL_ERROR); a body it did not finish reading with
         RST_STREAM(NO_ERROR) (RFC 9113 section 8.1).
         """
+        self._disarm_ingress_timer(stream_id)
         stream = self.streams.pop(stream_id, None)
         if stream is None:
             return

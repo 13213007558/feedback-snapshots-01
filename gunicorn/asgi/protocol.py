@@ -229,6 +229,99 @@ def _valid_websocket_key(key):
         return False
 
 
+class _Clock:
+    """Monotonic clock and timer scheduling for one event loop.
+
+    A thin seam over ``loop.time()`` / ``loop.call_later()`` so tests can
+    drive time deterministically with a manual clock instead of sleeping.
+    The loop is resolved lazily so a protocol built against a partial worker
+    (a mock without a loop, in some unit tests) still constructs.
+    """
+
+    __slots__ = ('_loop',)
+
+    def __init__(self, loop=None):
+        self._loop = loop
+
+    def _ensure_loop(self):
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        return self._loop
+
+    def time(self):
+        return self._ensure_loop().time()
+
+    def call_later(self, delay, callback, *args):
+        return self._ensure_loop().call_later(delay, callback, *args)
+
+
+class _ManualTimer:
+    """A timer handle scheduled by :class:`_ManualClock`."""
+
+    __slots__ = ('_clock', '_seq', '_cancelled')
+
+    def __init__(self, clock, seq):
+        self._clock = clock
+        self._seq = seq
+        self._cancelled = False
+
+    def cancel(self):
+        if self._cancelled:
+            return False
+        self._cancelled = True
+        self._clock._cancel(self._seq)
+        return True
+
+    def cancelled(self):
+        return self._cancelled
+
+
+class _ManualClock:
+    """Deterministic clock for tests: time only moves in ``advance()``.
+
+    Scheduled callbacks run in due order when the clock advances, including
+    callbacks scheduled while an earlier one runs, exactly as a real loop
+    would drain its ready queue between timers. Cancelled handles never run.
+    """
+
+    __slots__ = ('_now', '_next_id', '_timers')
+
+    def __init__(self):
+        self._now = 0.0
+        self._next_id = 0
+        # seq -> [due_time, seq, callback, args]
+        self._timers = {}
+
+    def time(self):
+        return self._now
+
+    def call_later(self, delay, callback, *args):
+        self._next_id += 1
+        seq = self._next_id
+        self._timers[seq] = [
+            self._now + max(delay, 0.0), seq, callback, args]
+        return _ManualTimer(self, seq)
+
+    def _cancel(self, seq):
+        self._timers.pop(seq, None)
+
+    def advance(self, seconds):
+        """Move the clock and run every timer due by the new time."""
+        target = self._now + seconds
+        while True:
+            if not self._timers:
+                break
+            seq = min(self._timers, key=lambda key: (
+                self._timers[key][0], self._timers[key][1]))
+            entry = self._timers[seq]
+            if entry[0] > target:
+                break
+            self._timers.pop(seq)
+            self._now = entry[0]
+            entry[2](*entry[3])
+        self._now = target
+
+
 class FlowControl:
     """Manage transport-level write flow control.
 
@@ -630,6 +723,9 @@ class ASGIProtocol(asyncio.Protocol):
         # getattr with the settings' defaults: a partial config (tests,
         # embedders) used to work as long as these were not needed.
         self._keepalive = getattr(cfg, "keepalive", 2)
+        # Optional budget for the first request on a fresh connection. The
+        # default of 0 keeps it disabled.
+        self._first_request_timeout = getattr(cfg, "first_request_timeout", 0)
         self._root_path = getattr(cfg, "root_path", "") or ""
         self._pre_request = _pre_request_hook(cfg, worker.log)
         self._post_request = _post_request_hook(cfg)
@@ -687,6 +783,20 @@ class ASGIProtocol(asyncio.Protocol):
 
         # Keep-alive timer
         self._keepalive_handle = None
+
+        # Clock seam: the event loop's clock in production, a manual clock
+        # in tests so timer behaviour is checked without real sleeps.
+        self.clock = _Clock(getattr(self.worker, "loop", None))
+        # How long the HTTP/2 receive loop blocks per poll. Tests using a
+        # manual clock set this to 0 so the loop never waits on wall time.
+        self._h2_read_poll_interval = 1.0
+        # First-request (ingress) timer. Armed for the first request of a
+        # fresh HTTP/1 connection and disarmed once its final response
+        # starts, after which the ordinary keepalive rules take over.
+        self._ingress_handle = None
+        # True once the first request has reached its final response, so a
+        # later request is never timed as an ingress again.
+        self._ingress_done = False
 
         # Callback parser state
         self._callback_parser = None
@@ -772,6 +882,7 @@ class ASGIProtocol(asyncio.Protocol):
             and hasattr(self._callback_parser, 'remaining')
         )
         self._task = self.worker.loop.create_task(self._handle_connection())
+        self._arm_ingress_timer()
         if buffered:
             self._feed_callback_parser(buffered)
 
@@ -1208,6 +1319,42 @@ class ASGIProtocol(asyncio.Protocol):
         # waiting for the cancellation scheduled by connection_lost.
         self._request_ready.set()
 
+    def _arm_ingress_timer(self):
+        """Bound the first request of a fresh HTTP/1 connection.
+
+        Runs from the moment the connection commits to HTTP/1 until its
+        first final response starts, so a client trickling the request
+        line or headers (or an app that never answers) cannot keep the
+        connection. A value of 0 disables it; once disarmed it is never
+        armed again on the same connection.
+        """
+        if self._ingress_done or self._ingress_handle is not None:
+            return
+        budget = self._first_request_timeout
+        if budget <= 0:
+            return
+        self._ingress_handle = self.clock.call_later(
+            budget, self._ingress_timeout)
+
+    def _cancel_ingress_timer(self):
+        """Disarm the ingress timer without graduating the connection."""
+        if self._ingress_handle is not None:
+            self._ingress_handle.cancel()
+            self._ingress_handle = None
+
+    def _ingress_graduated(self):
+        """The first final response started: normal rules apply from here."""
+        self._cancel_ingress_timer()
+        self._ingress_done = True
+
+    def _ingress_timeout(self):
+        """The first request did not reach a response within the budget."""
+        self._ingress_handle = None
+        self._close_transport()
+        # Wake the connection loop the same way the keepalive timer does.
+        if self._request_ready is not None:
+            self._request_ready.set()
+
     def connection_lost(self, exc):
         """Called when the connection is lost or closed.
 
@@ -1234,6 +1381,7 @@ class ASGIProtocol(asyncio.Protocol):
 
         # Cancel keepalive timer
         self._cancel_keepalive_timer()
+        self._cancel_ingress_timer()
 
         if self.reader:
             self.reader.feed_eof()
@@ -1596,6 +1744,10 @@ class ASGIProtocol(asyncio.Protocol):
         body = bytes(self._h2c_upgrade_body or b"")
         self._h2c_upgrade_settings = None
         self._h2c_upgrade_body = None
+        # HTTP/2 owns the connection now: per-stream ingress timers take over
+        # from the HTTP/1 one, including for stream 1 below.
+        self._cancel_ingress_timer()
+        self._ingress_done = True
         self.transport.write(negotiation.UPGRADE_101)
         await self._handle_http2_connection(
             self.transport, None, upgrade=(settings, request, body)
@@ -1661,6 +1813,9 @@ class ASGIProtocol(asyncio.Protocol):
         # Store reference so data_received() forwards to WebSocket
         self._websocket = ws_protocol
 
+        # The 101 Switching Protocols response ends the request preparation
+        # phase; the connection is now a WebSocket, not an idle HTTP one.
+        self._ingress_graduated()
         await ws_protocol.run()
 
     async def _handle_http_request(self, request, sockname, peername, complete=None):
@@ -1804,6 +1959,10 @@ class ASGIProtocol(asyncio.Protocol):
                     response_status, response_headers, request,
                     close=close_announced,
                 )
+                # The request preparation phase ends where the first final
+                # response starts being written. A 1xx earlier does not end
+                # it; this branch is the final status only.
+                self._ingress_graduated()
 
             elif msg_type == "http.response.body":
                 if not response_started:
@@ -2358,6 +2517,10 @@ class ASGIProtocol(asyncio.Protocol):
             h2_conn = AsyncHTTP2Connection(
                 self.cfg, reader, writer, peername
             )
+            # Share this connection's clock so the per-stream ingress timers
+            # are driven by the same (possibly manual, in tests) clock.
+            h2_conn.clock = self.clock
+            h2_conn.first_request_timeout = self._first_request_timeout
             if upgrade is None:
                 await h2_conn.initiate_connection()
                 self._h2_conn = h2_conn
@@ -2376,7 +2539,6 @@ class ASGIProtocol(asyncio.Protocol):
             # GOAWAY, the loop keeps reading until the streams already in
             # flight have finished, so their bodies still arrive; streams
             # opened meanwhile are refused.
-            loop = self.worker.loop
             idle_since = None
             keepalive = self._keepalive or None
             while not h2_conn.is_closed:
@@ -2385,15 +2547,16 @@ class ASGIProtocol(asyncio.Protocol):
                 if self._h2_tasks or h2_conn.streams:
                     idle_since = None
                 elif idle_since is None:
-                    idle_since = loop.time()
-                elif keepalive and loop.time() - idle_since >= keepalive:
+                    idle_since = self.clock.time()
+                elif keepalive and self.clock.time() - idle_since >= keepalive:
                     # Nothing open for cfg.keepalive: same as an idle
                     # HTTP/1 keep-alive connection, closed with GOAWAY.
                     await h2_conn.close()
                     break
                 self._maybe_resume_reading()
                 try:
-                    requests = await h2_conn.receive_data(timeout=1.0)
+                    requests = await h2_conn.receive_data(
+                        timeout=self._h2_read_poll_interval)
                 except asyncio.TimeoutError:
                     continue
                 except Exception as e:

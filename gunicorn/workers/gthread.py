@@ -15,6 +15,7 @@ import errno
 import os
 import queue
 import selectors
+import socket
 import ssl
 import sys
 import time
@@ -61,6 +62,15 @@ class TConn:
         self.is_http2 = False
         # Track if we've already waited for data (to avoid waiting again after defer)
         self.data_ready = False
+
+        # Optional first-request (ingress) budget: an absolute monotonic
+        # deadline for the first request to be fully parsed. 0 disables it.
+        ingress = getattr(cfg, "first_request_timeout", 0) or 0
+        self.ingress_deadline = (
+            time.monotonic() + ingress if ingress > 0 else None)
+        # True until the first request has been parsed, i.e. while the
+        # connection is still in its request preparation phase.
+        self.ingress_active = ingress > 0
 
         # set the socket to non blocking
         self.sock.setblocking(False)
@@ -480,8 +490,12 @@ class ThreadWorker(base.Worker):
                 # Connection deferred - no data arrived within timeout.
                 # Put it on the poller to wait for data without consuming a thread.
                 conn.sock.setblocking(False)
-                # Use keepalive timeout for pending connections too
-                conn.timeout = time.monotonic() + self.cfg.keepalive
+                # Use keepalive timeout for pending connections too, unless a
+                # first-request budget leaves less time.
+                deadline = time.monotonic() + self.cfg.keepalive
+                if conn.ingress_active and conn.ingress_deadline is not None:
+                    deadline = min(deadline, conn.ingress_deadline)
+                conn.timeout = deadline
                 self.pending_conns.append(conn)
                 self.poller.register(conn.sock, selectors.EVENT_READ,
                                      partial(self.on_pending_socket_readable, conn))
@@ -520,6 +534,17 @@ class ThreadWorker(base.Worker):
             # Skip this for already-initialized connections (keepalive, deferred)
             # since they're coming from the poller and data is already available.
             if not conn.initialized and not conn.data_ready:
+                if conn.ingress_active and conn.ingress_deadline is not None:
+                    # Bound the initial wait by what is left of the first-request
+                    # budget, so a fresh connection cannot burn the full default
+                    # wait and then sit in the pending queue up to the budget.
+                    remaining = conn.ingress_deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    if not conn.wait_for_data(min(DEFAULT_WORKER_DATA_TIMEOUT,
+                                                  remaining)):
+                        # Still within the budget: let the poller hold it.
+                        return _DEFER
                 # Wait for data with timeout before committing this thread
                 if not conn.wait_for_data(DEFAULT_WORKER_DATA_TIMEOUT):
                     # No data within timeout - defer to poller
@@ -539,9 +564,28 @@ class ThreadWorker(base.Worker):
             if conn.is_http2:
                 return self.handle_http2(conn)
 
-            req = next(conn.parser)
+            parse_deadline = None
+            if conn.ingress_active and conn.ingress_deadline is not None:
+                # Bound the blocking read of the first request line and headers
+                # by the rest of the first-request budget, so a client trickling
+                # the request cannot hold this worker thread past it.
+                parse_deadline = conn.ingress_deadline
+                conn.sock.settimeout(
+                    max(0.0, conn.ingress_deadline - time.monotonic()))
+            try:
+                req = next(conn.parser)
+            finally:
+                if parse_deadline is not None:
+                    # Restore the blocking default for the response path.
+                    conn.sock.settimeout(None)
             if not req:
                 return False
+
+            # The first request is fully parsed: its preparation phase is
+            # over, so the ingress deadline no longer applies to this
+            # connection. Later requests use the ordinary keepalive rules.
+            conn.ingress_active = False
+            conn.ingress_deadline = None
 
             settings = None
             if negotiation.upgrade_allowed(self.cfg, conn.client):
@@ -555,6 +599,9 @@ class ThreadWorker(base.Worker):
             self.log.debug("Ignored premature client disconnection. %s", e)
         except StopIteration as e:
             self.log.debug("Closing connection. %s", e)
+        except socket.timeout:
+            # The first-request budget elapsed while reading the request.
+            self.log.debug("First request timed out; closing connection.")
         except ssl.SSLError as e:
             if e.args[0] == ssl.SSL_ERROR_EOF:
                 self.log.debug("ssl connection closed")

@@ -1989,6 +1989,41 @@ stream open is closed with ``GOAWAY`` after this many seconds.
 !!! info "Changed in 26.3.0"
     Also applies to idle HTTP/2 connections.
 
+### `first_request_timeout`
+
+**Command line:** `--first-request-timeout INT`
+
+**Default:** `0`
+
+Maximum number of seconds a connection has to reach its first
+response, counted from when the connection is accepted.
+
+This bounds the request preparation phase of a fresh connection:
+waiting for the request line and headers, and for the application to
+begin its final response. A slow client trickling the first request,
+or an application that never answers it, has the connection taken
+away instead of holding a worker slot. Once the first final response
+has started the timer is disarmed and the connection is maintained
+under the ordinary rules: a streaming response and the ``timeout``
+setting are no longer bounded by it, and ``keepalive`` governs the
+idle time between later requests, which are not timed by this
+setting.
+
+On an HTTP/2 connection the budget is per stream, not per
+connection: each stream is timed from its HEADERS frame, an expired
+stream is cancelled with ``RST_STREAM`` while the other streams keep
+running, and a stream that answered normally leaves the connection
+reusable.
+
+Enforced by the ``asgi`` and ``gthread`` workers. The ``sync`` worker
+serves one connection at a time and the ``gevent`` and ``tornado``
+workers ignore this option.
+
+Value is a positive number or 0. Setting it to 0 (the default)
+disables the timeout entirely.
+
+!!! info "Added in 27.1.0"
+
 ### `asgi_loop`
 
 **Command line:** `--asgi-loop STRING`
