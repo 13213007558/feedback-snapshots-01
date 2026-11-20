@@ -124,21 +124,70 @@ class FSMap(MutableMapping):
             if on_error == "return" or not isinstance(out[k2], BaseException)
         }
 
-    def setitems(self, values_dict):
+    def setitems(self, values_dict, allowed_prefixes=None):
         """Set the values of multiple items in the store
 
         Parameters
         ----------
         values_dict: dict(str, bytes)
+        allowed_prefixes: iterable of str, optional
+            Explicit writable scope for this batch. Every key must equal one
+            of these prefixes or lie beneath one (a prefix followed by ``/``);
+            the empty string matches every key below the mapper root. The
+            whole batch is checked before touching the backend, so a rejected
+            batch never creates directories or writes any object, including
+            overwrites. ``None`` (the default) enforces no scope and preserves
+            the historical behavior.
         """
+        self._validate_write_scope(values_dict, allowed_prefixes)
         values = {self._key_to_str(k): maybe_convert(v) for k, v in values_dict.items()}
         for parent in dict.fromkeys(self.fs._parent(k) for k in values):
             self.fs.mkdirs(parent, exist_ok=True)
         self.fs.pipe(values)
 
-    def delitems(self, keys):
-        """Remove multiple keys from the store"""
+    def delitems(self, keys, allowed_prefixes=None):
+        """Remove multiple keys from the store
+
+        Parameters
+        ----------
+        keys: iterable of str
+        allowed_prefixes: iterable of str, optional
+            Explicit writable scope for this batch, with the same matching
+            rules as in :meth:`setitems`. The whole batch is checked before
+            anything is removed from the backend. ``None`` (the default)
+            enforces no scope and preserves the historical behavior.
+        """
+        keys = list(keys)
+        self._validate_write_scope(keys, allowed_prefixes)
         self.fs.rm([self._key_to_str(k) for k in keys])
+
+    def _validate_write_scope(self, keys, allowed_prefixes):
+        """Check that every key is inside the batch's writable scope.
+
+        This performs no filesystem access, so callers can enforce the scope
+        before any object is created, overwritten or deleted.
+        """
+        if allowed_prefixes is None:
+            return
+        prefixes = tuple(prefix.rstrip("/") for prefix in allowed_prefixes)
+        if not prefixes:
+            raise ValueError(
+                "allowed_prefixes must contain at least one prefix; pass None "
+                "to operate without a writable scope"
+            )
+        for key in keys:
+            if not self._key_in_scope(key, prefixes):
+                raise PermissionError(
+                    f"key {key!r} is outside the writable scope of this "
+                    f"operation, allowed prefixes: {list(prefixes)!r}"
+                )
+
+    @staticmethod
+    def _key_in_scope(key, prefixes):
+        return any(
+            prefix == "" or key == prefix or key.startswith(f"{prefix}/")
+            for prefix in prefixes
+        )
 
     def _key_to_str(self, key):
         """Generate full path for the key"""

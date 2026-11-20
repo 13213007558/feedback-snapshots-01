@@ -522,3 +522,153 @@ def test_delete_directory_key_raises_key_error(tmp_path, protocol):
         del mapper["dir"]
 
     assert mapper["dir/key"] == b"value"
+
+
+@pytest.mark.parametrize(
+    "prefix,key",
+    [
+        ("dept-a", "dept-a/file"),
+        ("dept-a", "dept-a/nested/file"),
+        ("dept-a/", "dept-a/file"),
+        ("", "anything/at/all"),
+        ("dept-a/", "dept-a"),
+    ],
+)
+def test_setitems_allowed_prefixes_accept_in_scope_keys(prefix, key):
+    m = _recording_mapper()
+    m.setitems({key: b"v"}, allowed_prefixes=[prefix])
+    assert m[key] == b"v"
+
+
+@pytest.mark.parametrize(
+    "prefix,key",
+    [("dept-a", "dept-ab/file"), ("dept-a", "other/file"), ("dept-a/", "other")]
+)
+def test_setitems_allowed_prefixes_reject_out_of_scope_keys(prefix, key):
+    m = _recording_mapper()
+    with pytest.raises(PermissionError, match="outside the writable scope"):
+        m.setitems({key: b"v"}, allowed_prefixes=[prefix])
+    assert m.fs.calls == []
+    assert key not in m
+
+
+def test_setitems_mixed_batch_checks_every_key_before_any_write():
+    # One permitted object and one object owned by another department: the
+    # whole batch must be rejected before any directory is made or pipe runs.
+    m = _recording_mapper()
+    m["dept-a/old"] = b"old"
+    m.fs.calls.clear()
+    batch = {"dept-a/new": b"allowed", "dept-b/secret": b"forbidden"}
+
+    with pytest.raises(PermissionError, match="dept-b/secret"):
+        m.setitems(batch, allowed_prefixes=["dept-a"])
+
+    assert m.fs.calls == []
+    assert "dept-a/new" not in m
+    assert "dept-b/secret" not in m
+    assert m["dept-a/old"] == b"old"
+
+
+def test_setitems_scope_rejects_overwrite_without_touching_backend():
+    m = _recording_mapper()
+    m["dept-a/key"] = b"old"
+    m.fs.calls.clear()
+    with pytest.raises(PermissionError):
+        m.setitems(
+            {"dept-a/key": b"new", "dept-b/key": b"x"},
+            allowed_prefixes=["dept-a"],
+        )
+    assert m.fs.calls == []
+    assert m["dept-a/key"] == b"old"
+
+
+def test_setitems_multiple_allowed_prefixes():
+    m = _recording_mapper()
+    batch = {"dept-a/k": b"1", "dept-b/k": b"2"}
+    m.setitems(batch, allowed_prefixes=["dept-a", "dept-b"])
+    assert dict(m) == batch
+
+
+def test_setitems_allowed_prefixes_empty_rejected():
+    m = _recording_mapper()
+    with pytest.raises(ValueError, match="at least one prefix"):
+        m.setitems({"k": b"v"}, allowed_prefixes=[])
+    assert m.fs.calls == []
+
+
+def test_setitems_scoped_batch_still_propagates_backend_failure():
+    failure = PermissionError("backend rejected the pipe")
+    m = _recording_mapper(pipe_errors=[failure])
+    with pytest.raises(PermissionError) as exc:
+        m.setitems({"dept-a/k": b"v"}, allowed_prefixes=["dept-a"])
+    assert exc.value is failure
+    assert [c[0] for c in m.fs.calls] == ["makedirs", "pipe"]
+    assert "dept-a/k" not in m
+
+
+def test_delitems_mixed_batch_removes_nothing_before_scope_check(monkeypatch):
+    fs = MemoryFileSystem(global_store=False, skip_instance_cache=True)
+    mapper = fs.get_mapper("/scope-delete", create=True)
+    mapper.setitems({"dept-a/k1": b"1", "dept-b/k2": b"2"})
+    removed = []
+    monkeypatch.setattr(fs, "rm", lambda path, *a, **k: removed.append(path))
+
+    with pytest.raises(PermissionError, match="dept-b/k2"):
+        mapper.delitems(["dept-a/k1", "dept-b/k2"], allowed_prefixes=["dept-a"])
+
+    assert removed == []
+    assert "dept-a/k1" in mapper
+    assert "dept-b/k2" in mapper
+
+
+def test_delitems_legal_scoped_batch_removes_keys():
+    fs = MemoryFileSystem(global_store=False, skip_instance_cache=True)
+    mapper = fs.get_mapper("/scope-delete-ok", create=True)
+    mapper.setitems({"dept-a/k1": b"1", "dept-a/k2": b"2", "dept-b/k3": b"3"})
+
+    mapper.delitems(["dept-a/k1", "dept-a/k2"], allowed_prefixes=["dept-a"])
+
+    assert dict(mapper) == {"dept-b/k3": b"3"}
+
+
+def test_delitems_empty_allowed_prefixes_rejected(monkeypatch):
+    fs = MemoryFileSystem(global_store=False, skip_instance_cache=True)
+    mapper = fs.get_mapper("/scope-delete-empty", create=True)
+    mapper["dept-a/k"] = b"v"
+    called = []
+    monkeypatch.setattr(fs, "rm", lambda path, *a, **k: called.append(path))
+
+    with pytest.raises(ValueError, match="at least one prefix"):
+        mapper.delitems(["dept-a/k"], allowed_prefixes=[])
+
+    assert called == []
+    assert "dept-a/k" in mapper
+
+
+def test_delitems_scoped_batch_still_propagates_backend_failure(monkeypatch):
+    fs = MemoryFileSystem(global_store=False, skip_instance_cache=True)
+    mapper = fs.get_mapper("/scope-delete-fail", create=True)
+    mapper["dept-a/k"] = b"v"
+    failure = PermissionError("backend could not remove the file")
+
+    def fail_rm(path, *args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(fs, "rm", fail_rm)
+
+    with pytest.raises(PermissionError) as exc:
+        mapper.delitems(["dept-a/k"], allowed_prefixes=["dept-a"])
+    assert exc.value is failure
+    assert mapper["dept-a/k"] == b"v"
+
+
+def test_single_key_and_unscoped_batch_operations_unchanged():
+    m = _recording_mapper()
+    # single-key API has no scope argument and keeps working as before
+    m["dept-a/k"] = b"v"
+    assert m["dept-a/k"] == b"v"
+    del m["dept-a/k"]
+    # bulk calls without allowed_prefixes still accept any key under root
+    m.setitems({"any/dept/key": b"x"})
+    m.delitems(["any/dept/key"])
+    assert not list(m)

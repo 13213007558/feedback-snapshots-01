@@ -6,6 +6,11 @@ Dev
 
 Enhancements
 
+- Accept ``allowed_prefixes`` on ``FSMap.setitems`` and ``FSMap.delitems`` to
+  declare a batch's writable key scope; the whole batch is validated before any
+  object is created, overwritten or deleted, while unscoped and single-key
+  usage is unchanged.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 

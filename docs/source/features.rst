@@ -90,6 +90,27 @@ object.
     list(mapper)
     mapper[k] = b'some data'
 
+When several departments share one mapper but each may only write beneath its
+own prefix, a batch can declare its explicit writable scope with
+``allowed_prefixes``. The whole batch is checked before any object is created,
+overwritten or deleted, so a batch containing even one key outside the scope
+fails without touching the backend. A prefix matches an exact key or anything
+beneath it (the prefix followed by ``/``); the empty string matches every key
+below the mapper root.
+
+.. code-block:: python
+
+    # writes only if every key is under "dept-a/" or "dept-b/"
+    mapper.setitems(
+        {"dept-a/chunk/0": b"...", "dept-b/chunk/1": b"..."},
+        allowed_prefixes=["dept-a", "dept-b"],
+    )
+    # deletions are checked with the same rules
+    mapper.delitems(["dept-a/chunk/0"], allowed_prefixes=["dept-a"])
+
+Calls without ``allowed_prefixes`` and the single-key ``mapper[k]`` interface
+keep their previous, unrestricted behavior.
+
 .. _zarr: https://zarr.readthedocs.io/en/stable/
 
 PyArrow integration
