@@ -272,6 +272,10 @@ class SQLAlchemy:
         self._engine_options = engine_options
         self._app_engines: WeakKeyDictionary[Flask, dict[str | None, sa.engine.Engine]]
         self._app_engines = WeakKeyDictionary()
+        self._app_allowed_binds: WeakKeyDictionary[
+            Flask, frozenset[str | None] | None
+        ]
+        self._app_allowed_binds = WeakKeyDictionary()
         self._add_models_to_shell = add_models_to_shell
 
         if app is not None:
@@ -305,6 +309,7 @@ class SQLAlchemy:
         - :data:`.SQLALCHEMY_ENGINE_OPTIONS`
         - :data:`.SQLALCHEMY_ECHO`
         - :data:`.SQLALCHEMY_BINDS`
+        - :data:`.SQLALCHEMY_ALLOWED_BINDS`
         - :data:`.SQLALCHEMY_RECORD_QUERIES`
         - :data:`.SQLALCHEMY_TRACK_MODIFICATIONS`
 
@@ -375,6 +380,8 @@ class SQLAlchemy:
             self._apply_driver_defaults(options, app)
             engines[key] = self._make_engine(key, options, app)
 
+        self._app_allowed_binds[app] = self._parse_allowed_binds(app, engines)
+
         if app.config.setdefault("SQLALCHEMY_RECORD_QUERIES", False):
             from . import record_queries
 
@@ -385,6 +392,41 @@ class SQLAlchemy:
             from . import track_modifications
 
             track_modifications._listen(self.session)
+
+    def _parse_allowed_binds(
+        self, app: Flask, engines: t.Mapping[str | None, sa.engine.Engine]
+    ) -> frozenset[str | None] | None:
+        """Read and validate :data:`.SQLALCHEMY_ALLOWED_BINDS`.
+
+        :meta private:
+
+        .. versionadded:: 3.2
+        """
+        value = app.config.setdefault("SQLALCHEMY_ALLOWED_BINDS", None)
+
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            allowed = frozenset({value})
+        else:
+            allowed = frozenset(value)
+
+        missing = sorted(
+            (key for key in allowed if key not in engines),
+            key=lambda key: "" if key is None else key,
+        )
+
+        if missing:
+            names = ", ".join(
+                "None" if key is None else repr(key) for key in missing
+            )
+            raise RuntimeError(
+                f"'SQLALCHEMY_ALLOWED_BINDS' contains bind keys that are not"
+                f" configured: {names}."
+            )
+
+        return allowed
 
     def _make_scoped_session(
         self, options: dict[str, t.Any]
@@ -696,6 +738,32 @@ class SQLAlchemy:
             )
 
         return self._app_engines[app]
+
+    @property
+    def allowed_binds(self) -> frozenset[str | None] | None:
+        """The set of bind keys that :attr:`session` may use for the current
+        application, or ``None`` if all bind keys are allowed.
+
+        This is configured with :data:`.SQLALCHEMY_ALLOWED_BINDS`. The restriction is
+        checked by :meth:`Session.get_bind <flask_sqlalchemy.session.Session.get_bind>`
+        before a connection is acquired, so it applies to ORM queries and Core
+        statements executed through the session, and a rejected statement is never sent
+        to an engine.
+
+        This requires that a Flask application context is active.
+
+        .. versionadded:: 3.2
+        """
+        app = current_app._get_current_object()  # type: ignore[attr-defined]
+
+        if app not in self._app_engines:
+            raise RuntimeError(
+                "The current Flask app is not registered with this 'SQLAlchemy'"
+                " instance. Did you forget to call 'init_app', or did you create"
+                " multiple 'SQLAlchemy' instances?"
+            )
+
+        return self._app_allowed_binds.get(app)
 
     @property
     def engine(self) -> sa.engine.Engine:

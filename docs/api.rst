@@ -53,6 +53,13 @@ Session
 .. autoclass:: Session
     :members:
 
+.. autoexception:: BindAccessError
+
+    Raised when :meth:`Session.get_bind` selects a bind that the current application
+    is not allowed to access. It subclasses both
+    :class:`sqlalchemy.exc.UnboundExecutionError` and :class:`PermissionError`.
+
+
 
 Pagination
 ----------

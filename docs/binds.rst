@@ -73,6 +73,32 @@ The default engine is :attr:`.SQLAlchemy.engine`, and the default metadata is
 :attr:`.SQLAlchemy.metadatas` are dicts mapping all bind keys.
 
 
+Restricting Binds Per Application
+---------------------------------
+
+An application may only be allowed to access some of the configured binds, for example
+when the same extension instance is shared by an internal reporting app and a public
+app. Set :data:`.SQLALCHEMY_ALLOWED_BINDS` to the list of bind keys the application may
+use. The default bind is ``None`` and must be listed explicitly if it is allowed.
+
+.. code-block:: python
+
+    SQLALCHEMY_BINDS = {
+        "reports": "sqlite:///reports.db",
+        "auth": "sqlite:///auth.db",
+    }
+    SQLALCHEMY_ALLOWED_BINDS = [None, "reports"]
+
+The restriction is applied by the session when it selects an engine, before a
+connection is acquired. It covers ORM queries, Core statements executed through the
+session, statements that join tables from more than one bind, and an explicit engine
+passed as a bind. A statement that references a disallowed bind key raises
+:class:`.BindAccessError` without sending any SQL to that engine.
+
+Applications that do not set this config keep the previous behavior and may use every
+configured bind.
+
+
 Creating and Dropping Tables
 ----------------------------
 

@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+-   Add ``SQLALCHEMY_ALLOWED_BINDS`` to restrict which bind keys a session may use for
+    an application. The restriction applies to ORM and Core statements and is checked
+    before a connection is acquired.
+
+
 Version 3.1.2
 -------------
 

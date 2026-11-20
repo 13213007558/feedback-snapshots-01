@@ -47,6 +47,29 @@ must happen before initializing the application.
 
     .. versionadded:: 0.12
 
+.. data:: SQLALCHEMY_ALLOWED_BINDS
+
+    A list of bind keys that the session may use for this application. If not set,
+    all configured bind keys are allowed, preserving the behavior of existing
+    applications. To restrict an application, list each allowed key, including
+    ``None`` for the default bind.
+
+    .. code-block:: python
+
+        SQLALCHEMY_BINDS = {"reports": "sqlite:///reports.db", "auth": "sqlite:///auth.db"}
+        SQLALCHEMY_ALLOWED_BINDS = [None, "reports"]
+
+    The check is enforced by the session for every ORM and Core statement, before a
+    connection is acquired. A statement that depends on a bind key that is not listed
+    raises :class:`.BindAccessError` and is not sent to any engine. This includes
+    joined statements that reference more than one bind, and an explicit ``bind``
+    passed in ``bind_arguments``.
+
+    A key that is listed but not configured as a bind raises an error when
+    :meth:`.SQLAlchemy.init_app` is called.
+
+    .. versionadded:: 3.2
+
 .. data:: SQLALCHEMY_ECHO
 
     The default value for ``echo`` and ``echo_pool`` for every engine. This is useful to
