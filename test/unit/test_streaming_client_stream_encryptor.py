@@ -12,6 +12,7 @@ from mock import MagicMock, call, patch, sentinel
 import aws_encryption_sdk.internal.defaults
 from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
+    AWSEncryptionSDKClientError,
     CustomMaximumValueExceeded,
     MasterKeyProviderError,
     NotSupportedError,
@@ -275,6 +276,47 @@ class TestStreamEncryptor(object):
         with pytest.raises(CustomMaximumValueExceeded) as excinfo:
             test_encryptor._prep_message()
         excinfo.match("Number of encrypted data keys found larger than configured value")
+
+    def test_prep_message_unapproved_encryption_context_keys_rejected_before_materials_request(self):
+        test_encryptor = StreamEncryptor(
+            source=io.BytesIO(self.plaintext),
+            materials_manager=self.mock_materials_manager,
+            encryption_context={"approved": "value", "internal-notes": "secret"},
+            allowed_encryption_context_keys={"approved"},
+            commitment_policy=self.mock_commitment_policy,
+        )
+        with pytest.raises(AWSEncryptionSDKClientError) as excinfo:
+            test_encryptor._prep_message()
+        excinfo.match("not approved to be stored")
+        excinfo.match("internal-notes")
+        self.mock_materials_manager.get_encryption_materials.assert_not_called()
+
+    def test_prep_message_approved_encryption_context_keys_allowed(self):
+        test_encryptor = StreamEncryptor(
+            source=io.BytesIO(self.plaintext),
+            materials_manager=self.mock_materials_manager,
+            frame_length=self.mock_frame_length,
+            source_length=5,
+            encryption_context={"approved": "value"},
+            allowed_encryption_context_keys={"approved", "also-approved"},
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_encryptor.content_type = ContentType.FRAMED_DATA
+        test_encryptor._prep_message()
+        self.mock_materials_manager.get_encryption_materials.assert_called_once()
+
+    def test_prep_message_no_allowed_encryption_context_keys_policy_allows_any_context(self):
+        test_encryptor = StreamEncryptor(
+            source=io.BytesIO(self.plaintext),
+            materials_manager=self.mock_materials_manager,
+            frame_length=self.mock_frame_length,
+            source_length=5,
+            encryption_context={"anything": "goes"},
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_encryptor.content_type = ContentType.FRAMED_DATA
+        test_encryptor._prep_message()
+        self.mock_materials_manager.get_encryption_materials.assert_called_once()
 
     def test_prep_message_algorithm_change(self):
         self.mock_encryption_materials.algorithm = Algorithm.AES_256_GCM_IV12_TAG16

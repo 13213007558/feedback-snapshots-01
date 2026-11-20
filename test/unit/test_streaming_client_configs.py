@@ -94,7 +94,13 @@ VALID_KWARGS = {
         ),
     ],
     EncryptorConfig: build_valid_kwargs_list(
-        BASE_KWARGS, dict(encryption_context={}, algorithm=ALGORITHM, frame_length=8192)
+        BASE_KWARGS,
+        dict(
+            encryption_context={},
+            algorithm=ALGORITHM,
+            frame_length=8192,
+            allowed_encryption_context_keys={"approved-key"},
+        ),
     ),
     DecryptorConfig: build_valid_kwargs_list(BASE_KWARGS, dict(max_body_length=10)),
 }
@@ -110,6 +116,7 @@ INVALID_KWARGS = {
     EncryptorConfig: [
         dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), encryption_context=None),
         dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), frame_length=None),
+        dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), allowed_encryption_context_keys=5),
     ],
     DecryptorConfig: [dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), max_body_length="not an int")],
 }
@@ -155,6 +162,23 @@ def test_encryptor_config_defaults():
     assert test.encryption_context == {}
     assert test.algorithm is None
     assert test.frame_length == FRAME_LENGTH
+    assert test.allowed_encryption_context_keys is None
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    (
+        (["a", "b"], frozenset(["a", "b"])),
+        (("a",), frozenset(["a"])),
+        (frozenset(["a"]), frozenset(["a"])),
+        (None, None),
+    ),
+)
+def test_encryptor_config_allowed_encryption_context_keys_converted(value, expected):
+    kwargs = dict(BASE_KWARGS)
+    kwargs["allowed_encryption_context_keys"] = value
+    test = EncryptorConfig(**kwargs)
+    assert test.allowed_encryption_context_keys == expected
 
 
 def test_decryptor_config_defaults():

@@ -19,10 +19,10 @@ from wrapt import ObjectProxy
 
 import aws_encryption_sdk
 from aws_encryption_sdk.caches import build_decryption_materials_cache_key, build_encryption_materials_cache_key
-from aws_encryption_sdk.exceptions import CustomMaximumValueExceeded, NotSupportedError
+from aws_encryption_sdk.exceptions import AWSEncryptionSDKClientError, CustomMaximumValueExceeded, NotSupportedError
 from aws_encryption_sdk.identifiers import Algorithm, CommitmentPolicy, EncryptionKeyType, WrappingAlgorithm
 from aws_encryption_sdk.internal.crypto.wrapping_keys import WrappingKey
-from aws_encryption_sdk.internal.defaults import LINE_LENGTH
+from aws_encryption_sdk.internal.defaults import ENCODED_SIGNER_KEY, LINE_LENGTH
 from aws_encryption_sdk.internal.formatting.encryption_context import serialize_encryption_context
 from aws_encryption_sdk.key_providers.base import MasterKeyProviderConfig
 from aws_encryption_sdk.key_providers.kms import DiscoveryAwsKmsMasterKeyProvider
@@ -291,6 +291,45 @@ def test_encrypt_decrypt_header_only():
     assert all(
         pair in decryptor_header.encryption_context.items() for pair in encryptor_header.encryption_context.items()
     )
+
+
+def test_encrypt_allowed_encryption_context_keys_policy():
+    """Only approved encryption context keys are written to the message header,
+    alongside the SDK-reserved keys; unapproved keys are rejected."""
+    client = aws_encryption_sdk.EncryptionSDKClient()
+    key_provider = build_fake_raw_key_provider(
+        wrapping_algorithm=WrappingAlgorithm.AES_256_GCM_IV12_TAG16_NO_PADDING,
+        encryption_key_type=EncryptionKeyType.SYMMETRIC,
+    )
+    approved_keys = frozenset(["archive-id", "retention-period"])
+    public_context = {"archive-id": "arc-2026-0001", "retention-period": "7y"}
+
+    ciphertext, encryptor_header = client.encrypt(
+        source=VALUES["plaintext_128"],
+        key_provider=key_provider,
+        encryption_context=public_context,
+        allowed_encryption_context_keys=approved_keys,
+    )
+
+    # The header only exposes the approved keys plus the SDK-reserved signing key
+    assert set(encryptor_header.encryption_context.keys()) == approved_keys | set([ENCODED_SIGNER_KEY])
+    assert all(encryptor_header.encryption_context[key] == value for key, value in public_context.items())
+
+    # The message still round-trips
+    plaintext, _decryptor_header = client.decrypt(source=ciphertext, key_provider=key_provider)
+    assert plaintext == VALUES["plaintext_128"]
+
+    # Context containing unapproved keys is rejected
+    unapproved_context = dict(public_context)
+    unapproved_context["internal-owner-notes"] = "not public metadata"
+    with pytest.raises(AWSEncryptionSDKClientError) as excinfo:
+        client.encrypt(
+            source=VALUES["plaintext_128"],
+            key_provider=key_provider,
+            encryption_context=unapproved_context,
+            allowed_encryption_context_keys=approved_keys,
+        )
+    excinfo.match("internal-owner-notes")
 
 
 @pytest.mark.parametrize(

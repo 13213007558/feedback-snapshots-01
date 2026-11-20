@@ -82,6 +82,13 @@ except ImportError:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _optional_frozenset(value):
+    """Converts an optional iterable to a frozenset, preserving None."""
+    if value is None:
+        return None
+    return frozenset(value)
+
+
 @attr.s(hash=True)  # pylint: disable=too-many-instance-attributes
 @six.add_metaclass(abc.ABCMeta)
 class _ClientConfig(object):  # pylint: disable=too-many-instance-attributes
@@ -443,6 +450,17 @@ class EncryptorConfig(_ClientConfig):
             this is not enforced if a `key_provider` is provided.
 
     :param dict encryption_context: Dictionary defining encryption context
+    :param allowed_encryption_context_keys: Encryption context keys approved to be stored
+        in the message header (optional).
+
+        .. note::
+            If provided, every key in `encryption_context` must be listed here;
+            otherwise encryption fails before any cryptographic materials are requested.
+            Keys that the SDK itself adds to the encryption context after materials
+            are requested (such as the `aws-crypto-public-key` signature verification key)
+            are not subject to this check and are stored in the header as usual.
+
+    :type allowed_encryption_context_keys: None or iterable of str
     :param algorithm: Algorithm to use for encryption (optional)
     :type algorithm: aws_encryption_sdk.identifiers.Algorithm
     :param int frame_length: Frame length in bytes (optional)
@@ -452,6 +470,12 @@ class EncryptorConfig(_ClientConfig):
         hash=False,  # dictionaries are not hashable
         default=attr.Factory(dict),
         validator=attr.validators.instance_of(dict),
+    )
+    allowed_encryption_context_keys = attr.ib(
+        hash=True,
+        default=None,
+        converter=_optional_frozenset,
+        validator=attr.validators.optional(attr.validators.instance_of(frozenset)),
     )
     algorithm = attr.ib(
         hash=True, default=None, validator=attr.validators.optional(attr.validators.instance_of(Algorithm))
@@ -498,6 +522,17 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             this is not enforced if a `key_provider` is provided.
 
     :param dict encryption_context: Dictionary defining encryption context
+    :param allowed_encryption_context_keys: Encryption context keys approved to be stored
+        in the message header (optional).
+
+        .. note::
+            If provided, every key in `encryption_context` must be listed here;
+            otherwise encryption fails before any cryptographic materials are requested.
+            Keys that the SDK itself adds to the encryption context after materials
+            are requested (such as the `aws-crypto-public-key` signature verification key)
+            are not subject to this check and are stored in the header as usual.
+
+    :type allowed_encryption_context_keys: None or iterable of str
     :param algorithm: Algorithm to use for encryption
     :type algorithm: aws_encryption_sdk.identifiers.Algorithm
     :param int frame_length: Frame length in bytes
@@ -529,6 +564,22 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             header=self.header, plaintext_length=self.stream_length
         )
 
+    def _validate_allowed_encryption_context_keys(self):
+        """Validates the configured encryption context against the approved keys policy.
+
+        :raises AWSEncryptionSDKClientError: if the encryption context contains keys
+            that are not in the configured allowed keys
+        """
+        allowed_keys = self.config.allowed_encryption_context_keys
+        if allowed_keys is None:
+            return
+        unapproved_keys = set(self.config.encryption_context) - allowed_keys
+        if unapproved_keys:
+            raise AWSEncryptionSDKClientError(
+                "Encryption context contains keys that are not approved to be stored "
+                "in the message header: {keys}".format(keys=sorted(unapproved_keys))
+            )
+
     def _prep_message(self):
         """Performs initial message setup.
 
@@ -536,6 +587,8 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         :raises MasterKeyProviderError: if no Master Keys are returned from key_provider
         """
         validate_commitment_policy_on_encrypt(self.config.commitment_policy, self.config.algorithm)
+
+        self._validate_allowed_encryption_context_keys()
 
         try:
             plaintext_length = self.stream_length
