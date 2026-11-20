@@ -62,6 +62,11 @@ from sigstore._utils import base64_encode_pem_cert, sha256_digest
 from sigstore.errors import CertValidationError, VerificationError
 from sigstore.hashes import Hashed
 from sigstore.models import Bundle, ClientTrustConfig, TrustedRoot
+from sigstore.verify.log_policy import (
+    LogDeactivationPolicy,
+    LogMaterial,
+    VerificationReceipt,
+)
 from sigstore.verify.policy import VerificationPolicy
 
 _logger = logging.getLogger(__name__)
@@ -80,15 +85,30 @@ class Verifier:
     The primary API for verification operations.
     """
 
-    def __init__(self, *, trusted_root: TrustedRoot):
+    def __init__(
+        self,
+        *,
+        trusted_root: TrustedRoot,
+        log_policy: LogDeactivationPolicy | None = None,
+    ):
         """
         Create a new `Verifier`.
 
         `trusted_root` is the `TrustedRoot` object containing the root of trust
         for the verification process.
+
+        `log_policy` is an optional `LogDeactivationPolicy` describing
+        decommissioned transparency logs and the approved historical window in
+        which their entries remain readable. When provided, every verification
+        is checked against it and every `log_policy` entry must reference a
+        transparency log instance present in `trusted_root`.
         """
         self._fulcio_certificate_chain = trusted_root.get_fulcio_certs()
         self._trusted_root = trusted_root
+
+        if log_policy is not None:
+            self._validate_log_policy(log_policy, trusted_root)
+        self._log_policy = log_policy
 
         # this is an ugly hack needed for verifying "detached" materials
         # In reality we should be choosing the rekor instance based on the logid
@@ -99,6 +119,39 @@ class Verifier:
             )
         url = tlogs[0].base_url
         self._rekor = RekorClient(url)
+
+    @staticmethod
+    def _validate_log_policy(
+        log_policy: LogDeactivationPolicy, trusted_root: TrustedRoot
+    ) -> None:
+        """
+        Fail closed if the policy deactivates a log that the trusted root
+        does not know about: such a policy could never accept any real entry
+        and is almost certainly a caller configuration error.
+        """
+        known_log_ids = {tlog.log_id.key_id for tlog in trusted_root._inner.tlogs}
+        unknown = [
+            log_id.hex()
+            for log_id in log_policy.deactivated_log_ids
+            if log_id not in known_log_ids
+        ]
+        if unknown:
+            raise VerificationError(
+                "log deactivation policy references transparency log(s) absent "
+                f"from the trusted root: {', '.join(unknown)}"
+            )
+
+    def _effective_log_policy(
+        self, log_policy: LogDeactivationPolicy | None
+    ) -> LogDeactivationPolicy | None:
+        """
+        Resolve the per-call policy (falling back to the verifier's default)
+        and ensure any per-call policy is consistent with the trusted root.
+        """
+        if log_policy is not None:
+            self._validate_log_policy(log_policy, self._trusted_root)
+            return log_policy
+        return self._log_policy
 
     @classmethod
     def production(cls, *, offline: bool = False) -> Verifier:
@@ -286,11 +339,17 @@ class Verifier:
             )
 
     def _verify_common_signing_cert(
-        self, bundle: Bundle, policy: VerificationPolicy
-    ) -> None:
+        self,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        log_policy: LogDeactivationPolicy | None = None,
+    ) -> VerificationReceipt | None:
         """
         Performs the signing certificate verification steps that are shared between
         `verify_dsse` and `verify_artifact`.
+
+        Returns a `VerificationReceipt` describing the accepted transparency log
+        material when a `LogDeactivationPolicy` is in effect, otherwise `None`.
 
         Raises `VerificationError` on all failures.
         """
@@ -380,6 +439,11 @@ class Verifier:
                     f"invalid signing cert: expired at time of signing, time via {vts}"
                 )
 
+        if log_policy is not None:
+            material = LogMaterial.from_bundle(bundle, verified_timestamps)
+            return log_policy.evaluate(material)
+        return None
+
     def verify_dsse(
         self, bundle: Bundle, policy: VerificationPolicy
     ) -> tuple[str, bytes]:
@@ -402,9 +466,26 @@ class Verifier:
         to them before proceeding to handle `payload` in an application-dependent
         manner.
         """
+        payload_type, payload, _receipt = self.verify_dsse_with_receipt(bundle, policy)
+        return (payload_type, payload)
+
+    def verify_dsse_with_receipt(
+        self,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        log_policy: LogDeactivationPolicy | None = None,
+    ) -> tuple[str, bytes, VerificationReceipt | None]:
+        """
+        Verifies a bundle's DSSE envelope, like `verify_dsse`, additionally
+        returning a `VerificationReceipt` describing the accepted transparency
+        log material when a `LogDeactivationPolicy` is configured on this
+        `Verifier` or passed as `log_policy`.
+        """
 
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        receipt = self._verify_common_signing_cert(
+            bundle, policy, self._effective_log_policy(log_policy)
+        )
 
         # (7): verify the bundle's signature and DSSE envelope against the
         #      signing certificate's public key.
@@ -440,7 +521,7 @@ class Verifier:
                 f"Unsupported DSSE log entry type: {kind}/{version}"
             )
 
-        return (envelope._inner.payload_type, envelope._inner.payload)
+        return (envelope._inner.payload_type, envelope._inner.payload, receipt)
 
     def verify_artifact(
         self,
@@ -461,8 +542,28 @@ class Verifier:
         On failure, this method raises `VerificationError`.
         """
 
+        self.verify_artifact_with_receipt(input_, bundle, policy)
+
+    def verify_artifact_with_receipt(
+        self,
+        input_: bytes | Hashed,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        log_policy: LogDeactivationPolicy | None = None,
+    ) -> VerificationReceipt | None:
+        """
+        Verifies an artifact, like `verify_artifact`, returning a
+        `VerificationReceipt` describing the accepted transparency log material
+        when a `LogDeactivationPolicy` is configured on this `Verifier` or
+        passed as `log_policy`, and `None` when no log policy is in effect.
+
+        On failure, this method raises `VerificationError`.
+        """
+
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        receipt = self._verify_common_signing_cert(
+            bundle, policy, self._effective_log_policy(log_policy)
+        )
 
         hashed_input = sha256_digest(input_)
         bundle_signature = bundle._inner.message_signature
@@ -507,6 +608,8 @@ class Verifier:
             raise VerificationError(
                 f"Unsupported hashedrekord version {entry._inner.kind_version.version}"
             )
+
+        return receipt
 
 
 def _validate_dsse_v001_entry_body(bundle: Bundle) -> None:

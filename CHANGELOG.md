@@ -12,6 +12,13 @@ All versions prior to 0.9.0 are untracked.
 
 * HTTP clients (most importantly Rekor) now retry requests when that makes
   sense ([#1970](https://github.com/sigstore/sigstore-python/pull/1970))
+* New `LogDeactivationPolicy` API for verifying against decommissioned
+  transparency logs: entries on a retired log are only accepted inside an
+  approved historical window ending at a fixed deactivation point, while
+  entries on current logs remain the only accepted material for new data.
+  `Verifier.verify_artifact_with_receipt` and
+  `Verifier.verify_dsse_with_receipt` return a `VerificationReceipt`
+  describing the material actually accepted.
 
 ### Changed
 

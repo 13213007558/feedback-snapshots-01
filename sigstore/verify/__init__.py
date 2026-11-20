@@ -43,11 +43,24 @@ print(result)
 ```
 """
 
-from sigstore.verify import policy, verifier
+from sigstore.verify import log_policy, policy, verifier
+from sigstore.verify.log_policy import (
+    AcceptedMaterial,
+    LogDeactivation,
+    LogDeactivationPolicy,
+    LogMaterial,
+    VerificationReceipt,
+)
 from sigstore.verify.verifier import Verifier
 
 __all__ = [
+    "AcceptedMaterial",
+    "LogDeactivation",
+    "LogDeactivationPolicy",
+    "LogMaterial",
+    "VerificationReceipt",
     "Verifier",
+    "log_policy",
     "policy",
     "verifier",
 ]
