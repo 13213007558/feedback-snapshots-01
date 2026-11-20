@@ -6,7 +6,19 @@ import pytest
 
 from kombu import Connection, Producer, pools
 from kombu.connection import ConnectionPool, PooledConnection
+from kombu.transport import memory
 from kombu.utils.collections import eqhash
+
+
+class IdentityRecordingTransport(memory.Transport):
+    """Local transport recording the identity domain of each client."""
+
+    established = []
+
+    def establish_connection(self):
+        connection = super().establish_connection()
+        self.established.append((self.client.identity_domain, connection))
+        return connection
 
 
 class test_ProducerPool:
@@ -292,3 +304,119 @@ class test_bool_limit:
             with pytest.raises(TypeError, match="limit must be an int, not bool"):
                 p.limit = value
         assert p.limit == 3
+
+
+class test_identity_domain:
+    """Pools segregated by the optional authorization identity domain."""
+
+    def setup_method(self):
+        IdentityRecordingTransport.established = []
+
+    def teardown_method(self):
+        pools.reset()
+        IdentityRecordingTransport.established = []
+
+    def _connection(self, identity_domain=None):
+        return Connection(
+            'memory://', transport=IdentityRecordingTransport,
+            identity_domain=identity_domain)
+
+    def test_same_domain_shares_pools(self):
+        c1 = self._connection('dept-a')
+        c2 = self._connection('dept-a')
+        assert eqhash(c1) == eqhash(c2)
+        assert pools.connections[c1] is pools.connections[c2]
+        assert pools.producers[c1] is pools.producers[c2]
+
+    def test_distinct_domains_do_not_share_pools(self):
+        ca = self._connection('dept-a')
+        cb = self._connection('dept-b')
+        assert eqhash(ca) != eqhash(cb)
+        assert pools.connections[ca] is not pools.connections[cb]
+        assert pools.producers[ca] is not pools.producers[cb]
+
+    def test_default_domain_keeps_previous_behavior(self):
+        c1 = Connection('memory://')
+        c2 = Connection('memory://', identity_domain=None)
+        c3 = Connection('memory://', identity_domain='dept-a')
+        assert eqhash(c1) == eqhash(c2)
+        assert eqhash(c1) != eqhash(c3)
+        assert pools.connections[c1] is pools.connections[c2]
+
+    def test_producer_and_connection_pool_agree_on_identity(self):
+        ca = self._connection('dept-a')
+        cb = self._connection('dept-b')
+
+        conn_a = pools.connections[ca].acquire()
+        conn_b = pools.connections[cb].acquire()
+        assert conn_a is not conn_b
+        assert conn_a.identity_domain == 'dept-a'
+        assert conn_b.identity_domain == 'dept-b'
+
+        with pools.producers[ca].acquire() as producer_a:
+            assert producer_a.__connection__.identity_domain == 'dept-a'
+            producer_a.publish('a', routing_key='a')
+        with pools.producers[cb].acquire() as producer_b:
+            assert producer_b.__connection__.identity_domain == 'dept-b'
+            producer_b.publish('b', routing_key='b')
+
+        # every established connection was recorded with the identity
+        # domain of the principal that borrowed it.
+        domains = {
+            domain for domain, _ in IdentityRecordingTransport.established}
+        assert domains == {'dept-a', 'dept-b'}
+        conn_a.release()
+        conn_b.release()
+
+    def test_rebuild_of_one_domain_does_not_affect_other(self):
+        ca = self._connection('dept-a')
+        cb = self._connection('dept-b')
+        pool_a = pools.connections[ca]
+        pool_b = pools.connections[cb]
+
+        conn_a = pool_a.acquire()
+        conn_b = pool_b.acquire()
+        conn_a.connect()
+        conn_b.connect()
+        established_before = len(IdentityRecordingTransport.established)
+
+        # rebuild domain A's pool: its connections are collected.
+        pool_a.force_close_all(close_pool=False)
+        assert not conn_a.connected
+
+        # domain B's borrowed connection is untouched.
+        assert conn_b.connected
+        conn_b.default_channel
+
+        # domain A re-establishes connections under its own identity.
+        conn_a2 = pool_a.acquire()
+        conn_a2.connect()
+        assert conn_a2.identity_domain == 'dept-a'
+        new_domains = {
+            domain for domain, _ in
+            IdentityRecordingTransport.established[established_before:]}
+        assert new_domains == {'dept-a'}
+
+        conn_a2.release()
+        conn_b.release()
+
+    def test_close_of_one_domain_does_not_affect_other(self):
+        ca = self._connection('dept-a')
+        cb = self._connection('dept-b')
+        pool_a = pools.connections[ca]
+        pool_b = pools.connections[cb]
+
+        pool_a.force_close_all()
+        with pytest.raises(RuntimeError):
+            pool_a.acquire()
+
+        # domain B still borrows and publishes normally.
+        with pool_b.acquire() as conn_b:
+            conn_b.connect()
+            assert conn_b.identity_domain == 'dept-b'
+        with pools.producers[cb].acquire() as producer_b:
+            assert producer_b.__connection__.identity_domain == 'dept-b'
+            producer_b.publish('b', routing_key='b')
+
+        assert all(domain == 'dept-b'
+                   for domain, _ in IdentityRecordingTransport.established)
