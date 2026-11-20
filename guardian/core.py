@@ -191,6 +191,36 @@ class ObjectPermissionChecker:
         ctype = get_content_type(obj)
         return ctype.id, force_str(obj.pk)
 
+    def invalidate_cache(self, objects: Model | Iterable[Model]) -> int:
+        """Evicts cached permission entries for the given objects only.
+
+        Entries for objects not listed here are kept, so cache hits for
+        unchanged objects are preserved. Works uniformly for objects
+        protected through direct foreign key and generic object permission
+        models, as both share the same cache key format.
+
+        When the auto-prefetch cache is in use, `_obj_perms_cache` is the
+        very dict stored on the user/group as `_guardian_perms_cache`, so
+        evicting here also evicts there.
+
+        Parameters:
+            objects (Model | Iterable[Model]): a single Django model instance
+                or an iterable of instances whose cached entries should be
+                dropped.
+
+        Returns:
+            Number of cache entries actually evicted.
+        """
+        if isinstance(objects, Model):
+            objects = [objects]
+        evicted = 0
+        for obj in objects:
+            key = self.get_local_cache_key(obj)
+            if key in self._obj_perms_cache:
+                del self._obj_perms_cache[key]
+                evicted += 1
+        return evicted
+
     def prefetch_perms(self, objects: QuerySet):
         """Prefetches the permissions for objects in `objects` and puts them in the cache.
 

@@ -143,3 +143,39 @@ for project in projects:
     # No additional lookups needed to check permissions
     checker.has_perm('change_project', project)
 ```
+
+## Invalidating cached permissions
+
+`ObjectPermissionChecker` caches the permissions it fetched, so revoking a
+permission in the database does not affect checkers (or identities carrying
+an auto-prefetch cache) that already hold a cached result for that object.
+Guardian provides an explicit invalidation contract for this:
+
+- `ObjectPermissionChecker.invalidate_cache(objects)` evicts the cached
+  entries for exactly the given objects, immediately.
+- `guardian.utils.invalidate_obj_perms_cache_on_commit(identity, objects)`
+  schedules the same per-object eviction to run only after the current
+  transaction commits (via `django.db.transaction.on_commit`). If the
+  revocation transaction rolls back, nothing is evicted and the cached
+  results stay consistent with the unchanged database.
+
+Both work uniformly for objects protected through direct foreign key and
+generic object permission models, and both leave entries for objects not
+listed untouched, so unchanged objects keep their cache hits. `identity`
+may be an `ObjectPermissionChecker` or a user/group instance carrying a
+prefetch cache (populated when `GUARDIAN_AUTO_PREFETCH` is used); checkers
+sharing that prefetch cache observe the eviction automatically.
+
+A typical bulk revocation in a back-office view looks like this:
+
+``` python
+from django.db import transaction
+from guardian.shortcuts import remove_perm
+from guardian.utils import invalidate_obj_perms_cache_on_commit
+
+with transaction.atomic():
+    for obj in revoked_objects:
+        remove_perm('change_project', user, obj)
+    # Evict the affected cache entries only once this transaction commits.
+    invalidate_obj_perms_cache_on_commit(user, revoked_objects)
+```

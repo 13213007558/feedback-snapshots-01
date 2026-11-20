@@ -19,6 +19,7 @@ from django.contrib.auth import REDIRECT_FIELD_NAME, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.db import transaction
 from django.db.models import Model, QuerySet
 from django.http import (
     Http404,
@@ -29,6 +30,7 @@ from django.http import (
     HttpResponseRedirect,
 )
 from django.shortcuts import render
+from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
 from guardian.ctypes import get_content_type
@@ -532,3 +534,63 @@ def evict_obj_perms_cache(obj: Any) -> bool:
         delattr(obj, "_guardian_perms_cache")
         return True
     return False
+
+
+def invalidate_obj_perms_cache_on_commit(identity: Any, objects: Any, using: str | None = None) -> None:
+    """Schedules per-object permission cache invalidation for after commit.
+
+    This is the explicit cache invalidation contract for bulk permission
+    revocation: register it inside the revocation transaction and the cached
+    authorization results for exactly the given objects are evicted only once
+    the transaction commits. If the transaction rolls back, nothing is
+    evicted and previously cached results stay valid, matching the unchanged
+    database state. Entries for objects not listed here are never touched,
+    so cache hits for unchanged objects are preserved.
+
+    Works uniformly for objects protected through direct foreign key and
+    generic object permission models, as both share the same cache key
+    format.
+
+    Parameters:
+        identity: an `ObjectPermissionChecker` whose local cache should be
+            pruned, or a user/group instance carrying a prefetch cache
+            (`_guardian_perms_cache`, populated when
+            `GUARDIAN_AUTO_PREFETCH` is used). Checkers sharing that
+            prefetch cache observe the eviction automatically.
+        objects (Model | Iterable[Model]): a single Django model instance
+            or an iterable of instances whose cached entries should be
+            dropped on commit.
+        using (str | None): database alias passed to
+            `django.db.transaction.on_commit`.
+    """
+    from guardian.core import ObjectPermissionChecker
+
+    if isinstance(objects, Model):
+        objects = [objects]
+
+    keys = set()
+    for obj in objects:
+        ctype = get_content_type(obj)
+        keys.add((ctype.id, force_str(obj.pk)))
+
+    if not keys:
+        return
+
+    if isinstance(identity, ObjectPermissionChecker):
+
+        def get_cache() -> dict | None:
+            return identity._obj_perms_cache
+
+    else:
+
+        def get_cache() -> dict | None:
+            return getattr(identity, "_guardian_perms_cache", None)
+
+    def evict_entries() -> None:
+        cache = get_cache()
+        if not cache:
+            return
+        for key in keys:
+            cache.pop(key, None)
+
+    transaction.on_commit(evict_entries, using=using)
