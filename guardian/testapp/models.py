@@ -56,6 +56,24 @@ class Project(models.Model):
 Project.not_a_relation_descriptor = DynamicAccessor()
 
 
+class Ticket(Project):
+    """Ordinary work-order view of a Project row."""
+
+    guardian_proxy_permission_mode = "isolate"
+
+    class Meta:
+        proxy = True
+
+
+class SupervisorReview(Project):
+    """Supervisor review view of the same Project row."""
+
+    guardian_proxy_permission_mode = "isolate"
+
+    class Meta:
+        proxy = True
+
+
 # Simple model for testing inline admin functionality
 class UserProfile(models.Model):
     """Simple model for testing inline admin functionality with Guardian permissions."""

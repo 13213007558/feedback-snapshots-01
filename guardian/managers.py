@@ -79,7 +79,14 @@ class BaseObjectPermissionManager(models.Manager):
         if self.is_generic():
             kwargs["content_type"] = ctype
             kwargs["object_pk"] = obj.pk
-            if _is_using_default_content_type():
+            # Passing content_object lets GenericForeignKey populate its cache
+            # and saves a query in BaseObjectPermission.save(). It must only be
+            # passed when the generic field would derive the same content type:
+            # GenericForeignKey.__set__ overwrites content_type with the
+            # object's concrete model. For an isolated proxy that would move
+            # the row onto the base model; for a custom GUARDIAN_GET_CONTENT_TYPE
+            # it would override the app's chosen content type.
+            if _is_using_default_content_type() and ctype == ContentType.objects.get_for_model(obj):
                 kwargs["defaults"] = {"content_object": obj}
         else:
             kwargs["content_object"] = obj

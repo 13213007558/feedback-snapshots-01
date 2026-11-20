@@ -139,6 +139,84 @@ non-polymorphic classes.
 
 Defaults to `"guardian.ctypes.get_default_content_type"`.
 
+## `GUARDIAN_PROXY_PERMISSION_MODE`
+
+!!! abstract "Added in version 3.6.0"
+
+Controls whether Django [proxy models](https://docs.djangoproject.com/en/stable/topics/db/models/#proxy-models)
+share the object permissions of the concrete model they extend. Only the
+default `guardian.ctypes.get_default_content_type` function consults this
+setting; a custom `GUARDIAN_GET_CONTENT_TYPE` function is always authoritative.
+
+There are two modes:
+
+| Mode | Content type of a proxy | Object permissions |
+|---|---|---|
+| `"inherit"` (default) | The concrete model's content type | Shared with the concrete model and every other inheriting proxy |
+| `"isolate"` | The proxy's own content type | Private to that proxy |
+
+`"inherit"` is the historical behaviour and is safe for existing deployments:
+a permission granted on the base model applies to the proxy, and a permission
+granted through the proxy is stored against the base model, so it applies to
+every view of the same row. Use it when the proxy is a presentation-only view
+of the same authorization domain.
+
+`"isolate"` creates one content type per proxy and leaves the base model's
+content type untouched. Django then generates a separate permission set
+(`add_ticket`, `change_ticket`, …) for each proxy, and a grant on one proxy is
+not visible to the other proxy, to the concrete model, or to queries such as
+`get_objects_for_user(..., klass=OtherProxy)`. Use it when different actor
+roles see the same row through different proxies and must be authorized
+separately.
+
+The mode only applies to the proxy class itself. A concrete (multi-table)
+subclass of a proxy is not treated as a proxy, mirroring Django's own
+`ContentType.objects.get_for_model(..., for_concrete_model=True)` behaviour.
+
+### Per-model override
+
+Any proxy can opt out of the project-wide mode by setting the
+`guardian_proxy_permission_mode` class attribute to `"inherit"` or
+`"isolate"`:
+
+```python
+from django.db import models
+
+from myapp.models import Ticket
+
+
+class SupervisorReview(Ticket):
+    guardian_proxy_permission_mode = "isolate"
+
+    class Meta:
+        proxy = True
+```
+
+The attribute is the recommended, explicit form: it keeps the decision next to
+the model that depends on it, and it stays in effect if the project-wide
+setting is later changed. An unknown value raises `ValueError` the first time
+permissions are checked for that model. Setting the attribute to `None`
+restores the project-wide default.
+
+!!! warning "Choose one policy deliberately"
+
+    Mixing `"inherit"` and `"isolate"` proxies of the same concrete model is
+    supported but subtle. An inheriting proxy shares permissions with the
+    base model, while an isolated proxy does not, so a grant made through the
+    inheriting proxy is invisible to the isolated one. Prefer a single policy
+    per concrete model and document it next to the proxy definitions.
+
+!!! note "Switching an existing proxy to isolate"
+
+    When a proxy currently stores its permissions against the concrete
+    model's content type, switching it to `"isolate"` changes which content
+    type its checks and assignments use. Existing rows for the base model are
+    not rewritten and remain effective for the base model and any inheriting
+    proxies. Copy the grants you want the isolated proxy to keep before the
+    switch, and remove those you do not.
+
+Defaults to `"inherit"`.
+
 ## `GUARDIAN_AUTO_PREFETCH`
 
 !!! abstract "Added in version 2.0.0"

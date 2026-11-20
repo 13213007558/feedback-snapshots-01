@@ -40,6 +40,15 @@ if hasattr(settings, "GUARDIAN_MONKEY_PATCH"):
 
 GET_CONTENT_TYPE = getattr(settings, "GUARDIAN_GET_CONTENT_TYPE", "guardian.ctypes.get_default_content_type")
 
+# How proxy models resolved by the default content type function are treated.
+# "inherit" gives a proxy the ContentType (and therefore the object permissions)
+# of its concrete model. "isolate" gives every proxy its own ContentType so it
+# can hold permissions independently. A proxy can override this per model with
+# a ``guardian_proxy_permission_mode`` class attribute.
+PROXY_PERMISSION_MODE = getattr(settings, "GUARDIAN_PROXY_PERMISSION_MODE", "inherit")
+if PROXY_PERMISSION_MODE not in ("inherit", "isolate"):
+    raise ImproperlyConfigured("GUARDIAN_PROXY_PERMISSION_MODE must be either 'inherit' or 'isolate'")
+
 AUTO_PREFETCH = getattr(settings, "GUARDIAN_AUTO_PREFETCH", False)
 
 # Restores the pre-3.5.1 get_objects_for_user behaviour fixed in GHSA-5729-mvhf-9gq4. Insecure, removed in 3.6.0.
