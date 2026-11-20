@@ -7,10 +7,11 @@ from unittest.mock import Mock, patch
 import pytest
 from amqp import RecoverableConnectionError
 
-from kombu import Exchange, common
+from kombu import Exchange, Queue, common
 from kombu.common import (PREFETCH_COUNT_MAX, Broadcast, QoS, collect_replies,
                           declaration_cached, generate_oid, ignore_errors,
-                          maybe_declare, send_reply)
+                          maybe_declare, send_reply, uuid)
+from kombu.exceptions import ReplyNotAllowedError
 from t.mocks import ContextMock, MockPool
 
 if TYPE_CHECKING:
@@ -317,12 +318,15 @@ class test_maybe_declare:
 
 class test_replies:
 
-    def test_send_reply(self):
+    def _get_reply_request(self, reply_to='hello', correlation_id='world'):
         req = Mock()
         req.content_type = 'application/json'
         req.content_encoding = 'binary'
-        req.properties = {'reply_to': 'hello',
-                          'correlation_id': 'world'}
+        req.properties = {'reply_to': reply_to,
+                          'correlation_id': correlation_id}
+        return req
+
+    def _get_reply_producer(self):
         channel = Mock()
         exchange = Mock()
         exchange.is_bound = True
@@ -330,6 +334,11 @@ class test_replies:
         producer = Mock()
         producer.channel = channel
         producer.channel.connection.client.declared_entities = set()
+        return exchange, producer
+
+    def test_send_reply(self):
+        req = self._get_reply_request()
+        exchange, producer = self._get_reply_producer()
         send_reply(exchange, req, {'hello': 'world'}, producer)
 
         assert producer.publish.call_count
@@ -344,6 +353,157 @@ class test_replies:
             'retry_policy': None,
             'content_encoding': 'binary',
         }
+
+    def test_send_reply_without_constraint_keeps_legacy_behaviour(self):
+        req = self._get_reply_request(reply_to='any-queue')
+        exchange, producer = self._get_reply_producer()
+        send_reply(exchange, req, {'hello': 'world'}, producer)
+
+        assert producer.publish.call_count == 1
+        assert producer.publish.call_args[1]['routing_key'] == 'any-queue'
+        assert (producer.publish.call_args[1]['correlation_id'] == 'world')
+        assert producer.publish.call_args[1]['exchange'] is exchange
+
+    def test_send_reply_allowed_destination_publishes(self):
+        req = self._get_reply_request(reply_to='approved-queue')
+        exchange, producer = self._get_reply_producer()
+        send_reply(exchange, req, {'hello': 'world'}, producer,
+                   allowed_reply_to={'approved-queue'})
+
+        assert producer.publish.call_count == 1
+        kwargs = producer.publish.call_args[1]
+        assert kwargs['routing_key'] == 'approved-queue'
+        assert kwargs['correlation_id'] == 'world'
+        assert kwargs['exchange'] is exchange
+
+    def test_send_reply_unapproved_destination_publishes_nothing(self):
+        req = self._get_reply_request(reply_to='rogue-queue')
+        exchange, producer = self._get_reply_producer()
+
+        with pytest.raises(ReplyNotAllowedError) as exc_info:
+            send_reply(exchange, req, {'hello': 'world'}, producer,
+                       allowed_reply_to={'approved-queue'})
+
+        producer.publish.assert_not_called()
+        error = exc_info.value
+        assert error.reply_to == 'rogue-queue'
+        assert 'rogue-queue' in str(error)
+        assert 'approved-queue' in str(error)
+        # The original message must never be embedded in the error.
+        assert req not in error.args
+        assert not any(arg is req for arg in error.args)
+
+    def test_send_reply_empty_allowlist_publishes_nothing(self):
+        req = self._get_reply_request(reply_to='hello')
+        exchange, producer = self._get_reply_producer()
+
+        with pytest.raises(ReplyNotAllowedError):
+            send_reply(exchange, req, {'hello': 'world'}, producer,
+                       allowed_reply_to=())
+
+        producer.publish.assert_not_called()
+
+    def test_send_reply_callable_constraint_approves(self):
+        req = self._get_reply_request(reply_to='service.reply.queue')
+        exchange, producer = self._get_reply_producer()
+        seen = []
+
+        def owner_only(reply_to, request):
+            seen.append((reply_to, request))
+            return reply_to.startswith('service.')
+
+        send_reply(exchange, req, {'hello': 'world'}, producer,
+                   allowed_reply_to=owner_only)
+
+        assert seen == [('service.reply.queue', req)]
+        assert producer.publish.call_count == 1
+        assert (producer.publish.call_args[1]['routing_key']
+                == 'service.reply.queue')
+
+    def test_send_reply_callable_constraint_rejects(self):
+        req = self._get_reply_request(reply_to='attacker.queue')
+        exchange, producer = self._get_reply_producer()
+
+        with pytest.raises(ReplyNotAllowedError) as exc_info:
+            send_reply(exchange, req, {'hello': 'world'}, producer,
+                       allowed_reply_to=lambda reply_to, request:
+                       reply_to.startswith('service.'))
+
+        producer.publish.assert_not_called()
+        assert exc_info.value.reply_to == 'attacker.queue'
+        assert not any(arg is req for arg in exc_info.value.args)
+
+    def test_send_reply_preserves_routing_correlation_and_exchange(self):
+        req = self._get_reply_request(
+            reply_to='approved-queue', correlation_id='corr-123')
+        exchange, producer = self._get_reply_producer()
+        send_reply(exchange, req, {'hello': 'world'}, producer,
+                   retry=True, retry_policy={'max_retries': 3},
+                   allowed_reply_to=['approved-queue'])
+
+        kwargs = producer.publish.call_args[1]
+        assert kwargs == {
+            'exchange': exchange,
+            'routing_key': 'approved-queue',
+            'correlation_id': 'corr-123',
+            'serializer': 'json',
+            'retry': True,
+            'retry_policy': {'max_retries': 3},
+            'content_encoding': 'binary',
+        }
+
+    def test_send_reply_local_two_queues_approved_and_denied(self):
+        from kombu import Connection
+        from kombu.message import Message
+        from kombu.messaging import Producer
+
+        suffix = uuid()
+        approved_queue = Queue(f'reply-approved-{suffix}')
+        rogue_queue = Queue(f'reply-rogue-{suffix}')
+        approved_name = approved_queue.name
+        rogue_name = rogue_queue.name
+
+        with Connection('memory://') as conn:
+            producer = Producer(conn)
+            channel = conn.default_channel
+            approved_queue(channel).declare()
+            rogue_queue(channel).declare()
+
+            reply_exchange = Exchange('')
+
+            approved_req = Message(
+                properties={'reply_to': approved_name,
+                            'correlation_id': 'corr-approved'},
+                content_type='application/json',
+                content_encoding='utf-8',
+            )
+            send_reply(reply_exchange, approved_req, {'status': 'ok'},
+                       producer, allowed_reply_to={approved_name})
+
+            delivered = approved_queue(channel).get(no_ack=True)
+            assert delivered is not None
+            assert delivered.payload == {'status': 'ok'}
+            assert delivered.properties['correlation_id'] == 'corr-approved'
+
+            rogue_req = Message(
+                properties={'reply_to': rogue_name,
+                            'correlation_id': 'corr-rogue'},
+                content_type='application/json',
+                content_encoding='utf-8',
+            )
+            with pytest.raises(ReplyNotAllowedError) as exc_info:
+                send_reply(reply_exchange, rogue_req, {'status': 'evil'},
+                           producer, allowed_reply_to={approved_name})
+
+            # No publication may reach either queue on rejection.
+            assert rogue_queue(channel).get(no_ack=True) is None
+            assert approved_queue(channel).get(no_ack=True) is None
+            # The rejected request must not appear inside the error.
+            assert not any(arg is rogue_req for arg in exc_info.value.args)
+            assert rogue_name in str(exc_info.value)
+
+            approved_queue(channel).delete()
+            rogue_queue(channel).delete()
 
     @patch('kombu.common.itermessages')
     def test_collect_replies_with_ack(self, itermessages):

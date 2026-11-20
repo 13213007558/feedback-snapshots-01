@@ -14,6 +14,7 @@ from uuid import NAMESPACE_OID, uuid3, uuid4, uuid5
 from amqp import ChannelError, RecoverableConnectionError
 
 from .entity import Exchange, Queue
+from .exceptions import ReplyNotAllowedError
 from .log import get_logger
 from .serialization import registry as serializers
 from .utils.compat import get_gevent_concurrent_error
@@ -243,8 +244,33 @@ def eventloop(conn, limit=None, timeout=None, ignore_timeouts=False):
                 raise
 
 
+def _reply_destination_allowed(reply_to, req, allowed_reply_to):
+    """Check whether ``reply_to`` is an approved reply destination.
+
+    ``allowed_reply_to`` configures the reply routing constraint:
+
+        * :const:`None` (the default) disables the constraint and keeps
+          the historical behaviour of replying to any ``reply_to``.
+        * A container of names allows a reply only when ``reply_to`` is
+          one of the approved reply queue names.
+        * A callable implements ownership based checks; it is called with
+          the requested destination and the original request and must
+          return a true value for the reply to be allowed.
+
+    Returns:
+    -------
+        bool: :const:`True` when the reply may be published.
+    """
+    if allowed_reply_to is None:
+        return True
+    if callable(allowed_reply_to):
+        return bool(allowed_reply_to(reply_to, req))
+    return reply_to in set(allowed_reply_to)
+
+
 def send_reply(exchange, req, msg,
-               producer=None, retry=False, retry_policy=None, **props):
+               producer=None, retry=False, retry_policy=None,
+               allowed_reply_to=None, **props):
     """Send reply for request.
 
     Arguments:
@@ -256,12 +282,32 @@ def send_reply(exchange, req, msg,
         retry (bool): If true must retry according to
             the ``reply_policy`` argument.
         retry_policy (Dict): Retry settings.
+        allowed_reply_to (Collection, Callable): Configurable reply
+            routing constraint used to verify that the request's
+            ``reply_to`` destination is approved for this service.
+
+            A container of approved reply queue names permits replies to
+            those destinations only; a callable receives the requested
+            destination and the original request and must return a true
+            value to allow the reply.  When :const:`None` (the default)
+            no constraint is enforced, preserving the historical
+            behaviour.  An unapproved destination raises
+            :class:`~kombu.exceptions.ReplyNotAllowedError` before
+            anything is published, and the original request is never
+            embedded in the error.
         ``**props`` (Any): Extra properties.
     """
+    reply_to = req.properties['reply_to']
+    if not _reply_destination_allowed(reply_to, req, allowed_reply_to):
+        if allowed_reply_to is None or callable(allowed_reply_to):
+            allowed = None
+        else:
+            allowed = set(allowed_reply_to)
+        raise ReplyNotAllowedError(reply_to, allowed)
     return producer.publish(
         msg, exchange=exchange,
         retry=retry, retry_policy=retry_policy,
-        **dict({'routing_key': req.properties['reply_to'],
+        **dict({'routing_key': reply_to,
                 'correlation_id': req.properties.get('correlation_id'),
                 'serializer': serializers.type_to_name[req.content_type],
                 'content_encoding': req.content_encoding}, **props)

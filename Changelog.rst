@@ -5,6 +5,23 @@
 ================
 
 
+.. _version-5.7.1:
+
+5.7.1
+========
+:release-date: TBA
+:release-by: Asif Saif Uddin
+
+
+What's Changed
+~~~~~~~~~~~~~~
+- security(common): ``send_reply`` now supports an ``allowed_reply_to``
+  routing constraint that verifies the request's ``reply_to`` destination
+  against an approved set of reply queues (or a callable ownership check);
+  unapproved destinations raise ``ReplyNotAllowedError`` before any
+  publication and never embed the original request in the error.
+
+
 .. _version-5.7.0:
 
 5.7.0

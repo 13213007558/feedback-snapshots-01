@@ -18,7 +18,7 @@ __all__ = (
     'ChannelLimitExceeded', 'ConnectionError', 'ChannelError',
     'VersionMismatch', 'SerializerNotInstalled', 'ResourceError',
     'SerializationError', 'EncodeError', 'DecodeError', 'HttpError',
-    'InconsistencyError',
+    'InconsistencyError', 'ReplyNotAllowedError',
 )
 
 BaseExceptionType = TypeVar('BaseExceptionType', bound=BaseException)
@@ -89,6 +89,31 @@ class SerializerNotInstalled(KombuError):
 
 class ContentDisallowed(SerializerNotInstalled):
     """Consumer does not allow this content-type."""
+
+
+class ReplyNotAllowedError(KombuError):
+    """Reply destination is not permitted by the configured reply policy.
+
+    Raised before anything is published, so an unapproved ``reply_to``
+    never reaches the broker.  Only the offending destination name is
+    included in the message; the original request is deliberately omitted
+    to avoid leaking its contents through error reports or logs.
+    """
+
+    def __init__(self, reply_to, allowed=None):
+        self.reply_to = reply_to
+        self.allowed = allowed
+        if allowed is None:
+            message = (
+                f'Replying to {reply_to!r} is not allowed: no reply '
+                f'destinations are permitted.'
+            )
+        else:
+            message = (
+                f'Replying to {reply_to!r} is not allowed. '
+                f'Permitted reply destinations: {sorted(allowed)!r}.'
+            )
+        super().__init__(message)
 
 
 class InconsistencyError(ConnectionError):
