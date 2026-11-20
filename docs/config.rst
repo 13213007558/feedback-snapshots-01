@@ -168,3 +168,22 @@ connections often, such as if it's running in a container that may restart.
 See SQLAlchemy's docs on `dealing with disconnects`_ for more information.
 
 .. _dealing with disconnects: https://docs.sqlalchemy.org/core/pooling.html#dealing-with-disconnects
+
+
+Inspecting Engine Configuration
+-------------------------------
+
+When debugging deployment issues, it can be useful to report which driver, pool
+options, and config layers produced each engine. Call
+:meth:`.SQLAlchemy.engine_config_summary` to get a sanitized summary for each bind
+key. The summary shows the effective options and which config layer set each one, and
+is safe to include in a ticket: the URL password and sensitive URL query parameters or
+``connect_args`` entries are redacted, and the redacted fields are named in the
+``hidden`` list. Reading the summary does not change the configuration of any engine.
+
+.. code-block:: python
+
+    with app.app_context():
+        summary = db.engine_config_summary()
+
+.. versionadded:: 3.1.2

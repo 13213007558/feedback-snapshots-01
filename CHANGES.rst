@@ -2,6 +2,9 @@ Version 3.1.2
 -------------
 
 - Fix issue with calling ``repr()`` on ``SQLAlchemy`` instance with no default engine. :issue:`1295`
+- Add ``SQLAlchemy.engine_config_summary`` to report the effective driver, pool
+  options, and config source layer for each bind, with URL credentials and
+  secret ``connect_args`` values redacted.
 
 
 Version 3.1.1

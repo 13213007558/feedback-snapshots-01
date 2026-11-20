@@ -30,6 +30,96 @@ from .table import _Table
 
 _O = t.TypeVar("_O", bound=object)  # Based on sqlalchemy.orm._typing.py
 
+#: Engine option keys reported in the ``pool_options`` section of
+#: :meth:`SQLAlchemy.engine_config_summary`.
+_POOL_OPTION_KEYS = {
+    "poolclass",
+    "pool_size",
+    "pool_timeout",
+    "pool_recycle",
+    "pool_pre_ping",
+    "pool_reset_on_return",
+    "pool_use_lifo",
+    "pool_logging_name",
+    "max_overflow",
+    "echo_pool",
+}
+
+#: Tokens that mark a connect arg or URL query parameter name as holding a
+#: secret, which is redacted in :meth:`SQLAlchemy.engine_config_summary`.
+_SENSITIVE_KEY_PARTS = {
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "key",
+    "credential",
+    "credentials",
+    "private",
+    "apikey",
+}
+
+
+def _is_sensitive_key(key: t.Any) -> bool:
+    """Check whether a connect arg or query parameter name looks like it holds a
+    secret, such as ``password``, ``ssl_key``, or ``auth_token``.
+    """
+    normalized = "".join(c if c.isalnum() else "_" for c in str(key).lower())
+    parts = normalized.split("_")
+
+    if any(part in _SENSITIVE_KEY_PARTS for part in parts):
+        return True
+
+    return any(
+        word in normalized
+        for word in ("password", "passwd", "secret", "token", "credential")
+    )
+
+
+def _sanitize_url(url: sa.engine.URL, hidden: list[str]) -> str:
+    """Render a URL as a string with the password and any sensitive query
+    parameters redacted, recording what was hidden.
+    """
+    if url.password is not None:
+        hidden.append("url password")
+
+    sensitive_query = [k for k in url.query if _is_sensitive_key(k)]
+
+    if sensitive_query:
+        hidden.extend(f"url query parameter {k!r}" for k in sensitive_query)
+        url = url.set(query={**url.query, **{k: "***" for k in sensitive_query}})
+
+    return url.render_as_string(hide_password=True)
+
+
+def _sanitize_value(key: str, value: t.Any, hidden: list[str], path: str) -> t.Any:
+    """Make an engine option value safe to show in a summary. Dict values have
+    sensitive keys redacted, classes are shown by name, and other non-scalar
+    values are shown by repr.
+    """
+    if _is_sensitive_key(key):
+        hidden.append(path)
+        return "***"
+
+    if isinstance(value, dict):
+        return {
+            k: _sanitize_value(str(k), v, hidden, f"{path}[{k!r}]")
+            for k, v in value.items()
+        }
+
+    return _safe_value(value)
+
+
+def _safe_value(value: t.Any) -> t.Any:
+    if isinstance(value, type):
+        return value.__name__
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    return repr(value)
+
 
 # Type accepted for model_class argument
 _FSA_MCT = t.TypeVar(
@@ -272,6 +362,10 @@ class SQLAlchemy:
         self._engine_options = engine_options
         self._app_engines: WeakKeyDictionary[Flask, dict[str | None, sa.engine.Engine]]
         self._app_engines = WeakKeyDictionary()
+        self._app_engine_info: WeakKeyDictionary[
+            Flask, dict[str | None, dict[str, t.Any]]
+        ]
+        self._app_engine_info = WeakKeyDictionary()
         self._add_models_to_shell = add_models_to_shell
 
         if app is not None:
@@ -327,31 +421,51 @@ class SQLAlchemy:
         basic_uri: str | sa.engine.URL | None = app.config.setdefault(
             "SQLALCHEMY_DATABASE_URI", None
         )
-        basic_engine_options = self._engine_options.copy()
-        basic_engine_options.update(
-            app.config.setdefault("SQLALCHEMY_ENGINE_OPTIONS", {})
+        config_engine_options: dict[str, t.Any] = app.config.setdefault(
+            "SQLALCHEMY_ENGINE_OPTIONS", {}
         )
+        basic_engine_options = self._engine_options.copy()
+        basic_engine_options.update(config_engine_options)
         echo: bool = app.config.setdefault("SQLALCHEMY_ECHO", False)
         config_binds: dict[str | None, str | sa.engine.URL | dict[str, t.Any]] = (
             app.config.setdefault("SQLALCHEMY_BINDS", {})
         )
         engine_options: dict[str | None, dict[str, t.Any]] = {}
+        # Track which config layer each effective option came from, to report
+        # in ``engine_config_summary``. This does not affect the merge itself.
+        engine_sources: dict[str | None, dict[str, str]] = {}
 
         # Build the engine config for each bind key.
         for key, value in config_binds.items():
             engine_options[key] = self._engine_options.copy()
+            engine_sources[key] = dict.fromkeys(
+                self._engine_options, "SQLAlchemy(engine_options)"
+            )
 
             if isinstance(value, (str, sa.engine.URL)):
                 engine_options[key]["url"] = value
+                engine_sources[key]["url"] = f"SQLALCHEMY_BINDS[{key!r}]"
             else:
                 engine_options[key].update(value)
+                engine_sources[key].update(
+                    dict.fromkeys(value, f"SQLALCHEMY_BINDS[{key!r}]")
+                )
 
         # Build the engine config for the default bind key.
+        basic_sources = dict.fromkeys(
+            self._engine_options, "SQLAlchemy(engine_options)"
+        )
+        basic_sources.update(
+            dict.fromkeys(config_engine_options, "SQLALCHEMY_ENGINE_OPTIONS")
+        )
+
         if basic_uri is not None:
             basic_engine_options["url"] = basic_uri
+            basic_sources["url"] = "SQLALCHEMY_DATABASE_URI"
 
         if "url" in basic_engine_options:
             engine_options.setdefault(None, {}).update(basic_engine_options)
+            engine_sources.setdefault(None, {}).update(basic_sources)
 
         if not engine_options:
             raise RuntimeError(
@@ -367,13 +481,38 @@ class SQLAlchemy:
 
             engines.clear()
 
+        engine_info: dict[str | None, dict[str, t.Any]] = {}
+
         # Create the metadata and engine for each bind key.
         for key, options in engine_options.items():
             self._make_metadata(key)
-            options.setdefault("echo", echo)
-            options.setdefault("echo_pool", echo)
+            sources = engine_sources[key]
+
+            for echo_key in ("echo", "echo_pool"):
+                if echo_key not in options:
+                    options[echo_key] = echo
+                    sources[echo_key] = "SQLALCHEMY_ECHO"
+
+            # Snapshot before applying driver defaults, to detect what they
+            # add or change. Dicts are copied since they may be mutated.
+            before = {
+                k: dict(v) if isinstance(v, dict) else v for k, v in options.items()
+            }
             self._apply_driver_defaults(options, app)
+
+            for opt_key, opt_value in options.items():
+                if opt_key not in before:
+                    sources[opt_key] = "driver defaults"
+                else:
+                    prev = before[opt_key]
+
+                    if prev is not opt_value and prev != opt_value:
+                        sources[opt_key] = "driver defaults"
+
+            engine_info[key] = {"options": dict(options), "sources": sources}
             engines[key] = self._make_engine(key, options, app)
+
+        self._app_engine_info[app] = engine_info
 
         if app.config.setdefault("SQLALCHEMY_RECORD_QUERIES", False):
             from . import record_queries
@@ -696,6 +835,86 @@ class SQLAlchemy:
             )
 
         return self._app_engines[app]
+
+    def engine_config_summary(self) -> dict[str | None, dict[str, t.Any]]:
+        """A sanitized summary of the effective engine configuration for each
+        bind key of the current application, suitable for including in
+        deployment diagnostics or support tickets.
+
+        The summary for each bind key contains:
+
+        - ``driver``: The driver name from the URL, such as
+          ``"sqlite+pysqlite"``.
+        - ``url``: The URL rendered as a string with the password and any
+          sensitive query parameters redacted.
+        - ``pool_options``: The effective pool-related arguments passed to
+          :func:`sqlalchemy.create_engine`.
+        - ``options``: The remaining effective arguments passed to
+          :func:`sqlalchemy.create_engine`.
+        - ``sources``: A map of each option name to the configuration layer
+          that set its effective value, such as ``"SQLAlchemy(engine_options)"``,
+          ``"SQLALCHEMY_ENGINE_OPTIONS"``, ``"SQLALCHEMY_BINDS['a']"``,
+          ``"SQLALCHEMY_DATABASE_URI"``, ``"SQLALCHEMY_ECHO"``, or
+          ``"driver defaults"``.
+        - ``hidden``: A list of fields whose values were redacted from the
+          summary because they may hold secrets, such as ``"url password"`` or
+          ``"connect_args['ssl_key']"``.
+
+        This only reads the configuration recorded during :meth:`init_app`, it
+        does not change the configuration of any engine. Authentication
+        information from the URL and secrets in ``connect_args`` are never
+        included in the returned data.
+
+        This requires that a Flask application context is active.
+
+        .. versionadded:: 3.1.2
+        """
+        app = current_app._get_current_object()  # type: ignore[attr-defined]
+
+        if app not in self._app_engine_info:
+            raise RuntimeError(
+                "The current Flask app is not registered with this 'SQLAlchemy'"
+                " instance. Did you forget to call 'init_app', or did you create"
+                " multiple 'SQLAlchemy' instances?"
+            )
+
+        summary: dict[str | None, dict[str, t.Any]] = {}
+
+        for key, info in self._app_engine_info[app].items():
+            hidden: list[str] = []
+            options: dict[str, t.Any] = info["options"]
+            url_summary: str | None = None
+            driver: str | None = None
+
+            if "url" in options:
+                url = sa.engine.make_url(options["url"])
+                driver = url.drivername
+                url_summary = _sanitize_url(url, hidden)
+
+            pool_options: dict[str, t.Any] = {}
+            other_options: dict[str, t.Any] = {}
+
+            for opt_key, opt_value in options.items():
+                if opt_key == "url":
+                    continue
+
+                if opt_key in _POOL_OPTION_KEYS:
+                    target = pool_options
+                else:
+                    target = other_options
+
+                target[opt_key] = _sanitize_value(opt_key, opt_value, hidden, opt_key)
+
+            summary[key] = {
+                "driver": driver,
+                "url": url_summary,
+                "pool_options": pool_options,
+                "options": other_options,
+                "sources": dict(info["sources"]),
+                "hidden": hidden,
+            }
+
+        return summary
 
     @property
     def engine(self) -> sa.engine.Engine:
