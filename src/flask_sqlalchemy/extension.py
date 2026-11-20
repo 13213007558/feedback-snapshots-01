@@ -307,6 +307,7 @@ class SQLAlchemy:
         - :data:`.SQLALCHEMY_BINDS`
         - :data:`.SQLALCHEMY_RECORD_QUERIES`
         - :data:`.SQLALCHEMY_TRACK_MODIFICATIONS`
+        - :data:`.SQLALCHEMY_AUDIT_FIELDS`
 
         :param app: The Flask application to initialize.
         """
@@ -385,6 +386,11 @@ class SQLAlchemy:
             from . import track_modifications
 
             track_modifications._listen(self.session)
+
+        if app.config.get("SQLALCHEMY_AUDIT_FIELDS"):
+            from . import track_modifications
+
+            track_modifications._listen_audit(self.session)
 
     def _make_scoped_session(
         self, options: dict[str, t.Any]

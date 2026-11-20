@@ -1,6 +1,10 @@
 Version 3.1.2
 -------------
 
+-   Add the ``SQLALCHEMY_AUDIT_FIELDS`` config and ``models_committed_audit`` signal.
+    After a commit, the signal sends records containing only the model class name, the
+    operation, and approved column values, instead of live ORM instances. Records are
+    omitted on rollback, and the existing ``models_committed`` signal is unchanged.
 - Fix issue with calling ``repr()`` on ``SQLAlchemy`` instance with no default engine. :issue:`1295`
 
 

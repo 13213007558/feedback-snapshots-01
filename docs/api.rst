@@ -116,3 +116,9 @@ Track Modifications
 
 .. autodata:: before_models_committed
     :no-value:
+
+.. autodata:: models_committed_audit
+    :no-value:
+
+.. autoclass:: AuditChange
+    :members:

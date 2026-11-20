@@ -27,6 +27,15 @@ class Session(sa_orm.Session):
         super().__init__(**kwargs)
         self._db = db
         self._model_changes: dict[object, tuple[t.Any, str]] = {}
+        self._audit_changes: dict[object, t.Any] = {}
+        self._audit_object_keys: dict[int, tuple[t.Any, object]] = {}
+        self._audit_savepoints: dict[
+            int,
+            tuple[
+                dict[object, t.Any],
+                dict[int, tuple[t.Any, object]],
+            ],
+        ] = {}
 
     def get_bind(
         self,

@@ -78,6 +78,26 @@ must happen before initializing the application.
 
     .. versionadded:: 2.0
 
+.. data:: SQLALCHEMY_AUDIT_FIELDS
+
+    If enabled, :data:`.models_committed_audit` sends post-commit records that contain
+    only a model class name, an operation, and the column values approved per model.
+    The value is a mapping of model classes or class names to an iterable of column
+    names. Approved names must be plain columns; relationships and computed column
+    properties are rejected before the commit. Models not in the mapping are omitted.
+
+    This is independent of :data:`SQLALCHEMY_TRACK_MODIFICATIONS` and does not change
+    the payload of :data:`.models_committed`.
+
+    .. code-block:: python
+
+        app.config["SQLALCHEMY_AUDIT_FIELDS"] = {
+            "User": ("id", "email"),
+            "Order": ("id", "status", "total"),
+        }
+
+    .. versionadded:: 3.1.2
+
 .. versionchanged:: 3.1
     Removed ``SQLALCHEMY_COMMIT_ON_TEARDOWN``.
 
