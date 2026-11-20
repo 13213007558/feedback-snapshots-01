@@ -23,6 +23,7 @@ from marshmallow.exceptions import (
     ValidationError,
     _FieldInstanceResolutionError,
 )
+from marshmallow.provenance import _current, _pop_context, _push_context
 from marshmallow.validate import And, Length
 
 if typing.TYPE_CHECKING:
@@ -627,8 +628,24 @@ class Nested(Field):
         value: typing.Any,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
     ):
+        ctx = _current()
+        kwargs = {}
+        if ctx is not None:
+            original = ctx.collector._root_view()._lookup_original(
+                ctx.alias, missing_
+            )
+            # Only pass the argument when provenance is in use so custom
+            # Schema.load overrides that do not accept it keep working.
+            kwargs["provenance"] = ctx.collector._scoped(
+                ctx.path, ctx.alias, original=original
+            )
         try:
-            valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
+            valid_data = self.schema.load(
+                value,
+                unknown=self.unknown,
+                partial=partial,
+                **kwargs,
+            )
         except ValidationError as error:
             raise ValidationError(
                 error.messages, valid_data=error.valid_data
@@ -771,15 +788,19 @@ class List(Field[list[_InternalT | None]]):
         if not utils.is_collection(value):
             raise self.make_error("invalid")
 
+        ctx = _current()
         result = []
         errors = {}
         for idx, each in enumerate(value):
+            token = _push_context(ctx.index(idx) if ctx is not None else None)
             try:
                 result.append(self.inner.deserialize(each, **kwargs))
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(typing.cast("_InternalT", error.valid_data))
                 errors.update({idx: error.messages})
+            finally:
+                _pop_context(token)
         if errors:
             raise ValidationError(errors, valid_data=result)
         return result
@@ -865,16 +886,20 @@ class Tuple(Field[tuple]):
 
         self.validate_length(value)
 
+        ctx = _current()
         result = []
         errors = {}
 
         for idx, (field, each) in enumerate(zip(self.tuple_fields, value, strict=True)):
+            token = _push_context(ctx.index(idx) if ctx is not None else None)
             try:
                 result.append(field.deserialize(each, **kwargs))
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(error.valid_data)
                 errors.update({idx: error.messages})
+            finally:
+                _pop_context(token)
         if errors:
             raise ValidationError(errors, valid_data=result)
 
@@ -1695,6 +1720,7 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                     errors[key]["key"] = error.messages
 
         # Deserialize values
+        ctx = _current()
         result = self.mapping_type()
         if self.value_field is None:
             for k, v in value.items():
@@ -1702,6 +1728,7 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                     result[keys[k]] = v
         else:
             for key, val in value.items():
+                token = _push_context(ctx.key(key) if ctx is not None else None)
                 try:
                     deser_val = self.value_field.deserialize(val, **kwargs)
                 except ValidationError as error:
@@ -1711,6 +1738,8 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                 else:
                     if key in keys:
                         result[keys[key]] = deser_val
+                finally:
+                    _pop_context(token)
 
         if errors:
             raise ValidationError(errors, valid_data=result)

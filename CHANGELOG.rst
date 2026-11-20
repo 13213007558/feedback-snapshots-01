@@ -1,6 +1,17 @@
 Changelog
 =========
 
+4.5.0 (unreleased)
+------------------
+
+Features:
+
+- Add opt-in field provenance to `Schema.load <marshmallow.Schema.load>` via
+  the ``provenance`` argument. `LoadProvenance
+  <marshmallow.provenance.LoadProvenance>` records whether each value came from
+  the original input, a ``load_default``, or a server-side processor, queryable
+  by output path or external alias. The loaded data is unchanged.
+
 4.4.0 (2026-11-03)
 ------------------
 

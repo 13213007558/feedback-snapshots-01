@@ -13,3 +13,4 @@ The guides below demonstrate how to extend schemas in various ways.
   custom_error_handling
   custom_options
   custom_error_messages
+  provenance

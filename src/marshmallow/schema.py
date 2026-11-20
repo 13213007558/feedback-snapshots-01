@@ -32,6 +32,13 @@ from marshmallow.decorators import (
 from marshmallow.error_store import ErrorStore
 from marshmallow.exceptions import SCHEMA, StringNotCollectionError, ValidationError
 from marshmallow.orderedset import OrderedSet
+from marshmallow.provenance import (
+    FieldSource,
+    LoadProvenance,
+    _pop_context,
+    _push_context,
+    _UNKNOWN,
+)
 from marshmallow.utils import (
     get_value,
     is_collection,
@@ -603,6 +610,8 @@ class Schema(metaclass=SchemaMeta):
         partial=None,
         unknown: types.UnknownOption = RAISE,
         index=None,
+        provenance: LoadProvenance | None = None,
+        original_data: typing.Mapping | None = None,
     ) -> typing.Any | list[typing.Any]:
         """Deserialize ``data``.
 
@@ -617,6 +626,10 @@ class Schema(metaclass=SchemaMeta):
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
         :param index: Index of the item being deserialized (for storing errors) if
             deserializing a collection, otherwise `None`.
+        :param provenance: Optional collector for per-field value sources.
+        :param original_data: Original input at this schema level, used to tell
+            values that were present in the request from values added by
+            ``pre_load`` processors.
         :return: The deserialized data as `dict_class` instance or list of `dict_class`
         instances if `many` is `True`.
         """
@@ -626,17 +639,35 @@ class Schema(metaclass=SchemaMeta):
                 error_store.store_error([self.error_messages["type"]], index=index)
                 ret_l = []
             else:
-                ret_l = [
-                    self._deserialize(
-                        d,
-                        error_store=error_store,
-                        many=False,
-                        partial=partial,
-                        unknown=unknown,
-                        index=idx,
+                ret_l = []
+                for idx, d in enumerate(data):
+                    item_provenance = (
+                        provenance._scoped(
+                            (*provenance._path_base, idx),
+                            (*provenance._alias_base, idx),
+                        )
+                        if provenance is not None
+                        else None
                     )
-                    for idx, d in enumerate(data)
-                ]
+                    item_original = (
+                        original_data[idx]
+                        if isinstance(original_data, Sequence)
+                        and not isinstance(original_data, (str, bytes))
+                        and idx < len(original_data)
+                        else None
+                    )
+                    ret_l.append(
+                        self._deserialize(
+                            d,
+                            error_store=error_store,
+                            many=False,
+                            partial=partial,
+                            unknown=unknown,
+                            index=idx,
+                            provenance=item_provenance,
+                            original_data=item_original,
+                        )
+                    )
             return ret_l
         ret_d = self.dict_class()
         # Check data is a dict
@@ -649,6 +680,27 @@ class Schema(metaclass=SchemaMeta):
                     field_obj.data_key if field_obj.data_key is not None else attr_name
                 )
                 raw_value = data.get(field_name, missing)
+                output_key = field_obj.attribute or attr_name
+                if isinstance(original_data, Mapping):
+                    original_value = original_data.get(field_name, missing)
+                elif provenance is not None:
+                    original_value = missing
+                else:
+                    original_value = raw_value
+                ctx = None
+                if provenance is not None:
+                    if raw_value is missing:
+                        source = FieldSource.DEFAULT
+                    elif original_value is missing:
+                        source = FieldSource.PROCESSOR
+                    else:
+                        source = FieldSource.INPUT
+                    ctx = provenance._context(
+                        tuple(output_key.split(".")),
+                        tuple(field_name.split(".")),
+                        source,
+                        original=original_value,
+                    )
                 if raw_value is missing:
                     # Ignore missing field if we're allowed to.
                     if partial is True or (
@@ -677,16 +729,21 @@ class Schema(metaclass=SchemaMeta):
                         **d_kwargs,
                     )
 
-                value = self._call_and_store(
-                    getter_func=getter,
-                    data=raw_value,
-                    field_name=field_name,
-                    error_store=error_store,
-                    index=index,
-                )
+                token = _push_context(ctx)
+                try:
+                    value = self._call_and_store(
+                        getter_func=getter,
+                        data=raw_value,
+                        field_name=field_name,
+                        error_store=error_store,
+                        index=index,
+                    )
+                finally:
+                    _pop_context(token)
+                if ctx is not None and value is not missing:
+                    ctx.collector._record_context(ctx)
                 if value is not missing:
-                    key = field_obj.attribute or attr_name
-                    set_value(ret_d, key, value)
+                    set_value(ret_d, output_key, value)
             if unknown != EXCLUDE:
                 fields = {
                     field_obj.data_key if field_obj.data_key is not None else field_name
@@ -696,6 +753,19 @@ class Schema(metaclass=SchemaMeta):
                     value = data[key]
                     if unknown == INCLUDE:
                         ret_d[key] = value
+                        if provenance is not None:
+                            path = tuple(str(key).split("."))
+                            source = (
+                                FieldSource.INPUT
+                                if isinstance(original_data, Mapping)
+                                and key in original_data
+                                else FieldSource.PROCESSOR
+                            )
+                            provenance._record(
+                                provenance._path_base + path,
+                                provenance._alias_base + path,
+                                source,
+                            )
                     elif unknown == RAISE:
                         error_store.store_error(
                             [self.error_messages["unknown"]],
@@ -711,6 +781,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        provenance: LoadProvenance | bool | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
 
@@ -724,16 +795,36 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
-        :return: Deserialized data
+        :param provenance: If `True`, record a :class:`FieldSource
+            <marshmallow.provenance.FieldSource>` for each output value and
+            return ``(data, provenance)``. Pass a :class:`LoadProvenance
+            <marshmallow.provenance.LoadProvenance>` instance to fill a
+            pre-created collector instead. If `None` (the default), no
+            provenance is recorded and plain data is returned.
+        :return: Deserialized data, or a ``(data, provenance)`` pair when
+            ``provenance=True``.
 
         .. versionchanged:: 3.0.0b7
             This method returns the deserialized data rather than a ``(data, errors)`` tuple.
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if invalid data are passed.
         """
-        return self._do_load(
-            data, many=many, partial=partial, unknown=unknown, postprocess=True
+        return_pair = provenance is True
+        if return_pair:
+            provenance = LoadProvenance()
+        if isinstance(provenance, LoadProvenance):
+            provenance._bind_root(data)
+        result = self._do_load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            provenance=provenance if provenance is not None else None,
         )
+        if return_pair and isinstance(provenance, LoadProvenance):
+            return result, provenance
+        return result
 
     def loads(
         self,
@@ -743,6 +834,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        provenance: LoadProvenance | bool | None = None,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,7 +850,14 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
-        :return: Deserialized data
+        :param provenance: If `True`, record a :class:`FieldSource
+            <marshmallow.provenance.FieldSource>` for each output value and
+            return ``(data, provenance)``. Pass a :class:`LoadProvenance
+            <marshmallow.provenance.LoadProvenance>` instance to fill a
+            pre-created collector instead. If `None` (the default), no
+            provenance is recorded and plain data is returned.
+        :return: Deserialized data, or a ``(data, provenance)`` pair when
+            ``provenance=True``.
 
         .. versionchanged:: 3.0.0b7
             This method returns the deserialized data rather than a ``(data, errors)`` tuple.
@@ -768,7 +867,10 @@ class Schema(metaclass=SchemaMeta):
             Rename ``json_module`` parameter to ``s``.
         """
         data = self.opts.render_module.loads(s, **kwargs)
-        return self.load(data, many=many, partial=partial, unknown=unknown)
+        load_kwargs = {"many": many, "partial": partial, "unknown": unknown}
+        if provenance is not None:
+            load_kwargs["provenance"] = provenance
+        return self.load(data, **load_kwargs)
 
     def _run_validator(
         self,
@@ -847,6 +949,7 @@ class Schema(metaclass=SchemaMeta):
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
         postprocess: bool = True,
+        provenance: LoadProvenance | None = None,
     ):
         """Deserialize `data`, returning the deserialized result.
         This method is private API.
@@ -862,6 +965,7 @@ class Schema(metaclass=SchemaMeta):
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
         :param postprocess: Whether to run post_load methods.
+        :param provenance: Optional collector for per-field value sources.
         :return: Deserialized data
         """
         error_store = ErrorStore()
@@ -871,6 +975,12 @@ class Schema(metaclass=SchemaMeta):
         if partial is None:
             partial = self.partial
         # Run preprocessors
+        original_data = data
+        if provenance is not None and provenance._original is not _UNKNOWN:
+            # A nested field knows the original value from its parent's input,
+            # which may differ from the (possibly pre_load-modified) value it
+            # was handed.
+            original_data = provenance._original
         if self._hooks[PRE_LOAD]:
             try:
                 processed_data = self._invoke_load_processors(
@@ -894,6 +1004,8 @@ class Schema(metaclass=SchemaMeta):
                 many=many,
                 partial=partial,
                 unknown=unknown,
+                provenance=provenance,
+                original_data=original_data,
             )
             # Run field-level validation
             self._invoke_field_validators(
@@ -925,6 +1037,7 @@ class Schema(metaclass=SchemaMeta):
             errors = error_store.errors
             # Run post processors
             if not errors and postprocess and self._hooks[POST_LOAD]:
+                before_post = self._snapshot(result)
                 try:
                     result = self._invoke_load_processors(
                         POST_LOAD,
@@ -934,6 +1047,8 @@ class Schema(metaclass=SchemaMeta):
                         partial=partial,
                         unknown=unknown,
                     )
+                    if provenance is not None:
+                        provenance._record_added(result, before_post)
                 except ValidationError as err:
                     errors = err.normalized_messages()
         if errors:
@@ -942,6 +1057,14 @@ class Schema(metaclass=SchemaMeta):
             raise exc
 
         return result
+
+    @staticmethod
+    def _snapshot(data: typing.Any) -> typing.Any:
+        if isinstance(data, Mapping):
+            return dict(data)
+        if isinstance(data, list):
+            return [dict(item) if isinstance(item, Mapping) else item for item in data]
+        return data
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
