@@ -25,10 +25,12 @@ module Warden
     end
 
     # Invoke the application guarding for throw :warden.
-    # If this is downstream from another warden instance, don't do anything.
+    # If this is downstream from another warden instance, the proxy is
+    # reused, but the failure is still guarded so that the layer closest
+    # to the application owns the failure response.
     # :api: private
     def call(env) # :nodoc:
-      return @app.call(env) if env['warden'] && env['warden'].manager != self
+      return downstream_call(env) if env['warden'] && env['warden'].manager != self
 
       env['warden'] = Proxy.new(env, self)
       result = catch(:warden) do
@@ -36,15 +38,7 @@ module Warden
         @app.call(env)
       end
 
-      result ||= {}
-      case result
-      when Array
-        handle_chain_result(result.first, result, env)
-      when Hash
-        process_unauthenticated(env, result)
-      when Rack::Response
-        handle_chain_result(result.status, result, env)
-      end
+      handle_result(result, env)
     end
 
     # :api: private
@@ -94,6 +88,37 @@ module Warden
 
   private
 
+    # Handles a request downstream from another Warden manager. The
+    # proxy (and its on_request callbacks) belongs to the upstream
+    # manager, so they are not run again here. A failure raised by the
+    # application is owned by this layer when it has a failure app of
+    # its own, and deferred to the upstream layer otherwise.
+    # :api: private
+    def downstream_call(env)
+      result = catch(:warden) { @app.call(env) }
+
+      if result.is_a?(Hash) || result.nil?
+        # The application threw :warden.
+        config.failure_app ? process_unauthenticated(env, result || {}) : throw(:warden, result)
+      elsif config.failure_app
+        handle_result(result, env)
+      else
+        result
+      end
+    end
+
+    def handle_result(result, env) # :nodoc:
+      result ||= {}
+      case result
+      when Array
+        handle_chain_result(result.first, result, env)
+      when Hash
+        process_unauthenticated(env, result)
+      when Rack::Response
+        handle_chain_result(result.status, result, env)
+      end
+    end
+
     def handle_chain_result(status, result, env)
       if status == 401 && intercept_401?(env)
         process_unauthenticated(env)
@@ -116,6 +141,10 @@ module Warden
       end
 
       proxy  = env['warden']
+      # This layer owns the failure response from here on. Flag it so
+      # that any upstream Warden layer passes the response through
+      # untouched instead of intercepting the 401 a second time.
+      proxy.custom_failure!
       result = options[:result] || proxy.result
 
       case result
@@ -136,6 +165,12 @@ module Warden
     def call_failure_app(env, options = {})
       if config.failure_app
         options.merge!(:attempted_path => ::Rack::Request.new(env).fullpath)
+        # Keep the scope the request was attempted under, so the failure
+        # app can scope its response even when the 401 was intercepted
+        # rather than thrown with options.
+        if !options.key?(:scope) && (strategy = env['warden'].winning_strategy)
+          options[:scope] = strategy.scope
+        end
         env["PATH_INFO"] = "/#{options[:action]}"
         env["warden.options"] = options
 

@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## Unreleased
+* A downstream `Warden::Manager` now guards `throw :warden` with its own configuration, so the layer closest to the application owns the failure response; layers without a failure app defer upstream
+* Failure responses are flagged as owned once processed, so upstream Warden layers no longer re-intercept the 401 or re-run `before_failure` callbacks
+* `warden.options` keeps the attempted scope (from the winning strategy) when an unauthenticated 401 is intercepted rather than thrown
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)
