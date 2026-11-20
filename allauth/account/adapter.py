@@ -719,6 +719,34 @@ class DefaultAccountAdapter(BaseAdapter):
     ) -> bool:
         return True
 
+    def get_email_verification_delivery_organization(
+        self, request: HttpRequest, email: str
+    ) -> str | None:
+        """
+        Returns the organization the email verification delivery belongs to.
+
+        This value is included in the ``email_verification_delivery`` audit
+        record. Override this method in a multi tenant setup to report the
+        organization the request is scoped to. The default returns ``None``.
+        """
+        return None
+
+    def get_email_verification_delivery_reference(
+        self, request: HttpRequest, email: str, organization: str | None
+    ) -> str:
+        """
+        Returns an opaque reference that correlates delivery records for the
+        same address within the same organization.
+
+        The default derives a keyed hash from the email address and the
+        organization, so that delivery statistics never need to contain the
+        address itself. Override this method if your organization already has
+        its own correlation identifier.
+        """
+        from allauth.account.delivery import create_delivery_reference
+
+        return create_delivery_reference(email, organization)
+
     def send_account_already_exists_mail(self, email: str) -> None:
         from allauth.account.internal import flows
 

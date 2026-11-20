@@ -36,6 +36,37 @@ hook to them for your own needs.
 - ``allauth.account.signals.email_confirmation_sent(request, confirmation, signup)``
     Sent right after the email confirmation is sent.
 
+    Note that the ``confirmation`` carries the recipient address and, depending
+    on the confirmation model, the confirmation key. Do not forward this signal
+    to systems that are not allowed to see those details. Use
+    ``email_verification_delivery`` for audit or statistics purposes instead.
+
+- ``allauth.account.signals.email_verification_delivery(delivery, event, organization, reference)``
+    Sent for every email verification delivery attempt, after the outcome is
+    known. The ``delivery`` argument is an
+    ``allauth.account.delivery.EmailVerificationDelivery`` record. It only
+    contains the event classification (``event``), the organization and an
+    opaque ``reference``, and is safe to forward to audit or statistics
+    systems: it never contains the recipient address, the confirmation key or
+    the activation URL.
+
+    The signal does not receive the ``request`` on purpose, as request data may
+    contain the address itself.
+
+    The ``event`` values are defined by
+    ``allauth.account.delivery.EmailVerificationDeliveryEvent``. Only the
+    ``*_sent`` events represent an actual handoff to the email backend; the
+    ``*_rate_limited`` events are emitted when a mail was suppressed by the
+    ``confirm_email`` rate limit, and the ``*_suppressed`` events are emitted
+    when enumeration prevention intentionally skips or replaces the mail.
+
+    Organization and reference are obtained through the adapter methods
+    ``get_email_verification_delivery_organization()`` and
+    ``get_email_verification_delivery_reference()``. The default reference is a
+    keyed hash derived from the address and the organization, so the same
+    address maps to the same reference within an organization without exposing
+    the address itself.
+
 - ``allauth.account.signals.email_changed(request, user, from_email_address, to_email_address)``
     Sent when a primary email address has been changed.
 

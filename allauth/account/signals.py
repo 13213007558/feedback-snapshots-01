@@ -44,7 +44,25 @@ email_confirmed = Signal()
 # - request: HttpRequest
 # - confirmation: EmailConfirmation
 # - signup: bool
+#
+# Note that the confirmation contains the recipient address and, depending on
+# the confirmation model, the confirmation key. Do not forward this signal to
+# systems that are not allowed to see those details. Use
+# `email_verification_delivery` for that purpose instead.
 email_confirmation_sent = Signal()
+
+# Emitted once for every email verification delivery attempt, after the outcome
+# is known. The `delivery` record is safe to forward to audit or statistics
+# systems: it only contains an event classification, an organization identifier
+# and an opaque reference, never the recipient address, confirmation key or
+# activation URL. Note that no `request` is passed on purpose, as it may
+# contain the address or other request data.
+# Arguments:
+# - delivery: EmailVerificationDelivery
+# - event: str
+# - organization: str | None
+# - reference: str
+email_verification_delivery = Signal()
 
 # Emitted when a primary email address has been changed.
 # Arguments:

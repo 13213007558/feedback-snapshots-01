@@ -1,3 +1,27 @@
+65.22.2 (unreleased)
+********************
+
+.. note::
+
+    💙 **Is django-allauth's authentication the entrance to your business?**
+    Please consider supporting its continued development by becoming a sponsor at
+    https://allauth.org/sponsors/. Your support helps keep this project thriving!
+
+
+Note worthy changes
+-------------------
+
+- Email verification delivery attempts are now reported through a new
+  ``allauth.account.signals.email_verification_delivery`` signal. The record
+  that is passed along only contains an event classification, an organization
+  and an opaque reference, making it safe to forward to audit or statistics
+  systems. The recipient address, confirmation key and activation URL remain
+  confined to the regular email delivery and the ``email_confirmation_sent``
+  signal. The organization and reference can be customized through the new
+  adapter methods ``get_email_verification_delivery_organization()`` and
+  ``get_email_verification_delivery_reference()``.
+
+
 65.22.1 (2026-11-13)
 ********************
 

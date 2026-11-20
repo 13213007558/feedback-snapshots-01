@@ -7,6 +7,10 @@ from django.urls import reverse
 
 from allauth.account import app_settings, signals
 from allauth.account.adapter import get_adapter
+from allauth.account.delivery import (
+    EmailVerificationDelivery,
+    EmailVerificationDeliveryEvent,
+)
 from allauth.account.internal.flows.manage_email import (
     emit_email_changed,
     sync_email_address,
@@ -247,20 +251,53 @@ def send_verification_email_to_address(
             )
             return process.did_send
 
-    send = handle_verification_email_rate_limit(
-        request,
-        address.email,
-    )
+    try:
+        send = handle_verification_email_rate_limit(
+            request,
+            address.email,
+        )
+    except ImmediateHttpResponse:
+        report_email_verification_delivery(
+            request,
+            address.email,
+            _get_rate_limited_delivery_event(address, signup=signup),
+        )
+        raise
     if not send:
+        report_email_verification_delivery(
+            request,
+            address.email,
+            _get_rate_limited_delivery_event(address, signup=signup),
+        )
         return False
 
     if not address.user_id:
         if skip_enumeration_mails:
-            pass
+            if signup:
+                event = EmailVerificationDeliveryEvent.ACCOUNT_ALREADY_EXISTS_SUPPRESSED
+            else:
+                event = EmailVerificationDeliveryEvent.UNKNOWN_ACCOUNT_SUPPRESSED
+            report_email_verification_delivery(request, address.email, event)
         elif signup:
             get_adapter().send_account_already_exists_mail(address.email)
-        else:
+            report_email_verification_delivery(
+                request,
+                address.email,
+                EmailVerificationDeliveryEvent.ACCOUNT_ALREADY_EXISTS_SENT,
+            )
+        elif app_settings.EMAIL_UNKNOWN_ACCOUNTS:
             send_unknown_account_mail(request, address.email)
+            report_email_verification_delivery(
+                request,
+                address.email,
+                EmailVerificationDeliveryEvent.UNKNOWN_ACCOUNT_SENT,
+            )
+        else:
+            report_email_verification_delivery(
+                request,
+                address.email,
+                EmailVerificationDeliveryEvent.UNKNOWN_ACCOUNT_SUPPRESSED,
+            )
         confirmation = None
     elif app_settings.EMAIL_VERIFICATION_BY_CODE_ENABLED:
         get_adapter().send_confirmation_mail(request, process, signup=signup)
@@ -269,6 +306,11 @@ def send_verification_email_to_address(
         confirmation = address.send_confirmation(request, signup=signup)
     add_email_verification_sent_message(request, address.email, signup=signup)
     if confirmation:
+        report_email_verification_delivery(
+            request,
+            address.email,
+            EmailVerificationDeliveryEvent.VERIFICATION_SENT,
+        )
         signals.email_confirmation_sent.send(
             sender=confirmation.__class__,
             request=request,
@@ -276,6 +318,51 @@ def send_verification_email_to_address(
             signup=signup,
         )
     return True
+
+
+def _get_rate_limited_delivery_event(
+    address: EmailAddress, signup: bool
+) -> EmailVerificationDeliveryEvent:
+    if address.user_id:
+        return EmailVerificationDeliveryEvent.VERIFICATION_RATE_LIMITED
+    elif signup:
+        return EmailVerificationDeliveryEvent.ACCOUNT_ALREADY_EXISTS_RATE_LIMITED
+    else:
+        return EmailVerificationDeliveryEvent.UNKNOWN_ACCOUNT_RATE_LIMITED
+
+
+def report_email_verification_delivery(
+    request: HttpRequest,
+    email: str,
+    event: EmailVerificationDeliveryEvent,
+) -> EmailVerificationDelivery:
+    """
+    Reports the outcome of an email verification delivery attempt.
+
+    The record being sent out only contains the event classification, the
+    organization and an opaque reference. It deliberately excludes the email
+    address, confirmation key and activation URL.
+    """
+    adapter = get_adapter(request)
+    organization = adapter.get_email_verification_delivery_organization(
+        request, email
+    )
+    reference = adapter.get_email_verification_delivery_reference(
+        request, email, organization
+    )
+    delivery = EmailVerificationDelivery(
+        event=event,
+        organization=organization,
+        reference=reference,
+    )
+    signals.email_verification_delivery.send(
+        sender=EmailVerificationDelivery,
+        delivery=delivery,
+        event=delivery.event.value,
+        organization=delivery.organization,
+        reference=delivery.reference,
+    )
+    return delivery
 
 
 def send_verification_email_at_login(request: HttpRequest, login: Login) -> bool:
@@ -304,6 +391,11 @@ def send_verification_email_at_real_login(request: HttpRequest, login: Login) ->
         return False
     send = get_adapter().should_send_confirmation_mail(request, address, login.signup)
     if not send:
+        report_email_verification_delivery(
+            request,
+            address.email,
+            EmailVerificationDeliveryEvent.VERIFICATION_SUPPRESSED,
+        )
         return False
     return send_verification_email_to_address(request, address, signup=login.signup)
 
