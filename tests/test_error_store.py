@@ -2,6 +2,7 @@ from typing import NamedTuple
 
 from marshmallow import missing
 from marshmallow.error_store import ErrorStore, merge_errors
+from marshmallow.exceptions import _CodedMessage
 
 
 def test_missing_is_falsy():
@@ -165,3 +166,33 @@ class TestMergeErrors:
         store.store_error(message)
         assert message == {"foo": ["bar"]}
         assert store.errors == {"foo": ["bar", "bar"]}
+
+
+class TestStoreErrorCode:
+    def test_code_is_attached_to_leaf_messages(self):
+        store = ErrorStore()
+        store.store_error(["bad"], "email", code="invalid")
+        store.store_error(["missing"], "name", code="required")
+        assert store.errors == {"email": ["bad"], "name": ["missing"]}
+        assert store.errors["email"][0].code == "invalid"
+        assert store.errors["name"][0].code == "required"
+
+    def test_code_is_preserved_when_set_on_message(self):
+        store = ErrorStore()
+        store.store_error([_CodedMessage("bad", "custom")], "email", code="invalid")
+        assert store.errors["email"][0].code == "custom"
+
+    def test_existing_codes_survive_merging(self):
+        store = ErrorStore()
+        store.store_error(["first"], "email", code="invalid")
+        store.store_error(["second"], "email", code="required")
+        assert store.errors["email"] == ["first", "second"]
+        assert [message.code for message in store.errors["email"]] == [
+            "invalid",
+            "required",
+        ]
+
+    def test_structured_message_dict_is_left_alone(self):
+        store = ErrorStore()
+        store.store_error({"message": "City required", "code": 400}, "city")
+        assert store.errors == {"city": {"code": 400, "message": "City required"}}

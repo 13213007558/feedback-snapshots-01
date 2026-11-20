@@ -6,7 +6,7 @@
     Users should not need to use this module directly.
 """
 
-from marshmallow.exceptions import SCHEMA
+from marshmallow.exceptions import SCHEMA, _with_code
 
 
 class ErrorStore:
@@ -14,11 +14,11 @@ class ErrorStore:
         #: Dictionary of errors stored during serialization
         self.errors = {}
 
-    def store_error(self, messages, field_name=SCHEMA, index=None):
+    def store_error(self, messages, field_name=SCHEMA, index=None, code=None):
         # field error  -> store/merge error messages under field name key
         # schema error -> if string or list, store/merge under _schema key
         #              -> if dict, store/merge with other top-level keys
-        messages = copy_containers(messages)
+        messages = _with_code(copy_containers(messages), code)
         if field_name != SCHEMA or not isinstance(messages, dict):
             messages = {field_name: messages}
         if index is not None:

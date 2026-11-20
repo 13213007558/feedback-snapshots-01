@@ -288,7 +288,7 @@ class Field(typing.Generic[_InternalT]):
             raise AssertionError(message) from error
         if isinstance(msg, (str, bytes)):
             msg = msg.format(**kwargs)
-        return ValidationError(msg)
+        return ValidationError(msg, code=key)
 
     def _validate_missing(self, value: typing.Any) -> None:
         """Validate missing values. Raise a :exc:`ValidationError` if

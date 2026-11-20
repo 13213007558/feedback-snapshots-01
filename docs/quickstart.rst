@@ -215,6 +215,55 @@ When validating a collection, the errors dictionary will be keyed on the indices
         # {1: {'email': ['Not a valid email address.']},
         #  3: {'name': ['Missing data for required field.']}}
 
+.. _public_errors:
+
+Errors for public responses
+---------------------------
+
+For an API response, you usually want the location of the failure and a
+machine-readable category rather than the raw error tree.
+`ValidationError.to_public_dict <marshmallow.exceptions.ValidationError.to_public_dict>`
+flattens the errors into ``{"errors": [...]}``.
+
+.. code-block:: python
+
+    from pprint import pprint
+
+    from marshmallow import Schema, fields, validates_schema, ValidationError
+
+
+    class RegistrationSchema(Schema):
+        email = fields.Email(data_key="contactEmail", required=True)
+        password = fields.Str(data_key="password", required=True)
+
+        @validates_schema
+        def check_password(self, data, **kwargs):
+            if data["password"] in data["email"]:
+                raise ValidationError("Do not use your email", field_name="password")
+
+
+    try:
+        RegistrationSchema().load({"contactEmail": "not-an-email", "password": "x"})
+    except ValidationError as err:
+        pprint(err.to_public_dict())
+        # {'errors': [{'code': 'invalid', 'location': ['contactEmail']}]}
+
+Each entry has ``location`` and ``code``. ``location`` follows the input data,
+so aliased fields use their ``data_key`` and collection errors include the item
+index, e.g. ``["members", 1, "contactEmail"]``. Errors raised from a
+`validates_schema <marshmallow.validates_schema>` method have an empty
+location if no ``field_name`` is given.
+
+The ``code`` defaults to the field error key, such as ``"required"``,
+``"invalid"``, or ``"unknown"``. Pass ``code=...`` to
+:exc:`ValidationError <marshmallow.exceptions.ValidationError>` to use your own
+category. Cross-field errors default to ``"schema"``.
+
+Messages are omitted by default since they may contain submitted values. Pass
+``include_messages=True`` to include them. Original input (``err.data``) and
+partially parsed data (``err.valid_data``) are never part of the payload, and
+the exception itself is unchanged for existing error handlers.
+
 You can perform additional validation for a field by passing the ``validate`` argument.
 There are a number of built-in validators in the :ref:`marshmallow.validate <api_validators>` module.
 

@@ -1,6 +1,18 @@
 Changelog
 =========
 
+4.5.0 (Unreleased)
+------------------
+
+Features:
+
+- Add `ValidationError.to_public_dict <marshmallow.exceptions.ValidationError.to_public_dict>`
+  for building a response-safe error object with field locations and
+  machine-readable error codes. Errors carry a ``code`` that defaults to the
+  field error key (e.g. ``"required"``, ``"invalid"``), can be set explicitly
+  with ``ValidationError(..., code=...)``, and is preserved through nested,
+  collection, and cross-field validation.
+
 4.4.0 (2026-11-03)
 ------------------
 

@@ -7,7 +7,7 @@ import typing
 from abc import ABC, abstractmethod
 from operator import attrgetter
 
-from marshmallow.exceptions import ValidationError
+from marshmallow.exceptions import ValidationError, _with_code
 
 if typing.TYPE_CHECKING:
     from marshmallow import types
@@ -76,10 +76,11 @@ class And(Validator):
                 validator(value)
             except ValidationError as err:
                 kwargs.update(err.kwargs)
-                if isinstance(err.messages, dict):
-                    errors.append(err.messages)
+                coded = _with_code(err.messages, err.code)
+                if isinstance(coded, dict):
+                    errors.append(coded)
                 else:
-                    errors.extend(err.messages)
+                    errors.extend(coded)
         if errors:
             raise ValidationError(errors, **kwargs)
         return value
@@ -366,13 +367,13 @@ class Range(Validator):
             value < self.min if self.min_inclusive else value <= self.min
         ):
             message = self.message_min if self.max is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
+            raise ValidationError(self._format_error(value, message), code="range")
 
         if self.max is not None and (
             value > self.max if self.max_inclusive else value >= self.max
         ):
             message = self.message_max if self.min is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
+            raise ValidationError(self._format_error(value, message), code="range")
 
         return value
 
@@ -432,16 +433,18 @@ class Length(Validator):
 
         if self.equal is not None:
             if length != self.equal:
-                raise ValidationError(self._format_error(value, self.message_equal))
+                raise ValidationError(
+                    self._format_error(value, self.message_equal), code="length"
+                )
             return value
 
         if self.min is not None and length < self.min:
             message = self.message_min if self.max is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
+            raise ValidationError(self._format_error(value, message), code="length")
 
         if self.max is not None and length > self.max:
             message = self.message_max if self.min is None else self.message_all
-            raise ValidationError(self._format_error(value, message))
+            raise ValidationError(self._format_error(value, message), code="length")
 
         return value
 
@@ -469,7 +472,7 @@ class Equal(Validator):
 
     def __call__(self, value: _T) -> _T:
         if value != self.comparable:
-            raise ValidationError(self._format_error(value))
+            raise ValidationError(self._format_error(value), code="equal")
         return value
 
 
@@ -621,9 +624,9 @@ class OneOf(Validator):
     def __call__(self, value: typing.Any) -> typing.Any:
         try:
             if value not in self.choices:
-                raise ValidationError(self._format_error(value))
+                raise ValidationError(self._format_error(value), code="one_of")
         except TypeError as error:
-            raise ValidationError(self._format_error(value)) from error
+            raise ValidationError(self._format_error(value), code="one_of") from error
 
         return value
 
