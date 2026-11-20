@@ -22,6 +22,7 @@ Kombu Core
     kombu.exceptions
     kombu.log
     kombu.connection
+    kombu.declarations
     kombu.message
     kombu.compression
     kombu.pools

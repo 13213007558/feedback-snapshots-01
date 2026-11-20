@@ -5,6 +5,16 @@
 ================
 
 
+Unreleased
+==========
+
+- Add ``declaration_policy`` to ``Connection`` so publishing applications can
+  restrict the entities (exchanges, queues and bindings) that automatic
+  declaration is allowed to create.  The policy is re-checked on every
+  declaration attempt, including retries after a reconnect, and raises
+  ``DeclarationNotAllowed`` when an entity is not permitted.
+
+
 .. _version-5.7.0:
 
 5.7.0

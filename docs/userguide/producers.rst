@@ -89,6 +89,42 @@ the queue while the workers are offline:
     ...     declare=[task_queue],  # declares exchange, queue and binds.
     ... )
 
+Restricting automatic declarations
+----------------------------------
+
+In some deployments a separate initialization service owns the broker
+topology, and a producer must only publish to exchanges that already exist.
+A :class:`~kombu.declarations.DeclarationPolicy` on the connection restricts
+which entities automatic declaration is allowed to create:
+
+.. code-block:: pycon
+
+    >>> from kombu import Connection
+    >>> from kombu.declarations import DeclarationPolicy, EXCHANGE_ENTITY
+
+    >>> # The producer may declare its exchange, but never queues or bindings.
+    >>> connection = Connection(
+    ...     'amqp://',
+    ...     declaration_policy=DeclarationPolicy([EXCHANGE_ENTITY]),
+    ... )
+
+An iterable of allowed entity kinds
+(:data:`~kombu.declarations.EXCHANGE_ENTITY`,
+:data:`~kombu.declarations.QUEUE_ENTITY` or
+:data:`~kombu.declarations.BINDING_ENTITY`) is accepted directly, and an
+empty iterable forbids every automatic declaration.  When an automatic
+declaration is not permitted,
+:class:`~kombu.exceptions.DeclarationNotAllowed` is raised before the broker
+is contacted, so no partial topology is created.  The policy is re-checked on
+every declaration attempt, including retries performed after a reconnect, so
+a forbidden declaration is never retried into existence.
+
+Explicit management calls such as ``queue.declare()`` made directly by your
+code are not affected: the policy only governs the automatic declaration
+paths used by :class:`~kombu.Producer` (for example the ``declare`` argument
+and the producer's default exchange).  A connection without a policy keeps
+the historical behavior where every entity may be declared automatically.
+
 Bypassing routing by using the anon-exchange
 --------------------------------------------
 

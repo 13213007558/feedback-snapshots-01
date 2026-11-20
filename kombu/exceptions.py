@@ -18,7 +18,7 @@ __all__ = (
     'ChannelLimitExceeded', 'ConnectionError', 'ChannelError',
     'VersionMismatch', 'SerializerNotInstalled', 'ResourceError',
     'SerializationError', 'EncodeError', 'DecodeError', 'HttpError',
-    'InconsistencyError',
+    'InconsistencyError', 'DeclarationNotAllowed',
 )
 
 BaseExceptionType = TypeVar('BaseExceptionType', bound=BaseException)
@@ -95,6 +95,16 @@ class InconsistencyError(ConnectionError):
     """Data or environment has been found to be inconsistent.
 
     Depending on the cause it may be possible to retry the operation.
+    """
+
+
+class DeclarationNotAllowed(KombuError):
+    """Automatic declaration of an entity is forbidden by policy.
+
+    Raised when a :class:`~kombu.declarations.DeclarationPolicy` configured
+    on the connection does not permit the requested automatic declaration.
+    The policy is re-checked on every declaration attempt, including retries
+    performed after a reconnect, so this error is not retried.
     """
 
 

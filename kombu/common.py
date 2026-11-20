@@ -107,6 +107,23 @@ def declaration_cached(entity, channel):
     return entity in channel.connection.client.declared_entities
 
 
+def _check_declaration_policy(entity, channel):
+    """Enforce the connection's automatic declaration policy.
+
+    Placed immediately before the actual ``entity.declare()`` call so that
+    cached declarations and entities configured with ``no_declare`` (which
+    never contact the broker) are not rejected.  The check still runs on
+    every declaration attempt, including retries after a reconnect, so a
+    forbidden entity cannot be created through the retry machinery.
+    """
+    if getattr(entity, 'no_declare', False):
+        return
+    connection = getattr(getattr(channel, 'connection', None), 'client', None)
+    policy = getattr(connection, 'declaration_policy', None)
+    if policy is not None:
+        policy.check(entity)
+
+
 def maybe_declare(entity, channel=None, retry=False, **retry_policy):
     """Declare entity (cached)."""
     if retry:
@@ -153,6 +170,7 @@ def _maybe_declare(entity, channel):
 
     if not channel.connection:
         raise RecoverableConnectionError('channel disconnected')
+    _check_declaration_policy(entity, channel)
     entity.declare(channel=channel)
     if declared is not None and ident:
         declared.add(ident)

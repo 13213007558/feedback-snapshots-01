@@ -31,6 +31,7 @@ from .utils.objects import cached_property
 from .utils.url import as_url, maybe_sanitize_url, parse_url, quote, urlparse
 
 if TYPE_CHECKING:
+    from kombu.declarations import DeclarationPolicy
     from kombu.transport.virtual import Channel
 
     if sys.version_info < (3, 10):
@@ -169,6 +170,13 @@ class Connection:
         .. versionadded:: 5.7
     :keyword virtual_host: Default virtual host if not provided in the URL.
     :keyword port: Default port if not provided in the URL.
+    :keyword declaration_policy: Optional
+        :class:`~kombu.declarations.DeclarationPolicy` (or an iterable of
+        allowed entity kinds) restricting which entities clients of this
+        connection may create through automatic declaration.  When unset,
+        every entity can be declared, matching the historical behavior.
+        The policy applies to every declaration attempt, including retries
+        performed after a reconnect.
     """
 
     port = None
@@ -212,7 +220,8 @@ class Connection:
                  ssl=False, transport=None, connect_timeout=5,
                  transport_options=None, login_method=None, uri_prefix=None,
                  heartbeat=0, failover_strategy='round-robin',
-                 alternates=None, credential_provider=None, **kwargs):
+                 alternates=None, credential_provider=None,
+                 declaration_policy=None, **kwargs):
         alt = [] if alternates is None else alternates
         # have to spell the args out, just to get nice docstrings :(
         params = self._initial_params = {
@@ -221,7 +230,8 @@ class Connection:
             'port': port, 'insist': insist, 'ssl': ssl,
             'transport': transport, 'connect_timeout': connect_timeout,
             'login_method': login_method, 'heartbeat': heartbeat,
-            'credential_provider': credential_provider
+            'credential_provider': credential_provider,
+            'declaration_policy': declaration_policy,
         }
 
         if hostname and not isinstance(hostname, str):
@@ -255,7 +265,12 @@ class Connection:
 
                 params['transport'] = transport
 
-        self._init_params(**params)
+        # declaration_policy is applied directly below, not by _init_params.
+        init_params = {
+            key: value for key, value in params.items()
+            if key != 'declaration_policy'
+        }
+        self._init_params(**init_params)
 
         # fallback hosts
         # Only alt[0] went through the checks above; every other alternate
@@ -286,6 +301,23 @@ class Connection:
             self.uri_prefix = uri_prefix
 
         self.declared_entities = set()
+        self.declaration_policy = self._prepare_declaration_policy(
+            declaration_policy)
+
+    @staticmethod
+    def _prepare_declaration_policy(declaration_policy):
+        """Normalize the declaration policy argument.
+
+        A :class:`~kombu.declarations.DeclarationPolicy` is kept as-is, an
+        iterable of entity kinds is turned into one, and :const:`None` keeps
+        the historical behavior where every entity may be declared.
+        """
+        if declaration_policy is None:
+            return None
+        from .declarations import DeclarationPolicy
+        if isinstance(declaration_policy, DeclarationPolicy):
+            return declaration_policy
+        return DeclarationPolicy(declaration_policy)
 
     def switch(self, conn_str):
         """Switch connection parameters to use a new URL or hostname.
@@ -308,7 +340,9 @@ class Connection:
         # transport given at construction time.
         if conn_params.get('transport'):
             _check_url_transport(conn_params['transport'])
-        self._init_params(**dict(self._initial_params, **conn_params))
+        merged_params = dict(self._initial_params, **conn_params)
+        merged_params.pop('declaration_policy', None)
+        self._init_params(**merged_params)
 
     def maybe_switch_next(self):
         """Switch to next URL given by the current failover strategy."""
@@ -784,6 +818,7 @@ class Connection:
             ('failover_strategy', self._failover_strategy),
             ('alternates', self.alt),
             ('credential_provider', self.credential_provider),
+            ('declaration_policy', self.declaration_policy),
         )
         return info
 

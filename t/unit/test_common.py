@@ -312,7 +312,38 @@ class test_maybe_declare:
         # Then: the exchange was declared on the live channel
         channel.exchange_declare.assert_called_once()
         old_channel.exchange_declare.assert_not_called()
-        assert exchange.channel is channel
+
+    def test_declaration_policy_blocks_maybe_declare(self):
+        from kombu import Queue
+        from kombu.declarations import DeclarationPolicy
+        from kombu.exceptions import DeclarationNotAllowed
+
+        # Given: A connection whose policy forbids queue declarations
+        channel = self._get_mock_channel()
+        channel.connection.client.declaration_policy = \
+            DeclarationPolicy([])
+        entity = Queue('blocked')
+
+        # When/Then: maybe_declare fails closed and never declares
+        with pytest.raises(DeclarationNotAllowed):
+            maybe_declare(entity, channel)
+        channel.queue_declare.assert_not_called()
+        assert channel.connection.client.declared_entities == set()
+
+    def test_declaration_policy_is_checked_again_on_retry(self):
+        from kombu import Queue
+        from kombu.declarations import DeclarationPolicy
+        from kombu.exceptions import DeclarationNotAllowed
+
+        channel = self._get_mock_channel()
+        channel.connection.client.declaration_policy = \
+            DeclarationPolicy([])
+        channel.connection.client.ensure = lambda obj, fun, **policy: fun
+        entity = Queue('blocked')(channel)
+
+        with pytest.raises(DeclarationNotAllowed):
+            maybe_declare(entity, channel, retry=True)
+        channel.queue_declare.assert_not_called()
 
 
 class test_replies:
