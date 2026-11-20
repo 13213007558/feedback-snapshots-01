@@ -24,5 +24,11 @@ class SessionsResponse(APIResponse):
 
 
 def get_config_data(request: HttpRequest) -> dict:
-    data = {"usersessions": {"track_activity": app_settings.TRACK_ACTIVITY}}
+    data = {
+        "usersessions": {
+            "track_activity": app_settings.TRACK_ACTIVITY,
+            "client_ip_policy": app_settings.CLIENT_IP_POLICY.value,
+            "user_agent_policy": app_settings.USER_AGENT_POLICY.value,
+        }
+    }
     return data

@@ -11,4 +11,5 @@ class UserSessionAdmin(admin.ModelAdmin):
         "user__pk",
         "user__username",
         "ip",
+        "user_agent",
     ]

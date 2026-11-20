@@ -16,6 +16,7 @@ from allauth.account.adapter import get_adapter
 from allauth.core import context
 from allauth.core.internal.httpkit import HTTP_USER_AGENT_MAX_LENGTH
 from allauth.core.internal.sessionkit import get_session_user
+from allauth.usersessions.adapter import get_adapter as get_usersessions_adapter
 
 
 if TYPE_CHECKING:
@@ -53,11 +54,11 @@ class UserSessionManager(models.Manager):
         ua = request.META.get("HTTP_USER_AGENT", "")[
             0 : UserSession._meta.get_field("user_agent").max_length
         ]
-
+        adapter = get_usersessions_adapter()
         defaults = dict(
             user=resolved_user,
-            ip=get_adapter().get_client_ip(request),
-            user_agent=ua,
+            ip=adapter.redact_client_ip(get_adapter().get_client_ip(request)),
+            user_agent=adapter.redact_user_agent(ua),
         )
 
         from_session = None
@@ -103,16 +104,16 @@ class UserSession(models.Model):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(default=timezone.now)
-    ip = models.GenericIPAddressField()
+    ip = models.GenericIPAddressField(null=True, blank=True)
     last_seen_at = models.DateTimeField(default=timezone.now)
     session_key = models.CharField(
         _("session key"), max_length=40, unique=True, editable=False
     )
-    user_agent = models.CharField(max_length=HTTP_USER_AGENT_MAX_LENGTH)
+    user_agent = models.CharField(max_length=HTTP_USER_AGENT_MAX_LENGTH, blank=True)
     data = models.JSONField(default=dict)
 
     def __str__(self) -> str:
-        return f"{self.ip} ({self.user_agent})"
+        return f"{self.ip or '—'} ({self.user_agent or '—'})"
 
     def _session_store(self, *args):
         engine = import_module(settings.SESSION_ENGINE)

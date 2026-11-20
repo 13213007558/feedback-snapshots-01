@@ -24,10 +24,10 @@
                             {% translate "Started At" %}
                         {% endelement %}
                         {% element th %}
-                            {% translate "IP Address" %}
+                            {% translate "Location" %}
                         {% endelement %}
                         {% element th %}
-                            {% translate "Browser" %}
+                            {% translate "Device" %}
                         {% endelement %}
                         {% if show_last_seen_at %}
                             {% element th %}
@@ -43,10 +43,10 @@
                                 <span title="{{ session.created_at }}">{{ session.created_at|naturaltime }}</span>
                             {% endelement %}
                             {% element td %}
-                                {{ session.ip }}
+                                {{ session.ip|default:"—" }}
                             {% endelement %}
                             {% element td %}
-                                {{ session.user_agent }}
+                                {{ session.user_agent|default:"—" }}
                             {% endelement %}
                             {% if show_last_seen_at %}
                                 {% element td %}

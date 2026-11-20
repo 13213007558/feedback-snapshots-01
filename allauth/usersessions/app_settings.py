@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import TypeVar
 
 
@@ -7,6 +8,22 @@ _T = TypeVar("_T")
 
 
 class AppSettings:
+    class ClientIPPolicy(str, Enum):
+        # Store the IP address as reported by the client.
+        FULL = "full"
+        # Store a coarse, network level address only (IPv4 /24, IPv6 /48).
+        MASKED = "masked"
+        # Do not store the IP address at all.
+        NONE = "none"
+
+    class UserAgentPolicy(str, Enum):
+        # Store the full user agent string.
+        FULL = "full"
+        # Store a coarse device category only, e.g. "Mobile", "Desktop".
+        DEVICE = "device"
+        # Do not store the user agent at all.
+        NONE = "none"
+
     def __init__(self, prefix: str) -> None:
         self.prefix = prefix
 
@@ -28,6 +45,24 @@ class AppSettings:
         track of.
         """
         return self._setting("TRACK_ACTIVITY", False)
+
+    @property
+    def CLIENT_IP_POLICY(self) -> ClientIPPolicy:
+        """Determines how much of the client IP address is persisted on the
+        user session record.
+        """
+        return self.ClientIPPolicy(
+            self._setting("CLIENT_IP_POLICY", self.ClientIPPolicy.FULL.value)
+        )
+
+    @property
+    def USER_AGENT_POLICY(self) -> UserAgentPolicy:
+        """Determines how much of the client user agent is persisted on the
+        user session record.
+        """
+        return self.UserAgentPolicy(
+            self._setting("USER_AGENT_POLICY", self.UserAgentPolicy.FULL.value)
+        )
 
 
 _app_settings = AppSettings("USERSESSIONS_")

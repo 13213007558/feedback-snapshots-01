@@ -1,3 +1,19 @@
+Unreleased
+**********
+
+Note worthy changes
+-------------------
+
+- The client information kept on user session records is now configurable.
+  ``USERSESSIONS_CLIENT_IP_POLICY`` (``"full"``, ``"masked"``, ``"none"``) and
+  ``USERSESSIONS_USER_AGENT_POLICY`` (``"full"``, ``"device"``, ``"none"``)
+  allow storing only coarse geographic clues and device categories instead of
+  the raw IP address and full user agent string. The policies are applied at
+  write time, existing records are redacted through a data migration, and the
+  new ``usersessions_redact_clients`` management command re-applies the current
+  policy to historical records.
+
+
 65.22.1 (2026-11-13)
 ********************
 

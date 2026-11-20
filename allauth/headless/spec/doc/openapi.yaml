@@ -2329,9 +2329,20 @@ components:
       properties:
         user_agent:
           type: string
+          description: |
+            The user agent of the session. Depending on
+            `settings.USERSESSIONS_USER_AGENT_POLICY`, this holds the full
+            user agent string, a coarse device category (e.g. `Desktop`,
+            `Mobile`), or an empty string.
           example: Mozilla Firefox
         ip:
-          type: string
+          type:
+            - string
+            - "null"
+          description: |
+            The IP address of the session. Depending on
+            `settings.USERSESSIONS_CLIENT_IP_POLICY`, this holds the full IP
+            address, a masked network level address, or `null`.
           example: 127.2.3.192
         created_at:
           $ref: "#/components/schemas/Timestamp"
@@ -3039,8 +3050,26 @@ components:
           type: boolean
           description: |
             Matches `settings.USERSESSIONS_TRACK_ACTIVITY`.
+        client_ip_policy:
+          type: string
+          enum:
+            - full
+            - masked
+            - none
+          description: |
+            Matches `settings.USERSESSIONS_CLIENT_IP_POLICY`.
+        user_agent_policy:
+          type: string
+          enum:
+            - full
+            - device
+            - none
+          description: |
+            Matches `settings.USERSESSIONS_USER_AGENT_POLICY`.
       required:
         - track_activity
+        - client_ip_policy
+        - user_agent_policy
     ConfigurationResponse:
       type: object
       properties:
@@ -3082,6 +3111,8 @@ components:
               - "totp"
           usersessions:
             track_activity: false
+            client_ip_policy: full
+            user_agent_policy: full
     ResetPassword:
       type: object
       properties:
