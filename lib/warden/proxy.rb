@@ -223,11 +223,37 @@ module Warden
       else
         unless user = session_serializer.fetch(scope)
           run_callbacks = opts.fetch(:run_callbacks, true)
-          manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope) if run_callbacks
+          if run_callbacks && !session_serializer.retryable_fetch_error?(scope)
+            manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope)
+          end
         end
 
         @users[scope] = user ? set_user(user, opts.merge(:event => :fetch)) : nil
       end
+    end
+
+    # Whether the user for +scope+ could not be fetched from the session
+    # because the serialize_from_session hook raised a
+    # Warden::RetryableDeserializationError (for example a temporarily
+    # unreachable directory service). The stored identity is preserved in that
+    # case, so the next request attempts to fetch it again.
+    #
+    # Example:
+    #   env['warden'].deserialization_retryable?
+    #   env['warden'].deserialization_retryable?(:admin)
+    #
+    # :api: public
+    def deserialization_retryable?(scope = @config.default_scope)
+      session_serializer.retryable_fetch_error?(scope)
+    end
+
+    # The Warden::RetryableDeserializationError that prevented the user for
+    # +scope+ from being fetched from the session, or +nil+ when there was no
+    # such failure.
+    #
+    # :api: public
+    def deserialization_error(scope = @config.default_scope)
+      session_serializer.retryable_fetch_error(scope)
     end
 
     # Provides a scoped session data for authenticated users.

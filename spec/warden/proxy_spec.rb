@@ -1081,4 +1081,84 @@ describe "dynamic default_strategies" do
       expect(proxy).not_to be_asset_request
     end
   end
+
+  describe "deserialization state" do
+    after(:each) do
+      Warden::Manager.serialize_from_session { |k| k }
+    end
+
+    it "reports no retryable failure before any fetch" do
+      env = env_with_params
+      setup_rack(success_app).call(env)
+      proxy = env["warden"]
+
+      expect(proxy.deserialization_retryable?).to eq(false)
+      expect(proxy.deserialization_error).to be_nil
+    end
+
+    it "exposes the retryable error and keeps the user unauthenticated on a transient failure" do
+      Warden::Manager.serialize_from_session do |_key|
+        raise Warden::RetryableDeserializationError, "directory down"
+      end
+
+      env = env_with_params
+      env['rack.session'] = { "warden.user.default.key" => 42 }
+      app = lambda do |e|
+        e['warden'].user
+        valid_response
+      end
+      setup_rack(app).call(env)
+      proxy = env["warden"]
+
+      expect(proxy.user).to be_nil
+      expect(proxy).to be_deserialization_retryable
+      expect(proxy.deserialization_error).to be_a(Warden::RetryableDeserializationError)
+      expect(proxy.deserialization_error.message).to eq("directory down")
+      expect(env['rack.session']["warden.user.default.key"]).to eq(42)
+    end
+
+    it "signs the scope out without a retryable state on an invalid identity" do
+      Warden::Manager.serialize_from_session do |_key|
+        raise Warden::InvalidIdentityError, "deactivated"
+      end
+
+      env = env_with_params
+      env['rack.session'] = { "warden.user.default.key" => 42 }
+      app = lambda do |e|
+        e['warden'].user
+        valid_response
+      end
+      setup_rack(app).call(env)
+      proxy = env["warden"]
+
+      expect(proxy.user).to be_nil
+      expect(proxy).not_to be_deserialization_retryable
+      expect(env['rack.session']).not_to have_key("warden.user.default.key")
+    end
+
+    it "scopes the retryable state to the failing scope" do
+      Warden::Manager.serialize_from_session(:admin) do |_key|
+        raise Warden::RetryableDeserializationError, "timeout"
+      end
+
+      env = env_with_params
+      env['rack.session'] = {
+        "warden.user.default.key" => "default-user",
+        "warden.user.admin.key" => 7
+      }
+      app = lambda do |e|
+        e['warden'].user(:default)
+        e['warden'].user(:admin)
+        valid_response
+      end
+      setup_rack(app).call(env)
+      proxy = env["warden"]
+
+      expect(proxy.user(:default)).to eq("default-user")
+      expect(proxy.deserialization_retryable?(:default)).to eq(false)
+      expect(proxy.deserialization_retryable?(:admin)).to eq(true)
+    ensure
+      Warden::SessionSerializer.send(:remove_method, :admin_deserialize)
+    end
+  end
 end
