@@ -1,3 +1,18 @@
+Unreleased
+**********
+
+Note worthy changes
+-------------------
+
+- MFA trusted browser support now distinguishes two trust scopes. Regular
+  site and headless browser clients keep using the signed trust cookie, while
+  headless app (mobile) clients persist their trust server side, keyed by the
+  device. Both scopes can be reviewed and revoked independently from the
+  two-factor authentication management page and the headless
+  ``account/trusted-devices`` endpoint. Revoking trust leaves existing
+  sessions untouched and only forces MFA verification again at the next login.
+
+
 65.22.1 (2026-11-13)
 ********************
 

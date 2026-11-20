@@ -3,7 +3,7 @@ from __future__ import annotations
 from allauth.account.forms import BaseSignupForm
 from allauth.headless.internal.restkit import inputs
 from allauth.mfa.base.forms import AuthenticateForm, ReauthenticateForm
-from allauth.mfa.models import Authenticator
+from allauth.mfa.models import Authenticator, TrustedDevice
 from allauth.mfa.recovery_codes.forms import GenerateRecoveryCodesForm
 from allauth.mfa.totp.forms import ActivateTOTPForm
 from allauth.mfa.webauthn.forms import (
@@ -84,3 +84,13 @@ class SignupWebAuthnInput(BaseSignupForm, inputs.Input):
 
 class TrustInput(inputs.Input):
     trust = inputs.BooleanField(required=False)
+
+
+class TrustedDevicesInput(inputs.Input):
+    devices = inputs.ModelMultipleChoiceField(queryset=TrustedDevice.objects.none())
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.user = kwargs.pop("user")
+        super().__init__(*args, **kwargs)
+        devices_field: inputs.ModelMultipleChoiceField = self.fields["devices"]  # type: ignore[assignment]
+        devices_field.queryset = TrustedDevice.objects.filter(user=self.user)

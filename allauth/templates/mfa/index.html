@@ -114,4 +114,41 @@
             {% endelement %}
         {% endwith %}
     {% endif %}
+    {% if trusted_devices %}
+        {% element panel %}
+            {% slot title %}
+                {% translate "Trusted Devices" %}
+            {% endslot %}
+            {% slot body %}
+                {% element p %}
+                    {% blocktranslate %}These devices are trusted and will not be asked for two-factor authentication when signing in. Revoking trust does not sign the device out, but forces verification again at the next sign in.{% endblocktranslate %}
+                {% endelement %}
+                <form method="post"
+                      action="{% url 'mfa_index' %}"
+                      id="revoke-trusted-devices-form">
+                    {% csrf_token %}
+                    {% element fields form=trusted_devices_form unlabeled=True %}
+                    {% endelement %}
+                    <ul>
+                        {% for device in trusted_devices %}
+                            <li>
+                                <label>
+                                    <input type="checkbox"
+                                           name="devices"
+                                           value="{{ device.pk }}">
+                                    {{ device.get_scope_display }}:
+                                    {{ device.user_agent|default:device.identifier }}
+                                </label>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </form>
+            {% endslot %}
+            {% slot actions %}
+                {% element button type="submit" form="revoke-trusted-devices-form" tags="danger,delete,panel" %}
+                    {% translate "Revoke Trust" %}
+                {% endelement %}
+            {% endslot %}
+        {% endelement %}
+    {% endif %}
 {% endblock content %}

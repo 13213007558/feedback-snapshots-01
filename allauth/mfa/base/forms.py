@@ -7,7 +7,7 @@ from allauth.core import context
 from allauth.mfa import signals
 from allauth.mfa.adapter import get_adapter
 from allauth.mfa.base.internal.flows import check_rate_limit, post_authentication
-from allauth.mfa.models import Authenticator
+from allauth.mfa.models import Authenticator, TrustedDevice
 
 
 class BaseAuthenticateForm(forms.Form):
@@ -71,3 +71,22 @@ class ReauthenticateForm(BaseAuthenticateForm):
             authenticator=authenticator,
             reauthentication=True,
         )
+
+
+class ManageTrustedDevicesForm(forms.Form):
+    devices = forms.ModelMultipleChoiceField(
+        queryset=TrustedDevice.objects.none(),
+        widget=forms.MultipleHiddenInput,
+        required=False,
+    )
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.user = kwargs.pop("user")
+        super().__init__(*args, **kwargs)
+        self.fields["devices"].queryset = TrustedDevice.objects.filter(user=self.user)
+
+    def save(self, request, response=None) -> list[TrustedDevice]:
+        from allauth.mfa.internal.flows import trust as trust_flow
+
+        devices = list(self.cleaned_data["devices"])
+        return trust_flow.revoke_trust(request, devices, response)

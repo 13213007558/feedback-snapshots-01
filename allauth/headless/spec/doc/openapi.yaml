@@ -801,16 +801,20 @@ paths:
                   $ref: "#/components/examples/InvalidAuthenticatorCode"
         "403":
           $ref: "#/components/responses/Forbidden"
-  /_allauth/browser/v1/auth/2fa/trust:
+  /_allauth/{client}/v1/auth/2fa/trust:
     post:
       tags:
         - "Authentication: 2FA"
-      summary: Trust this browser
+      summary: Trust this device
       description: |
         If "Trust this browser?" is enabled (`MFA_TRUST_ENABLED`), the
         `mfa_trust` flow activates after the user completes the MFA
-        authentication flow, offering to skip MFA for this particular
-        browser. This endpoint is used to complete the `mfa_trust` flow.
+        authentication flow, offering to skip MFA on the next login. This
+        endpoint is used to complete the `mfa_trust` flow. Browser clients
+        receive a trust cookie, whereas app clients persist their trust
+        server side; both scopes are managed independently.
+      parameters:
+        - $ref: "#/components/parameters/Client"
       security:
         - SessionToken: []
         - {}
@@ -1454,6 +1458,54 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Authenticators"
+        "401":
+          $ref: "#/components/responses/Authentication"
+        "410":
+          $ref: "#/components/responses/SessionGone"
+  /_allauth/{client}/v1/account/trusted-devices:
+    get:
+      tags:
+        - "Account: 2FA"
+      summary: List trusted devices
+      description: |
+        Lists the devices for which MFA verification was explicitly bypassed
+        via the `mfa_trust` flow. Browser scope trust is backed by a cookie,
+        app scope trust fully by a server side record.
+      parameters:
+        - $ref: "#/components/parameters/Client"
+      security:
+        - SessionToken: []
+        - {}
+      responses:
+        "200":
+          $ref: "#/components/responses/TrustedDevices"
+        "401":
+          $ref: "#/components/responses/Authentication"
+        "410":
+          $ref: "#/components/responses/SessionGone"
+    delete:
+      tags:
+        - "Account: 2FA"
+      summary: Revoke trusted devices
+      description: |
+        Revokes trust for the given devices. Existing sessions are not ended;
+        MFA verification is required again at the next login.
+      parameters:
+        - $ref: "#/components/parameters/Client"
+      security:
+        - SessionToken: []
+        - {}
+      requestBody:
+        $ref: "#/components/requestBodies/RevokeTrustedDevices"
+      responses:
+        "200":
+          $ref: "#/components/responses/TrustedDevices"
+        "400":
+          description: An input error occurred.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           $ref: "#/components/responses/Authentication"
         "410":
@@ -2114,6 +2166,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/EndSessions"
+    RevokeTrustedDevices:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RevokeTrustedDevices"
     PasskeySignup:
       description: Signup using a passkey
       required: true
@@ -2427,6 +2485,18 @@ components:
             example: 123
       required:
         - sessions
+    RevokeTrustedDevices:
+      type: object
+      properties:
+        devices:
+          description: |
+            The IDs of the trusted devices whose trust is to be revoked.
+          type: array
+          items:
+            type: integer
+            example: 123
+      required:
+        - devices
     PhoneNumber:
       type: object
       description: |
@@ -3325,6 +3395,43 @@ components:
           - $ref: "#/components/schemas/TOTPAuthenticator"
           - $ref: "#/components/schemas/RecoveryCodesAuthenticator"
           - $ref: "#/components/schemas/WebAuthnAuthenticator"
+    TrustedDevice:
+      type: object
+      properties:
+        id:
+          type: integer
+        scope:
+          type: string
+          enum:
+            - browser
+            - app
+          description: |
+            The trust scope: `browser` for cookie based trust of regular site
+            and headless browser clients, `app` for server side trust of
+            headless mobile app clients.
+        identifier:
+          type: string
+          description: The identifier of the trusted device.
+        user_agent:
+          type: string
+        created_at:
+          type: number
+        last_seen_at:
+          type: number
+        is_expired:
+          type: boolean
+      required:
+        - id
+        - scope
+        - identifier
+        - user_agent
+        - created_at
+        - last_seen_at
+        - is_expired
+    TrustedDeviceList:
+      type: array
+      items:
+        $ref: "#/components/schemas/TrustedDevice"
     ProviderList:
       type: array
       items:
@@ -3514,6 +3621,21 @@ components:
                 $ref: "#/components/schemas/StatusOK"
               data:
                 $ref: "#/components/schemas/AuthenticatorList"
+            required:
+              - status
+              - data
+    TrustedDevices:
+      description: |
+        List of trusted devices.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                $ref: "#/components/schemas/StatusOK"
+              data:
+                $ref: "#/components/schemas/TrustedDeviceList"
             required:
               - status
               - data

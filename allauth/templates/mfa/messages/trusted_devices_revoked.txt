@@ -1,0 +1,2 @@
+{% load i18n %}
+{% blocktranslate count counter=count %}Trust for the selected device has been revoked. You will need to verify again on your next sign in.{% plural %}Trust for {{ counter }} devices has been revoked. You will need to verify again on your next sign in.{% endblocktranslate %}

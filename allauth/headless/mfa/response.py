@@ -108,3 +108,25 @@ class AddWebAuthnResponse(APIResponse):
 class WebAuthnRequestOptionsResponse(APIResponse):
     def __init__(self, request: HttpRequest, request_options) -> None:
         super().__init__(request, data={"request_options": request_options})
+
+
+def _trusted_device_data(device) -> dict:
+    return {
+        "id": device.pk,
+        "scope": device.scope,
+        "identifier": device.identifier,
+        "user_agent": device.user_agent,
+        "created_at": device.created_at.timestamp(),
+        "last_seen_at": device.last_seen_at.timestamp(),
+        "is_expired": device.is_expired,
+    }
+
+
+class TrustedDevicesResponse(APIResponse):
+    def __init__(self, request: HttpRequest, devices) -> None:
+        data = [_trusted_device_data(device) for device in devices]
+        super().__init__(request, data=data)
+
+
+class TrustedDeviceRevokedResponse(APIResponse):
+    pass

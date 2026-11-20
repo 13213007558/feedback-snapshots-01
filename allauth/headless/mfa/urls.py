@@ -20,7 +20,7 @@ def build_urlpatterns(client: Client) -> list[URLPattern | URLResolver]:
             name="reauthenticate",
         ),
     ]
-    if mfa_settings.TRUST_ENABLED and client == Client.BROWSER:
+    if mfa_settings.TRUST_ENABLED:
         auth_patterns.append(
             path(
                 "2fa/trust",
@@ -30,6 +30,15 @@ def build_urlpatterns(client: Client) -> list[URLPattern | URLResolver]:
         )
 
     authenticators = []
+    trusted_devices = []
+    if mfa_settings.TRUST_ENABLED:
+        trusted_devices.append(
+            path(
+                "trusted-devices",
+                views.TrustedDevicesView.as_api_view(client=client),
+                name="trusted_devices",
+            )
+        )
     if "totp" in mfa_settings.SUPPORTED_TYPES:
         authenticators.append(
             path(
@@ -105,6 +114,7 @@ def build_urlpatterns(client: Client) -> list[URLPattern | URLResolver]:
                         "authenticators/",
                         include(authenticators),
                     ),
+                    *trusted_devices,
                 ]
             ),
         ),

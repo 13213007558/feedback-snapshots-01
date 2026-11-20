@@ -33,13 +33,15 @@ from allauth.headless.mfa.inputs import (
     ReauthenticateInput,
     ReauthenticateWebAuthnInput,
     SignupWebAuthnInput,
+    TrustedDevicesInput,
     TrustInput,
     UpdateWebAuthnInput,
 )
 from allauth.mfa.adapter import DefaultMFAAdapter, get_adapter
 from allauth.mfa.internal.flows import add
+from allauth.mfa.internal.flows import trust as trust_flow
 from allauth.mfa.internal.flows.trust import trust_browser
-from allauth.mfa.models import Authenticator
+from allauth.mfa.models import Authenticator, TrustedDevice
 from allauth.mfa.recovery_codes.internal import flows as recovery_codes_flows
 from allauth.mfa.stages import AuthenticateStage, TrustStage
 from allauth.mfa.totp.internal import auth as totp_auth, flows as totp_flows
@@ -317,3 +319,20 @@ class TrustView(AuthenticationStageAPIView):
         if trust:
             trust_browser(request, self.stage.login.user, response)
         return response
+
+
+class TrustedDevicesView(AuthenticatedAPIView):
+    input_class = {"DELETE": TrustedDevicesInput}
+
+    def get(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        devices = TrustedDevice.objects.purge_and_list(authenticated_user(request))
+        return response.TrustedDevicesResponse(request, devices)
+
+    def delete(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        devices = list(self.input.cleaned_data["devices"])
+        result = response.TrustedDeviceRevokedResponse(request)
+        trust_flow.revoke_trust(request, devices, result)
+        return result
+
+    def get_input_kwargs(self) -> dict:
+        return {"user": authenticated_user(self.request)}

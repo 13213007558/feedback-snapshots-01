@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.forms import Form
 from django.http import (
@@ -17,14 +18,19 @@ from django.views.generic import TemplateView
 from django.views.generic.edit import FormView
 
 from allauth.account import app_settings as account_settings
+from allauth.account.adapter import get_adapter
 from allauth.account.internal.decorators import login_stage_required
 from allauth.account.internal.templatekit import get_entrance_context_data
 from allauth.account.views._reauthenticate import BaseReauthenticateView
 from allauth.core.internal.httpkit import authenticated_user
 from allauth.mfa import app_settings
-from allauth.mfa.base.forms import AuthenticateForm, ReauthenticateForm
+from allauth.mfa.base.forms import (
+    AuthenticateForm,
+    ManageTrustedDevicesForm,
+    ReauthenticateForm,
+)
 from allauth.mfa.internal.flows import trust as trust_
-from allauth.mfa.models import Authenticator
+from allauth.mfa.models import Authenticator, TrustedDevice
 from allauth.mfa.stages import AuthenticateStage, TrustStage
 from allauth.mfa.utils import is_mfa_enabled
 from allauth.mfa.webauthn.forms import AuthenticateWebAuthnForm
@@ -153,6 +159,22 @@ reauthenticate = ReauthenticateView.as_view()
 class IndexView(TemplateView):
     template_name = f"mfa/index.{account_settings.TEMPLATE_EXTENSION}"
 
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        if not app_settings.TRUST_ENABLED:
+            return HttpResponseRedirect(reverse("mfa_index"))
+        form = ManageTrustedDevicesForm(user=request.user, data=request.POST)
+        response = HttpResponseRedirect(reverse("mfa_index"))
+        if form.is_valid():
+            revoked = form.save(request, response)
+            if revoked:
+                get_adapter().add_message(
+                    request,
+                    messages.INFO,
+                    "mfa/messages/trusted_devices_revoked.txt",
+                    message_context={"count": len(revoked)},
+                )
+        return response
+
     def get_context_data(self, **kwargs) -> dict:
         ret = super().get_context_data(**kwargs)
         authenticators: dict = {}
@@ -167,6 +189,9 @@ class IndexView(TemplateView):
         ret["MFA_SUPPORTED_TYPES"] = app_settings.SUPPORTED_TYPES
         ret["MFA_RECOVERY_CODES_SHOW_ONCE"] = app_settings.RECOVERY_CODES_SHOW_ONCE
         ret["is_mfa_enabled"] = is_mfa_enabled(authenticated_user(self.request))
+        if app_settings.TRUST_ENABLED:
+            ret["trusted_devices"] = TrustedDevice.objects.purge_and_list(user)
+            ret["trusted_devices_form"] = ManageTrustedDevicesForm(user=user)
         return ret
 
 

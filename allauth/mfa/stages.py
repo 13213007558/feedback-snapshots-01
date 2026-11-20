@@ -5,7 +5,7 @@ from django.http import HttpRequest
 from allauth.account import app_settings as account_settings
 from allauth.account.internal.constants import LoginStageKey as AccountLoginStageKey
 from allauth.account.stages import LoginStage
-from allauth.core.internal.httpkit import headed_redirect_response, is_headless_request
+from allauth.core.internal.httpkit import headed_redirect_response
 from allauth.mfa import app_settings
 from allauth.mfa.internal.constants import LoginStageKey
 from allauth.mfa.internal.flows import trust
@@ -57,9 +57,7 @@ class TrustStage(LoginStage):
             or not lbc_stage.state.get("login_by_code_required")
         ):
             return None, True
-        client = is_headless_request(self.request)
-        if client and client == "app":
-            # Trust-this-browser relies on cookies.
-            return None, True
+        # Browser trust is delivered through a cookie, whereas headless app
+        # clients keep their trust server side. Both scopes are supported.
         response = headed_redirect_response("mfa_trust")
         return response, True

@@ -91,12 +91,26 @@ Available settings:
 ``MFA_TRUST_ENABLED`` (default: ``False``)
   Enables the "Trust this browser?" functionality, which presents users with MFA
   enabled the choice to trust their browser allowing them to skip authenticating
-  per MFA on each login. This is implemented by handing out a special trust
-  cookie.
+  per MFA on each login. Two distinct trust scopes are kept apart:
+
+  - Regular site and headless *browser* clients receive a signed, HTTP only
+    trust cookie. The corresponding server side ``TrustedDevice`` record is
+    used to review and revoke that trust.
+  - Headless *app* (mobile) clients cannot rely on cookies, so their trust is
+    fully persisted server side, keyed by the device identifier, and looked up
+    on each login.
+
+  Trusted devices are listed on the two-factor authentication management page,
+  and through the headless ``account/trusted-devices`` endpoint. Revoking trust
+  does not end any active session -- it only ensures that MFA verification is
+  required again at the next login. Changing the security configuration (e.g.
+  the password or an authenticator) invalidates previously issued trust
+  automatically.
 
 ``MFA_TRUST_COOKIE_AGE`` (default: ``timedelta(days=14)``)
   Specifies the period (in seconds, or ``timedelta``) during which MFA is
-  skipped.
+  skipped. This applies to both the browser trust cookie and server side
+  trusted device records.
 
 ``MFA_TRUST_COOKIE_NAME`` (default: ``"mfa_trusted"``)
   The name of the trust cookie.

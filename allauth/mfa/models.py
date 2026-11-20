@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.conf import settings
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 from django.db.models import Q
@@ -19,6 +20,20 @@ if not allauth_settings.MFA_ENABLED:
 
 class AuthenticatorManager(models.Manager):
     pass
+
+
+class TrustedDeviceManager(models.Manager):
+    def purge_and_list(self, user: AbstractBaseUser) -> list["TrustedDevice"]:
+        from allauth.mfa import app_settings
+
+        expired = [
+            device
+            for device in self.filter(user_id=user.pk)
+            if device.created_at + app_settings.TRUST_COOKIE_AGE < timezone.now()
+        ]
+        for device in expired:
+            device.delete()
+        return list(self.filter(user_id=user.pk))
 
 
 class Authenticator(models.Model):
@@ -68,3 +83,46 @@ class Authenticator(models.Model):
     def record_usage(self) -> None:
         self.last_used_at = timezone.now()
         self.save(update_fields=["last_used_at"])
+
+
+class TrustedDevice(models.Model):
+    """A device for which MFA verification was explicitly bypassed.
+
+    Two distinct trust scopes are kept apart:
+
+    - ``BROWSER``: trust is handed out through a signed, httponly cookie and
+      the record here merely allows the user to review/revoke that trust.
+    - ``APP``: headless (mobile) clients cannot rely on cookies, so their trust
+      is fully persisted server side and looked up per device.
+    """
+
+    class Scope(models.TextChoices):
+        BROWSER = "browser", _("Browser")
+        APP = "app", _("App")
+
+    objects = TrustedDeviceManager()
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    scope = models.CharField(max_length=20, choices=Scope.choices)
+    fingerprint = models.CharField(max_length=64)
+    identifier = models.CharField(max_length=200)
+    user_agent = models.CharField(max_length=200, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=["user", "scope", "identifier"],
+                name="unique_trusted_device",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_scope_display()}: {self.identifier}"
+
+    @property
+    def is_expired(self) -> bool:
+        from allauth.mfa import app_settings
+
+        return self.created_at + app_settings.TRUST_COOKIE_AGE <= timezone.now()
