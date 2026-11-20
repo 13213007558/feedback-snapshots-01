@@ -47,6 +47,35 @@ must happen before initializing the application.
 
     .. versionadded:: 0.12
 
+.. data:: SQLALCHEMY_SCHEMA_PERMISSIONS
+
+    A dict mapping bind keys to a collection of schema management operations
+    allowed on that bind. It controls :meth:`.SQLAlchemy.create_all`,
+    :meth:`.SQLAlchemy.drop_all`, and :meth:`.SQLAlchemy.reflect`. The operation
+    names are ``"create_all"``, ``"drop_all"``, and ``"reflect"``.
+
+    The ``None`` key configures the default bind. The ``"*"`` key provides the
+    rule applied to any bind without an explicit entry. If this config is not set
+    or is empty, every operation is allowed on every bind, as in previous
+    versions. Once it is set, a bind without any matching rule is denied.
+
+    All binds in a call are authorized before any operation runs. If one bind is
+    not permitted, a :class:`PermissionError` is raised and the schema of every
+    database, including the otherwise permitted ones, is left unchanged.
+
+    .. code-block:: python
+
+        # The test bind may create and drop tables.
+        # The reporting bind may only be reflected.
+        # The production bind has no entry, so it is denied everything.
+        SQLALCHEMY_SCHEMA_PERMISSIONS = {
+            "test": {"create_all", "drop_all"},
+            "reports": {"reflect"},
+            "*": {"reflect"},
+        }
+
+    .. versionadded:: 3.2
+
 .. data:: SQLALCHEMY_ECHO
 
     The default value for ``echo`` and ``echo_pool`` for every engine. This is useful to

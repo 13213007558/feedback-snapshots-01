@@ -95,3 +95,42 @@ application context.
 
     # drop tables for the default bind
     db.drop_all(bind_key=None)
+
+
+Schema Management Permissions
+------------------------------
+
+Some databases should never have their schema changed by the application. For
+example, a maintenance script may create and drop tables on a test bind, a
+reporting database may only be reflected, and a production database is managed
+by an independent migration tool. Use the
+:data:`.SQLALCHEMY_SCHEMA_PERMISSIONS` config to allow the
+``create_all``, ``drop_all``, and ``reflect`` operations per bind.
+
+The config maps bind keys to the operations allowed on that bind. The ``None``
+key configures the default bind, and the ``"*"`` key sets the rule for any bind
+without an explicit entry. An unset or empty config allows everything,
+preserving the previous behavior. Once the config is set, a bind without a
+matching rule is denied.
+
+.. code-block:: python
+
+    SQLALCHEMY_SCHEMA_PERMISSIONS = {
+        None: {"create_all", "drop_all", "reflect"},
+        "test": {"create_all", "drop_all", "reflect"},
+        "reports": {"reflect"},
+    }
+
+Permissions are checked for every bind in a call, including when the default
+``bind_key`` selects all binds, before any operation runs. If any bind is not
+permitted, a :class:`PermissionError` is raised and no database in the batch is
+modified.
+
+.. code-block:: python
+
+    # Raises PermissionError if "reports" may not create tables. Neither the
+    # default bind nor the "reports" bind has any table created.
+    db.create_all()
+
+    # Selecting an allowed bind works with the original semantics.
+    db.reflect(bind_key="reports")

@@ -30,6 +30,10 @@ from .table import _Table
 
 _O = t.TypeVar("_O", bound=object)  # Based on sqlalchemy.orm._typing.py
 
+#: Bind key in :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS` that applies to every
+#: bind without an explicit entry.
+SCHEMA_PERMISSIONS_DEFAULT_KEY = "*"
+
 
 # Type accepted for model_class argument
 _FSA_MCT = t.TypeVar(
@@ -305,6 +309,7 @@ class SQLAlchemy:
         - :data:`.SQLALCHEMY_ENGINE_OPTIONS`
         - :data:`.SQLALCHEMY_ECHO`
         - :data:`.SQLALCHEMY_BINDS`
+        - :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`
         - :data:`.SQLALCHEMY_RECORD_QUERIES`
         - :data:`.SQLALCHEMY_TRACK_MODIFICATIONS`
 
@@ -335,6 +340,7 @@ class SQLAlchemy:
         config_binds: dict[str | None, str | sa.engine.URL | dict[str, t.Any]] = (
             app.config.setdefault("SQLALCHEMY_BINDS", {})
         )
+        app.config.setdefault("SQLALCHEMY_SCHEMA_PERMISSIONS", {})
         engine_options: dict[str | None, dict[str, t.Any]] = {}
 
         # Build the engine config for each bind key.
@@ -848,15 +854,63 @@ class SQLAlchemy:
             count=count,
         )
 
+    @property
+    def schema_permissions(self) -> t.Mapping[str | None, t.Collection[str]]:
+        """Map of bind keys to the schema management operations allowed on them,
+        from the :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS` config. The ``"*"`` key
+        provides the rule for any bind without an explicit entry, and the ``None``
+        key configures the default bind.
+
+        If the config is not set, every operation is allowed on every bind, as in
+        previous versions. Otherwise a bind without any matching rule is denied.
+
+        This requires that a Flask application context is active.
+
+        .. versionadded:: 3.2
+        """
+        app = current_app._get_current_object()  # type: ignore[attr-defined]
+        permissions: t.Mapping[str | None, t.Collection[str]] = app.config.get(
+            "SQLALCHEMY_SCHEMA_PERMISSIONS", {}
+        )
+        return permissions
+
+    def _is_schema_op_allowed(self, bind_key: str | None, op_name: str) -> bool:
+        """Check whether a schema management operation is permitted on a bind.
+
+        :meta private:
+        """
+        permissions = self.schema_permissions
+
+        if not permissions:
+            # No configuration preserves the historical permissive behavior.
+            return True
+
+        if bind_key in permissions:
+            allowed: t.Collection[str] = permissions[bind_key]
+        elif SCHEMA_PERMISSIONS_DEFAULT_KEY in permissions:
+            allowed = permissions[SCHEMA_PERMISSIONS_DEFAULT_KEY]
+        else:
+            # Configured permissions without a rule for this bind: fail closed.
+            return False
+
+        return op_name in allowed
+
     def _call_for_binds(
         self, bind_key: str | None | list[str | None], op_name: str
     ) -> None:
         """Call a method on each metadata.
 
+        Every bind is resolved and authorized before any operation runs, so a
+        rejected batch does not change the schema of any database.
+
         :meta private:
 
         :param bind_key: A bind key or list of keys. Defaults to all binds.
         :param op_name: The name of the method to call.
+
+        .. versionchanged:: 3.2
+            Added per-bind permission checks through
+            :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`.
 
         .. versionchanged:: 3.0
             Renamed from ``_execute_for_all_tables``.
@@ -867,6 +921,10 @@ class SQLAlchemy:
             keys = [bind_key]
         else:
             keys = bind_key
+
+        # Resolve and authorize every bind first, so a rejection leaves every
+        # database's schema untouched.
+        targets: list[tuple[sa.engine.Engine, sa.MetaData]] = []
 
         for key in keys:
             try:
@@ -879,7 +937,15 @@ class SQLAlchemy:
 
                 raise sa_exc.UnboundExecutionError(message) from None
 
-            metadata = self.metadatas[key]
+            if not self._is_schema_op_allowed(key, op_name):
+                raise PermissionError(
+                    f"Schema operation '{op_name}' is not permitted for bind"
+                    f" '{key}'. Check the 'SQLALCHEMY_SCHEMA_PERMISSIONS' config."
+                )
+
+            targets.append((engine, self.metadatas[key]))
+
+        for engine, metadata in targets:
             getattr(metadata, op_name)(bind=engine)
 
     def create_all(self, bind_key: str | None | list[str | None] = "__all__") -> None:
@@ -891,6 +957,14 @@ class SQLAlchemy:
 
         :param bind_key: A bind key or list of keys to create the tables for. Defaults
             to all binds.
+
+        :raises PermissionError: if ``create_all`` is not allowed for one of the
+            binds by :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`. The check happens for
+            every bind before any table is created.
+
+        .. versionchanged:: 3.2
+            Respects per-bind permissions in
+            :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`.
 
         .. versionchanged:: 3.0
             Renamed the ``bind`` parameter to ``bind_key``. Removed the ``app``
@@ -909,6 +983,14 @@ class SQLAlchemy:
         :param bind_key: A bind key or list of keys to drop the tables from. Defaults to
             all binds.
 
+        :raises PermissionError: if ``drop_all`` is not allowed for one of the
+            binds by :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`. The check happens for
+            every bind before any table is dropped.
+
+        .. versionchanged:: 3.2
+            Respects per-bind permissions in
+            :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`.
+
         .. versionchanged:: 3.0
             Renamed the ``bind`` parameter to ``bind_key``. Removed the ``app``
             parameter.
@@ -926,6 +1008,14 @@ class SQLAlchemy:
 
         :param bind_key: A bind key or list of keys to reflect the tables from. Defaults
             to all binds.
+
+        :raises PermissionError: if ``reflect`` is not allowed for one of the
+            binds by :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`. The check happens for
+            every bind before any metadata is reflected.
+
+        .. versionchanged:: 3.2
+            Respects per-bind permissions in
+            :data:`.SQLALCHEMY_SCHEMA_PERMISSIONS`.
 
         .. versionchanged:: 3.0
             Renamed the ``bind`` parameter to ``bind_key``. Removed the ``app``

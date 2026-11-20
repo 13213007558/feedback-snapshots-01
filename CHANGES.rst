@@ -1,3 +1,12 @@
+Version 3.2.0
+-------------
+
+-   Add the ``SQLALCHEMY_SCHEMA_PERMISSIONS`` config to allow or deny
+    ``create_all``, ``drop_all``, and ``reflect`` per bind. All binds in a batch
+    are authorized before any schema change runs, so a rejected operation leaves
+    every database untouched.
+
+
 Version 3.1.2
 -------------
 
