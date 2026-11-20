@@ -1,0 +1,13 @@
+boolean-py==5.0
+ddt==1.7.2
+defusedxml==0.7.1
+iniconfig==2.3.1
+license-expression==30.4.4
+packageurl-python==0.17.6
+packaging==26.3
+pluggy==1.7.0
+py-serializable==2.2.0
+pygments==2.21.0
+pytest==9.2.0
+sortedcontainers==2.4.0
+typing-extensions==4.16.0
