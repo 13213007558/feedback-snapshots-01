@@ -46,6 +46,7 @@ nav:
       - Verify:
           - Policy: api/verify/policy.md
           - Verifier: api/verify/verifier.md
+          - Evidence: api/verify/evidence.md
   # end-api-section
 markdown_extensions:
   - admonition

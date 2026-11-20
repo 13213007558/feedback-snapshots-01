@@ -44,9 +44,11 @@ print(result)
 """
 
 from sigstore.verify import policy, verifier
+from sigstore.verify.evidence import VerificationEvidence
 from sigstore.verify.verifier import Verifier
 
 __all__ = [
+    "VerificationEvidence",
     "Verifier",
     "policy",
     "verifier",

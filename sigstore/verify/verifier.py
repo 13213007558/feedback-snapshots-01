@@ -62,6 +62,10 @@ from sigstore._utils import base64_encode_pem_cert, sha256_digest
 from sigstore.errors import CertValidationError, VerificationError
 from sigstore.hashes import Hashed
 from sigstore.models import Bundle, ClientTrustConfig, TrustedRoot
+from sigstore.verify.evidence import (
+    VerificationEvidence,
+    build_verification_evidence,
+)
 from sigstore.verify.policy import VerificationPolicy
 
 _logger = logging.getLogger(__name__)
@@ -287,12 +291,15 @@ class Verifier:
 
     def _verify_common_signing_cert(
         self, bundle: Bundle, policy: VerificationPolicy
-    ) -> None:
+    ) -> list[TimestampVerificationResult]:
         """
         Performs the signing certificate verification steps that are shared between
         `verify_dsse` and `verify_artifact`.
 
         Raises `VerificationError` on all failures.
+
+        Returns the sources of trusted time that the verification established,
+        which are reused when building verification evidence.
         """
 
         # In order to verify an artifact, we need to achieve the following:
@@ -380,9 +387,15 @@ class Verifier:
                     f"invalid signing cert: expired at time of signing, time via {vts}"
                 )
 
+        return verified_timestamps
+
     def verify_dsse(
-        self, bundle: Bundle, policy: VerificationPolicy
-    ) -> tuple[str, bytes]:
+        self,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        *,
+        include_evidence: bool = False,
+    ) -> tuple[str, bytes] | tuple[str, bytes, VerificationEvidence]:
         """
         Verifies an bundle's DSSE envelope, returning the encapsulated payload
         and its content type.
@@ -395,6 +408,12 @@ class Verifier:
 
         `policy` is the `VerificationPolicy` to verify against.
 
+        If `include_evidence` is `True`, a `VerificationEvidence` summary is
+        appended to the return value. The summary is built only after every
+        verification step has succeeded and contains just the identifiers,
+        trusted time, and policy version relied on by this verification; it
+        never embeds the certificate or the envelope contents.
+
         Returns a tuple of `(type, payload)`, where `type` is the payload's
         type as encoded in the DSSE envelope and `payload` is the raw `bytes`
         of the payload. No validation of either `type` or `payload` is
@@ -404,7 +423,7 @@ class Verifier:
         """
 
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        verified_timestamps = self._verify_common_signing_cert(bundle, policy)
 
         # (7): verify the bundle's signature and DSSE envelope against the
         #      signing certificate's public key.
@@ -440,14 +459,26 @@ class Verifier:
                 f"Unsupported DSSE log entry type: {kind}/{version}"
             )
 
-        return (envelope._inner.payload_type, envelope._inner.payload)
+        if not include_evidence:
+            return (envelope._inner.payload_type, envelope._inner.payload)
+
+        pae_digest = sha256_digest(envelope.pae()).digest.hex()
+        evidence = build_verification_evidence(
+            bundle=bundle,
+            policy=policy,
+            verified_timestamps=verified_timestamps,
+            digest_identifier=("dsse_pae_digest_sha256", pae_digest),
+        )
+        return (envelope._inner.payload_type, envelope._inner.payload, evidence)
 
     def verify_artifact(
         self,
         input_: bytes | Hashed,
         bundle: Bundle,
         policy: VerificationPolicy,
-    ) -> None:
+        *,
+        include_evidence: bool = False,
+    ) -> VerificationEvidence | None:
         """
         Public API for verifying.
 
@@ -458,11 +489,17 @@ class Verifier:
 
         `policy` is the `VerificationPolicy` to verify against.
 
-        On failure, this method raises `VerificationError`.
+        If `include_evidence` is `True`, this method returns a
+        `VerificationEvidence` summary instead of `None`. The summary is
+        built only after every verification step has succeeded and contains
+        just the identifiers, trusted time, and policy version relied on by
+        this verification; it never embeds the signing certificate or the
+        artifact contents. On failure, this method raises
+        `VerificationError` and produces no evidence.
         """
 
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        verified_timestamps = self._verify_common_signing_cert(bundle, policy)
 
         hashed_input = sha256_digest(input_)
         bundle_signature = bundle._inner.message_signature
@@ -507,6 +544,16 @@ class Verifier:
             raise VerificationError(
                 f"Unsupported hashedrekord version {entry._inner.kind_version.version}"
             )
+
+        if not include_evidence:
+            return None
+
+        return build_verification_evidence(
+            bundle=bundle,
+            policy=policy,
+            verified_timestamps=verified_timestamps,
+            digest_identifier=("artifact_digest_sha256", hashed_input.digest.hex()),
+        )
 
 
 def _validate_dsse_v001_entry_body(bundle: Bundle) -> None:

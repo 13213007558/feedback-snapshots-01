@@ -93,3 +93,39 @@ $ sigstore verify identity sha256:ce8ab2822671752e201ea1e19e8c85e73d497e1c315bfd
     --cert-oidc-issuer 'https://github.com/login/oauth'
     --bundle 'foo.txt.sigstore.json'
 ```
+
+## Recording verification evidence
+
+For compliance workflows that need to know which signing materials a
+verification relied on, the Python API can return a stable evidence summary by
+passing `include_evidence=True` to `Verifier.verify_artifact` or
+`Verifier.verify_dsse`:
+
+```python
+from sigstore.verify import Verifier
+from sigstore.verify.policy import UnsafeNoOp
+
+verifier = Verifier.production()
+evidence = verifier.verify_artifact(
+    artifact,
+    bundle,
+    UnsafeNoOp(),
+    include_evidence=True,
+)
+print(evidence.to_json())
+```
+
+The summary contains only three groups of information:
+
+* `identifiers`: the signing certificate fingerprint, the transparency log ID
+  and index, and the digest that the signature was verified against;
+* `trusted_time`: each source of trusted time used during verification;
+* `policy_version`: a stable version string derived from the verification
+  policy configuration.
+
+The summary never embeds the full certificate, the signature, or the artifact
+contents, so it is safe to persist at intake time. It is built only after every
+verification step succeeds — a failed verification raises `VerificationError`
+and produces no evidence. Because the JSON encoding is canonical, an evidence
+record produced by an initial verification can be compared byte-for-byte with
+the record produced by a later offline review of the same fixed materials.
