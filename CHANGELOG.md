@@ -12,9 +12,19 @@ All versions prior to 0.9.0 are untracked.
 
 * HTTP clients (most importantly Rekor) now retry requests when that makes
   sense ([#1970](https://github.com/sigstore/sigstore-python/pull/1970))
+* Verification now accepts a `VerifiedTimePolicy`, allowing callers to choose
+  the verified time evidence an artifact needs: ordinary builds accept
+  transparency log confirmation, while important builds additionally require
+  approved timestamp evidence. Policies are evaluated over distinct time
+  sources, so repeated material from one source is not counted as independent
+  proof, and can be evaluated against a caller-supplied clock.
 
 ### Changed
 
+* The default verified time requirement is now counted over distinct sources
+  rather than over the number of timestamp responses. This does not change the
+  default threshold of one, but multiple timestamps from the same source can no
+  longer satisfy a higher threshold.
 * Added support for Python 3.15 and dropped EOL Python 3.10.
   ([#1957](https://github.com/sigstore/sigstore-python/pull/1957))
 * All HTTP clients now use urllib3 instead of requests: This means

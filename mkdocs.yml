@@ -45,6 +45,7 @@ nav:
       - Sign: api/sign.md
       - Verify:
           - Policy: api/verify/policy.md
+          - Verified Time Policy: api/verify/time_policy.md
           - Verifier: api/verify/verifier.md
   # end-api-section
 markdown_extensions:

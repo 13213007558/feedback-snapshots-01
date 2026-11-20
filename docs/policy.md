@@ -68,15 +68,53 @@ the [`Identity`][sigstore.verify.policy] verification policy.
 
 ### Establishing a Time for the Signature
 
-If the bundle contains one or more signed times from Timestamping Authorities,
-they will be used as the time source. In this case, a Timestamp Authority 
-configuration must be provided in the `ClientTrustConfig`. When verifying 
-Timestamp Authorities Responses, at least one must be valid.
+A bundle can carry verified time from two kinds of sources:
 
-If there is a Transparency Service Timestamp, this is also used as a source 
-of trusted time.
+- a signed timestamp from a Timestamping Authority (RFC 3161), and
+- the Transparency Service's confirmation (for Rekor v1 entries, the
+  integrated time covered by an inclusion promise).
 
-The verification will fail if no sources of time are found.
+A Timestamp Authority configuration must be provided in the
+`ClientTrustConfig`; when verifying Timestamp Authority responses, at least
+one must be valid.
+
+By default, at least one distinct source of verified time is required. The
+requirement is evaluated over *sources*, not over responses: repeating the
+same source's material (for example, the same TSA response several times, or
+several responses from the same TSA) counts as one proof.
+
+Callers that need a stronger requirement can pass a
+[`VerifiedTimePolicy`][sigstore.verify.time_policy.VerifiedTimePolicy] to
+`Verifier.verify_artifact` or `Verifier.verify_dsse`:
+
+```python
+from sigstore.verify import Verifier, VerifiedTimePolicy
+
+verifier = Verifier.production()
+
+# Ordinary builds: transparency log confirmation is sufficient.
+ordinary = VerifiedTimePolicy.ordinary()
+
+# Important builds: additionally require approved timestamp evidence.
+important = VerifiedTimePolicy.important()
+
+# Map an artifact's level straight to a policy.
+policy = VerifiedTimePolicy.for_artifact_level("important")
+```
+
+!!! note
+
+    Transparency log verification (inclusion proof, checkpoint, and the
+    inclusion promise when present) is always performed by the verifier,
+    regardless of the policy. `important` adds the requirement for an approved
+    timestamp; it does not replace log verification.
+
+A policy may also carry a `clock` and a `max_age`. The clock is used to decide
+whether evidence is acceptable *now* (for example, an archival service's
+ingestion time), while the signing certificate's validity is still checked
+against the evidence's own timestamp. Evidence that is newer than the clock is
+rejected; if `max_age` is set, evidence older than the given duration is
+rejected too.
 
 ### Certificate
 

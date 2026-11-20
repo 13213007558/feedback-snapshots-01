@@ -43,11 +43,20 @@ print(result)
 ```
 """
 
-from sigstore.verify import policy, verifier
+from sigstore.verify import policy, time_policy, verifier
+from sigstore.verify.time_policy import (
+    ArtifactLevel,
+    VerifiedTimeMaterials,
+    VerifiedTimePolicy,
+)
 from sigstore.verify.verifier import Verifier
 
 __all__ = [
+    "ArtifactLevel",
     "Verifier",
+    "VerifiedTimeMaterials",
+    "VerifiedTimePolicy",
     "policy",
+    "time_policy",
     "verifier",
 ]

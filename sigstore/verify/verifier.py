@@ -63,6 +63,10 @@ from sigstore.errors import CertValidationError, VerificationError
 from sigstore.hashes import Hashed
 from sigstore.models import Bundle, ClientTrustConfig, TrustedRoot
 from sigstore.verify.policy import VerificationPolicy
+from sigstore.verify.time_policy import (
+    VerifiedTimeMaterials,
+    VerifiedTimePolicy,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -70,8 +74,10 @@ _logger = logging.getLogger(__name__)
 # From https://github.com/sigstore/sigstore-go/blob/e92142f0734064ebf6001f188b7330a1212245fe/pkg/verify/tsa.go#L29
 MAX_ALLOWED_TIMESTAMP: int = 32
 
-# When verifying an entry, this threshold represents the minimum number of required
-# verified times to consider a signature valid.
+# When verifying an entry, this threshold represents the minimum number of distinct
+# sources of verified time required to consider a signature valid by default.
+# Multiple timestamps from one source count as a single source: see
+# `sigstore.verify.time_policy`.
 VERIFIED_TIME_THRESHOLD: int = 1
 
 
@@ -286,11 +292,19 @@ class Verifier:
             )
 
     def _verify_common_signing_cert(
-        self, bundle: Bundle, policy: VerificationPolicy
-    ) -> None:
+        self,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        time_policy: VerifiedTimePolicy | None = None,
+    ) -> VerifiedTimeMaterials:
         """
         Performs the signing certificate verification steps that are shared between
         `verify_dsse` and `verify_artifact`.
+
+        `time_policy` selects which verified time materials the caller requires.
+        If omitted, the historical `VERIFIED_TIME_THRESHOLD` requirement is used,
+        but evaluated against distinct sources rather than the number of
+        timestamp responses.
 
         Raises `VerificationError` on all failures.
         """
@@ -324,16 +338,17 @@ class Verifier:
         # validate the certificate chain, so this step comes first.
         # These include TSA timestamps and (in the case of rekor v1 entries)
         # rekor log integrated time.
-        verified_timestamps = self._establish_time(bundle)
-        if len(verified_timestamps) < VERIFIED_TIME_THRESHOLD:
-            raise VerificationError("not enough sources of verified time")
+        verified_times = VerifiedTimeMaterials(self._establish_time(bundle))
+        if time_policy is None:
+            time_policy = VerifiedTimePolicy.at_least(VERIFIED_TIME_THRESHOLD)
+        time_policy.verify(verified_times)
 
         # (1): verify that the signing certificate is signed by the root
         #      certificate and that the signing certificate was valid at the
         #      time of signing.
         chain: list[Certificate] = []
-        for vts in verified_timestamps:
-            chain = self._verify_chain_at_time(cert, vts)
+        for result in verified_times:
+            chain = self._verify_chain_at_time(cert, result)
 
         # (2): verify the signing certificate's SCT.
         try:
@@ -368,20 +383,28 @@ class Verifier:
         except VerificationError as exc:
             raise VerificationError(f"invalid log entry: {exc}")
 
-        # (6): verify our established times (timestamps or the log integration time) are
-        # within signing certificate validity period.
-        for vts in verified_timestamps:
+        # (6): verify our established times (timestamps or the log integration time)
+        # are within signing certificate validity period. Every source must agree,
+        # not just the first one.
+        for result in verified_times:
             if not (
                 bundle.signing_certificate.not_valid_before_utc
-                <= vts.time
+                <= result.time
                 <= bundle.signing_certificate.not_valid_after_utc
             ):
                 raise VerificationError(
-                    f"invalid signing cert: expired at time of signing, time via {vts}"
+                    "invalid signing cert: expired at time of signing, "
+                    f"time via {result}"
                 )
 
+        return verified_times
+
     def verify_dsse(
-        self, bundle: Bundle, policy: VerificationPolicy
+        self,
+        bundle: Bundle,
+        policy: VerificationPolicy,
+        *,
+        time_policy: VerifiedTimePolicy | None = None,
     ) -> tuple[str, bytes]:
         """
         Verifies an bundle's DSSE envelope, returning the encapsulated payload
@@ -395,6 +418,12 @@ class Verifier:
 
         `policy` is the `VerificationPolicy` to verify against.
 
+        `time_policy` selects which verified time materials are required (for
+        example, `VerifiedTimePolicy.important()` for artifacts that need
+        approved timestamp evidence in addition to transparency log
+        confirmation). If omitted, at least `VERIFIED_TIME_THRESHOLD` distinct
+        sources are required.
+
         Returns a tuple of `(type, payload)`, where `type` is the payload's
         type as encoded in the DSSE envelope and `payload` is the raw `bytes`
         of the payload. No validation of either `type` or `payload` is
@@ -404,7 +433,7 @@ class Verifier:
         """
 
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        self._verify_common_signing_cert(bundle, policy, time_policy)
 
         # (7): verify the bundle's signature and DSSE envelope against the
         #      signing certificate's public key.
@@ -447,6 +476,8 @@ class Verifier:
         input_: bytes | Hashed,
         bundle: Bundle,
         policy: VerificationPolicy,
+        *,
+        time_policy: VerifiedTimePolicy | None = None,
     ) -> None:
         """
         Public API for verifying.
@@ -458,11 +489,17 @@ class Verifier:
 
         `policy` is the `VerificationPolicy` to verify against.
 
+        `time_policy` selects which verified time materials are required (for
+        example, `VerifiedTimePolicy.important()` for artifacts that need
+        approved timestamp evidence in addition to transparency log
+        confirmation). If omitted, at least `VERIFIED_TIME_THRESHOLD` distinct
+        sources are required.
+
         On failure, this method raises `VerificationError`.
         """
 
         # (1) through (6) are performed by `_verify_common_signing_cert`.
-        self._verify_common_signing_cert(bundle, policy)
+        self._verify_common_signing_cert(bundle, policy, time_policy)
 
         hashed_input = sha256_digest(input_)
         bundle_signature = bundle._inner.message_signature
