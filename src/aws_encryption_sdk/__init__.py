@@ -25,6 +25,7 @@ from aws_encryption_sdk.streaming_client import (  # noqa
     StreamDecryptor,
     StreamEncryptor,
 )
+from aws_encryption_sdk.staged_streaming_client import StagedStreamDecryptor  # noqa
 
 _warn_deprecated_python()
 
@@ -274,8 +275,13 @@ class EncryptionSDKClient(object):
             ...         for chunk in decryptor:
             ...             pt_file.write(chunk)
 
-        :param str mode: Type of streaming client to return (e/encrypt: encryptor, d/decrypt: decryptor)
-        :param **kwargs: All other parameters provided are passed to the appropriate Streaming client
+        :param str mode: Type of streaming client to return (e/encrypt: encryptor, d/decrypt: decryptor,
+            decrypt-unsigned: decryptor that rejects signed messages,
+            decrypt-staged: :class:`StagedStreamDecryptor` that releases no plaintext
+            until the entire message has been authenticated)
+        :param **kwargs: All other parameters provided are passed to the appropriate Streaming client.
+            The ``decrypt-staged`` mode additionally accepts ``staging_spool_size`` and ``staging_dir``,
+            which control the in-memory threshold and on-disk location of the controlled staging area.
         :returns: Streaming Encryptor or Decryptor, as requested
         :rtype: :class:`aws_encryption_sdk.streaming_client.StreamEncryptor`
             or :class:`aws_encryption_sdk.streaming_client.StreamDecryptor`
@@ -290,6 +296,7 @@ class EncryptionSDKClient(object):
             "d": SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT,
             "decrypt": SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT,
             "decrypt-unsigned": SignaturePolicy.ALLOW_ENCRYPT_FORBID_DECRYPT,
+            "decrypt-staged": SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT,
         }
         kwargs["signature_policy"] = _signature_policy_map[mode.lower()]
 
@@ -299,6 +306,7 @@ class EncryptionSDKClient(object):
             "d": StreamDecryptor,
             "decrypt": StreamDecryptor,
             "decrypt-unsigned": StreamDecryptor,
+            "decrypt-staged": StagedStreamDecryptor,
         }
         try:
             return _stream_map[mode.lower()](**kwargs)
