@@ -86,6 +86,25 @@ Available settings:
   When enabled, refreshing the access token results in a new refresh token
   as well. The original refresh token is invalidated.
 
+``HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED`` (default: ``None``)
+  Declares, per client, which of the extra claims returned by
+  ``JWTTokenStrategy.get_claims()`` are allowed to end up in the signed access
+  token. For example::
+
+    HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED = {
+        "app": ("roles", "email"),
+        "browser": ("roles",),
+    }
+
+  The allowlist is checked both when the access token is first issued and
+  every time it is refreshed, so claims that are not (or no longer) approved
+  for a client never enter its tokens. Clients not listed receive no extra
+  claims. The reserved claims (``sub``, ``sid``, ``jti``, ``iat``, ``exp``,
+  ``token_use``) are always present and unaffected. When not configured (the
+  default), all extra claims are included. Changing this setting only affects
+  newly created access tokens; existing sessions and refresh tokens remain
+  valid.
+
 
 Customization
 -------------
@@ -95,7 +114,7 @@ class deriving from ``JWTTokenStrategy``, and pointing
 ``settings.HEADLESS_TOKEN_STRATEGY`` to that class.
 
 .. autoclass:: allauth.headless.tokens.strategies.jwt.JWTTokenStrategy
-   :members: get_claims
+   :members: get_claims, get_allowed_claims
 
 
 Securing Your API Endpoints

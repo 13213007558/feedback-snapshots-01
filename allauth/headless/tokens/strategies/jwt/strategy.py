@@ -80,7 +80,7 @@ class JWTTokenStrategy(AbstractTokenStrategy):
 
     def create_access_token(self, request: HttpRequest) -> str | None:
         user = authenticated_user(request)
-        claims = self.get_claims(user)
+        claims = self.get_allowed_claims(self.get_claims(user), request)
         return internal.create_access_token(user, request.session, claims)
 
     def get_claims(self, user: AbstractBaseUser) -> dict[str, Any]:
@@ -93,17 +93,36 @@ class JWTTokenStrategy(AbstractTokenStrategy):
          - ``jti``
          - ``token_use``
          - ``sub``
+
+        The claims returned here are filtered against
+        ``HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED`` before they end up in the token.
         """
         return {}
+
+    def get_allowed_claims(
+        self, claims: dict[str, Any], request: HttpRequest
+    ) -> dict[str, Any]:
+        """
+        Filters the given claims down to those the client of the given request
+        is allowed to receive, as declared by
+        ``HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED``. When that setting is not
+        configured, all claims are allowed.
+        """
+        allowed = app_settings.JWT_EXTRA_CLAIMS_ALLOWED
+        if allowed is None:
+            return claims
+        headless = getattr(getattr(request, "allauth", None), "headless", None)
+        client = getattr(headless, "client", None)
+        allowed_names = set(allowed.get(client, ()))
+        return {key: value for key, value in claims.items() if key in allowed_names}
 
     def refresh_token(self, refresh_token: str) -> tuple[str, str] | None:
         user_session_payload = internal.validate_refresh_token(refresh_token)
         if user_session_payload is None:
             return None
         user, session, payload = user_session_payload
-        access_token = internal.create_access_token(
-            user, session, self.get_claims(user)
-        )
+        claims = self.get_allowed_claims(self.get_claims(user), context.request)
+        access_token = internal.create_access_token(user, session, claims)
         if app_settings.JWT_ROTATE_REFRESH_TOKEN:
             internal.invalidate_refresh_token(session, payload)
             next_refresh_token = internal.create_refresh_token(user, session)

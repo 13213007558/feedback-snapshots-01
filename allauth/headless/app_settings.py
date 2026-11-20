@@ -78,6 +78,10 @@ class AppSettings:
     def JWT_ROTATE_REFRESH_TOKEN(self) -> bool:
         return self._setting("JWT_ROTATE_REFRESH_TOKEN", True)
 
+    @property
+    def JWT_EXTRA_CLAIMS_ALLOWED(self) -> dict[str, tuple[str, ...]] | None:
+        return self._setting("JWT_EXTRA_CLAIMS_ALLOWED", None)
+
 
 _app_settings = AppSettings("HEADLESS_")
 

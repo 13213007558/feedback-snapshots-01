@@ -1,13 +1,16 @@
 from http import HTTPStatus
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import HASH_SESSION_KEY
-from django.test.client import Client
+from django.test.client import Client, RequestFactory
 from django.urls import reverse, reverse_lazy
 
 import jwt
 import pytest
 
+from allauth.headless.constants import Client as HeadlessClient
+from allauth.headless.internal.decorators import mark_request_as_headless
 from allauth.headless.tokens.strategies.jwt import JWTTokenStrategy, internal
 from allauth.headless.tokens.strategies.jwt.internal import (
     create_access_token,
@@ -19,6 +22,34 @@ from allauth.headless.tokens.strategies.jwt.internal import (
 class CustomJWTTokenStrategy(JWTTokenStrategy):
     def get_claims(self, user):
         return {"email": user.email}
+
+
+class RichClaimsJWTTokenStrategy(JWTTokenStrategy):
+    def get_claims(self, user):
+        return {
+            "roles": ["staff", "editor"],
+            "email": user.email,
+            "phone": "+31612345678",
+        }
+
+
+LOCAL_SIGNING_KEY = "local-test-signing-key-0123456789abcdef"
+
+
+def _decode_local(access_token):
+    return jwt.decode(
+        access_token,
+        key=LOCAL_SIGNING_KEY,
+        algorithms=["HS256"],
+        options={"verify_signature": True, "verify_iss": False, "verify_aud": False},
+    )
+
+
+def _assert_mandatory_claims(payload, user):
+    assert payload["sub"] == str(user.pk)
+    assert payload["token_use"] == "access"
+    for claim in ("sid", "jti", "iat", "exp"):
+        assert claim in payload
 
 
 def test_jwt_config_is_cached(settings):
@@ -493,3 +524,121 @@ def test_stateful_access_token_with_unusable_password(
     client.force_login(user)
     access_token = create_access_token(user, client.session, {})
     _assert_bearer_resource(access_token, HTTPStatus.OK)
+
+
+@pytest.fixture
+def rich_claims_jwt(settings):
+    settings.HEADLESS_TOKEN_STRATEGY = (
+        "tests.apps.headless.tokens.test_jwttokenstrategy.RichClaimsJWTTokenStrategy"
+    )
+    settings.HEADLESS_JWT_ALGORITHM = "HS256"
+    settings.HEADLESS_JWT_PRIVATE_KEY = LOCAL_SIGNING_KEY
+    settings.HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED = {
+        "app": ("roles", "email"),
+        "browser": ("roles",),
+    }
+
+
+def test_extra_claims_allowed_at_issue_and_refresh(
+    headless_client,
+    headless_reverse,
+    client,
+    user,
+    obtain_tokens,
+    rich_claims_jwt,
+):
+    if headless_client == "browser":
+        return
+    access_token, refresh_token = obtain_tokens(client)
+
+    # On first issuance, only the claims approved for the app client are
+    # signed into the token; the mandatory claims are present as well.
+    payload = _decode_local(access_token)
+    _assert_mandatory_claims(payload, user)
+    assert payload["roles"] == ["staff", "editor"]
+    assert payload["email"] == user.email
+    assert "phone" not in payload
+
+    # On refresh, the allowlist is checked again.
+    resp = Client().post(
+        headless_reverse("headless:tokens:refresh"),
+        data={"refresh_token": refresh_token},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.OK
+    payload = _decode_local(resp.json()["data"]["access_token"])
+    _assert_mandatory_claims(payload, user)
+    assert payload["roles"] == ["staff", "editor"]
+    assert payload["email"] == user.email
+    assert "phone" not in payload
+
+
+def test_extra_claims_config_update_keeps_session(
+    headless_client,
+    headless_reverse,
+    client,
+    user,
+    settings,
+    obtain_tokens,
+    rich_claims_jwt,
+):
+    if headless_client == "browser":
+        return
+    access_token, refresh_token = obtain_tokens(client)
+    assert _decode_local(access_token)["email"] == user.email
+
+    # Tighten the disclosure configuration: email is no longer approved.
+    settings.HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED = {"app": ("roles",)}
+
+    # The still-valid session/refresh token does not need to be cleared...
+    resp = Client().post(
+        headless_reverse("headless:tokens:refresh"),
+        data={"refresh_token": refresh_token},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.OK
+
+    # ...yet the refreshed access token reflects the updated configuration.
+    payload = _decode_local(resp.json()["data"]["access_token"])
+    _assert_mandatory_claims(payload, user)
+    assert payload["roles"] == ["staff", "editor"]
+    assert "email" not in payload
+    assert "phone" not in payload
+
+
+def test_extra_claims_unrestricted_by_default(
+    headless_client,
+    client,
+    user,
+    settings,
+    obtain_tokens,
+    rich_claims_jwt,
+):
+    if headless_client == "browser":
+        return
+    settings.HEADLESS_JWT_EXTRA_CLAIMS_ALLOWED = None
+    access_token, _ = obtain_tokens(client)
+    payload = _decode_local(access_token)
+    _assert_mandatory_claims(payload, user)
+    assert payload["roles"] == ["staff", "editor"]
+    assert payload["email"] == user.email
+    assert payload["phone"] == "+31612345678"
+
+
+@pytest.mark.parametrize(
+    "client,expected_claims",
+    [
+        (HeadlessClient.APP, {"roles", "email"}),
+        (HeadlessClient.BROWSER, {"roles"}),
+        (None, set()),
+    ],
+)
+def test_get_allowed_claims_per_client(rich_claims_jwt, client, expected_claims):
+    request = RequestFactory().get("/")
+    request.allauth = SimpleNamespace()
+    if client is not None:
+        mark_request_as_headless(request, client)
+    claims = RichClaimsJWTTokenStrategy().get_allowed_claims(
+        {"roles": ["staff"], "email": "a@b.c", "phone": "+316"}, request
+    )
+    assert set(claims.keys()) == expected_claims
