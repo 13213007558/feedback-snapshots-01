@@ -19,7 +19,11 @@ from wrapt import ObjectProxy
 
 import aws_encryption_sdk
 from aws_encryption_sdk.caches import build_decryption_materials_cache_key, build_encryption_materials_cache_key
-from aws_encryption_sdk.exceptions import CustomMaximumValueExceeded, NotSupportedError
+from aws_encryption_sdk.exceptions import (
+    CustomMaximumValueExceeded,
+    EncryptionContextMismatchError,
+    NotSupportedError,
+)
 from aws_encryption_sdk.identifiers import Algorithm, CommitmentPolicy, EncryptionKeyType, WrappingAlgorithm
 from aws_encryption_sdk.internal.crypto.wrapping_keys import WrappingKey
 from aws_encryption_sdk.internal.defaults import LINE_LENGTH
@@ -446,6 +450,150 @@ def test_encryption_cycle_stream_kms(frame_length, algorithm, encryption_context
     assert ciphertext != plaintext
     assert plaintext == VALUES["plaintext_128"] * 10
     assert encryptor.header.encryption_context == decryptor.header.encryption_context
+
+
+EXPECTED_CONTEXT_ARCHIVE_A = {
+    "bucket": "objects",
+    "object-key": "archive/a.enc",
+    "tenant": "tenant-a",
+}
+EXPECTED_CONTEXT_ARCHIVE_B = {
+    "bucket": "objects",
+    "object-key": "archive/b.enc",
+    "tenant": "tenant-a",
+}
+
+
+def _raw_symmetric_key_provider():
+    return build_fake_raw_key_provider(
+        WrappingAlgorithm.AES_256_GCM_IV12_TAG16_NO_PADDING, EncryptionKeyType.SYMMETRIC
+    )
+
+
+def _encrypt_archive_objects():
+    """Encrypts two normal objects with the local symmetric test key, each with its own object context."""
+    key_provider = _raw_symmetric_key_provider()
+    ciphertext_a, _ = aws_encryption_sdk.EncryptionSDKClient().encrypt(
+        source=VALUES["plaintext_128"],
+        key_provider=key_provider,
+        encryption_context=EXPECTED_CONTEXT_ARCHIVE_A,
+        frame_length=0,
+    )
+    ciphertext_b, _ = aws_encryption_sdk.EncryptionSDKClient().encrypt(
+        source=VALUES["plaintext_128"] * 2,
+        key_provider=key_provider,
+        encryption_context=EXPECTED_CONTEXT_ARCHIVE_B,
+        frame_length=0,
+    )
+    return ciphertext_a, ciphertext_b
+
+
+def test_decrypt_oneshot_with_matching_expected_encryption_context():
+    """A caller that supplies the object context used at encryption time can read the plaintext."""
+    ciphertext_a, ciphertext_b = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+    client = aws_encryption_sdk.EncryptionSDKClient()
+
+    plaintext_a, header_a = client.decrypt(
+        source=ciphertext_a,
+        key_provider=key_provider,
+        expected_encryption_context=EXPECTED_CONTEXT_ARCHIVE_A,
+    )
+    plaintext_b, header_b = client.decrypt(
+        source=ciphertext_b,
+        key_provider=key_provider,
+        expected_encryption_context=EXPECTED_CONTEXT_ARCHIVE_B,
+    )
+
+    assert plaintext_a == VALUES["plaintext_128"]
+    assert plaintext_b == VALUES["plaintext_128"] * 2
+    assert header_a.encryption_context["object-key"] == EXPECTED_CONTEXT_ARCHIVE_A["object-key"]
+    assert header_b.encryption_context["object-key"] == EXPECTED_CONTEXT_ARCHIVE_B["object-key"]
+
+
+def test_decrypt_oneshot_with_different_object_expected_encryption_context_fails():
+    """Asking for object B while reading object A's ciphertext fails without returning plaintext."""
+    ciphertext_a, _ = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+
+    with pytest.raises(EncryptionContextMismatchError) as excinfo:
+        aws_encryption_sdk.EncryptionSDKClient().decrypt(
+            source=ciphertext_a,
+            key_provider=key_provider,
+            expected_encryption_context=EXPECTED_CONTEXT_ARCHIVE_B,
+        )
+
+    assert excinfo.value.mismatched_keys == ("object-key",)
+    assert excinfo.value.missing_keys == ()
+    excinfo.match("Encryption context verification failed")
+
+
+def test_decrypt_oneshot_expected_encryption_context_missing_key_fails():
+    """An expected pair that is absent from the message encryption context fails verification."""
+    ciphertext_a, _ = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+    expected_context = {"bucket": "objects", "owner": "business-unit-42"}
+
+    with pytest.raises(EncryptionContextMismatchError) as excinfo:
+        aws_encryption_sdk.EncryptionSDKClient().decrypt(
+            source=ciphertext_a,
+            key_provider=key_provider,
+            expected_encryption_context=expected_context,
+        )
+
+    assert excinfo.value.missing_keys == ("owner",)
+    assert excinfo.value.mismatched_keys == ()
+
+
+def test_decrypt_oneshot_without_expected_encryption_context_still_works():
+    """Existing callers that do not pass an expected context are unaffected."""
+    ciphertext_a, _ = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+
+    plaintext, _ = aws_encryption_sdk.EncryptionSDKClient().decrypt(
+        source=ciphertext_a, key_provider=key_provider
+    )
+
+    assert plaintext == VALUES["plaintext_128"]
+
+
+def test_stream_decrypt_with_matching_expected_encryption_context():
+    """The streaming entry point honors the expected object context and returns the plaintext."""
+    _, ciphertext_b = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+    plaintext = io.BytesIO()
+
+    with aws_encryption_sdk.EncryptionSDKClient().stream(
+        mode="d",
+        source=io.BytesIO(ciphertext_b),
+        key_provider=key_provider,
+        expected_encryption_context=EXPECTED_CONTEXT_ARCHIVE_B,
+    ) as decryptor:
+        for chunk in decryptor:
+            plaintext.write(chunk)
+
+    assert plaintext.getvalue() == VALUES["plaintext_128"] * 2
+    assert decryptor.header.encryption_context["object-key"] == EXPECTED_CONTEXT_ARCHIVE_B["object-key"]
+
+
+def test_stream_decrypt_with_different_object_expected_encryption_context_fails():
+    """The streaming entry point fails on a mismatched object context before yielding plaintext."""
+    ciphertext_a, _ = _encrypt_archive_objects()
+    key_provider = _raw_symmetric_key_provider()
+    plaintext = io.BytesIO()
+
+    with pytest.raises(EncryptionContextMismatchError) as excinfo:
+        with aws_encryption_sdk.EncryptionSDKClient().stream(
+            mode="d",
+            source=io.BytesIO(ciphertext_a),
+            key_provider=key_provider,
+            expected_encryption_context=EXPECTED_CONTEXT_ARCHIVE_B,
+        ) as decryptor:
+            for chunk in decryptor:
+                plaintext.write(chunk)
+
+    assert excinfo.value.mismatched_keys == ("object-key",)
+    assert plaintext.getvalue() == b""
 
 
 def test_decrypt_legacy_provided_message():

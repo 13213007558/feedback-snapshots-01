@@ -39,6 +39,31 @@ class NotSupportedError(AWSEncryptionSDKClientError):
     """Exception class for unsupported identities or operations."""
 
 
+class EncryptionContextMismatchError(AWSEncryptionSDKClientError):
+    """Exception class for when the expected encryption context does not match the message.
+
+    :param missing_keys: Keys that were expected but are not present in the message encryption context
+    :type missing_keys: iterable of str
+    :param mismatched_keys: Keys that are present but whose values do not match the expected values
+    :type mismatched_keys: iterable of str
+    """
+
+    def __init__(self, missing_keys=(), mismatched_keys=()):
+        """Prepares exception message and exposes the mismatched key names."""
+        self.missing_keys = tuple(sorted(missing_keys))
+        self.mismatched_keys = tuple(sorted(mismatched_keys))
+
+        details = []
+        if self.missing_keys:
+            details.append("keys not found: {}".format(", ".join(self.missing_keys)))
+        if self.mismatched_keys:
+            details.append("keys with unexpected values: {}".format(", ".join(self.mismatched_keys)))
+
+        super(EncryptionContextMismatchError, self).__init__(
+            "Encryption context verification failed ({})".format("; ".join(details))
+        )
+
+
 class MasterKeyProviderError(AWSEncryptionSDKClientError):
     """Exception class for Master Key Providers."""
 

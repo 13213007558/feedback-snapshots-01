@@ -10,6 +10,7 @@ from aws_encryption_sdk.caches.local import LocalCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.caches.null import NullCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.compatability import _warn_deprecated_python
 from aws_encryption_sdk.exceptions import AWSEncryptionSDKClientError  # noqa
+from aws_encryption_sdk.exceptions import EncryptionContextMismatchError  # noqa
 from aws_encryption_sdk.identifiers import Algorithm, CommitmentPolicy, __version__  # noqa
 from aws_encryption_sdk.internal.utils.signature import SignaturePolicy  # noqa
 from aws_encryption_sdk.key_providers.kms import (  # noqa
@@ -207,10 +208,18 @@ class EncryptionSDKClient(object):
         :param dict encryption_context: Dictionary defining encryption context to validate
             on decrypt. This is ONLY validated on decrypt if using a CMM from the
             aws-cryptographic-material-providers library.
+        :param dict expected_encryption_context: Encryption context that the caller expects the
+            message to have been encrypted with. Every key/value pair provided here MUST be present
+            in the message encryption context; additional pairs in the message are allowed. This is
+            verified against the authenticated message header before any data key is decrypted, so a
+            mismatch raises :class:`aws_encryption_sdk.exceptions.EncryptionContextMismatchError`
+            without returning plaintext.
         :param int max_body_length: Maximum frame size (or content length for non-framed messages)
             in bytes to read from ciphertext message.
         :returns: Tuple containing the decrypted plaintext and the message header object
         :rtype: tuple of bytes and :class:`aws_encryption_sdk.structures.MessageHeader`
+        :raises EncryptionContextMismatchError: if ``expected_encryption_context`` does not match
+            the message encryption context
         """
         self._set_config_kwargs("decrypt", kwargs)
         kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT

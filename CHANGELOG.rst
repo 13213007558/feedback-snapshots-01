@@ -2,6 +2,19 @@
 Changelog
 *********
 
+Unreleased
+==========
+
+Features
+--------
+* feat: verify caller-supplied expected encryption context on decrypt
+
+  Adds an ``expected_encryption_context`` input to the decrypt APIs. Every key/value pair
+  provided must be present in the message encryption context, and verification happens
+  against the authenticated message header before any data key is decrypted. A mismatch
+  raises ``EncryptionContextMismatchError`` without returning plaintext. This works for
+  all materials managers, including the native ``key_provider`` path.
+
 4.0.7 -- 2026-08-31
 ===================
 

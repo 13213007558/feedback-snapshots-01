@@ -10,6 +10,7 @@ from mock import MagicMock, call, patch, sentinel
 from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
     CustomMaximumValueExceeded,
+    EncryptionContextMismatchError,
     MasterKeyProviderError,
     NotSupportedError,
     SerializationError,
@@ -392,6 +393,43 @@ class TestStreamDecryptor(object):
         test_decryptor._stream_length = len(VALUES["data_128"])
         test_decryptor._read_header()
         assert test_decryptor.verifier is None
+
+    def test_GIVEN_expected_EC_is_subset_of_message_EC_WHEN_validate_THEN_succeeds(self):
+        # Given: message encryption context with an extra pair beyond the expected one
+        self.mock_header.encryption_context = {"object-key": "archive/a.enc", "extra": "allowed"}
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=self.mock_input_stream,
+            commitment_policy=self.mock_commitment_policy,
+            expected_encryption_context={"object-key": "archive/a.enc"},
+        )
+
+        # When: validating the expected encryption context
+        test_decryptor._validate_expected_encryption_context(self.mock_header)
+
+        # Then: no error is raised (assertion is reaching this point)
+
+    def test_GIVEN_expected_EC_does_not_match_WHEN_read_header_THEN_raises_before_decrypting_data_keys(self):
+        # Given: message encryption context that does not match the expected object context
+        self.mock_header.encryption_context = {"object-key": "archive/a.enc"}
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=self.mock_input_stream,
+            commitment_policy=self.mock_commitment_policy,
+            expected_encryption_context={"object-key": "archive/b.enc"},
+        )
+        test_decryptor.source_stream = self.mock_input_stream
+        test_decryptor._stream_length = len(VALUES["data_128"])
+
+        # Then: raises the typed verification error
+        with pytest.raises(EncryptionContextMismatchError) as excinfo:
+            # When: read_header
+            test_decryptor._read_header()
+
+        assert excinfo.value.mismatched_keys == ("object-key",)
+        # And: no data key decryption was attempted
+        self.mock_materials_manager.decrypt_materials.assert_not_called()
+        self.mock_deserialize_header_auth.assert_not_called()
 
     @patch("aws_encryption_sdk.streaming_client.Verifier")
     @patch("aws_encryption_sdk.streaming_client.DecryptionMaterialsRequest")

@@ -19,6 +19,7 @@ from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
     AWSEncryptionSDKClientError,
     CustomMaximumValueExceeded,
+    EncryptionContextMismatchError,
     MasterKeyProviderError,
     MaxEncryptedDataKeysExceeded,
     NotSupportedError,
@@ -48,6 +49,7 @@ from aws_encryption_sdk.internal.formatting.serialize import (
     serialize_non_framed_close,
     serialize_non_framed_open,
 )
+from aws_encryption_sdk.internal.str_ops import to_str
 from aws_encryption_sdk.internal.utils import exactly_one_arg_is_not_none
 from aws_encryption_sdk.internal.utils.commitment import (
     validate_commitment_policy_on_decrypt,
@@ -884,12 +886,21 @@ class DecryptorConfig(_ClientConfig):
     :param dict encryption_context: Dictionary defining encryption context to validate
             on decrypt. This is ONLY validated on decrypt if using a CMM
             from the aws-cryptographic-material-providers library.
+    :param dict expected_encryption_context: Encryption context that the caller expects the message
+            to have been encrypted with. Every key/value pair provided here MUST be present in the
+            message encryption context, otherwise decryption fails before any data key is decrypted.
+            Additional pairs in the message encryption context are allowed.
     """
 
     max_body_length = attr.ib(
         hash=True, default=None, validator=attr.validators.optional(attr.validators.instance_of(six.integer_types))
     )
     encryption_context = attr.ib(
+        hash=False,  # dictionaries are not hashable
+        default=None,
+        validator=attr.validators.optional(attr.validators.instance_of(dict)),
+    )
+    expected_encryption_context = attr.ib(
         hash=False,  # dictionaries are not hashable
         default=None,
         validator=attr.validators.optional(attr.validators.instance_of(dict)),
@@ -929,6 +940,11 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
     :param int max_body_length: Maximum frame size (or content length for non-framed messages)
         in bytes to read from ciphertext message.
+    :param dict expected_encryption_context: Encryption context that the caller expects the message
+        to have been encrypted with. Every key/value pair provided here MUST be present in the
+        message encryption context. Verification happens before any data key is decrypted, so a
+        mismatch fails decryption without exposing plaintext.
+        .. versionadded:: 4.1.0
     """
 
     _config_class = DecryptorConfig
@@ -1017,6 +1033,42 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
         return header, header_auth
 
+    def _validate_expected_encryption_context(self, header):
+        """Verifies that the message was encrypted with the caller's expected encryption context.
+
+        Verification happens against the authenticated encryption context parsed from the message
+        header and before any data key is decrypted, so callers can confirm the message belongs to
+        the object they intend to read before any plaintext is exposed.
+
+        Every key/value pair in the expected encryption context MUST be present in the message
+        encryption context. Additional pairs in the message encryption context are allowed.
+
+        :param header: Parsed message header
+        :type header: aws_encryption_sdk.structures.MessageHeader
+        :raises EncryptionContextMismatchError: if any expected pair is missing or has a different value
+        """
+        expected_encryption_context = getattr(self.config, "expected_encryption_context", None)
+        if expected_encryption_context is None:
+            return
+
+        message_encryption_context = {
+            to_str(key): to_str(value) for key, value in header.encryption_context.items()
+        }
+        missing_keys = []
+        mismatched_keys = []
+        for key, value in expected_encryption_context.items():
+            normalized_key = to_str(key)
+            if normalized_key not in message_encryption_context:
+                missing_keys.append(normalized_key)
+            elif message_encryption_context[normalized_key] != to_str(value):
+                mismatched_keys.append(normalized_key)
+
+        if missing_keys or mismatched_keys:
+            raise EncryptionContextMismatchError(
+                missing_keys=missing_keys,
+                mismatched_keys=mismatched_keys,
+            )
+
     def _read_header(self):
         """Reads the message header from the input stream.
 
@@ -1025,12 +1077,15 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             and aws_encryption_sdk.internal.structures.MessageHeaderAuthentication
         :raises CustomMaximumValueExceeded: if frame length is greater than the custom max value
         :raises CustomMaximumValueExceeded: if number of encrypted data keys is greater than the custom max value
+        :raises EncryptionContextMismatchError: if the expected encryption context does not match the message
         """
         header, raw_header = deserialize_header(self.source_stream, self.config.max_encrypted_data_keys)
         self.__unframed_bytes_read += len(raw_header)
 
         validate_commitment_policy_on_decrypt(self.config.commitment_policy, header.algorithm)
         validate_signature_policy_on_decrypt(self.config.signature_policy, header.algorithm)
+
+        self._validate_expected_encryption_context(header)
 
         if (
             self.config.max_body_length is not None
