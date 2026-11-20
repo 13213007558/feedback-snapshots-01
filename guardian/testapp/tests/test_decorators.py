@@ -21,6 +21,7 @@ from guardian.compat import get_user_model_path, get_user_permission_full_codena
 from guardian.decorators import permission_required, permission_required_or_403, permission_required_or_404
 from guardian.exceptions import GuardianError, WrongAppError
 from guardian.shortcuts import assign_perm
+from guardian.testapp.models import Project
 from guardian.testapp.tests.conf import TestDataMixin, override_settings, skipUnlessTestApp
 
 User = get_user_model()
@@ -391,3 +392,107 @@ class PermissionRequiredTest(TestDataMixin, TestCase):
         response = self.client.get(view_url)
         # this should be '/account/login'
         self.assertRedirects(response, global_settings.LOGIN_URL + "?next=" + view_url)
+
+
+class WorkspaceGroupScopeDecoratorTest(TestCase):
+    """`permission_required` must accept the shared group scope entry point."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="decorated")
+        self.workspace = Group.objects.create(name="decorator-workspace")
+        self.other_workspace = Group.objects.create(name="decorator-other-workspace")
+        self.project = Project.objects.create(name="decorator-project")
+        assign_perm("change_project", self.workspace, self.project)
+
+        request = HttpRequest()
+        request.user = self.user
+        self.request = request
+
+    def test_scope_argument_controls_the_check(self):
+        @permission_required(
+            "testapp.change_project",
+            (Project, "name", "project_name"),
+            return_403=True,
+            group_scope=[self.workspace],
+        )
+        def scoped_view(request, project_name):
+            return HttpResponse("allowed")
+
+        @permission_required(
+            "testapp.change_project",
+            (Project, "name", "project_name"),
+            return_403=True,
+        )
+        def unscoped_view(request, project_name):
+            return HttpResponse("allowed")
+
+        self.assertEqual(scoped_view(self.request, project_name=self.project.name).status_code, 200)
+
+        # Without a scope the stored membership applies and the check fails.
+        self.assertEqual(unscoped_view(self.request, project_name=self.project.name).status_code, 403)
+
+        # Another workspace's temporary group grants nothing here.
+        @permission_required(
+            "testapp.change_project",
+            (Project, "name", "project_name"),
+            return_403=True,
+            group_scope=[self.other_workspace],
+        )
+        def other_workspace_view(request, project_name):
+            return HttpResponse("allowed")
+
+        self.assertEqual(other_workspace_view(self.request, project_name=self.project.name).status_code, 403)
+        # The scope never changed the stored membership.
+        self.assertFalse(self.user.groups.exists())
+
+
+class WorkspaceScopeIsolationTest(TestCase):
+    """Two interleaved request objects keep independent scopes and fall back cleanly."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="interleaved")
+        self.workspace_a = Group.objects.create(name="isolation-a")
+        self.workspace_b = Group.objects.create(name="isolation-b")
+        self.account_group = Group.objects.create(name="isolation-account")
+        self.user.groups.add(self.account_group)
+
+        self.project = Project.objects.create(name="isolation-project")
+        assign_perm("change_project", self.workspace_a, self.project)
+        assign_perm("view_project", self.workspace_b, self.project)
+        assign_perm("delete_project", self.account_group, self.project)
+
+    def _request(self):
+        request = HttpRequest()
+        request.user = self.user
+        return request
+
+    def test_interleaved_requests_and_plain_check(self):
+        @permission_required(
+            "testapp.change_project",
+            (Project, "name", "project_name"),
+            return_403=True,
+            group_scope=[self.workspace_a],
+        )
+        def request_a(request, project_name):
+            return HttpResponse("a")
+
+        @permission_required(
+            "testapp.view_project",
+            (Project, "name", "project_name"),
+            return_403=True,
+            group_scope=[self.workspace_b],
+        )
+        def request_b(request, project_name):
+            return HttpResponse("b")
+
+        # Interleave: A, B, A, then a plain check with stored groups.
+        self.assertEqual(request_a(self._request(), project_name=self.project.name).status_code, 200)
+        self.assertEqual(request_b(self._request(), project_name=self.project.name).status_code, 200)
+        self.assertEqual(request_a(self._request(), project_name=self.project.name).status_code, 200)
+
+        self.assertFalse(self.user.has_perm("testapp.change_project", self.project))
+        self.assertFalse(self.user.has_perm("testapp.view_project", self.project))
+        self.assertTrue(self.user.has_perm("testapp.delete_project", self.project))
+
+        # Cleanup guard: the account membership is the existing setting.
+        self.assertEqual(list(self.user.groups.values_list("name", flat=True)), ["isolation-account"])

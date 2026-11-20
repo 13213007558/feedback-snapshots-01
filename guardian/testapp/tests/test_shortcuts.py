@@ -12,7 +12,7 @@ from django.test import TestCase, TransactionTestCase
 
 from guardian.compat import get_user_permission_full_codename
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import GroupScope, ObjectPermissionChecker, group_scope
 from guardian.exceptions import (
     MixedContentTypeError,
     MultipleIdentityAndObjectError,
@@ -38,6 +38,7 @@ from guardian.shortcuts import (
 from guardian.testapp.models import (
     CharPKModel,
     ChildTestModel,
+    Project,
     TextPKModel,
     UUIDPKModel,
 )
@@ -2511,3 +2512,64 @@ class NonStandardPKTests(TestCase):
 
         # Both should behave consistently
         self.assertEqual(len(uuid_objects), len(text_objects))
+
+
+class GroupScopedObjectsTest(TestCase):
+    """`get_objects_for_user` must use the same scope as the checker."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="scoped-objects")
+        self.workspace_a = Group.objects.create(name="objects-workspace-a")
+        self.workspace_b = Group.objects.create(name="objects-workspace-b")
+        self.account_group = Group.objects.create(name="objects-account-group")
+        self.user.groups.add(self.account_group)
+
+        self.direct_project = Project.objects.create(name="direct")
+        self.workspace_a_project = Project.objects.create(name="workspace-a")
+        self.workspace_b_project = Project.objects.create(name="workspace-b")
+        self.account_project = Project.objects.create(name="account")
+
+        assign_perm("change_project", self.user, self.direct_project)
+        assign_perm("change_project", self.workspace_a, self.workspace_a_project)
+        assign_perm("change_project", self.workspace_b, self.workspace_b_project)
+        assign_perm("change_project", self.account_group, self.account_project)
+
+    def _names(self, queryset):
+        return set(queryset.values_list("name", flat=True))
+
+    def test_direct_and_group_grants_are_combined_per_scope(self):
+        with group_scope([self.workspace_a]):
+            names = self._names(get_objects_for_user(self.user, "testapp.change_project", Project))
+            self.assertEqual(names, {"direct", "workspace-a"})
+
+            with group_scope([self.workspace_b]):
+                names = self._names(get_objects_for_user(self.user, "testapp.change_project", Project))
+                self.assertEqual(names, {"direct", "workspace-b"})
+
+            # Back in A; B and the account group must not leak.
+            self.assertEqual(
+                self._names(get_objects_for_user(self.user, "testapp.change_project", Project)),
+                {"direct", "workspace-a"},
+            )
+
+        # Leaving the request restores the account's own groups.
+        names = self._names(get_objects_for_user(self.user, "testapp.change_project", Project))
+        self.assertEqual(names, {"direct", "account"})
+
+    def test_explicit_argument_matches_prefetched_checker(self):
+        scope = GroupScope.from_groups([self.workspace_a, self.account_group])
+        queryset = get_objects_for_user(self.user, "testapp.change_project", Project, group_scope=scope)
+        self.assertEqual(self._names(queryset), {"direct", "workspace-a", "account"})
+
+        checker = ObjectPermissionChecker(self.user, group_scope=scope)
+        checker.prefetch_perms(Project.objects.all())
+        checked = {project.name for project in Project.objects.all() if checker.has_perm("change_project", project)}
+        self.assertEqual(checked, self._names(queryset))
+
+    def test_scope_does_not_write_membership(self):
+        with group_scope([self.workspace_b]):
+            get_objects_for_user(self.user, "testapp.change_project", Project)
+        self.assertEqual(
+            set(self.user.groups.values_list("name", flat=True)),
+            {"objects-account-group"},
+        )

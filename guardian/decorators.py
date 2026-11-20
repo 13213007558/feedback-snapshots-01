@@ -44,6 +44,9 @@ def permission_required(perm, lookup_variables=None, **kwargs):
             like an extension over standard
             `django.contrib.admin.decorators.permission_required` as it would
             check for global permissions first. Defaults to `False`.
+        group_scope (GroupScope | Iterable[Group] | QuerySet[Group]): optional
+            group membership snapshot for this check. Defaults to the scope active
+            in the current context, if any. See `guardian.core.group_scope`.
 
     Example:
         ```python
@@ -81,6 +84,7 @@ def permission_required(perm, lookup_variables=None, **kwargs):
     return_403 = kwargs.pop("return_403", False)
     return_404 = kwargs.pop("return_404", False)
     accept_global_perms = kwargs.pop("accept_global_perms", False)
+    group_scope = kwargs.pop("group_scope", None)
 
     # Check if perm is given as string in order not to decorate
     # view function itself which makes debugging harder
@@ -131,6 +135,7 @@ def permission_required(perm, lookup_variables=None, **kwargs):
                 return_403=return_403,
                 return_404=return_404,
                 accept_global_perms=accept_global_perms,
+                group_scope=group_scope,
             )
             if response:
                 return response

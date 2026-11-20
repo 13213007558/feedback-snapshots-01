@@ -29,7 +29,7 @@ from django.db.models.functions import Cast, Replace
 from django.shortcuts import _get_queryset
 
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import GroupScope, ObjectPermissionChecker, get_group_scope
 from guardian.ctypes import get_content_type
 from guardian.exceptions import (
     MixedContentTypeError,
@@ -570,6 +570,7 @@ def get_objects_for_user(
     any_perm: bool = False,
     with_superuser: bool = True,
     accept_global_perms: bool = True,
+    group_scope: GroupScope | None = None,
 ) -> QuerySet[T]:
     """Get objects that a user has *all* the supplied permissions for.
 
@@ -593,6 +594,10 @@ def get_objects_for_user(
             If `any_perm` is `False` then the intersection of matching object is returned.
             Note, that if `with_superuser` is `False`, `accept_global_perms` will be ignored,
             which means that only object permissions will be checked!
+        group_scope (GroupScope | None): Optional explicit membership snapshot used for
+            the group grants. When omitted, the scope active in the current context
+            is used, if any (see `guardian.core.group_scope`). Direct user permissions
+            are always kept, and the user's membership is not modified.
 
     Raises:
         MixedContentTypeError: when computed content type for `perms` and/or `klass` clashes.
@@ -685,6 +690,12 @@ def get_objects_for_user(
     if user.is_anonymous:
         user = get_anonymous_user()
 
+    # An explicit scope wins; otherwise the context scope, if a request set one.
+    if group_scope is not None and not isinstance(group_scope, GroupScope):
+        group_scope = GroupScope.from_groups(group_scope)
+    if group_scope is None:
+        group_scope = get_group_scope()
+
     has_global_perms = False
     # a superuser has by default assigned global perms for any
     if accept_global_perms and with_superuser:
@@ -733,8 +744,11 @@ def get_objects_for_user(
         group_model = get_group_obj_perms_model(queryset.model)
         group_filters = {
             "permission__content_type": ctype,
-            "group__in": user.groups.all(),
         }
+        if group_scope is None:
+            group_filters["group__in"] = user.groups.all()
+        else:
+            group_filters["group_id__in"] = group_scope.group_ids
         if codenames:
             group_filters.update(
                 {

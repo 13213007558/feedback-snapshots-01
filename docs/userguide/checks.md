@@ -133,6 +133,41 @@ Let's see it in action:
     [u'change_site']
 ```
 
+### Scoping checks to temporary groups
+
+An application may let one user act in several workspaces, each with its own
+temporary team memberships. Rather than writing those groups to the user's
+account, wrap the checks in `guardian.core.group_scope`. Inside the block,
+request-level checks (through the authentication backend), direct
+`ObjectPermissionChecker` use, prefetching and `get_objects_for_user` all use
+the same snapshot of groups:
+
+```python
+from guardian.core import ObjectPermissionChecker, group_scope
+from guardian.shortcuts import get_objects_for_user
+
+with group_scope(workspace.temporary_groups.all()):
+    # Direct user grants stay effective; group grants come only from the snapshot.
+    projects = get_objects_for_user(request.user, "projects.view_project")
+
+    checker = ObjectPermissionChecker(request.user)
+    checker.prefetch_perms(projects)
+    for project in projects:
+        checker.has_perm("projects.view_project", project)
+```
+
+The scope replaces the account's stored groups for the duration of the block,
+so pass the account groups too if they should remain effective. It never
+modifies the user's group table, and leaving the block (including on an
+exception) restores normal checks. Blocks may be nested, and the scope is
+stored in a `ContextVar`, so concurrent requests do not observe each other's
+groups.
+
+`ObjectPermissionChecker` and `get_objects_for_user` also accept the scope
+explicitly through a `group_scope=` argument. `PermissionRequiredMixin` and
+`PermissionListMixin` expose a `get_group_scope()` hook for the same purpose,
+and `permission_required` accepts `group_scope=`.
+
 ### Using decorators
 
 Standard `permission_required` decorator doesn't allow to check for

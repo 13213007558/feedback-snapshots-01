@@ -201,6 +201,18 @@ class PermissionRequiredMixin:
         """
         return self.object_permission_denied_message
 
+    def get_group_scope(self):
+        """Return the group membership scope for this request, if any.
+
+        Override it to check a request against temporary workspace groups
+        instead of the account's stored membership. The returned iterable is
+        snapshotted for the duration of the check; the user's groups are not
+        modified. Direct user object permissions remain effective.
+
+        Return `None` (the default) to use the account's normal groups.
+        """
+        return None
+
     def get_required_permissions(self, request: HttpRequest | None = None) -> list[str]:
         """Get the required permissions.
 
@@ -271,6 +283,7 @@ class PermissionRequiredMixin:
             permission_denied_message=self.get_object_permission_denied_message(),
             accept_global_perms=self.accept_global_perms,
             any_perm=self.any_perm,
+            group_scope=self.get_group_scope(),
         )
         if forbidden:
             self.on_permission_check_fail(request, forbidden, obj=obj)
@@ -449,6 +462,14 @@ class PermissionListMixin:
             )
         return perms
 
+    def get_group_scope(self):
+        """Return the group membership scope used to filter the list, if any.
+
+        Mirrors `PermissionRequiredMixin.get_group_scope`; return `None` to use
+        the account's stored groups.
+        """
+        return None
+
     @deprecated(
         "This method is deprecated and will be removed in future versions. Use get_user_object_kwargs instead which has identical behavior."
     )
@@ -476,12 +497,18 @@ class PermissionListMixin:
         Parameters:
             queryset (QuerySet): Queryset to filter.
         """
-        return dict(
+        kwargs = dict(
             user=self.request.user,  # type: ignore[attr-defined]
             perms=self.get_required_permissions(self.request),  # type: ignore[attr-defined]
             klass=queryset,
             **self.get_objects_for_user_extra_kwargs,
         )
+        # An explicit extra kwarg wins over the view-level scope hook.
+        if kwargs.get("group_scope") is None:
+            group_scope = self.get_group_scope()
+            if group_scope is not None:
+                kwargs["group_scope"] = group_scope
+        return kwargs
 
     def get_queryset(self, *args, **kwargs):
         qs = super().get_queryset(*args, **kwargs)

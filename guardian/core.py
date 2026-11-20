@@ -1,5 +1,9 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from itertools import chain
+from typing import Any
 
 from django.contrib.auth.models import Permission
 from django.db.models import Model
@@ -9,6 +13,98 @@ from django.utils.encoding import force_str
 from guardian.conf import settings as guardian_settings
 from guardian.ctypes import get_content_type
 from guardian.utils import get_group_obj_perms_model, get_identity, get_user_obj_perms_model
+
+
+@dataclass(frozen=True)
+class GroupScope:
+    """An explicit snapshot of the groups that should be effective for a check.
+
+    A scope replaces the groups a user is a member of *for the lifetime of the
+    checker or request that uses it*. It never adds or removes rows in the
+    user's group table; membership is only resolved for this request.
+
+    Direct object permissions assigned to the user are not affected.
+    """
+
+    group_ids: frozenset
+
+    def __post_init__(self):
+        # Normalize to an immutable snapshot so a caller mutating the source
+        # collection cannot change a request that already started.
+        object.__setattr__(self, "group_ids", frozenset(self.group_ids))
+
+    @classmethod
+    def from_groups(cls, groups: Iterable[Any] | QuerySet) -> "GroupScope":
+        """Build a scope from a group iterable, queryset or manager.
+
+        The iterable is materialized eagerly so that later membership changes
+        cannot alter a request that has already started. Items may be group
+        instances or primary keys.
+        """
+        if groups is None:
+            raise TypeError("A group scope requires an iterable of groups; use None only to disable an explicit scope.")
+        if isinstance(groups, Model):
+            raise TypeError("A group scope requires an iterable of groups, not a single group instance.")
+        if isinstance(groups, cls):
+            return groups
+        if hasattr(groups, "values_list"):
+            return cls(frozenset(groups.values_list("pk", flat=True)))
+
+        group_ids = set()
+        for group in groups:
+            group_id = getattr(group, "pk", group)
+            if group_id is None:
+                raise ValueError("Cannot scope permissions to a group that has not been saved.")
+            group_ids.add(group_id)
+        return cls(frozenset(group_ids))
+
+
+_active_group_scope: ContextVar[GroupScope | None] = ContextVar("guardian_group_scope", default=None)
+
+
+def get_group_scope() -> GroupScope | None:
+    """Return the group scope active for the current context, if any.
+
+    The value is request-local (``ContextVar``), so concurrent requests,
+    threads and asynchronous tasks do not observe each other's scope.
+    """
+    return _active_group_scope.get()
+
+
+@contextmanager
+def group_scope(groups: GroupScope | Iterable[Any] | QuerySet) -> Iterator[GroupScope]:
+    """Restrict a block of object permission checks and prefetches to ``groups``.
+
+    This is the shared entry point for request-level checks and prefetching.
+    Inside the block ``user.has_perm(...)`` (through
+    `guardian.backends.ObjectPermissionBackend`), ``ObjectPermissionChecker``
+    and ``get_objects_for_user`` only consider the supplied groups. Direct user
+    object permissions keep working, and the user's group membership is not
+    modified.
+
+    The scope is a snapshot and replaces the user's normal group membership for
+    the block. To keep account groups as well, include them in ``groups``.
+    Blocks may be nested; leaving one restores the previous scope, including on
+    exceptions.
+
+    Example:
+        ```python
+        from guardian.core import group_scope
+
+        def workspace_view(request, workspace):
+            with group_scope(workspace.temporary_groups.all()):
+                projects = get_objects_for_user(request.user, "projects.view_project")
+                checker = ObjectPermissionChecker(request.user)
+                checker.prefetch_perms(projects)
+                return render(request, "...", {"projects": projects})
+        ```
+    """
+    scope = groups if isinstance(groups, GroupScope) else GroupScope.from_groups(groups)
+    token = _active_group_scope.set(scope)
+    try:
+        yield scope
+    finally:
+        _active_group_scope.reset(token)
 
 
 def _get_pks_model_and_ctype(objects):
@@ -53,13 +149,31 @@ class ObjectPermissionChecker:
        dictionary.
     """
 
-    def __init__(self, user_or_group: Model | None = None) -> None:
+    def __init__(
+        self,
+        user_or_group: Model | None = None,
+        group_scope: GroupScope | Iterable[Any] | QuerySet | None = None,
+    ) -> None:
         """Constructor for ObjectPermissionChecker.
 
         Parameters:
             user_or_group (User, AnonymousUser, Group): The user or group to check permissions for.
+            group_scope (GroupScope | Iterable[Group] | QuerySet[Group]): Optional
+                snapshot of the groups that should count for a user. It replaces
+                the user's normal group membership for this checker only and
+                does not write anything to the user. When omitted, the scope
+                active in the current context (see
+                `guardian.core.group_scope`) is used, if any. Direct user
+                object permissions are always kept.
         """
         self.user, self.group = get_identity(user_or_group)  # type: ignore[arg-type] # None is not allowed
+        if group_scope is None:
+            group_scope = get_group_scope()
+        elif not isinstance(group_scope, GroupScope):
+            group_scope = GroupScope.from_groups(group_scope)
+        # A group identity is already explicit; scoping only applies to users.
+        self._group_scope: GroupScope | None = group_scope if self.user else None
+        self._auto_prefetch_loaded = False
         self._obj_perms_cache: dict = {}
 
     def has_perm(self, perm: str, obj: Model) -> bool:
@@ -81,13 +195,27 @@ class ObjectPermissionChecker:
             _, perm = perm.split(".", 1)
         return perm in self.get_perms(obj)
 
+    def _effective_group_ids(self):
+        """Return the group ids that count for this checker.
+
+        ``None`` means "use the user's normal membership"; a frozenset is the
+        explicit scope snapshot and must be used verbatim.
+        """
+        if self.user is None or self._group_scope is None:
+            return None
+        return self._group_scope.group_ids
+
     def get_group_filters(self, obj):
         ctype = get_content_type(obj)
         model = get_group_obj_perms_model(obj)
         related_name = model.permission.field.related_query_name()
 
         if self.user:
-            group_filters = {f"{related_name}__group__in": self.user.groups.all()}
+            group_ids = self._effective_group_ids()
+            if group_ids is None:
+                group_filters = {f"{related_name}__group__in": self.user.groups.all()}
+            else:
+                group_filters = {f"{related_name}__group_id__in": group_ids}
         else:
             group_filters = {f"{related_name}__group": self.group}
 
@@ -172,7 +300,8 @@ class ObjectPermissionChecker:
                 perms: list[str] = list(
                     Permission.objects.filter(content_type=ctype).values_list("codename", flat=True)
                 )
-            # If auto-prefetching enabled, do not hit the database
+            # If auto-prefetching enabled, do not hit the database. A scoped
+            # checker still prefetches, but only from the scope snapshot.
             elif guardian_settings.AUTO_PREFETCH:
                 return []
             elif self.user:
@@ -212,7 +341,11 @@ class ObjectPermissionChecker:
             return True
 
         if self.user:
-            group_filters = {"group__in": self.user.groups.all()}
+            group_ids = self._effective_group_ids()
+            if group_ids is None:
+                group_filters = {"group__in": self.user.groups.all()}
+            else:
+                group_filters = {"group_id__in": group_ids}
         else:
             group_filters = {"group": self.group}
 
@@ -263,7 +396,7 @@ class ObjectPermissionChecker:
         return True
 
     @staticmethod
-    def _init_obj_prefetch_cache(obj, *querysets):
+    def _init_obj_prefetch_cache(obj, *querysets, attach=True):
         cache = {}
         for qs in querysets:
             model = qs.model
@@ -285,17 +418,29 @@ class ObjectPermissionChecker:
                 cache[p[:2]] += [
                     p[2],
                 ]
-        obj._guardian_perms_cache = cache
+        if attach:
+            obj._guardian_perms_cache = cache
         return obj, cache
 
     def _prefetch_cache(self):
         obj = self.user if self.user else self.group
+        group_ids = self._effective_group_ids()
 
-        # Cache hits should stay O(1): bail out before scanning the app
-        # registry for direct permission models and building their querysets.
-        if hasattr(obj, "_guardian_perms_cache"):
-            self._obj_perms_cache = obj._guardian_perms_cache
-            return
+        # A scoped checker must not publish request-specific results on the
+        # shared user instance, or the next ordinary check would reuse another
+        # workspace's groups.
+        if group_ids is None:
+            # Cache hits should stay O(1): bail out before scanning the app
+            # registry for direct permission models and building their querysets.
+            if hasattr(obj, "_guardian_perms_cache"):
+                self._obj_perms_cache = obj._guardian_perms_cache
+                return
+        else:
+            # A scoped snapshot lives only on this checker, so AUTO_PREFETCH
+            # must load it once instead of re-querying on every check.
+            if self._auto_prefetch_loaded:
+                return
+            self._auto_prefetch_loaded = True
 
         from guardian.models import GroupObjectPermissionBase, UserObjectPermissionBase
         from guardian.utils import get_direct_obj_perms_models, get_group_obj_perms_model, get_user_obj_perms_model
@@ -306,16 +451,20 @@ class ObjectPermissionChecker:
         direct_group_models = get_direct_obj_perms_models(GroupObjectPermissionBase, GroupObjectPermission)
 
         if self.user:
+            if group_ids is None:
+                group_filters = {"group__user": obj}
+            else:
+                group_filters = {"group_id__in": group_ids}
             querysets = (
                 [UserObjectPermission.objects.filter(user=obj)]
                 + [model.objects.filter(user=obj) for model in direct_user_models]
-                + [GroupObjectPermission.objects.filter(group__user=obj)]
-                + [model.objects.filter(group__user=obj) for model in direct_group_models]
+                + [GroupObjectPermission.objects.filter(**group_filters)]
+                + [model.objects.filter(**group_filters) for model in direct_group_models]
             )
         else:
             querysets = [GroupObjectPermission.objects.filter(group=obj)] + [
                 model.objects.filter(group=obj) for model in direct_group_models
             ]
 
-        obj, cache = self._init_obj_prefetch_cache(obj, *querysets)
+        obj, cache = self._init_obj_prefetch_cache(obj, *querysets, attach=group_ids is None)
         self._obj_perms_cache = cache

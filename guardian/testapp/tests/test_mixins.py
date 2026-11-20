@@ -4,7 +4,7 @@ import warnings
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import AnonymousUser, Group
 from django.core.exceptions import ImproperlyConfigured, PermissionDenied
 from django.http import HttpResponse
 from django.test import TestCase, override_settings
@@ -20,7 +20,7 @@ from guardian.mixins import (
 )
 from guardian.shortcuts import assign_perm
 
-from ..models import Post
+from ..models import Post, Project
 
 
 class DatabaseRemovedError(Exception):
@@ -746,3 +746,79 @@ class TestViewMixins(TestCase):
 
             # Should still return the permissions (converted from generator)
             self.assertEqual(perms, ["testapp.change_post", "testapp.view_post"])
+
+
+class ScopedGroupPermissionView(PermissionRequiredMixin, RemoveDatabaseView):
+    permission_required = "testapp.change_project"
+    object = None
+    scoped_groups = []
+
+    def get_group_scope(self):
+        return self.scoped_groups
+
+
+class ScopedGroupListView(PermissionListMixin, ListView):
+    model = Project
+    permission_required = "testapp.change_project"
+    template_name = "list.html"
+    scoped_groups = []
+
+    def get_group_scope(self):
+        return self.scoped_groups
+
+
+class WorkspaceScopedRequestTest(TestCase):
+    """A request can select temporary workspace groups through the view hook."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("scoped-view", password="doe")
+        self.workspace_a = Group.objects.create(name="view-workspace-a")
+        self.workspace_b = Group.objects.create(name="view-workspace-b")
+        self.account_group = Group.objects.create(name="view-account-group")
+        self.user.groups.add(self.account_group)
+
+        self.project = Project.objects.create(name="scoped-project")
+        assign_perm("change_project", self.workspace_a, self.project)
+
+    def tearDown(self):
+        self.user.refresh_from_db()
+        self.assertEqual(
+            set(self.user.groups.values_list("pk", flat=True)),
+            {self.account_group.pk},
+        )
+
+    def test_interleaved_requests_choose_their_own_groups(self):
+        factory = RequestFactory()
+
+        def request():
+            req = factory.get("/")
+            req.user = self.user
+            return req
+
+        view_a = ScopedGroupPermissionView.as_view(object=self.project, scoped_groups=[self.workspace_a])
+        view_b = ScopedGroupPermissionView.as_view(object=self.project, scoped_groups=[self.workspace_b])
+
+        # Interleave the two requests.
+        with self.assertRaises(DatabaseRemovedError):
+            view_a(request())
+        self.assertEqual(view_b(request()).status_code, 302)
+        with self.assertRaises(DatabaseRemovedError):
+            view_a(request())
+
+        # The account's own group does not grant the permission to this project.
+        self.assertEqual(ScopedGroupPermissionView.as_view(object=self.project)(request()).status_code, 302)
+
+    def test_list_view_filters_with_the_same_scope(self):
+        other_project = Project.objects.create(name="zzz-other-project")
+        assign_perm("change_project", self.workspace_b, other_project)
+
+        req = RequestFactory().get("/")
+        req.user = self.user
+
+        response = ScopedGroupListView.as_view(scoped_groups=[self.workspace_a])(req)
+        self.assertContains(response, "scoped-project")
+        self.assertNotContains(response, "zzz-other-project")
+
+        response = ScopedGroupListView.as_view(scoped_groups=[self.workspace_b])(req)
+        self.assertContains(response, "zzz-other-project")
+        self.assertNotContains(response, self.project.name)

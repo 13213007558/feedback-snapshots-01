@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from guardian.backends import ObjectPermissionBackend, check_user_support
 from guardian.conf import settings as guardian_settings
+from guardian.core import ObjectPermissionChecker, get_group_scope, group_scope
 from guardian.shortcuts import assign_perm, remove_perm
 from guardian.testapp.models import Project
 
@@ -207,3 +208,87 @@ class CheckUserSupportAnonymousCacheTest(TestCase):
     def test_anonymous_lookup_hits_database_without_cache(self):
         with patch("guardian.conf.settings.ANONYMOUS_USER_CACHE_TTL", 0), self.assertNumQueries(1):
             check_user_support(AnonymousUser())
+
+
+class WorkspaceGroupScopeTest(TestCase):
+    """Request-level checks must be able to use temporary workspace groups.
+
+    The same user has different temporary memberships in different workspaces.
+    The scope must only affect the current request, must never be written back
+    to the user's group table, and direct object permissions must stay valid.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="scoped", password="testpass")
+        self.workspace_a = Group.objects.create(name="workspace-a")
+        self.workspace_b = Group.objects.create(name="workspace-b")
+        self.account_group = Group.objects.create(name="account-group")
+        self.project = Project.objects.create(name="Shared Project")
+
+        # The account's stored membership differs from either workspace.
+        self.user.groups.add(self.account_group)
+
+        assign_perm("change_project", self.user, self.project)
+        assign_perm("delete_project", self.workspace_a, self.project)
+        assign_perm("add_project", self.workspace_b, self.project)
+        assign_perm("view_project", self.account_group, self.project)
+
+        self.backend = ObjectPermissionBackend()
+
+    def test_interleaved_requests_keep_their_own_groups(self):
+        """Two interleaved requests see only their workspace's group grants."""
+        membership_before = set(self.user.groups.values_list("pk", flat=True))
+
+        with group_scope([self.workspace_a]) as request_a:
+            self.assertEqual(request_a.group_ids, frozenset({self.workspace_a.pk}))
+            # Direct user permission survives, workspace A group grant applies.
+            self.assertTrue(self.backend.has_perm(self.user, "change_project", self.project))
+            self.assertTrue(self.backend.has_perm(self.user, "delete_project", self.project))
+            # Workspace B and account grants must not leak in.
+            self.assertFalse(self.backend.has_perm(self.user, "add_project", self.project))
+            self.assertFalse(self.backend.has_perm(self.user, "view_project", self.project))
+
+            with group_scope([self.workspace_b]):
+                self.assertTrue(self.backend.has_perm(self.user, "add_project", self.project))
+                self.assertTrue(self.backend.has_perm(self.user, "change_project", self.project))
+                self.assertFalse(self.backend.has_perm(self.user, "delete_project", self.project))
+
+            # Leaving the nested request restores request A's scope.
+            self.assertTrue(self.backend.has_perm(self.user, "delete_project", self.project))
+            self.assertFalse(self.backend.has_perm(self.user, "add_project", self.project))
+
+        # Membership was never written back to the user table.
+        self.assertEqual(set(self.user.groups.values_list("pk", flat=True)), membership_before)
+
+        # The next ordinary check uses the account's existing groups again.
+        self.assertTrue(self.backend.has_perm(self.user, "change_project", self.project))
+        self.assertTrue(self.backend.has_perm(self.user, "view_project", self.project))
+        self.assertFalse(self.backend.has_perm(self.user, "delete_project", self.project))
+        self.assertFalse(self.backend.has_perm(self.user, "add_project", self.project))
+
+    def test_checker_scope_argument_without_context(self):
+        """The checker accepts the snapshot directly, without a surrounding block."""
+        checker = ObjectPermissionChecker(self.user, group_scope=[self.workspace_b])
+
+        self.assertTrue(checker.has_perm("change_project", self.project))
+        self.assertTrue(checker.has_perm("add_project", self.project))
+        self.assertFalse(checker.has_perm("delete_project", self.project))
+
+        # A separate ordinary checker sees the account's groups, not workspace B.
+        ordinary = ObjectPermissionChecker(self.user)
+        self.assertFalse(ordinary.has_perm("add_project", self.project))
+        self.assertTrue(ordinary.has_perm("view_project", self.project))
+
+    def test_scope_restored_after_exception(self):
+        with self.assertRaises(RuntimeError):
+            with group_scope([self.workspace_a]):
+                raise RuntimeError("request failed")
+        self.assertIsNone(get_group_scope())
+        self.assertTrue(self.backend.has_perm(self.user, "view_project", self.project))
+        self.assertFalse(self.backend.has_perm(self.user, "delete_project", self.project))
+
+    def test_empty_scope_disables_group_grants_but_not_direct_perms(self):
+        with group_scope([]):
+            self.assertTrue(self.backend.has_perm(self.user, "change_project", self.project))
+            self.assertFalse(self.backend.has_perm(self.user, "view_project", self.project))
+            self.assertFalse(self.backend.has_perm(self.user, "delete_project", self.project))

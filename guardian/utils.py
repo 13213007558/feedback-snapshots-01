@@ -174,7 +174,27 @@ def get_40x_or_None(
     permission_denied_message: str = "",
     accept_global_perms: bool = False,
     any_perm: bool = False,
+    group_scope: Any | None = None,
 ) -> HttpResponseForbidden | HttpResponseNotFound | HttpResponseRedirect | HttpResponse | None:
+    if group_scope is not None:
+        # The request-level checks below go through `request.user.has_perm()`,
+        # i.e. the backend, so the scope must be active while they run.
+        from guardian.core import group_scope as group_scope_context
+
+        with group_scope_context(group_scope):
+            return get_40x_or_None(
+                request,
+                perms,
+                obj=obj,
+                login_url=login_url,
+                redirect_field_name=redirect_field_name,
+                return_403=return_403,
+                return_404=return_404,
+                permission_denied_message=permission_denied_message,
+                accept_global_perms=accept_global_perms,
+                any_perm=any_perm,
+            )
+
     login_url = login_url or settings.LOGIN_URL
     redirect_field_name = redirect_field_name or REDIRECT_FIELD_NAME
 

@@ -12,7 +12,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import ObjectPermissionChecker, group_scope
 from guardian.exceptions import NotUserNorGroup
 from guardian.management import create_anonymous_user
 from guardian.models import GroupObjectPermission, UserObjectPermission
@@ -786,3 +786,76 @@ class ObjectPermissionCheckerTest(ObjectPermissionTestCase):
         # Ignore other queries that JOIN this table.
         group_selects = [q for q in queries if q["sql"].endswith(auth_group_from)]
         self.assertEqual(len(group_selects), 1)
+
+
+class GroupScopedPrefetchTest(ObjectPermissionTestCase):
+    """Prefetching must obey the same group scope as request-level checks."""
+
+    def setUp(self):
+        super().setUp()
+        self.workspace_a = Group.objects.create(name="prefetch-workspace-a")
+        self.workspace_b = Group.objects.create(name="prefetch-workspace-b")
+        self.direct_project = Project.objects.create(name="prefetch-direct")
+        self.a_project = Project.objects.create(name="prefetch-a")
+        self.b_project = Project.objects.create(name="prefetch-b")
+        self.account_project = Project.objects.create(name="prefetch-account")
+
+        assign_perm("change_project", self.user, self.direct_project)
+        assign_perm("change_project", self.workspace_a, self.a_project)
+        assign_perm("change_project", self.workspace_b, self.b_project)
+        assign_perm("change_project", self.group, self.account_project)
+
+    def _visible(self, checker):
+        return {p.name for p in Project.objects.all() if checker.has_perm("change_project", p)}
+
+    def test_prefetch_uses_the_scope_snapshot(self):
+        checker = ObjectPermissionChecker(self.user, group_scope=[self.workspace_a])
+        self.assertTrue(checker.prefetch_perms(Project.objects.all()))
+
+        self.assertEqual(self._visible(checker), {"prefetch-direct", "prefetch-a"})
+        # The scoped result is not published on the user instance.
+        self.assertFalse(hasattr(self.user, "_guardian_perms_cache"))
+
+        ordinary = ObjectPermissionChecker(self.user)
+        self.assertTrue(ordinary.prefetch_perms(Project.objects.all()))
+        self.assertEqual(self._visible(ordinary), {"prefetch-direct", "prefetch-account"})
+
+    def test_context_scope_reaches_prefetch(self):
+        with group_scope([self.workspace_b]):
+            checker = ObjectPermissionChecker(self.user)
+            checker.prefetch_perms(Project.objects.all())
+        self.assertEqual(self._visible(checker), {"prefetch-direct", "prefetch-b"})
+
+        # After the request, the ordinary prefetch cache (shared on the user)
+        # still reflects the account settings only.
+        ordinary = ObjectPermissionChecker(self.user)
+        ordinary._prefetch_cache()
+        self.assertEqual(self._visible(ordinary), {"prefetch-direct", "prefetch-account"})
+        self.assertTrue(hasattr(self.user, "_guardian_perms_cache"))
+
+    def test_autoprefetch_uses_the_scope_snapshot(self):
+        guardian_settings.AUTO_PREFETCH = True
+        try:
+            with group_scope([self.workspace_a]):
+                checker = ObjectPermissionChecker(self.user)
+                self.assertEqual(self._visible(checker), {"prefetch-direct", "prefetch-a"})
+                # A second check must not reload or widen the snapshot.
+                self.assertEqual(self._visible(checker), {"prefetch-direct", "prefetch-a"})
+                self.assertFalse(hasattr(self.user, "_guardian_perms_cache"))
+
+            ordinary = ObjectPermissionChecker(self.user)
+            self.assertEqual(self._visible(ordinary), {"prefetch-direct", "prefetch-account"})
+        finally:
+            guardian_settings.AUTO_PREFETCH = False
+
+    def test_scoped_checker_does_not_poison_existing_user_cache(self):
+        # Prime the ordinary cache first.
+        ordinary = ObjectPermissionChecker(self.user)
+        ordinary.prefetch_perms(Project.objects.all())
+        self.assertEqual(self._visible(ordinary), {"prefetch-direct", "prefetch-account"})
+
+        scoped = ObjectPermissionChecker(self.user, group_scope=[self.workspace_b])
+        self.assertEqual(self._visible(scoped), {"prefetch-direct", "prefetch-b"})
+
+        # Still account-only, even on the same user instance.
+        self.assertEqual(self._visible(ObjectPermissionChecker(self.user)), {"prefetch-direct", "prefetch-account"})
