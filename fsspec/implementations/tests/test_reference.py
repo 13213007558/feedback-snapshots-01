@@ -10,6 +10,7 @@ from fsspec.implementations.reference import (
     LazyReferenceMapper,
     ReferenceFileSystem,
     ReferenceNotReachable,
+    ReferenceTargetNotAllowed,
 )
 from fsspec.tests.conftest import data, reset_files, server, win  # noqa: F401
 
@@ -865,6 +866,121 @@ def test_cat_omit_unreachable_mixed(m):
         "whole": b"0123456789",
         "range": b"123",
     }
+
+
+def test_target_aliases_only_reach_approved_filesystems():
+    primary = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    secondary = fsspec.filesystem(
+        "memory", global_store=False, skip_instance_cache=True
+    )
+    primary.pipe("shared/data", b"primary bytes")
+    secondary.pipe("shared/data", b"secondary bytes")
+
+    refs = {
+        "inline": b"inline data",
+        "text": "plain text",
+        "encoded": "base64:aGVsbG8=",
+        "first": ["primary://shared/data"],
+        "second_range": ["secondary://shared/data", 0, 9],
+    }
+    fs = ReferenceFileSystem(
+        fo=refs,
+        target_aliases={"primary": primary, "secondary": secondary},
+    )
+
+    # inline records keep their existing meaning
+    assert fs.cat("inline") == b"inline data"
+    assert fs.cat("text") == b"plain text"
+    assert fs.cat("encoded") == b"hello"
+
+    # each alias resolves to the filesystem the service approved
+    assert fs.cat("first") == b"primary bytes"
+    assert fs.cat("second_range") == b"secondary"
+    assert fs.size("first") == len(b"primary bytes")
+    assert fs.cat_file("second_range", start=2, end=6) == b"cond"
+    with fs.open("first", "rb") as f:
+        assert f.read() == b"primary bytes"
+
+
+def test_target_aliases_batch_reads_across_approved_filesystems():
+    primary = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    secondary = fsspec.filesystem(
+        "memory", global_store=False, skip_instance_cache=True
+    )
+    primary.pipe("data", b"0123456789")
+    secondary.pipe("data", b"abcdefghij")
+    fs = ReferenceFileSystem(
+        fo={
+            "inline": b"inline",
+            "whole": ["primary://data"],
+            "part": ["secondary://data", 2, 3],
+        },
+        target_aliases={"primary": primary, "secondary": secondary},
+    )
+
+    assert fs.cat(["whole", "part", "inline"]) == {
+        "whole": b"0123456789",
+        "part": b"cde",
+        "inline": b"inline",
+    }
+
+
+def test_target_aliases_unknown_alias_is_rejected_before_connecting(monkeypatch):
+    approved = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    approved.pipe("data", b"approved")
+
+    def fail_factory(*args, **kwargs):
+        raise AssertionError("no filesystem should be constructed from the manifest")
+
+    monkeypatch.setattr(fsspec.core, "filesystem", fail_factory)
+    monkeypatch.setattr("fsspec.implementations.reference.filesystem", fail_factory)
+
+    with pytest.raises(ReferenceTargetNotAllowed) as exc:
+        ReferenceFileSystem(
+            fo={"bad": ["unknown://data"]},
+            target_aliases={"approved": approved},
+        )
+
+    assert exc.value.alias == "unknown"
+    assert exc.value.reference == "bad"
+
+
+def test_target_aliases_reject_absolute_urls():
+    approved = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    for url in ["file:///etc/passwd", "http://example.com/x", "data/plain"]:
+        with pytest.raises(ReferenceTargetNotAllowed):
+            ReferenceFileSystem(
+                fo={"bad": [url]},
+                target_aliases={"approved": approved},
+            )
+
+
+def test_target_aliases_requires_instances():
+    with pytest.raises(TypeError, match="AbstractFileSystem"):
+        ReferenceFileSystem(
+            fo={"bad": ["approved://data"]},
+            target_aliases={"approved": {"protocol": "memory"}},
+        )
+    approved = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    with pytest.raises(ValueError, match="either fs or target_aliases"):
+        ReferenceFileSystem(
+            fo={},
+            fs=approved,
+            target_aliases={"approved": approved},
+        )
+
+
+@pytest.mark.asyncio
+async def test_target_aliases_async_reads():
+    approved = fsspec.filesystem("memory", global_store=False, skip_instance_cache=True)
+    approved.pipe("data", b"0123456789")
+    fs = ReferenceFileSystem(
+        fo={"part": ["approved://data", 1, 4]},
+        target_aliases={"approved": approved},
+        asynchronous=True,
+    )
+    assert await fs._cat_file("part") == b"1234"
+    assert (await fs._info("part"))["size"] == 4
 
 
 def test_df_single(m):

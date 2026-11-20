@@ -6,6 +6,11 @@ Dev
 
 Enhancements
 
+- Restrict ``ReferenceFileSystem`` targets to service-approved connections
+  with ``target_aliases``: references name ``alias://path``, unapproved aliases
+  are rejected with ``ReferenceTargetNotAllowed`` before a backend is
+  contacted, and inline references keep working.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 

@@ -127,6 +127,7 @@ Built-in Implementations
    implementations.local.LocalFileSystem
    implementations.memory.MemoryFileSystem
    implementations.reference.ReferenceFileSystem
+   implementations.reference.ReferenceTargetNotAllowed
    implementations.reference.LazyReferenceMapper
    implementations.sftp.SFTPFileSystem
    implementations.smb.SMBFileSystem
@@ -193,6 +194,8 @@ Built-in Implementations
 
 .. autoclass:: fsspec.implementations.reference.ReferenceFileSystem
    :members: __init__
+
+.. autoclass:: fsspec.implementations.reference.ReferenceTargetNotAllowed
 
 .. autoclass:: fsspec.implementations.reference.LazyReferenceMapper
    :members: __init__

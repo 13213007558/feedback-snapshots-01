@@ -468,3 +468,37 @@ If using exclusive mode on a file that does already exist, a ``FileExistsError``
 be raised.
 
 This feature is currently included on a trial basis and may change in the future.
+
+Reference targets with approved aliases
+---------------------------------------
+
+:class:`fsspec.implementations.reference.ReferenceFileSystem` normally derives
+the target filesystem from the protocol in each reference URL. That is not
+appropriate when the reference list comes from an untrusted source, because a
+reference could name a backend that the service never configured.
+
+Pass ``target_aliases`` to restrict the reference set to connections that the
+service has already created. Keys are alias names and values are filesystem
+instances; references select one with ``alias://path``:
+
+.. code-block:: python
+
+    from fsspec.implementations.reference import ReferenceFileSystem
+
+    refs = {
+        "inline": b"data held in the manifest",
+        "first": ["primary://bucket/key", 0, 1024],
+        "second": ["archive://year/file"],
+    }
+    fs = ReferenceFileSystem(
+        fo=refs,
+        target_aliases={"primary": primary_fs, "archive": archive_fs},
+    )
+
+In this mode no protocol is inferred from the manifest: an unapproved alias,
+an absolute URL such as ``https://...``, or a scheme-like prefix is rejected
+with :class:`~fsspec.implementations.reference.ReferenceTargetNotAllowed` while
+the reference is resolved, before the target filesystem is contacted or any
+connection is created. Inline references (bytes, text, ``base64:`` and JSON
+values) keep working exactly as before, and single and batch reads may mix
+aliases freely.

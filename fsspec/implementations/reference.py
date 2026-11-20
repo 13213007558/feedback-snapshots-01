@@ -5,12 +5,13 @@ import itertools
 import logging
 import math
 import os
+import re
 from functools import lru_cache
 from itertools import chain
 from typing import TYPE_CHECKING, Literal
 
 import fsspec.core
-from fsspec.spec import AbstractBufferedFile
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
 try:
     import ujson as json
@@ -40,6 +41,45 @@ class ReferenceNotReachable(RuntimeError):
 
     def __str__(self):
         return f'Reference "{self.reference}" failed to fetch target {self.target}'
+
+
+class ReferenceTargetNotAllowed(PermissionError):
+    """A manifest named a connection alias that the service did not approve.
+
+    Raised while the reference is being resolved, before the target
+    filesystem is contacted, and therefore also before any connection to it
+    could be created.
+    """
+
+    def __init__(self, reference, alias):
+        super().__init__(
+            f'Reference "{reference}" uses unapproved target alias {alias!r}'
+        )
+        self.reference = reference
+        self.alias = alias
+
+
+def _validate_aliases(aliases):
+    """Normalize the approved ``alias -> filesystem`` mapping.
+
+    Aliases are plain connection names and must be filesystem instances: this
+    mode exists so that a manifest cannot cause a backend to be constructed.
+    """
+    if not isinstance(aliases, dict):
+        raise TypeError("target_aliases must be a dict of alias -> filesystem")
+    out = {}
+    for alias, fs in aliases.items():
+        if not isinstance(alias, str) or re.fullmatch(r"[^:/]+", alias) is None:
+            raise ValueError(f"Invalid target alias: {alias!r}")
+        if alias == "reference":
+            raise ValueError('The "reference" alias is reserved')
+        if not isinstance(fs, AbstractFileSystem):
+            raise TypeError(
+                f"Target alias {alias!r} must be an AbstractFileSystem instance, "
+                f"not {type(fs).__name__}"
+            )
+        out[alias] = fs
+    return out
 
 
 def _first(d):
@@ -664,6 +704,7 @@ class ReferenceFileSystem(AsyncFileSystem):
         remote_protocol=None,
         remote_options=None,
         fs=None,
+        target_aliases=None,
         template_overrides=None,
         simple_templates=True,
         max_gap=64_000,
@@ -682,7 +723,8 @@ class ReferenceFileSystem(AsyncFileSystem):
             files to be loaded lazily.
         target : str
             For any references having target_url as None, this is the default file
-            target to use
+            target to use. In alias mode it must itself be an approved
+            ``alias://path`` URL.
         ref_storage_args : dict
             If references is a str, use these kwargs for loading the JSON file.
             Deprecated: use target_options instead.
@@ -706,6 +748,18 @@ class ReferenceFileSystem(AsyncFileSystem):
                   instance for the given protocol
 
             If this is given, remote_options and remote_protocol are ignored.
+        target_aliases : dict(str, AbstractFileSystem)
+            Restrict this reference set to a fixed set of connections. Each key
+            is an alias that references may name as ``alias://path`` and each
+            value is the already-created filesystem to use for it. When given,
+            the references can only reach these filesystems: no protocol is
+            derived from the templates or references, ``remote_protocol`` and
+            ``remote_options`` are not used to construct anything, and a
+            reference naming any other alias is rejected with
+            ``ReferenceTargetNotAllowed`` as soon as it is resolved, before the
+            target filesystem is contacted. Inline references keep working.
+            This is the safe mode for manifests that come from an untrusted
+            source; ``fs`` and ``target_aliases`` are mutually exclusive.
         template_overrides : dict
             Swap out any templates in the references file with these - useful for
             testing.
@@ -733,9 +787,21 @@ class ReferenceFileSystem(AsyncFileSystem):
         self.simple_templates = simple_templates
         self.templates = {}
         self.fss = {}
+        self._aliases = None
         self._dircache = {}
         self.max_gap = max_gap
         self.max_block = max_block
+        if target_aliases is not None and fs is not None:
+            raise ValueError("Pass either fs or target_aliases, not both")
+        if target_aliases is not None:
+            self._setup_aliases(target_aliases)
+            if isinstance(fo, str):
+                raise ValueError(
+                    "fo must be a reference mapping when target_aliases is used"
+                )
+            self._process_references(fo, template_overrides)
+            self._check_alias_references()
+            return
         if isinstance(fo, str):
             dic = dict(
                 **(ref_storage_args or target_options or {}), protocol=target_protocol
@@ -817,6 +883,97 @@ class ReferenceFileSystem(AsyncFileSystem):
                     "of asynchronous"
                 )
 
+    def _setup_aliases(self, target_aliases):
+        """Install the approved connections and nothing else."""
+        self._aliases = _validate_aliases(target_aliases)
+        self._alias_set = frozenset(self._aliases)
+        for alias, fs in self._aliases.items():
+            self.fss[alias] = fs
+        self.fss[None] = next(iter(self._aliases.values()), None)
+        for alias, f in list(self.fss.items()):
+            if f is None:
+                continue
+            if not f.async_impl:
+                self.fss[alias] = AsyncFileSystemWrapper(
+                    f, asynchronous=self.asynchronous
+                )
+            elif self.asynchronous ^ f.asynchronous:
+                raise ValueError(
+                    "Reference-FS's target filesystem must have same value "
+                    "of asynchronous"
+                )
+
+    def _resolve_alias(self, url, reference=None):
+        """Return ``(alias, filesystem, path)`` for an approved target URL.
+
+        Anything that is not spelled ``alias://path`` with an approved alias is
+        refused here, before the target filesystem is touched, so a manifest
+        can neither name a new connection nor smuggle one via a protocol-like
+        prefix.
+        """
+        if not isinstance(url, str):
+            raise ReferenceTargetNotAllowed(reference, url)
+        match = re.fullmatch(r"([^:/]+)://(.*)", url, re.DOTALL)
+        if match is None:
+            raise ReferenceTargetNotAllowed(reference, url)
+        alias, path = match.groups()
+        if alias not in self._alias_set or not path:
+            raise ReferenceTargetNotAllowed(reference, alias)
+        return alias, self.fss[alias], path
+
+    def _check_alias_references(self):
+        """Reject any remote reference naming an unapproved alias.
+
+        Done once, up front, so a bad manifest is refused before a caller can
+        read from it; inline (bytes/str) references are left alone.
+        """
+        for key, part in self.references.items():
+            if callable(part):
+                part = part()
+            if isinstance(part, (bytes, str, memoryview)) or hasattr(part, "to_bytes"):
+                continue
+            url = part[0] if isinstance(part, (list, tuple)) else None
+            if url is None:
+                url = self.target
+            if url is None:
+                continue
+            self._resolve_alias(url, key)
+
+    def _alias_groups(self, paths):
+        """Group paths by the approved alias their reference points at."""
+        out = {}
+        for path in paths:
+            ref = self.references.get(self._strip_protocol(path))
+            if callable(ref):
+                ref = ref()
+            if (
+                ref is None
+                or isinstance(ref, (bytes, str, memoryview))
+                or hasattr(ref, "to_bytes")
+            ):
+                out.setdefault(None, []).append(path)
+                continue
+            url = ref[0] if isinstance(ref, (list, tuple)) else None
+            if url is None:
+                url = self.target
+            alias, _, _ = self._resolve_alias(url, path)
+            out.setdefault(alias, []).append(path)
+        return out
+
+    def _target(self, url, reference=None):
+        """Resolve a reference target to ``(filesystem, path)``.
+
+        In restricted (alias) mode the URL must name an approved alias and the
+        alias is removed before the backend sees the path, so the connection is
+        never selected from manifest text. Otherwise the historical behaviour
+        of selecting a filesystem by protocol is kept.
+        """
+        if self._aliases is not None:
+            _, fs, path = self._resolve_alias(url, reference=reference)
+            return fs, path
+        protocol, _ = split_protocol(url)
+        return self.fss[protocol], url
+
     def _cat_common(self, path, start=None, end=None):
         path = self._strip_protocol(path)
         logger.debug(f"cat: {path}")
@@ -865,11 +1022,9 @@ class ReferenceFileSystem(AsyncFileSystem):
         part_or_url, start0, end0 = self._cat_common(path, start=start, end=end)
         if isinstance(part_or_url, bytes):
             return part_or_url[start:end]
-        protocol, _ = split_protocol(part_or_url)
+        fs, target = self._target(part_or_url, reference=path)
         try:
-            return await self.fss[protocol]._cat_file(
-                part_or_url, start=start0, end=end0, **kwargs
-            )
+            return await fs._cat_file(target, start=start0, end=end0, **kwargs)
         except Exception as e:
             raise ReferenceNotReachable(path, part_or_url) from e
 
@@ -877,16 +1032,19 @@ class ReferenceFileSystem(AsyncFileSystem):
         part_or_url, start0, end0 = self._cat_common(path, start=start, end=end)
         if isinstance(part_or_url, bytes):
             return part_or_url[start:end]
-        protocol, _ = split_protocol(part_or_url)
+        fs, target = self._target(part_or_url, reference=path)
         try:
-            return self.fss[protocol].cat_file(
-                part_or_url, start=start0, end=end0, **kwargs
-            )
+            return fs.cat_file(target, start=start0, end=end0, **kwargs)
         except Exception as e:
             raise ReferenceNotReachable(path, part_or_url) from e
 
     def pipe_file(self, path, value, **_):
         """Temporarily add binary data or reference as a file"""
+        if self._aliases is not None and not isinstance(
+            value, (bytes, str, memoryview)
+        ):
+            url = value[0] if isinstance(value, (list, tuple)) and value else value
+            self._resolve_alias(url, path)
         self.references[path] = value
 
     async def _get_file(self, rpath, lpath, **kwargs):
@@ -934,10 +1092,15 @@ class ReferenceFileSystem(AsyncFileSystem):
         if isinstance(path, list) and (recursive or any("*" in p for p in path)):
             raise NotImplementedError
         # TODO: if references is lazy, pre-fetch all paths in batch before access
-        proto_dict = _protocol_groups(path, self.references)
+        alias_mode = self._aliases is not None
+        proto_dict = (
+            self._alias_groups([path] if isinstance(path, str) else list(path))
+            if alias_mode
+            else _protocol_groups(path, self.references)
+        )
         out = {}
         for proto, paths in proto_dict.items():
-            fs = self.fss[proto]
+            fs = self.fss[proto] if not alias_mode or proto is not None else None
             urls, starts, ends, valid_paths = [], [], [], []
             for p in paths:
                 # find references or label not-found. Early exit if any not
@@ -952,11 +1115,16 @@ class ReferenceFileSystem(AsyncFileSystem):
                         raise
                     if on_error != "omit":
                         out[p] = err
-                else:
-                    urls.append(u)
-                    starts.append(s)
-                    ends.append(e)
-                    valid_paths.append(p)
+                    continue
+                if alias_mode and not isinstance(u, bytes):
+                    # Group by approved alias and give the backend the bare
+                    # path. Any unapproved alias is refused by _target before
+                    # the filesystem is selected.
+                    fs, u = self._target(u, reference=p)
+                urls.append(u)
+                starts.append(s)
+                ends.append(e)
+                valid_paths.append(p)
 
             # process references into form for merging
             urls2 = []
@@ -993,7 +1161,11 @@ class ReferenceFileSystem(AsyncFileSystem):
                 max_gap=self.max_gap,
                 max_block=self.max_block,
             )
-            bytes_out = fs.cat_ranges(new_paths, new_starts, new_ends)
+            # An alias group always comes with its filesystem; the None group
+            # only holds inline references, which need no fetch.
+            bytes_out = (
+                fs.cat_ranges(new_paths, new_starts, new_ends) if new_paths else []
+            )
 
             # unbundle from merged bytes - simple approach
             for u, s, e, p in zip(urls, starts, ends, valid_paths):
@@ -1191,10 +1363,10 @@ class ReferenceFileSystem(AsyncFileSystem):
         if isinstance(part_or_url, bytes):
             return io.BytesIO(part_or_url[start0:end0])
 
-        protocol, _ = split_protocol(part_or_url)
+        fs, target = self._target(part_or_url, reference=path)
         if start0 is None and end0 is None:
-            return self.fss[protocol]._open(
-                part_or_url,
+            return fs._open(
+                target,
                 mode,
                 block_size=block_size,
                 cache_options=cache_options,
@@ -1280,8 +1452,8 @@ class ReferenceFileSystem(AsyncFileSystem):
                 return {"name": path, "type": "directory", "size": 0}
         if out0[0]["size"] is None:
             # if this is a whole remote file, update size using remote FS
-            prot, _ = split_protocol(self.references[path][0])
-            out0[0]["size"] = self.fss[prot].size(self.references[path][0])
+            fs, target = self._target(self.references[path][0], reference=path)
+            out0[0]["size"] = fs.size(target)
         return out0[0]
 
     async def _info(self, path, **kwargs):
@@ -1289,12 +1461,11 @@ class ReferenceFileSystem(AsyncFileSystem):
         if isinstance(out, (list, tuple)) and len(out) == 1:
             # whole remote file: the size must come from the remote FS, which
             # cannot be called synchronously from inside the event loop
-            prot, _ = split_protocol(out[0])
-            fs = self.fss[prot]
+            fs, target = self._target(out[0], reference=path)
             if fs.async_impl:
-                size = await fs._size(out[0])
+                size = await fs._size(target)
             else:
-                size = fs.size(out[0])
+                size = fs.size(target)
             return {"name": path, "type": "file", "size": size}
         return self.info(path)  # calls fast sync code
 
@@ -1305,6 +1476,9 @@ class ReferenceFileSystem(AsyncFileSystem):
         self.dircache.clear()  # this is a bit heavy handed
 
     async def _pipe_file(self, path, data, mode="overwrite", **kwargs):
+        if self._aliases is not None and not isinstance(data, (bytes, str, memoryview)):
+            url = data[0] if isinstance(data, (list, tuple)) and data else data
+            self._resolve_alias(url, path)
         if mode == "create" and self.exists(path):
             raise FileExistsError
         # can be str or bytes
@@ -1359,9 +1533,7 @@ class ReferenceFile(AbstractBufferedFile):
             **kwargs,
         )
         part_or_url, self.start, self.end = self.fs._cat_common(self.path)
-        protocol, _ = split_protocol(part_or_url)
-        self.src_fs = self.fs.fss[protocol]
-        self.src_path = part_or_url
+        self.src_fs, self.src_path = self.fs._target(part_or_url, reference=self.path)
         self._f = None
 
     @property
