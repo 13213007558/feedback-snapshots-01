@@ -11,8 +11,9 @@ from typing import NamedTuple
 
 import pytest
 
-from marshmallow import Schema, fields
+from marshmallow import Schema, fields, post_dump, pre_dump
 from marshmallow import missing as missing_
+from marshmallow.experimental.context import Context
 from tests.base import ALL_FIELDS, DateEnum, GenderEnum, HairColorEnum, User, central
 
 
@@ -1000,3 +1001,331 @@ def test_nested_field_many_serializing_generator():
     data = OtherSchema().dump(obj)
 
     assert data.get("objects") == [{"name": "foo"}, {"name": "bar"}]
+
+
+class _TripwireProfile:
+    """Nested object whose sensitive property records every read."""
+
+    def __init__(self, owner):
+        self.owner = owner
+
+    @property
+    def secret(self):
+        self.owner.reads["profile.secret"] += 1
+        return "nested-secret"
+
+
+class _TripwireModel:
+    """Stand-in for an ORM object with properties that touch storage on access.
+
+    ``reads`` distinguishes "the field was removed from the result" from "the
+    attribute was never evaluated". No database is involved: the property body
+    is the tripwire.
+    """
+
+    def __init__(self):
+        self.name = "alice"
+        self.reads = {
+            "ssn": 0,
+            "profile": 0,
+            "profile.secret": 0,
+        }
+        self._profile = _TripwireProfile(self)
+
+    @property
+    def ssn(self):
+        self.reads["ssn"] += 1
+        return "123-45-6789"
+
+    @property
+    def profile(self):
+        self.reads["profile"] += 1
+        return self._profile
+
+
+class TestDisclosureBeforeRead:
+    """A field that is absent from the output must not have been read."""
+
+    def test_exclude_never_reads_attribute(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+        model = _TripwireModel()
+        result = UserSchema(exclude=("ssn",)).dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 0
+
+    def test_only_never_reads_excluded_attribute(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+        model = _TripwireModel()
+        result = UserSchema(only=("name",)).dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 0
+
+    def test_load_only_never_reads_attribute(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            def on_bind_field(self, field_name, field_obj):
+                if field_name == "ssn":
+                    field_obj.load_only = True
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 0
+
+    def test_get_attribute_guard_never_reads_attribute(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 0
+
+    def test_get_attribute_guard_can_emit_placeholder_without_reading(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str(dump_default="<redacted>")
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result == {"name": "alice", "ssn": "<redacted>"}
+        assert model.reads["ssn"] == 0
+
+    def test_get_attribute_guard_can_fail_closed(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    raise PermissionError("ssn is not readable")
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        with pytest.raises(PermissionError):
+            UserSchema().dump(model)
+
+        assert model.reads["ssn"] == 0
+
+    def test_post_dump_removes_key_but_has_already_read_it(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            @post_dump
+            def redact(self, data, **kwargs):
+                data.pop("ssn", None)
+                return data
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        # The output looks redacted...
+        assert result == {"name": "alice"}
+        # ...but the getter already ran, so post_dump is not a disclosure control.
+        assert model.reads["ssn"] == 1
+
+    def test_get_attribute_guard_keys_on_internal_attribute(self):
+        class UserSchema(Schema):
+            hidden = fields.Str(attribute="ssn")
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result == {}
+        assert model.reads["ssn"] == 0
+
+    def test_get_attribute_guard_keyed_on_field_name_leaks(self):
+        class UserSchema(Schema):
+            hidden = fields.Str(attribute="ssn")
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "hidden":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        # The accessor receives "ssn", so a field-name guard misses it.
+        assert result == {"hidden": "123-45-6789"}
+        assert model.reads["ssn"] == 1
+
+    def test_pre_dump_hook_can_read_before_any_field_policy(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            @pre_dump
+            def touch_everything(self, obj, **kwargs):
+                obj.ssn  # a hook reading the object is outside field policy
+                return obj
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 1
+
+    def test_method_field_bypasses_get_attribute_guard(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Method("get_ssn")
+
+            def get_ssn(self, obj):
+                return obj.ssn
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        # Method fields do not use the accessor, so the guard cannot stop them.
+        assert result["ssn"] == "123-45-6789"
+        assert model.reads["ssn"] == 1
+
+    def test_outer_guard_prevents_nested_read_entirely(self):
+        class ProfileSchema(Schema):
+            secret = fields.Str()
+
+        class OuterSchema(Schema):
+            name = fields.Str()
+            profile = fields.Nested(ProfileSchema)
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "profile":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = OuterSchema().dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["profile"] == 0
+        assert model.reads["profile.secret"] == 0
+
+    def test_outer_guard_does_not_cover_inner_attribute(self):
+        class ProfileSchema(Schema):
+            secret = fields.Str()
+
+        class OuterSchema(Schema):
+            name = fields.Str()
+            profile = fields.Nested(ProfileSchema)
+
+            def get_attribute(self, obj, attr, default):
+                # Allows the nested object through; only the child decides
+                # whether its own attributes are readable.
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = OuterSchema().dump(model)
+
+        assert result == {"name": "alice", "profile": {"secret": "nested-secret"}}
+        assert model.reads["profile"] == 1
+        assert model.reads["profile.secret"] == 1
+
+    def test_nested_guard_on_inner_schema_prevents_inner_read(self):
+        class ProfileSchema(Schema):
+            secret = fields.Str()
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "secret":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        class OuterSchema(Schema):
+            name = fields.Str()
+            profile = fields.Nested(ProfileSchema)
+
+        model = _TripwireModel()
+        result = OuterSchema().dump(model)
+
+        assert result == {"name": "alice", "profile": {}}
+        assert model.reads["profile"] == 1
+        assert model.reads["profile.secret"] == 0
+
+    def test_function_field_bypasses_get_attribute_guard(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Function(lambda obj: obj.ssn)
+
+            def get_attribute(self, obj, attr, default):
+                if attr == "ssn":
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        result = UserSchema().dump(model)
+
+        assert result["ssn"] == "123-45-6789"
+        assert model.reads["ssn"] == 1
+
+    def test_context_scoped_guard_prevents_read_without_database(self):
+        class UserSchema(Schema):
+            name = fields.Str()
+            ssn = fields.Str()
+
+            def get_attribute(self, obj, attr, default):
+                denied = Context[dict].get({}).get("denied", set())
+                if attr in denied:
+                    return missing_
+                return super().get_attribute(obj, attr, default)
+
+        model = _TripwireModel()
+        with Context({"denied": {"ssn"}}):
+            result = UserSchema().dump(model)
+
+        assert result == {"name": "alice"}
+        assert model.reads["ssn"] == 0
+
+    def test_nested_exclude_never_reads_inner_attribute(self):
+        class ProfileSchema(Schema):
+            secret = fields.Str()
+
+        class OuterSchema(Schema):
+            name = fields.Str()
+            profile = fields.Nested(ProfileSchema)
+
+        model = _TripwireModel()
+        result = OuterSchema(exclude=("profile.secret",)).dump(model)
+
+        assert result == {"name": "alice", "profile": {}}
+        assert model.reads["profile"] == 1
+        assert model.reads["profile.secret"] == 0
