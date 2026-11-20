@@ -115,6 +115,51 @@ called from a single worker thread, so they may run queries.
 If you override `check_permissions()`, override `acheck_permissions()` as
 well; asynchronous views do not call the synchronous one.
 
+## Hiding inaccessible records
+
+A detail page usually must not reveal whether a record that the current user
+cannot access even exists. Combine `LoginRequiredMixin` with
+`PermissionRequiredMixin` and set `return_404 = True`:
+
+```python
+from django.http import Http404, HttpResponse
+from django.views.generic import DetailView
+
+from guardian.mixins import LoginRequiredMixin, PermissionRequiredMixin
+
+
+class PostDetailView(LoginRequiredMixin, PermissionRequiredMixin, DetailView):
+    model = Post
+    permission_required = "testapp.view_post"
+    return_404 = True
+
+    async def aget_permission_object(self):
+        try:
+            return await Post.objects.aget(pk=self.kwargs["pk"])
+        except Post.DoesNotExist:
+            raise Http404
+
+    async def get(self, request, *args, **kwargs):
+        post = await self.aget_permission_object()
+        return HttpResponse(post.title)
+```
+
+The external responses then match the synchronous view exactly:
+
+- An anonymous request is redirected to the login page (the per-application
+  `login_url`, with the current path in `redirect_field_name`), whether or not
+  the record exists.
+- An authenticated user without the permission gets the same 404 as a request
+  for a record that does not exist, so existence cannot be probed.
+- An authorized user reaches the handler normally.
+
+The two authenticated denials stay distinguishable internally: a missing
+record raises `Http404` while a permission failure calls
+`on_permission_check_fail()` with the resolved object before the 404 is
+returned. The synchronous `get_object()` path is covered as well, since
+`aget_permission_object()` runs it in a worker thread by default and lets its
+`Http404` propagate to the same 404 response.
+
 ## Limitations
 
 - Django's generic views (`DetailView`, `ListView`, ...) provide synchronous

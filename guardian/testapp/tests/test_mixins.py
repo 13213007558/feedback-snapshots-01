@@ -6,11 +6,11 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ImproperlyConfigured, PermissionDenied
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseNotFound, HttpResponseRedirect
 from django.test import TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import path
-from django.views.generic import ListView, View
+from django.views.generic import DetailView, ListView, View
 
 from guardian.mixins import (
     _ASYNC_VIEWS_SUPPORTED,
@@ -134,6 +134,62 @@ class CombinedAsyncAdispatchOverrideView(LoginRequiredMixin, AsyncAdispatchOverr
         return HttpResponse("combined html")
 
 
+def hidden_detail_fail_handler(obj):
+    """Hook recording the object of every failed asynchronous permission check."""
+
+
+class HiddenAsyncPostDetailView(LoginRequiredMixin, PermissionRequiredMixin, DetailView):
+    """Protected detail page migrated to an asynchronous view.
+
+    `LoginRequiredMixin` keeps the per-application anonymous redirect, while
+    `return_404` makes an authenticated denial indistinguishable from a
+    missing record so existence cannot be probed.
+    """
+
+    model = Post
+    permission_required = "testapp.view_post"
+    return_404 = True
+
+    async def aget_permission_object(self):
+        try:
+            return await Post.objects.aget(pk=self.kwargs["pk"])
+        except Post.DoesNotExist:
+            raise Http404("post does not exist")
+
+    def on_permission_check_fail(self, request, response, obj=None):
+        hidden_detail_fail_handler(obj)
+
+    async def get(self, request, *args, **kwargs):
+        obj = await self.aget_permission_object()
+        return HttpResponse(f"post:{obj.pk}")
+
+
+class HiddenSyncPostDetailView(LoginRequiredMixin, PermissionRequiredMixin, DetailView):
+    """Synchronous twin of `HiddenAsyncPostDetailView` for response parity."""
+
+    model = Post
+    permission_required = "testapp.view_post"
+    return_404 = True
+
+    def on_permission_check_fail(self, request, response, obj=None):
+        hidden_detail_fail_handler(obj)
+
+    def get(self, request, *args, **kwargs):
+        return HttpResponse(f"post:{self.get_object().pk}")
+
+
+class HiddenAsyncThreadedDetailView(HiddenAsyncPostDetailView):
+    """Hiding strategy with the object resolved through the default thread path.
+
+    The override mirrors the mixin's default `aget_permission_object()`: the
+    synchronous `get_object()` runs in a worker thread, and its `Http404` must
+    still surface as a 404 rather than crashing the event loop.
+    """
+
+    async def aget_permission_object(self):
+        return await sync_to_async(self.get_permission_object)()
+
+
 urlpatterns = [
     path("async-permission-required/", AsyncPermissionObjectView.as_view(raise_exception=False)),
     path("async-login-required/", AsyncLoginRequiredView.as_view()),
@@ -141,6 +197,13 @@ urlpatterns = [
     path("async-combined/", CombinedAsyncLoginPermissionView.as_view()),
     path("async-adispatch-override/", AsyncAdispatchOverrideView.as_view()),
     path("async-combined-adispatch-override/", CombinedAsyncAdispatchOverrideView.as_view()),
+    path("async-hidden-post/<int:pk>/", HiddenAsyncPostDetailView.as_view()),
+    path(
+        "async-hidden-post-custom-login/<int:pk>/",
+        HiddenAsyncPostDetailView.as_view(login_url="/custom-login/"),
+    ),
+    path("async-hidden-post-threaded/<int:pk>/", HiddenAsyncThreadedDetailView.as_view()),
+    path("sync-hidden-post/<int:pk>/", HiddenSyncPostDetailView.as_view()),
 ]
 
 
@@ -302,6 +365,152 @@ class AsyncPermissionRequiredMixinTests(TestCase):
 
         self.user.add_obj_perm("change_post", self.post)
         self.assertEqual(async_to_sync(get)().content, b"some html")
+
+
+@skipIf(not _ASYNC_VIEWS_SUPPORTED, "Asynchronous class-based views require Django >= 4.2")
+class AsyncPermissionHidingTests(TestCase):
+    """A protected asynchronous detail page must not reveal record existence.
+
+    Under the hiding strategy (`LoginRequiredMixin` plus `return_404`):
+
+    - an anonymous request is redirected to the login page, per the
+      application settings, regardless of whether the record exists;
+    - an authenticated request for a record the user cannot access and a
+      request for a record that does not exist both return the same 404;
+    - the permission failure hook still receives the resolved object, so the
+      two denial reasons remain distinguishable internally.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.allowed_post = Post.objects.create(title="allowed-post-title")
+        cls.hidden_post = Post.objects.create(title="hidden-post-title")
+        cls.user = get_user_model().objects.create_user("hank", "hank@doe.com", "doe")
+
+    def async_get(self, path):
+        async def request():
+            return await self.async_client.get(path)
+
+        return async_to_sync(request)()
+
+    def login(self):
+        self.async_client.force_login(self.user)
+
+    def grant(self):
+        assign_perm("testapp.view_post", self.user, self.allowed_post)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_authorized_user_sees_the_record(self):
+        self.login()
+        self.grant()
+
+        response = self.async_get(f"/async-hidden-post/{self.allowed_post.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, f"post:{self.allowed_post.pk}".encode())
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_hidden_and_missing_records_return_the_same_not_found_response(self):
+        self.login()
+
+        forbidden = self.async_get(f"/async-hidden-post/{self.hidden_post.pk}/")
+        missing = self.async_get("/async-hidden-post/999999/")
+
+        self.assertEqual(forbidden.status_code, 404)
+        self.assertIsInstance(forbidden, HttpResponseNotFound)
+        self.assertEqual(missing.status_code, forbidden.status_code)
+        self.assertEqual(missing.headers, forbidden.headers)
+        self.assertEqual(missing.content, forbidden.content)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_permission_failure_remains_distinguishable_through_the_hook(self):
+        """The external 404s match, but the hook only fires for a real object."""
+        self.login()
+
+        with mock.patch(
+            "guardian.testapp.tests.test_mixins.hidden_detail_fail_handler"
+        ) as check_fail:
+            forbidden = self.async_get(f"/async-hidden-post/{self.hidden_post.pk}/")
+            missing = self.async_get("/async-hidden-post/999999/")
+
+        self.assertEqual((forbidden.status_code, missing.status_code), (404, 404))
+        check_fail.assert_called_once_with(self.hidden_post)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_anonymous_requests_are_redirected_for_existing_and_missing_records(self):
+        forbidden = self.async_get(f"/async-hidden-post/{self.hidden_post.pk}/")
+        missing = self.async_get("/async-hidden-post/999999/")
+
+        self.assertEqual(forbidden.status_code, 302)
+        self.assertIsInstance(forbidden, HttpResponseRedirect)
+        self.assertEqual(
+            forbidden.url,
+            f"/accounts/login/?next=/async-hidden-post/{self.hidden_post.pk}/",
+        )
+        self.assertEqual(missing.status_code, 302)
+        self.assertEqual(missing.url, "/accounts/login/?next=/async-hidden-post/999999/")
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_anonymous_redirect_uses_the_configured_login_url(self):
+        response = self.async_get(f"/async-hidden-post-custom-login/{self.hidden_post.pk}/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            f"/custom-login/?next=/async-hidden-post-custom-login/{self.hidden_post.pk}/",
+        )
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_threaded_object_lookup_hides_and_redirects_like_the_async_orm_path(self):
+        # Anonymous request is redirected before the object is even fetched.
+        anonymous = self.async_get(f"/async-hidden-post-threaded/{self.hidden_post.pk}/")
+        self.assertEqual(anonymous.status_code, 302)
+
+        self.login()
+        # Authenticated denial and a missing record both produce a 404.
+        forbidden = self.async_get(f"/async-hidden-post-threaded/{self.hidden_post.pk}/")
+        missing = self.async_get("/async-hidden-post-threaded/999999/")
+        self.assertEqual((forbidden.status_code, missing.status_code), (404, 404))
+
+        assign_perm("testapp.view_post", self.user, self.allowed_post)
+        allowed = self.async_get(f"/async-hidden-post-threaded/{self.allowed_post.pk}/")
+        self.assertEqual(allowed.status_code, 200)
+
+    @override_settings(ROOT_URLCONF=__name__)
+    def test_asynchronous_and_synchronous_views_deny_identically(self):
+        cases = (
+            ("hidden", self.hidden_post.pk),
+            ("missing", 999999),
+        )
+
+        # Anonymous users are redirected by both views.
+        for label, pk in cases:
+            with self.subTest(label):
+                async_path = f"/async-hidden-post/{pk}/"
+                sync_path = f"/sync-hidden-post/{pk}/"
+                async_response = self.async_get(async_path)
+                sync_response = self.client.get(sync_path)
+                self.assertEqual(async_response.status_code, 302)
+                self.assertEqual(sync_response.status_code, 302)
+                self.assertEqual(async_response.url, f"/accounts/login/?next={async_path}")
+                self.assertEqual(sync_response.url, f"/accounts/login/?next={sync_path}")
+
+        self.login()
+        self.client.force_login(self.user)
+        for label, pk in cases:
+            with self.subTest(label):
+                async_response = self.async_get(f"/async-hidden-post/{pk}/")
+                sync_response = self.client.get(f"/sync-hidden-post/{pk}/")
+                self.assertEqual(async_response.status_code, 404)
+                self.assertEqual(sync_response.status_code, 404)
+                self.assertEqual(async_response.headers, sync_response.headers)
+                self.assertEqual(async_response.content, sync_response.content)
+
+        self.grant()
+        async_response = self.async_get(f"/async-hidden-post/{self.allowed_post.pk}/")
+        sync_response = self.client.get(f"/sync-hidden-post/{self.allowed_post.pk}/")
+        self.assertEqual(async_response.status_code, 200)
+        self.assertEqual(sync_response.status_code, 200)
 
 
 @skipIf(not _ASYNC_VIEWS_SUPPORTED, "Asynchronous class-based views require Django >= 4.2")
