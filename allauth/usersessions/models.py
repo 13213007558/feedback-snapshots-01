@@ -138,6 +138,9 @@ class UserSession(models.Model):
         return self.session_key == context.request.session.session_key
 
     def end(self) -> None:
+        from allauth.usersessions.internal import usersessionkit
+
+        usersessionkit.mark_session_ended(self.session_key)
         engine = import_module(settings.SESSION_ENGINE)
         store = engine.SessionStore()
         store.delete(self.session_key)

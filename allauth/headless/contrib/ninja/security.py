@@ -37,6 +37,9 @@ class XSessionTokenAuth(AuthBase):
             if self.allow_invalid_session_tokens:
                 return _anonymous_user(request)
             return None
+        if usersessionkit.is_session_ended(result.session.session_key):
+            result.session.flush()
+            return _anonymous_user(request) if self.allow_anonymous_users else None
         if result.user is None:
             return _anonymous_user(request) if self.allow_anonymous_users else None
         usersessionkit.track_activity(request, user=result.user, session=result.session)
@@ -67,6 +70,11 @@ class JWTTokenAuth(AuthBase):
             return _anonymous_user(request) if self.allow_anonymous_users else None
         result = internal.validate_access_token(token)
         if result is None:
+            return None
+        if result.session is not None and usersessionkit.is_session_ended(
+            result.session.session_key
+        ):
+            result.session.flush()
             return None
         usersessionkit.track_activity(request, user=result.user, session=result.session)
         request.user = result.user  # type: ignore[assignment]

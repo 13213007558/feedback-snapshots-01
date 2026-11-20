@@ -62,16 +62,25 @@ def authentication_context(request: HttpRequest):
 
         strategy = app_settings.TOKEN_STRATEGY
         session_token = strategy.get_session_token(request)
+        session_ended = False
         if session_token:
             session = strategy.lookup_session(session_token)
             if not session:
                 raise ImmediateHttpResponse(UnauthorizedResponse(request, status=410))
             request.session = session
             purge_request_user_cache(request)
+            if usersessionkit.is_session_ended(session.session_key):
+                # The session was ended (possibly while this request was still
+                # in flight). Ending takes precedence over activity tracking:
+                # drop the resurrected session and treat the request as
+                # unauthenticated.
+                session_ended = True
+                session.flush()
+                purge_request_user_cache(request)
         request.allauth.headless._pre_user = request.user  # type: ignore[attr-defined]
         # request.user is lazy -- force evaluation
         request.allauth.headless._pre_user.pk  # type: ignore[attr-defined]
-        if session_token:
+        if session_token and not session_ended:
             usersessionkit.track_activity(
                 request,
                 user=request.user,

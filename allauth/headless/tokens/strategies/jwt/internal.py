@@ -145,6 +145,12 @@ def get_token_session(payload: dict[str, Any]) -> SessionBase | None:
     session_key = session_key_from_sid(sid)
     if not session_key:
         return None
+    from allauth.usersessions.internal import usersessionkit
+
+    if usersessionkit.is_session_ended(session_key):
+        # The session was ended; ending takes precedence over token based
+        # access, so do not hand out a (resurrected) session.
+        return None
     session = lookup_session(session_key)
     if session is None:
         return None

@@ -19,3 +19,12 @@ Available settings:
   require ``HEADLESS_JWT_STATEFUL_VALIDATION_ENABLED`` for activity tracking in
   these integrations; stateless access token validation does not access the
   session. Successful JWT refreshes also update the session's activity.
+
+Ending a session always takes precedence over activity tracking. If a session is
+ended while a request from that session is still in flight, the ending is
+remembered so that the late request -- and any later request presenting the same
+session -- cannot resurrect the session nor bring its activity record back. The
+ended session stays out of the session list, and authentication using that
+session is rejected. These markers are kept in the Django cache for the duration
+of ``SESSION_COOKIE_AGE``; ensure the configured cache backend (``CACHES``)
+persists values, as ``django.core.cache.backends.dummy.DummyCache`` does not.

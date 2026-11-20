@@ -39,6 +39,9 @@ class XSessionTokenAuthentication(authentication.BaseAuthentication):
                     message = get_adapter().error_messages["invalid_token"]
                     raise AuthenticationFailed(message)
                 return None
+            if usersessionkit.is_session_ended(result.session.session_key):
+                result.session.flush()
+                return None
             if result.user is None:
                 if not self.allow_anonymous_users:
                     raise AuthenticationFailed()
@@ -81,6 +84,11 @@ class JWTTokenAuthentication(authentication.TokenAuthentication):
         if result is None:
             message = get_adapter().error_messages["invalid_token"]
             raise AuthenticationFailed(message)
+        if result.session is not None and usersessionkit.is_session_ended(
+            result.session.session_key
+        ):
+            result.session.flush()
+            raise AuthenticationFailed(get_adapter().error_messages["invalid_token"])
         usersessionkit.track_activity(
             context.request, user=result.user, session=result.session
         )

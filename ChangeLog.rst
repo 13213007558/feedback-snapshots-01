@@ -1,3 +1,20 @@
+Unreleased
+**********
+
+Security notice
+---------------
+
+- User sessions: ending a session now takes precedence over activity tracking.
+  Previously, a slow request that was still in flight when its session was ended
+  could resurrect the session and bring its activity record back when it
+  returned, showing the ended session as online again. Ended sessions are now
+  remembered (in the cache, for the duration of ``SESSION_COOKIE_AGE``) so that
+  late and subsequent requests stay unauthenticated and the session never
+  reappears in the session list. This covers cookie based requests as well as
+  the headless ``X-Session-Token`` and stateful JWT (access token and refresh
+  token) integrations. A real, persisting cache backend (``CACHES``) is required.
+
+
 65.22.1 (2026-11-13)
 ********************
 
