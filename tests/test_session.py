@@ -4,10 +4,12 @@ import typing as t
 
 import pytest
 import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
 import sqlalchemy.orm as sa_orm
 from flask import Flask
 
 from flask_sqlalchemy import SQLAlchemy
+from flask_sqlalchemy.session import ReadOnlySession
 from flask_sqlalchemy.session import Session
 
 
@@ -205,3 +207,68 @@ def test_session_multiple_dbs(app: Flask, model_class: t.Any) -> None:
     db.session.commit()
     products = db.session.execute(db.select(Product)).scalars().all()
     assert len(products) == 2
+
+
+def test_read_only_session(app: Flask, tmp_path: t.Any) -> None:
+    uri = f"sqlite:///{tmp_path / 'audit.db'}"
+    app.config["SQLALCHEMY_DATABASE_URI"] = uri
+
+    db_rw = SQLAlchemy(app)
+
+    class Todo(db_rw.Model):
+        id = sa.Column(sa.Integer, primary_key=True)
+        title = sa.Column(sa.String)
+
+    app_ro = Flask("audit_ro")
+    app_ro.config["SQLALCHEMY_DATABASE_URI"] = uri
+    db_ro = SQLAlchemy(app_ro, session_options={"class_": ReadOnlySession})
+
+    class AuditTodo(db_ro.Model):
+        __tablename__ = "todo"
+        id = sa.Column(sa.Integer, primary_key=True)
+        title = sa.Column(sa.String)
+
+    with app.app_context():
+        db_rw.create_all()
+        db_rw.session.add(Todo(title="original"))
+        db_rw.session.commit()
+
+    with app_ro.app_context():
+        # A business function mistakenly modifies the loaded instance.
+        todo = db_ro.session.execute(db_ro.select(AuditTodo)).scalar_one()
+        todo.title = "changed"
+        # Another query in the same scope must not autoflush the change.
+        todos = db_ro.session.execute(db_ro.select(AuditTodo)).scalars().all()
+        assert len(todos) == 1
+        # An explicit write with pending changes raises and writes nothing.
+        with pytest.raises(sa_exc.InvalidRequestError):
+            db_ro.session.commit()
+    # Leaving the scope removes the session without saving anything.
+
+    with app.app_context():
+        # The read-only request left no changes in the database.
+        todo = db_rw.session.execute(db_rw.select(Todo)).scalar_one()
+        assert todo.title == "original"
+        # A normal write transaction is unaffected by the previous request.
+        db_rw.session.add(Todo(title="second"))
+        db_rw.session.commit()
+        titles = db_rw.session.execute(sa.select(Todo.title)).scalars().all()
+        assert sorted(titles) == ["original", "second"]
+
+
+@pytest.mark.usefixtures("app_ctx")
+def test_read_only_session_clean_commit(app: Flask) -> None:
+    db = SQLAlchemy(app, session_options={"class_": ReadOnlySession})
+
+    class Todo(db.Model):
+        id = sa.Column(sa.Integer, primary_key=True)
+        title = sa.Column(sa.String)
+
+    db.create_all()
+    db.session.execute(db.select(Todo))
+    # Committing with no pending changes is a harmless no-op.
+    db.session.commit()
+
+    db.session.add(Todo(title="x"))
+    with pytest.raises(sa_exc.InvalidRequestError):
+        db.session.flush()

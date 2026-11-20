@@ -53,6 +53,9 @@ Session
 .. autoclass:: Session
     :members:
 
+.. autoclass:: ReadOnlySession
+    :members:
+
 
 Pagination
 ----------

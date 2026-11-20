@@ -121,6 +121,25 @@ session, so it must accept that to continue working. That can be used to get acc
     db = SQLAlchemy(session_options={"class_": CustomSession})
 
 
+Read-Only Session
+-----------------
+
+For requests that must never modify the database, such as internal audit APIs,
+use :class:`.ReadOnlySession`. Queries read existing models as usual, but
+autoflush is disabled, so a query never saves changes even if a business
+function mistakenly modifies a model instance. An explicit write --- ``flush``
+or ``commit`` with pending changes --- raises
+:class:`sqlalchemy.exc.InvalidRequestError` and nothing is sent to the database.
+
+.. code-block:: python
+
+    from flask_sqlalchemy.session import ReadOnlySession
+
+    db = SQLAlchemy(session_options={"class_": ReadOnlySession})
+
+.. versionadded:: 3.1.2
+
+
 Query Class
 -----------
 

@@ -2,6 +2,9 @@ Version 3.1.2
 -------------
 
 - Fix issue with calling ``repr()`` on ``SQLAlchemy`` instance with no default engine. :issue:`1295`
+- Add ``ReadOnlySession``, a session class that never writes to the database.
+  Queries never trigger an automatic flush, and explicit writes with pending
+  changes raise ``sqlalchemy.exc.InvalidRequestError``.
 
 
 Version 3.1.1

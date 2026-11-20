@@ -106,6 +106,49 @@ def _clause_to_engine(
     return None
 
 
+class ReadOnlySession(Session):
+    """A SQLAlchemy session that never writes to the database, for serving
+    read-only requests such as internal audit APIs.
+
+    Queries work exactly as with :class:`.Session`, and existing models are read
+    as usual. Autoflush is disabled, so a query never triggers an automatic
+    flush, even if a business function has mistakenly modified a model
+    instance's attributes. Such modifications only exist in memory and are
+    discarded when the session is removed at the end of the request.
+
+    An explicit write operation --- calling :meth:`~sqlalchemy.orm.Session.flush`
+    or :meth:`~sqlalchemy.orm.Session.commit` while there are pending new, dirty,
+    or deleted objects --- raises :class:`sqlalchemy.exc.InvalidRequestError` and
+    nothing is sent to the database. Committing with no pending changes is a
+    harmless no-op.
+
+    To use it, pass it as the ``class_`` key in the ``session_options`` to
+    :class:`.SQLAlchemy`:
+
+    .. code-block:: python
+
+        from flask_sqlalchemy.session import ReadOnlySession
+
+        db = SQLAlchemy(session_options={"class_": ReadOnlySession})
+
+    .. versionadded:: 3.1.2
+    """
+
+    def __init__(self, db: SQLAlchemy, **kwargs: t.Any) -> None:
+        kwargs["autoflush"] = False
+        super().__init__(db, **kwargs)
+
+    def flush(self, objects: t.Sequence[t.Any] | None = None) -> None:
+        if self.new or self.dirty or self.deleted:
+            raise sa_exc.InvalidRequestError(
+                "This session is read-only and does not write to the database."
+                " Discarding pending changes; use a regular session to modify"
+                " data."
+            )
+
+        super().flush(objects=objects)
+
+
 def _app_ctx_id() -> int:
     """Get the id of the current Flask application context for the session scope."""
     return id(app_ctx._get_current_object())  # type: ignore[attr-defined]
