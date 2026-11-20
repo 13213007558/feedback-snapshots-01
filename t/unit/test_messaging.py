@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+import socket
 import sys
 import threading
 from collections import defaultdict
@@ -1156,6 +1157,98 @@ class test_Consumer:
         consumer.cancel()
         assert 'basic_cancel' in channel
         assert not consumer._active_tags
+
+    def test_cancel_by_queue_then_revive_reconnect_contract(self):
+        # Contract: when a permission is revoked, the internal task cancels
+        # that one subscription.  A later disconnect/reconnect must restore
+        # the queues that are still allowed, and must not re-register the
+        # revoked queue on this consumer.
+        conn = Connection('memory://')
+        exchange = Exchange('contract-revoke', 'direct')
+        allowed = Queue('contract-revoke.allowed',
+                        exchange, 'contract-revoke.allowed')
+        revoked = Queue('contract-revoke.revoked',
+                        exchange, 'contract-revoke.revoked')
+        received = []
+
+        def on_task(body, message):
+            received.append((message.delivery_info['routing_key'], body))
+            message.ack()
+
+        with conn:
+            first_channel = conn.channel()
+            consumer = Consumer(first_channel, [allowed, revoked],
+                                auto_declare=True, callbacks=[on_task])
+            consumer.consume()
+            assert consumer.consuming_from(allowed.name)
+            assert consumer.consuming_from(revoked.name)
+
+            producer = conn.Producer()
+            # baseline: both subscriptions deliver to the business callback.
+            producer.publish({'task': 'allowed-1'}, exchange=exchange,
+                             routing_key=allowed.name, declare=[allowed])
+            producer.publish({'task': 'revoked-1'}, exchange=exchange,
+                             routing_key=revoked.name, declare=[revoked])
+            conn.drain_events(timeout=1)
+            conn.drain_events(timeout=1)
+            assert received == [
+                (allowed.name, {'task': 'allowed-1'}),
+                (revoked.name, {'task': 'revoked-1'}),
+            ]
+            received.clear()
+
+            # one message is already in flight on the queue that is
+            # about to be revoked.
+            producer.publish({'task': 'in-flight'}, exchange=exchange,
+                             routing_key=revoked.name)
+
+            # permission revoked: cancel only that subscription.
+            revoked_tag = consumer._active_tags[revoked.name]
+            consumer.cancel_by_queue(revoked.name)
+            assert revoked.name not in consumer._queues
+            assert not consumer.consuming_from(revoked.name)
+            assert revoked_tag not in first_channel._consumers
+
+            # disconnect/reconnect: the old channel is gone and the
+            # consumer is revived on a fresh channel of the connection.
+            first_channel.close()
+            revived_channel = conn.channel()
+            queue_declare = Mock(wraps=revived_channel.queue_declare)
+            revived_channel.queue_declare = queue_declare
+            consumer.revive(revived_channel)
+
+            # only the still-allowed queue is declared again ...
+            declared_queues = [
+                call.kwargs.get('queue') for call in
+                queue_declare.call_args_list
+            ]
+            assert declared_queues == [allowed.name]
+            # ... and only that queue is re-registered for this consumer.
+            assert set(consumer._active_tags) == {allowed.name}
+            assert set(revived_channel._tag_to_queue.values()) == {
+                allowed.name}
+            assert revoked.name not in revived_channel.connection._callbacks
+
+            # delivery to the allowed queue resumes after reconnect ...
+            producer.publish({'task': 'allowed-2'}, exchange=exchange,
+                             routing_key=allowed.name)
+            producer.publish({'task': 'revoked-2'}, exchange=exchange,
+                             routing_key=revoked.name)
+            conn.drain_events(timeout=1)
+            assert received == [(allowed.name, {'task': 'allowed-2'})]
+            # ... while nothing is ever pushed from the revoked queue.
+            with pytest.raises(socket.timeout):
+                conn.drain_events(timeout=0.1)
+
+            # In-flight rule: cancelling the subscription does not delete
+            # messages already queued on the broker.  They are no longer
+            # pushed to this consumer, but stay queued and can still be
+            # fetched by an authorized party (e.g. via basic_get).
+            queued = revoked(revived_channel).get(no_ack=True)
+            assert queued.payload == {'task': 'in-flight'}
+            queued = revoked(revived_channel).get(no_ack=True)
+            assert queued.payload == {'task': 'revoked-2'}
+            assert revoked(revived_channel).get(no_ack=True) is None
 
     def test___enter____exit__(self):
         channel = self.connection.channel()
