@@ -176,6 +176,7 @@ def pre_load(
     fn: typing.Callable[..., typing.Any] | None = None,
     *,
     pass_collection: bool = False,
+    trusted_only: bool = False,
 ) -> typing.Callable[..., typing.Any]:
     """Register a method to invoke before deserializing an object. The method
     receives the data to be deserialized and returns the processed data.
@@ -184,13 +185,23 @@ def pre_load(
     argument passed to the `Schema <marshmallow.Schema>`'s :func:`~marshmallow.Schema.load` call.
     If ``pass_collection=True``, the raw data (which may be a collection) is passed.
 
+    If ``trusted_only=True``, the method is only invoked during trusted imports
+    via `Schema.load_trusted <marshmallow.Schema.load_trusted>`. Regular
+    deserialization through `Schema.load <marshmallow.Schema.load>`,
+    `Schema.loads <marshmallow.Schema.loads>`, and
+    `Schema.validate <marshmallow.Schema.validate>` skips the method. Use this
+    to declare compatibility transforms for human-verified legacy data that
+    untrusted API input must not receive. Transformed data is still checked by
+    all field-level and schema-level validators.
+
     .. versionchanged:: 3.0.0 ``partial`` and ``many`` are always passed as keyword arguments to
         the decorated method.
     .. versionchanged:: 4.0.0 ``pass_many`` is renamed to ``pass_collection``.
     .. versionchanged:: 4.0.0 ``pass_collection`` is a keyword-only argument.
     .. versionchanged:: 4.0.0 ``unknown`` is passed as a keyword argument to the decorated method.
+    .. versionchanged:: 4.5.0 Added ``trusted_only`` parameter.
     """
-    return set_hook(fn, PRE_LOAD, many=pass_collection)
+    return set_hook(fn, PRE_LOAD, many=pass_collection, trusted_only=trusted_only)
 
 
 def post_load(

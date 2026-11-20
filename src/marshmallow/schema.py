@@ -43,6 +43,20 @@ if typing.TYPE_CHECKING:
     from marshmallow.fields import Field
 
 
+class TrustedImport(typing.NamedTuple):
+    """Result of a trusted import via `Schema.load_trusted`.
+
+    :param data: The deserialized data.
+    :param applied_transforms: Names of the ``trusted_only`` compatibility
+        transforms that ran during the import, in execution order.
+
+    .. versionadded:: 4.5.0
+    """
+
+    data: typing.Any
+    applied_transforms: list[str]
+
+
 def _get_fields(attrs) -> list[tuple[str, Field]]:
     """Get fields from a class
 
@@ -770,6 +784,55 @@ class Schema(metaclass=SchemaMeta):
         data = self.opts.render_module.loads(s, **kwargs)
         return self.load(data, many=many, partial=partial, unknown=unknown)
 
+    def load_trusted(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool | None = None,
+        partial: bool | types.StrSequenceOrSet | None = None,
+        unknown: types.UnknownOption | None = None,
+    ) -> TrustedImport:
+        """Deserialize `data` as a trusted import, additionally running the
+        `pre_load <marshmallow.decorators.pre_load>` methods declared with
+        ``trusted_only=True``.
+
+        Use this entry point only for input from a trusted channel, such as
+        human-verified historical configuration imports. Untrusted API input
+        must go through `load <marshmallow.Schema.load>`, which skips
+        ``trusted_only`` transforms and applies the regular validation only.
+
+        The transformed data is still checked by all field-level and
+        schema-level validators, so a compatibility transform that produces
+        invalid values is rejected with a
+        :exc:`ValidationError <marshmallow.exceptions.ValidationError>`.
+
+        :param data: The data to deserialize.
+        :param many: Whether to deserialize `data` as a collection. If `None`, the
+            value for `self.many` is used.
+        :param partial: Whether to ignore missing fields and not require
+            any fields declared. Propagates down to ``Nested`` fields as well. If
+            its value is an iterable, only missing fields listed in that iterable
+            will be ignored. Use dot delimiters to specify nested fields.
+        :param unknown: Whether to exclude, include, or raise an error for unknown
+            fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+            If `None`, the value for `self.unknown` is used.
+        :return: A `TrustedImport` with the deserialized data and the names of
+            the ``trusted_only`` transforms that were applied.
+
+        .. versionadded:: 4.5.0
+        """
+        applied_transforms: list[str] = []
+        result = self._do_load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            trusted=True,
+            transform_report=applied_transforms,
+        )
+        return TrustedImport(data=result, applied_transforms=applied_transforms)
+
     def _run_validator(
         self,
         validator_func: types.SchemaValidator,
@@ -847,6 +910,8 @@ class Schema(metaclass=SchemaMeta):
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
         postprocess: bool = True,
+        trusted: bool = False,
+        transform_report: list[str] | None = None,
     ):
         """Deserialize `data`, returning the deserialized result.
         This method is private API.
@@ -862,6 +927,9 @@ class Schema(metaclass=SchemaMeta):
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
         :param postprocess: Whether to run post_load methods.
+        :param trusted: Whether to run ``trusted_only`` pre_load transforms.
+        :param transform_report: If a list is passed, the names of applied
+            ``trusted_only`` transforms are appended to it.
         :return: Deserialized data
         """
         error_store = ErrorStore()
@@ -880,6 +948,8 @@ class Schema(metaclass=SchemaMeta):
                     original_data=data,
                     partial=partial,
                     unknown=unknown,
+                    trusted=trusted,
+                    transform_report=transform_report,
                 )
             except ValidationError as err:
                 errors = err.normalized_messages()
@@ -1099,6 +1169,8 @@ class Schema(metaclass=SchemaMeta):
         original_data,
         partial: bool | types.StrSequenceOrSet | None,
         unknown: types.UnknownOption | None,
+        trusted: bool = False,
+        transform_report: list[str] | None = None,
     ):
         # This has to invert the order of the dump processors, so run the pass_collection
         # processors first.
@@ -1110,6 +1182,8 @@ class Schema(metaclass=SchemaMeta):
             original_data=original_data,
             partial=partial,
             unknown=unknown,
+            trusted=trusted,
+            transform_report=transform_report,
         )
         return self._invoke_processors(
             tag,
@@ -1119,6 +1193,8 @@ class Schema(metaclass=SchemaMeta):
             original_data=original_data,
             partial=partial,
             unknown=unknown,
+            trusted=trusted,
+            transform_report=transform_report,
         )
 
     def _invoke_field_validators(self, *, error_store: ErrorStore, data, many: bool):
@@ -1226,10 +1302,15 @@ class Schema(metaclass=SchemaMeta):
         data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
         many: bool,
         original_data=None,
+        trusted: bool = False,
+        transform_report: list[str] | None = None,
         **kwargs,
     ):
         for attr_name, hook_many, processor_kwargs in self._hooks[tag]:
             if hook_many != pass_collection:
+                continue
+            trusted_only = processor_kwargs.get("trusted_only", False)
+            if trusted_only and not trusted:
                 continue
             # This will be a bound method.
             processor = getattr(self, attr_name)
@@ -1247,6 +1328,12 @@ class Schema(metaclass=SchemaMeta):
                 data = processor(data, original_data, many=many, **kwargs)
             else:
                 data = processor(data, many=many, **kwargs)
+            if (
+                trusted_only
+                and transform_report is not None
+                and attr_name not in transform_report
+            ):
+                transform_report.append(attr_name)
         return data
 
 

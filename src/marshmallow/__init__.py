@@ -8,7 +8,7 @@ from marshmallow.decorators import (
     validates_schema,
 )
 from marshmallow.exceptions import ValidationError
-from marshmallow.schema import Schema, SchemaOpts
+from marshmallow.schema import Schema, SchemaOpts, TrustedImport
 
 from . import fields
 
@@ -18,6 +18,7 @@ __all__ = [
     "RAISE",
     "Schema",
     "SchemaOpts",
+    "TrustedImport",
     "ValidationError",
     "fields",
     "missing",

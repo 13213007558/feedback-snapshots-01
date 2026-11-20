@@ -1,6 +1,21 @@
 Changelog
 =========
 
+4.5.0 (unreleased)
+------------------
+
+Features:
+
+- Add ``trusted_only`` parameter to `pre_load <marshmallow.decorators.pre_load>`
+  and the `Schema.load_trusted <marshmallow.Schema.load_trusted>` entry point.
+  Compatibility transforms declared with ``trusted_only=True`` only run during
+  trusted imports (e.g. human-verified historical configuration), while
+  `Schema.load <marshmallow.Schema.load>` and
+  `Schema.validate <marshmallow.Schema.validate>` always skip them.
+  ``load_trusted`` returns a `TrustedImport <marshmallow.TrustedImport>`
+  reporting which transforms were applied, and transformed data is still
+  checked by all field-level and schema-level validators.
+
 4.4.0 (2026-11-03)
 ------------------
 
