@@ -1,0 +1,7 @@
+source 'https://rubygems.org'
+ruby '>= 3.3', '< 4'
+gem 'http', path: '..'
+gem 'minitest', '~> 5.0'
+gem 'minitest-mock'
+gem 'minitest-memory'
+gem 'minitest-strict'
