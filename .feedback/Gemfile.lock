@@ -1,0 +1,48 @@
+PATH
+  remote: ..
+  specs:
+    http (6.0.4)
+      http-cookie (~> 1.0)
+      llhttp (~> 0.6.1)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    domain_name (0.7.20261117)
+    http-cookie (1.1.6)
+      domain_name (~> 0.5)
+    llhttp (0.6.2)
+    minitest (5.27.0)
+    minitest-memory (1.1.1)
+      minitest (>= 5.21, < 7)
+      minitest-strict (>= 1.0)
+    minitest-mock (5.27.0)
+    minitest-strict (1.0.1)
+      minitest (>= 5.21, < 7)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  http!
+  minitest (~> 5.0)
+  minitest-memory
+  minitest-mock
+  minitest-strict
+
+CHECKSUMS
+  domain_name (0.7.20261117) sha256=13f6a6cc6190892a75041b606d90bfb358ecbd869c1099fdd57b83b11d79269e
+  http (6.0.4)
+  http-cookie (1.1.6) sha256=ba4b82be64de61dc281243dac70e3c382c45142f20268ed9276a3670c93feaa9
+  llhttp (0.6.2) sha256=3c3c59aafb1e1594ab2f45293478f697458f5a91eb0f0db4b27f61a064024982
+  minitest (5.27.0) sha256=2d3b17f8a36fe7801c1adcffdbc38233b938eb0b4966e97a6739055a45fa77d5
+  minitest-memory (1.1.1) sha256=45629f007ae4b06e30d75a0328581cb31f75bd5d38cfe3ce9aa9b00ceddb5dfa
+  minitest-mock (5.27.0) sha256=7040ed7185417a966920987eaa6eaf1be4ea1fc5b25bb03ff4703f98564a55b0
+  minitest-strict (1.0.1) sha256=5bf179ed48c21013575cc00506be3fd6ceec8529636ce6897468f9574004ae06
+
+RUBY VERSION
+  ruby 3.3.12
+
+BUNDLED WITH
+  4.0.16
