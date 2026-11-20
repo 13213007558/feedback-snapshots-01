@@ -41,9 +41,17 @@ class test_QoS:
 
     def setup_method(self):
         self.q = virtual.QoS(client().channel(), prefetch_count=10)
+        self._extra_qos = []
 
     def teardown_method(self):
         self.q._on_collect.cancel()
+        for qos in self._extra_qos:
+            qos._on_collect.cancel()
+
+    def _new_qos(self, channel=None, **kwargs):
+        qos = virtual.QoS(channel or client().channel(), **kwargs)
+        self._extra_qos.append(qos)
+        return qos
 
     def test_constructor(self):
         assert self.q.channel
@@ -107,6 +115,131 @@ class test_QoS:
     def test_get(self):
         self.q._delivered['foo'] = 1
         assert self.q.get('foo') == 1
+
+    def test_prefetch_size_limits_consumption(self):
+        qos = self._new_qos(prefetch_size=10)
+        first, second = Mock(delivery_info={}), Mock(delivery_info={})
+        first.body = b'123456'
+        second.body = b'78901'
+
+        qos.append(first, 'tag-1')
+        assert qos.can_consume()
+
+        qos.append(second, 'tag-2')
+        assert not qos.can_consume()
+
+        qos.ack('tag-1')
+        qos._flush()
+        assert qos.can_consume()
+
+    def test_count_and_size_limits_apply_together(self):
+        qos = self._new_qos(prefetch_count=10, prefetch_size=10)
+        for i in range(2):
+            message = Mock(delivery_info={})
+            message.body = b'12345'
+            qos.append(message, i)
+        assert not qos.can_consume()
+
+        qos = self._new_qos(prefetch_count=1, prefetch_size=100)
+        message = Mock(delivery_info={})
+        message.body = b'1'
+        qos.append(message, 'tag')
+        assert not qos.can_consume()
+
+    def test_consumer_budgets_are_independent(self):
+        qos = self._new_qos(prefetch_count=1)
+        qos.register_consumer('a')
+        qos.register_consumer('b')
+
+        first = Mock(delivery_info={}, _consumer_tag='a')
+        first.body = b'msg'
+        qos.append(first, 'tag-a')
+
+        assert not qos.can_consume('a')
+        assert qos.can_consume('b')
+        assert qos.can_consume()
+        assert qos.can_consume_max_estimate('a') == 0
+        assert qos.can_consume_max_estimate('b') == 1
+
+    def test_consumer_budget_size_is_independent(self):
+        qos = self._new_qos(prefetch_size=5)
+        qos.register_consumer('a')
+        qos.register_consumer('b')
+
+        message = Mock(delivery_info={}, _consumer_tag='a')
+        message.body = b'12345'
+        qos.append(message, 'tag-a')
+
+        assert not qos.can_consume('a')
+        assert qos.can_consume('b')
+
+    def test_reject_and_requeue_release_budget(self):
+        class RequeuingChannel(virtual.Channel):
+            restored = []
+
+            def _restore_at_beginning(self, message):
+                self.restored.append(message)
+
+        channel = RequeuingChannel(client().connection)
+        qos = channel.qos
+        self._extra_qos.append(qos)
+        qos.prefetch_count = 1
+        qos.register_consumer('a')
+
+        message = Mock(delivery_info={}, _consumer_tag='a')
+        message.body = b'msg'
+        qos.append(message, 'tag-a')
+        assert not qos.can_consume('a')
+
+        qos.reject('tag-a', requeue=True)
+        qos._flush()
+
+        assert channel.restored == [message]
+        assert qos.can_consume('a')
+        assert not qos._delivered
+
+    def test_cancelled_consumer_does_not_hold_budget_for_next(self):
+        qos = self._new_qos(prefetch_count=1)
+        qos.register_consumer('old')
+
+        message = Mock(delivery_info={}, _consumer_tag='old')
+        message.body = b'msg'
+        qos.append(message, 'tag-old')
+        assert not qos.can_consume('old')
+
+        qos.cancel_consumer('old')
+        qos.register_consumer('new')
+
+        # The old delivery is still restorable, but the new consumer starts
+        # with its full budget.
+        assert 'tag-old' in qos._delivered
+        assert qos.can_consume('new')
+        assert qos.can_consume()
+
+        qos.ack('tag-old')
+        qos._flush()
+        assert not qos._delivered
+
+    def test_directly_inserted_deliveries_still_count(self):
+        qos = self._new_qos(prefetch_count=1)
+        qos.register_consumer('a')
+        qos._delivered['legacy-tag'] = Mock()
+
+        assert not qos.can_consume()
+
+    def test_restore_unacked_releases_budget(self):
+        qos = self._new_qos(prefetch_count=1)
+        qos.channel = Mock()
+        qos.register_consumer('a')
+        message = Mock(delivery_info={}, _consumer_tag='a')
+        message.body = b'msg'
+        qos.append(message, 'tag-a')
+        assert not qos.can_consume('a')
+
+        qos.restore_unacked()
+
+        qos.channel._restore.assert_called_once_with(message)
+        assert qos.can_consume('a')
 
     @pytest.mark.parametrize('compression', [None, 'gzip'])
     def test_restore_unacked_once_dumps_message_body(self, tmp_path, monkeypatch, compression):

@@ -497,6 +497,7 @@ class Consumer:
         on_message (Callable): See :attr:`on_message`
         on_decode_error (Callable): see :attr:`on_decode_error`.
         prefetch_count (int): see :attr:`prefetch_count`.
+        prefetch_size (int): see :attr:`prefetch_size`.
     """
 
     ContentDisallowed = ContentDisallowed
@@ -567,6 +568,12 @@ class Consumer:
     #: Can also be changed using :meth:`qos`.
     prefetch_count = None
 
+    #: Initial prefetch size, in bytes.
+    #:
+    #: If set, the consumer will set the prefetch_size QoS value at startup.
+    #: Can also be changed using :meth:`qos`.
+    prefetch_size = None
+
     #: Mapping of queues we consume from.
     _queues = None
 
@@ -574,7 +581,8 @@ class Consumer:
 
     def __init__(self, channel, queues=None, no_ack=None, auto_declare=None,
                  callbacks=None, on_decode_error=None, on_message=None,
-                 accept=None, prefetch_count=None, tag_prefix=None):
+                 accept=None, prefetch_count=None, tag_prefix=None,
+                 prefetch_size=None):
         self.channel = channel
         self.queues = maybe_list(queues or [])
         self.no_ack = self.no_ack if no_ack is None else no_ack
@@ -590,6 +598,7 @@ class Consumer:
             self.on_decode_error = on_decode_error
         self.accept = prepare_accept_content(accept)
         self.prefetch_count = prefetch_count
+        self.prefetch_size = prefetch_size
 
         if self.channel:
             self.revive(self.channel)
@@ -618,8 +627,9 @@ class Consumer:
         if self.auto_declare:
             self.declare()
 
-        if self.prefetch_count is not None:
-            self.qos(prefetch_count=self.prefetch_count)
+        if self.prefetch_count is not None or self.prefetch_size is not None:
+            self.qos(prefetch_size=self.prefetch_size or 0,
+                     prefetch_count=self.prefetch_count or 0)
 
         # re-register the AMQP consumers, but only for queues that were
         # actually being consumed from before (not merely registered).
@@ -811,6 +821,9 @@ class Consumer:
 
             apply_global (bool): Apply new settings globally on all channels.
         """
+        self.prefetch_size = prefetch_size or 0
+        self.prefetch_count = prefetch_count or 0
+        self._apply_consumer_budget()
         return self.channel.basic_qos(prefetch_size,
                                       prefetch_count,
                                       apply_global)
@@ -857,9 +870,30 @@ class Consumer:
             no_ack = queue.no_ack if no_ack is None else no_ack
             tag = self._add_tag(queue, consumer_tag)
             self._active_queue_no_ack[queue.name] = no_ack
+            self._apply_consumer_budget(tag)
             queue.consume(tag, self._receive_callback,
                           no_ack=no_ack, nowait=nowait)
         return tag
+
+    def _apply_consumer_budget(self, consumer_tag=None):
+        """Give this consumer its own quota on the channel.
+
+        Virtual transports track budgets per consumer tag, so consumers
+        sharing a channel do not use each other's prefetch allowance.  This
+        is a no-op for channels that only support a channel-wide QoS.
+        """
+        if self.prefetch_count is None and self.prefetch_size is None:
+            return
+        qos = getattr(self.channel, 'qos', None)
+        set_budget = getattr(qos, 'set_consumer_budget', None)
+        if not callable(set_budget):
+            return
+        tags = ([consumer_tag] if consumer_tag is not None
+                else self._active_tags.values())
+        for tag in tags:
+            set_budget(tag,
+                       prefetch_size=self.prefetch_size or 0,
+                       prefetch_count=self.prefetch_count or 0)
 
     def _add_tag(self, queue, consumer_tag=None):
         tag = consumer_tag or '{}{}'.format(

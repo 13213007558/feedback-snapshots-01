@@ -182,3 +182,189 @@ class test_MemoryTransport:
 
         assert self.q3(self.c).get().payload == {'hello': 'on return'}
         assert self.q3(self.c).get() is None
+
+
+class test_MemoryQoSBudgets:
+    """Repeatedly exhaust and release quotas on a small memory queue."""
+
+    def setup_method(self):
+        self.connection = Connection(transport='memory')
+        self.queue = Queue(f'qos-budget-{id(self)}')
+        self.channel = self.connection.channel()
+        self.queue(self.channel).declare()
+        self.producer = Producer(self.channel)
+        self.received = []
+
+    def teardown_method(self):
+        for message in self.received:
+            if not message.acknowledged:
+                message.ack()
+
+    def publish(self, payload, count=1):
+        for i in range(count):
+            self.producer.publish(
+                {'n': i, 'payload': payload},
+                routing_key=self.queue.name,
+                serializer='json',
+            )
+
+    def drain(self, consumer):
+        try:
+            self.connection.drain_events(timeout=0.05)
+        except socket.timeout:
+            pass
+
+    def test_count_budget_drains_and_is_released_by_ack(self):
+        for _ in range(3):
+            self.received.clear()
+            self.publish('x', count=3)
+            consumer = Consumer(
+                self.channel, [self.queue], prefetch_count=1,
+                callbacks=[
+                    lambda body, message: self.received.append(message),
+                ],
+            )
+            consumer.consume()
+            try:
+                self.drain(consumer)
+                assert len(self.received) == 1
+                assert not self.channel.qos.can_consume()
+                self.drain(consumer)
+                assert len(self.received) == 1
+
+                self.received[0].ack()
+                self.drain(consumer)
+                assert len(self.received) == 2
+            finally:
+                consumer.cancel()
+            for message in self.received:
+                if not message.acknowledged:
+                    message.ack()
+            self.queue(self.channel).purge()
+
+    def test_size_budget_drains_and_is_released_by_reject(self):
+        for _ in range(2):
+            message = self.channel.prepare_message(b'1234567890')
+            self.channel.basic_publish(
+                message, None, self.queue.name,
+                content_type='application/octet-stream',
+            )
+        consumer = Consumer(
+            self.channel, [self.queue], prefetch_size=10,
+            callbacks=[lambda body, message: self.received.append(message)],
+        )
+        consumer.consume()
+        try:
+            self.drain(consumer)
+            assert len(self.received) == 1
+            assert not self.channel.qos.can_consume()
+            self.drain(consumer)
+            assert len(self.received) == 1
+
+            self.received[0].reject(requeue=True)
+            self.drain(consumer)
+            assert len(self.received) == 2
+        finally:
+            consumer.cancel()
+
+    def test_consumers_do_not_share_quota(self):
+        # Two queues on one channel: each consumer gets its own budget.
+        first = Queue(f'{self.queue.name}-a')
+        second = Queue(f'{self.queue.name}-b')
+        first(self.channel).declare()
+        second(self.channel).declare()
+        self.producer.publish(
+            {'n': 0}, routing_key=first.name, serializer='json')
+        self.producer.publish(
+            {'n': 0}, routing_key=second.name, serializer='json')
+
+        received_a, received_b = [], []
+        consumer_a = Consumer(
+            self.channel, [first], prefetch_count=1,
+            callbacks=[lambda body, message: received_a.append(message)],
+            tag_prefix='a-',
+        )
+        consumer_b = Consumer(
+            self.channel, [second], prefetch_count=1,
+            callbacks=[lambda body, message: received_b.append(message)],
+            tag_prefix='b-',
+        )
+        consumer_a.consume()
+        consumer_b.consume()
+        try:
+            deadline = 2.0
+            while len(received_a) + len(received_b) < 2 and deadline > 0:
+                self.drain(consumer_a)
+                self.drain(consumer_b)
+                deadline -= 0.05
+            assert len(received_a) == len(received_b) == 1
+        finally:
+            consumer_a.cancel()
+            consumer_b.cancel()
+            for message in received_a + received_b:
+                if not message.acknowledged:
+                    message.ack()
+
+    def test_cancelled_consumer_does_not_hold_quota_for_next(self):
+        self.publish('held', count=1)
+        self.publish('next', count=1)
+
+        first = Consumer(
+            self.channel, [self.queue], prefetch_count=1,
+            callbacks=[lambda body, message: self.received.append(message)],
+            tag_prefix='old-',
+        )
+        first.consume()
+        self.drain(first)
+        assert len(self.received) == 1
+        held = self.received[0]
+        assert not self.channel.qos.can_consume()
+        first.cancel()
+
+        second_batch = []
+        second = Consumer(
+            self.channel, [self.queue], prefetch_count=1,
+            callbacks=[lambda body, message: second_batch.append(message)],
+            tag_prefix='new-',
+        )
+        second.consume()
+        try:
+            self.drain(second)
+            assert len(second_batch) == 1
+            assert second_batch[0] is not held
+            # The old delivery is still tracked and restorable.
+            assert held.delivery_tag in self.channel.qos._delivered
+        finally:
+            second.cancel()
+            if not second_batch[0].acknowledged:
+                second_batch[0].ack()
+            if not held.acknowledged:
+                held.ack()
+        self.received.clear()
+
+    def test_consumer_prefetch_size_budget(self):
+        for _ in range(2):
+            message = self.channel.prepare_message(b'0123456789')
+            self.channel.basic_publish(
+                message, None, self.queue.name,
+                content_type='application/octet-stream',
+            )
+
+        consumer = Consumer(
+            self.channel, [self.queue], prefetch_size=10,
+            callbacks=[lambda body, message: self.received.append(message)],
+        )
+        consumer.consume()
+        try:
+            self.drain(consumer)
+            assert len(self.received) == 1
+            assert not self.channel.qos.can_consume()
+            assert self.channel.qos.can_consume_max_estimate() == 0
+            self.drain(consumer)
+            assert len(self.received) == 1
+            self.received[0].ack()
+            self.drain(consumer)
+            assert len(self.received) == 2
+        finally:
+            consumer.cancel()
+        self.queue(self.channel).purge()

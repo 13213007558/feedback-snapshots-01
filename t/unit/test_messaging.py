@@ -1426,6 +1426,29 @@ class test_Consumer:
         Consumer(channel, [b1], prefetch_count=14)
         channel.basic_qos.assert_called_with(0, 14, False)
 
+    def test_revive__with_prefetch_size(self):
+        channel = Mock(name='channel')
+        b1 = Queue('qname1', self.exchange, 'rkey')
+        Consumer(channel, [b1], prefetch_size=1024)
+        channel.basic_qos.assert_called_with(1024, 0, False)
+
+    def test_qos_sets_consumer_budget(self):
+        channel = Mock(name='channel')
+        b1 = Queue('qname1', self.exchange, 'rkey')
+        consumer = Consumer(channel, [b1], prefetch_count=5)
+        consumer.consume()
+        tag = consumer._active_tags[b1.name]
+        channel.qos.set_consumer_budget.assert_called_with(
+            tag, prefetch_size=0, prefetch_count=5,
+        )
+
+    def test_consumer_without_prefetch_does_not_set_budget(self):
+        channel = Mock(name='channel')
+        b1 = Queue('qname1', self.exchange, 'rkey')
+        consumer = Consumer(channel, [b1])
+        consumer.consume()
+        channel.qos.set_consumer_budget.assert_not_called()
+
     def test__repr__(self):
         channel = self.connection.channel()
         b1 = Queue('qname1', self.exchange, 'rkey')

@@ -152,19 +152,97 @@ class BrokerState:
         )
 
 
+def _message_size(message):
+    """Return the size of a message body in bytes."""
+    body = getattr(message, 'body', None)
+    if body is None:
+        raw = getattr(message, '_raw', None)
+        if isinstance(raw, dict):
+            body = raw.get('body')
+    if body is None:
+        return 0
+    if isinstance(body, str):
+        return len(body.encode('utf-8'))
+    if isinstance(body, (bytes, bytearray, memoryview)):
+        return len(body)
+    try:
+        return len(body)
+    except TypeError:
+        return 0
+
+
+class _ConsumerState:
+    """Outstanding deliveries and optional budget for a consumer tag."""
+
+    __slots__ = ('consumer_tag', 'tags', 'count', 'size', 'limits')
+
+    def __init__(self, consumer_tag):
+        self.consumer_tag = consumer_tag
+        #: Delivery tags that are still unacknowledged.
+        self.tags = OrderedDict()
+        #: Pending count and total body size.  Only the consuming thread
+        #: changes these; dirty (acked/rejected) tags are subtracted on read.
+        self.count = 0
+        self.size = 0
+        #: Explicit (count, size) budget, or None to use channel defaults.
+        self.limits = None
+
+    def get_limits(self, qos):
+        if self.limits is not None:
+            return self.limits
+        return qos.prefetch_count, qos.prefetch_size
+
+    def usage(self, qos):
+        count = self.count
+        size = self.size
+        delivered_state = qos._delivered_state
+        sizes = qos._sizes
+        for delivery_tag in qos._dirty:
+            if delivered_state.get(delivery_tag) is self:
+                count -= 1
+                size -= sizes.get(delivery_tag, 0)
+        return max(count, 0), max(size, 0)
+
+    def can_consume(self, qos):
+        prefetch_count, prefetch_size = self.get_limits(qos)
+        count, size = self.usage(qos)
+        if prefetch_count and count >= prefetch_count:
+            return False
+        if prefetch_size and size >= prefetch_size:
+            return False
+        return True
+
+    def remaining(self, qos):
+        prefetch_count, prefetch_size = self.get_limits(qos)
+        count, size = self.usage(qos)
+        if prefetch_size and size >= prefetch_size:
+            return 0
+        if prefetch_count:
+            return max(prefetch_count - count, 0)
+
+
 class QoS:
     """Quality of Service guarantees.
 
-    Only supports `prefetch_count` at this point.
+    Supports both a message count (``prefetch_count``) and a byte size
+    (``prefetch_size``) budget for messages that have been delivered but not
+    yet acknowledged.
+
+    Budgets are tracked separately for every consumer tag, so consumers
+    sharing a channel do not consume each other's quota.
 
     Arguments:
     ---------
         channel (ChannelT): Connection channel.
         prefetch_count (int): Initial prefetch count (defaults to 0).
+        prefetch_size (int): Initial prefetch size in bytes (defaults to 0).
     """
 
     #: current prefetch count value
     prefetch_count = 0
+
+    #: current prefetch size value, in bytes.
+    prefetch_size = 0
 
     #: :class:`~collections.OrderedDict` of active messages.
     #: *NOTE*: Can only be modified by the consuming thread.
@@ -179,9 +257,10 @@ class QoS:
     #: If disabled, unacked messages won't be restored at shutdown.
     restore_at_shutdown = True
 
-    def __init__(self, channel, prefetch_count=0):
+    def __init__(self, channel, prefetch_count=0, prefetch_size=0):
         self.channel = channel
         self.prefetch_count = prefetch_count or 0
+        self.prefetch_size = prefetch_size or 0
 
         # Standard Python dictionaries do not support setting attributes
         # on the object, hence the use of OrderedDict
@@ -194,16 +273,113 @@ class QoS:
             self, self.restore_unacked_once, exitpriority=1,
         )
 
-    def can_consume(self):
+        #: Budget state per consumer tag.
+        self._consumers = {}
+        #: Budgets of cancelled consumers that may still receive a delivery
+        #: racing with the cancellation.  They never affect new consumers.
+        self._retired = {}
+        #: Budget for messages fetched without a consumer (``basic_get``).
+        self._direct = _ConsumerState(None)
+        #: Delivery tag -> consumer state that holds its quota.
+        self._delivered_state = {}
+        #: Delivery tag -> body size, for all pending deliveries.
+        self._sizes = {}
+        #: Total size of all pending deliveries.
+        self._pending_size = 0
+
+    def register_consumer(self, consumer_tag):
+        """Start a fresh budget for a consumer tag.
+
+        A new state is created even if the tag was used before, so messages
+        still held by an old consumer cannot limit a restarted consumer.
+        """
+        state = self._consumers.get(consumer_tag)
+        if state is None:
+            state = _ConsumerState(consumer_tag)
+            self._consumers[consumer_tag] = state
+        return state
+
+    def cancel_consumer(self, consumer_tag):
+        """Stop tracking the active budget for a consumer tag.
+
+        Deliveries that are still unacknowledged keep their old state until
+        they are acked or restored, but no longer count against any consumer
+        that starts afterwards.
+        """
+        state = self._consumers.pop(consumer_tag, None)
+        if state is not None and state.tags:
+            self._retired[consumer_tag] = state
+        return state
+
+    def _state_for(self, consumer_tag):
+        state = self._consumers.get(consumer_tag)
+        if state is None:
+            state = self._retired.get(consumer_tag)
+        return state
+
+    def set_consumer_budget(self, consumer_tag, prefetch_size=0,
+                            prefetch_count=0):
+        """Set an explicit budget for one consumer tag."""
+        state = self._consumers.get(consumer_tag)
+        if state is None:
+            state = self.register_consumer(consumer_tag)
+        state.limits = (prefetch_count or 0, prefetch_size or 0)
+        return state
+
+    def _usage(self):
+        # Count every delivery, including messages fetched with ``basic_get``
+        # or inserted directly into ``_delivered`` by older code.
+        dirty_count = 0
+        dirty_size = 0
+        delivered_state = self._delivered_state
+        sizes = self._sizes
+        for delivery_tag in self._dirty:
+            if delivery_tag in delivered_state:
+                dirty_count += 1
+                dirty_size += sizes.get(delivery_tag, 0)
+        return (
+            len(self._delivered) - dirty_count,
+            max(self._pending_size - dirty_size, 0),
+        )
+
+    def _channel_can_consume(self):
+        pcount = self.prefetch_count
+        psize = self.prefetch_size
+        if not pcount and not psize:
+            return True
+        count, size = self._usage()
+        if pcount and count >= pcount:
+            return False
+        if psize and size >= psize:
+            return False
+        return True
+
+    def can_consume(self, consumer_tag=None):
         """Return true if the channel can be consumed from.
 
-        Used to ensure the client adhers to currently active
-        prefetch limits.
+        If ``consumer_tag`` is given, only that consumer's budget is checked.
+        Otherwise the channel can be consumed from as long as any of its
+        consumers has quota left.  Deliveries that are not attributed to a
+        consumer (``basic_get`` and legacy direct appends) apply to the
+        channel as a whole.
         """
-        pcount = self.prefetch_count
-        return not pcount or len(self._delivered) - len(self._dirty) < pcount
+        if consumer_tag is not None:
+            state = self._state_for(consumer_tag)
+            if state is not None:
+                return state.can_consume(self)
+        if self._direct.usage(self)[0] or not self._consumers:
+            return self._channel_can_consume()
+        tracked = self._direct.count + sum(
+            state.count for state in self._consumers.values()) + sum(
+            state.count for state in self._retired.values())
+        if len(self._delivered) > tracked:
+            # Deliveries added without append() have no owner; apply the
+            # channel-wide limits so they are still counted.
+            return self._channel_can_consume()
+        return any(state.can_consume(self)
+                   for state in self._consumers.values())
 
-    def can_consume_max_estimate(self):
+    def can_consume_max_estimate(self, consumer_tag=None):
         """Return the maximum number of messages allowed to be returned.
 
         Returns an estimated number of messages that a consumer may be allowed
@@ -215,18 +391,60 @@ class QoS:
         -------
             int: greater than zero.
         """
+        if consumer_tag is not None:
+            state = self._state_for(consumer_tag)
+            if state is not None:
+                return state.remaining(self)
+        count, size = self._usage()
+        if self.prefetch_size and size >= self.prefetch_size:
+            return 0
         pcount = self.prefetch_count
         if pcount:
-            return max(pcount - (len(self._delivered) - len(self._dirty)), 0)
+            return max(pcount - count, 0)
+        if self.prefetch_size:
+            return None
 
     def append(self, message, delivery_tag):
         """Append message to transactional state."""
         if self._dirty:
             self._flush()
+        consumer_tag = getattr(message, '__dict__', {}).get('_consumer_tag')
+        if consumer_tag is None:
+            state = self._direct
+        else:
+            # A delivery racing with a cancel goes to the retired budget, so
+            # it cannot block a consumer that replaces the cancelled one.
+            state = self._state_for(consumer_tag)
+            if state is None:
+                state = self.register_consumer(consumer_tag)
+        size = _message_size(message)
+        state.tags[delivery_tag] = size
+        state.count += 1
+        state.size += size
+        self._delivered_state[delivery_tag] = state
+        self._sizes[delivery_tag] = size
+        self._pending_size += size
         self._quick_append(delivery_tag, message)
 
     def get(self, delivery_tag):
         return self._delivered[delivery_tag]
+
+    def _release(self, delivery_tag):
+        """Return a delivery's quota, at most once.
+
+        The delivery record is the guard: it is removed on the first release,
+        so concurrent or repeated acks/rejects cannot free the quota twice.
+        """
+        state = self._delivered_state.pop(delivery_tag, None)
+        size = self._sizes.pop(delivery_tag, 0)
+        self._pending_size = max(self._pending_size - size, 0)
+        if state is not None:
+            state.tags.pop(delivery_tag, None)
+            state.count = max(state.count - 1, 0)
+            state.size = max(state.size - size, 0)
+            if not state.tags and state.consumer_tag is not None:
+                if self._retired.get(state.consumer_tag) is state:
+                    del self._retired[state.consumer_tag]
 
     def _flush(self):
         """Flush dirty (acked/rejected) tags from."""
@@ -237,10 +455,13 @@ class QoS:
                 dirty_tag = dirty.pop()
             except KeyError:
                 break
+            self._release(dirty_tag)
             delivered.pop(dirty_tag, None)
 
     def ack(self, delivery_tag):
         """Acknowledge message and remove from transactional state."""
+        # Only the consuming thread mutates the budget records, so acks from
+        # other threads just mark the tag; ``_flush`` releases the quota.
         self._quick_ack(delivery_tag)
 
     def reject(self, delivery_tag, requeue=False):
@@ -271,7 +492,12 @@ class QoS:
                     # This may cause the restore attempt to fail (e.g. in SQS).
                     # If restore fails, we only care about errors for messages that have not been 'acked'.
                     errors.append((exc, message))
+            finally:
+                self._release(key)
         delivered.clear()
+        self._delivered_state.clear()
+        self._sizes.clear()
+        self._pending_size = 0
         return errors
 
     def restore_unacked_once(self, stderr=None):
@@ -424,6 +650,12 @@ class AbstractChannel:
         return cycle.get(callback)
 
     def _get_and_deliver(self, queue, callback):
+        # A queue is served by one consumer here, so skip it instead of
+        # fetching a message that the consumer has no budget for.
+        queue_to_consumer = getattr(self, '_queue_to_consumer', None)
+        consumer_tag = (queue_to_consumer or {}).get(queue)
+        if consumer_tag is not None and not self.qos.can_consume(consumer_tag):
+            raise Empty()
         message = self._get(queue)
         callback(message, queue)
 
@@ -481,6 +713,7 @@ class Channel(AbstractChannel, base.StdChannel):
         self._cycle = None
         self._tag_to_queue = {}
         self._active_queues = []
+        self._queue_to_consumer = {}
         self._qos = None
         self.closed = False
 
@@ -640,11 +873,18 @@ class Channel(AbstractChannel, base.StdChannel):
     def basic_consume(self, queue, no_ack, callback, consumer_tag, **kwargs):
         """Consume from `queue`."""
         self._tag_to_queue[consumer_tag] = queue
+        self._queue_to_consumer[queue] = consumer_tag
         self._active_queues.append(queue)
 
-        def _callback(raw_message):
+        # Give every consumer its own quota, so a restarted or additional
+        # consumer on the same channel is not blocked by messages that an
+        # older consumer still holds.
+        self.qos.register_consumer(consumer_tag)
+
+        def _callback(raw_message, _consumer_tag=consumer_tag):
             message = self.Message(raw_message, channel=self)
             if not no_ack:
+                message._consumer_tag = _consumer_tag
                 self.qos.append(message, message.delivery_tag)
             return callback(message)
 
@@ -658,10 +898,15 @@ class Channel(AbstractChannel, base.StdChannel):
         if consumer_tag in self._consumers:
             self._consumers.remove(consumer_tag)
             queue = self._tag_to_queue.pop(consumer_tag, None)
+            if self._queue_to_consumer.get(queue) == consumer_tag:
+                self._queue_to_consumer.pop(queue, None)
             try:
                 self._active_queues.remove(queue)
             except ValueError:
                 pass
+            # Unacknowledged deliveries stay restorable, but their quota is
+            # released so the next consumer on this channel starts fresh.
+            self.qos.cancel_consumer(consumer_tag)
             self._reset_cycle()
             self.connection._callbacks.pop(queue, None)
 
@@ -693,11 +938,16 @@ class Channel(AbstractChannel, base.StdChannel):
                   apply_global=False):
         """Change QoS settings for this channel.
 
-        Note:
-        ----
-            Only `prefetch_count` is supported.
+        Both a maximum number of unacknowledged messages (``prefetch_count``)
+        and a maximum total body size in bytes (``prefetch_size``) are
+        supported.  A value of zero disables that limit.
+
+        If consumers sharing this channel declared their own budget (see
+        :meth:`Consumer.qos` with a ``consumer_tag``), those budgets take
+        precedence for those consumers.
         """
-        self.qos.prefetch_count = prefetch_count
+        self.qos.prefetch_size = prefetch_size or 0
+        self.qos.prefetch_count = prefetch_count or 0
 
     def get_exchanges(self):
         return list(self.state.exchanges)

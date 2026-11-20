@@ -555,8 +555,12 @@ class QoS(virtual.QoS):
     def restore_unacked(self, client=None):
         with self.channel.conn_or_acquire(client) as client:
             for tag in self._delivered:
-                self.restore_by_tag(tag, client=client)
+                try:
+                    self.restore_by_tag(tag, client=client)
+                finally:
+                    self._release(tag)
         self._delivered.clear()
+        self._sizes.clear()
 
     def ack(self, delivery_tag):
         self._remove_from_indices(delivery_tag).execute()

@@ -102,6 +102,58 @@ The full example will look as follows:
             with consumer:
                 conn.drain_events(timeout=1)
 
+.. _consumer-qos:
+
+Prefetch limits
+===============
+
+A consumer can cap the messages it holds before acknowledging them.  Two
+limits are available:
+
+``prefetch_count``
+    The maximum number of unacknowledged messages.
+
+``prefetch_size``
+    The maximum total size of the unacknowledged message bodies, in bytes.
+    The size is measured from the received message body as delivered by the
+    transport.
+
+Either limit can be used on its own or combined with the other, and a
+value of zero disables that limit:
+
+.. code-block:: python
+
+    from kombu import Consumer, Queue
+
+    consumer = Consumer(
+        channel, [Queue('jobs')],
+        prefetch_count=100,
+        prefetch_size=10 * 1024 * 1024,
+        callbacks=[on_message],
+    )
+
+The limits can also be changed at any time with :meth:`Consumer.qos
+<kombu.messaging.Consumer.qos>`:
+
+.. code-block:: python
+
+    consumer.qos(prefetch_count=10)
+    consumer.qos(prefetch_size=1024 * 1024)
+
+On virtual transports (``memory://`` and transports built on
+:class:`~kombu.transport.virtual.Channel`) the limits are tracked per
+consumer tag: consumers sharing a channel each get their own budget, so one
+busy consumer cannot exhaust another consumer's quota.  A message counts
+against its consumer's budget until it is acknowledged, rejected, or
+requeued, at which point the quota is returned.  Cancelling a consumer frees
+its budget for the next consumer on that channel, while messages it still
+holds remain restorable until they are acked or the channel closes.
+
+.. note::
+
+    Other transports only support a channel-wide prefetch count; for those,
+    the limits set with ``Consumer.qos`` apply to the whole channel.
+
 Consumer mixin classes
 ======================
 
