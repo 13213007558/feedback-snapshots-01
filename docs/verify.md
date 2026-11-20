@@ -93,3 +93,60 @@ $ sigstore verify identity sha256:ce8ab2822671752e201ea1e19e8c85e73d497e1c315bfd
     --cert-oidc-issuer 'https://github.com/login/oauth'
     --bundle 'foo.txt.sigstore.json'
 ```
+
+## Batch verification from a backend service
+
+Services that receive many verification requests in one process can use
+`sigstore.verify.service.VerificationService` instead of calling `Verifier`
+directly. It verifies requests concurrently, enforces per-item and per-batch
+read budgets, honours per-request and per-batch cancellation, and returns a
+status for every request:
+
+```python
+import threading
+from pathlib import Path
+
+from sigstore.models import Bundle
+from sigstore.verify.policy import Identity
+from sigstore.verify.service import (
+    ReadBudget,
+    VerificationRequest,
+    VerificationService,
+)
+
+service = VerificationService.production(
+    policy=Identity(
+        identity="release@example.com",
+        issuer="https://accounts.google.com",
+    ),
+)
+
+batch_cancel = threading.Event()
+requests = [
+    VerificationRequest(
+        name="foo.whl",
+        artifact=Path("foo.whl"),
+        bundle=Bundle.from_json(Path("foo.whl.sigstore.json").read_bytes()),
+    ),
+    VerificationRequest(
+        name="bar.whl",
+        artifact=Path("bar.whl"),
+        bundle=Bundle.from_json(Path("bar.whl.sigstore.json").read_bytes()),
+    ),
+]
+
+result = service.verify_batch(
+    requests,
+    budget=ReadBudget(per_item=64 * 1024 * 1024, batch=256 * 1024 * 1024),
+    cancel=batch_cancel,
+)
+
+print(result.summary())
+# {'verified': ('foo.whl',), 'budget_exceeded': ('bar.whl',), ...}
+```
+
+Each `ItemResult` reports a `status` (`verified`, `rejected`,
+`budget_exceeded`, `cancelled`, or `error`) plus the bytes read and, when the
+artifact was read through EOF, its digest. A digest is never produced from a
+truncated input, and completing one request never discards a sibling's
+already-completed result.
