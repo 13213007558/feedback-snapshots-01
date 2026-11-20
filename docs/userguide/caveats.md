@@ -82,6 +82,8 @@ We would still **strongly** advise to remove orphaned object permissions explici
 
 !!! info
     - `guardian.utils.clean_orphan_obj_perms`
+    - `guardian.utils.preview_orphan_obj_perms`
+    - `guardian.utils.delete_orphan_obj_perms`
     - `clean_orphan_obj_perms`
 
 ## Using multiple databases

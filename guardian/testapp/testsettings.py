@@ -45,7 +45,13 @@ SECRET_KEY = "".join(random.choice(string.ascii_letters) for x in range(40))
 
 # Database specific
 
-DATABASES = {"default": env.db(default="sqlite:///")}
+DATABASES = {
+    "default": env.db(default="sqlite:///"),
+    # Second in-memory SQLite alias used by multi-database tests. Only test
+    # cases declaring `databases = {"default", "secondary"}` trigger its
+    # creation, so the rest of the suite is unaffected.
+    "secondary": env.db(default="sqlite:///"),
+}
 
 
 TEMPLATES = [
