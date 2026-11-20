@@ -1,5 +1,9 @@
+import os
+import posixpath
+
 from .. import filesystem
 from ..asyn import AsyncFileSystem
+from ..spec import AbstractFileSystem
 from ..utils import stringify_path
 from .chained import ChainedFileSystem
 from .local import LocalFileSystem
@@ -16,6 +20,23 @@ def _escapes_root(path):
         elif part and part != ".":
             depth += 1
     return False
+
+
+def _uses_local_filesystem(fs):
+    """Whether *fs* presents paths from a local filesystem unchanged.
+
+    Only unwrapping layers that forward the same path space (such as
+    ``AsyncFileSystemWrapper``) is safe: a nested ``DirFileSystem`` or cache
+    reinterprets paths, so the OS-level containment check would compare the
+    wrong directory.
+    """
+    while True:
+        if isinstance(fs, LocalFileSystem):
+            return True
+        inner = getattr(fs, "sync_fs", None)
+        if not isinstance(inner, AbstractFileSystem):
+            return False
+        fs = inner
 
 
 class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
@@ -35,6 +56,7 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         fo=None,
         target_protocol=None,
         target_options=None,
+        strict=False,
         **storage_options,
     ):
         """
@@ -48,11 +70,18 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             if fs is none, construct it from these
         fo: str
             Alternate for path; do not provide both
+        strict: bool
+            If True, treat ``path`` as a hard boundary. Paths are normalized
+            before being joined to the root, ``..`` segments that would resolve
+            above the root are rejected, and names returned by the wrapped
+            filesystem are verified to lie below the root. The check applies to
+            single and batch sync/async operations alike.
         """
         super().__init__(**storage_options)
         if fs is None:
             fs = filesystem(protocol=target_protocol, **(target_options or {}))
-        path = path or fo
+        if path is None:
+            path = "" if fo is None else fo
 
         if self.asynchronous and not fs.async_impl:
             raise ValueError("can't use asynchronous with non-async fs")
@@ -63,22 +92,26 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         self.path = fs._strip_protocol(path)
         self.fs = fs
         self.async_impl = fs.async_impl
+        self.strict = strict
+        self._local = _uses_local_filesystem(fs)
 
     def _join(self, path):
         path = stringify_path(path)
         if isinstance(path, str):
-            if not self.path:
-                return path
-            if not path:
-                return self.path
             # a trailing slash requests "copy the contents" in bulk
             # operations (docs/source/copying.rst), so preserve it across the
             # join even though _strip_protocol removes it
             suffix = "/" if path.endswith("/") else ""
+            if self.strict:
+                return self._strict_join(path, suffix)
+            if not self.path:
+                return path
+            if not path:
+                return self.path
             path = self._strip_protocol(path)
-            # ".." only navigates above the root on filesystems that resolve it
-            # against a real directory tree; on object stores it is a literal
-            # path part, so only guard the local case here.
+            # ".." only navigates above the root on filesystems that resolve
+            # it against a real directory tree; on object stores it is a
+            # literal path part, so only guard the local case here.
             if isinstance(self.fs, LocalFileSystem) and _escapes_root(path):
                 raise ValueError(
                     f"path {path!r} escapes the {self.path!r} root of the filesystem"
@@ -91,8 +124,83 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             return {self._join(_path): value for _path, value in path.items()}
         return [self._join(_path) for _path in path]
 
+    def _strict_join(self, path, suffix=""):
+        normalized = self._strict_relative(path)
+        if not normalized:
+            joined = self.path
+        elif not self.path:
+            joined = normalized
+        elif self.path == self.fs.sep:
+            joined = self.fs.sep + normalized
+        else:
+            joined = self.path.rstrip(self.fs.sep) + self.fs.sep + normalized
+        if suffix and joined and not joined.endswith("/"):
+            joined += "/"
+        return joined
+
+    def _strict_relative(self, path):
+        """Validate and normalize a path relative to the strict root.
+
+        Absolute spellings are accepted only when they point inside the root
+        (relative paths returned by listings may be absolute on some
+        backends); anything resolving above the root is rejected.
+        """
+        path = self._strip_protocol(path)
+        if path in ("", self.fs.sep):
+            return ""
+        if path.startswith(self.fs.sep):
+            if self.path in ("", self.fs.sep):
+                # The view is the backend root, or has no prefix of its own;
+                # every absolute spelling is inside.
+                path = path.lstrip(self.fs.sep)
+            else:
+                # Compare after normalizing, so an absolute name that climbs
+                # out and re-enters the root ("/root/../root/x") still counts
+                # as inside, while one that stays above is rejected.
+                path = posixpath.normpath(path)
+                root = self.path.rstrip(self.fs.sep)
+                if path == root:
+                    path = ""
+                elif path.startswith(root + self.fs.sep):
+                    path = path[len(root) + 1 :]
+                else:
+                    raise ValueError(
+                        f"path {path!r} escapes the {self.path!r} root "
+                        "of the filesystem"
+                    )
+        normalized = posixpath.normpath(path) if path else ""
+        if normalized in (".", "/"):
+            normalized = ""
+        if normalized == ".." or normalized.startswith("../"):
+            raise ValueError(
+                f"path {path!r} escapes the {self.path!r} root of the filesystem"
+            )
+        if self._local and normalized:
+            root = os.path.realpath(os.path.abspath(self.path))
+            target = os.path.realpath(
+                os.path.join(root, *normalized.split(self.fs.sep))
+            )
+            try:
+                inside = os.path.commonpath([root, target]) == root
+            except ValueError:
+                # Different drives on Windows cannot share a common path.
+                inside = False
+            if not inside:
+                raise ValueError(
+                    f"path {path!r} escapes the {self.path!r} root of the filesystem"
+                )
+        return normalized
+
     def _relpath(self, path):
         if isinstance(path, str):
+            if self.strict and self.path in ("", self.fs.sep):
+                relative = path.lstrip(self.fs.sep)
+                if relative == ".." or relative.startswith("../"):
+                    raise ValueError(
+                        f"backend path {path!r} lies outside the {self.path!r} "
+                        "root of the filesystem"
+                    )
+                return relative
             if not self.path:
                 return path
             # We need to account for S3FileSystem returning paths that do not
@@ -104,8 +212,20 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             prefix = self.path + self.fs.sep
             if self.path.startswith(self.fs.sep) and not path.startswith(self.fs.sep):
                 prefix = prefix[1:]
-            assert path.startswith(prefix)
-            return path[len(prefix) :]
+            if not path.startswith(prefix):
+                if self.strict:
+                    raise ValueError(
+                        f"backend path {path!r} lies outside the {self.path!r} "
+                        "root of the filesystem"
+                    )
+                assert path.startswith(prefix)
+            relative = path[len(prefix) :]
+            if self.strict and (relative == ".." or relative.startswith("../")):
+                raise ValueError(
+                    f"backend path {path!r} lies outside the {self.path!r} "
+                    "root of the filesystem"
+                )
+            return relative
         return [self._relpath(_path) for _path in path]
 
     def _relpath_detail(self, paths):
@@ -172,6 +292,17 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             *args,
             **kwargs,
         )
+
+    async def _mv(self, path1, path2, *args, **kwargs):
+        # Validate both sides before touching the backend; ``_join`` checks
+        # every element of a batch. Prefer the wrapped backend's move so it can
+        # keep its native semantics, and fall back to copy-then-delete as
+        # ``AbstractFileSystem.mv`` does.
+        path1, path2 = self._join(path1), self._join(path2)
+        if hasattr(self.fs, "_mv"):
+            return await self.fs._mv(path1, path2, *args, **kwargs)
+        await self.fs._copy(path1, path2, *args, **kwargs)
+        return await self.fs._rm(path1, *args, **kwargs)
 
     async def _pipe(self, path, *args, **kwargs):
         return await self.fs._pipe(self._join(path), *args, **kwargs)
@@ -371,7 +502,13 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             )
 
     def walk(self, path, *args, **kwargs):
-        for root, dirs, files in self.fs.walk(self._join(path), *args, **kwargs):
+        # Validate before returning the generator, so an out-of-view root is
+        # rejected at the call site rather than on the first iteration.
+        joined = self._join(path)
+        return self._walk_joined(joined, *args, **kwargs)
+
+    def _walk_joined(self, path, *args, **kwargs):
+        for root, dirs, files in self.fs.walk(path, *args, **kwargs):
             yield (
                 self._relpath(root),
                 self._relpath_walk_entries(dirs),

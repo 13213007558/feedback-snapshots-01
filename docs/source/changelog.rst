@@ -6,6 +6,11 @@ Dev
 
 Enhancements
 
+- Add a ``strict=True`` mode to ``DirFileSystem`` that treats the root as a hard
+  boundary. Paths are normalized, escapes are rejected before reaching the
+  wrapped backend, and the same check covers sync, async and bulk operations
+  while listings keep returning relative names.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 

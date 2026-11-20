@@ -2,6 +2,7 @@ import os
 import tarfile
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1113,3 +1114,197 @@ def test_custom_pathlike_join_spelling(pathlike_dirfs, path):
 def test_join_bytes_still_unsupported(pathlike_dirfs):
     with pytest.raises(TypeError):
         pathlike_dirfs._join(b"file")
+
+
+# Strict mode: the assigned root is a hard boundary for every entry point.
+
+
+REJECTED_OPERATIONS = {
+    "open": lambda fs: fs.open("../outside", "rb"),
+    "ls": lambda fs: fs.ls("notes/../../outside"),
+    "info": lambda fs: fs.info("/etc/passwd"),
+    "exists": lambda fs: fs.exists("../outside"),
+    "cat": lambda fs: fs.cat(["ok", "../outside"]),
+    "pipe": lambda fs: fs.pipe({"ok": b"", "../outside": b""}),
+    "rm": lambda fs: fs.rm(["ok", "../outside"]),
+    "copy": lambda fs: fs.copy(["ok"], ["../outside"]),
+    "mv": lambda fs: fs.mv("ok", "../outside"),
+    "get": lambda fs: fs.get("../outside", "local"),
+    "put": lambda fs: fs.put("local", "../outside"),
+    "mkdir": lambda fs: fs.mkdir("../outside"),
+    "glob": lambda fs: fs.glob("../*"),
+    "find": lambda fs: fs.find("../outside"),
+    "walk": lambda fs: fs.walk("../outside"),
+}
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [pytest.param(op, id=name) for name, op in REJECTED_OPERATIONS.items()],
+)
+def test_strict_rejects_before_backend(operation):
+    backend = MagicMock(spec=AbstractFileSystem)
+    backend.sep = "/"
+    backend.async_impl = False
+    backend._strip_protocol = lambda path: path
+    dirfs = DirFileSystem("root", backend, strict=True)
+
+    with pytest.raises(ValueError):
+        operation(dirfs)
+
+    assert backend.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", "root"),
+        ("/", "root/"),
+        (".", "root"),
+        ("file", "root/file"),
+        ("dir://file", "root/file"),
+        ("a/./b", "root/a/b"),
+        ("a//b", "root/a/b"),
+        ("a/../b", "root/b"),
+        ("file/", "root/file/"),
+    ],
+)
+def test_strict_join_normalizes(fs, raw, expected):
+    dirfs = DirFileSystem("root", fs, strict=True)
+    assert dirfs._join(raw) == expected
+
+
+def test_strict_join_accepts_absolute_names_inside_root(m):
+    dirfs = DirFileSystem("/root", m, strict=True)
+    assert dirfs._join("/root/file") == "/root/file"
+    assert dirfs._join("/root") == "/root"
+    with pytest.raises(ValueError):
+        dirfs._join("/outside/file")
+
+
+def test_strict_root_may_be_empty(fs):
+    dirfs = DirFileSystem("", fs, strict=True)
+    assert dirfs._join("") == ""
+    assert dirfs._join("/") == ""
+    assert dirfs._join("file") == "file"
+    assert dirfs._join("/file") == "file"
+    with pytest.raises(ValueError):
+        dirfs._join("../file")
+
+
+def test_strict_rejects_backend_names_outside_root(m):
+    dirfs = DirFileSystem("/root", m, strict=True)
+    m.pipe("/root/file", b"data")
+    m.pipe("/outside/file", b"data")
+    assert dirfs.ls("", detail=False) == ["file"]
+    with pytest.raises(ValueError, match="outside"):
+        dirfs._relpath("/outside/file")
+
+
+def test_strict_sequence_memory(m):
+    dirfs = DirFileSystem("/root", m, strict=True)
+
+    with dirfs.open("notes/todo.txt", "wb") as f:
+        f.write(b"hello")
+    assert dirfs.ls("notes", detail=False) == ["notes/todo.txt"]
+    assert dirfs.info("notes/todo.txt")["name"] == "notes/todo.txt"
+    assert dirfs.find("") == ["notes/todo.txt"]
+
+    dirfs.mv("notes/todo.txt", "notes/done.txt")
+    assert dirfs.ls("notes", detail=False) == ["notes/done.txt"]
+    with dirfs.open("notes/done.txt", "rb") as f:
+        assert f.read() == b"hello"
+
+    dirfs.rm("notes/done.txt")
+    assert not dirfs.exists("notes/done.txt")
+    assert m.exists("/root/notes/done.txt") is False
+
+    with pytest.raises(ValueError):
+        dirfs.open("../root/notes/done.txt", "rb")
+    assert m.exists("/outside") is False
+
+
+def test_strict_sequence_local(tmp_path):
+    root = tmp_path / "assigned"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"secret")
+    dirfs = DirFileSystem(str(root), LocalFileSystem(), strict=True)
+
+    dirfs.makedirs("notes")
+    with dirfs.open("notes/todo.txt", "wb") as f:
+        f.write(b"hello")
+    assert (root / "notes" / "todo.txt").read_bytes() == b"hello"
+    assert dirfs.ls("notes", detail=False) == ["notes/todo.txt"]
+    assert dirfs.info("notes/todo.txt")["name"] == "notes/todo.txt"
+
+    dirfs.mv("notes/todo.txt", "notes/done.txt")
+    assert (root / "notes" / "done.txt").read_bytes() == b"hello"
+    dirfs.rm("notes/done.txt")
+    assert not (root / "notes" / "done.txt").exists()
+
+    for path in ["../outside.txt", "notes/../../outside.txt"]:
+        with pytest.raises(ValueError):
+            dirfs.open(path, "rb")
+        with pytest.raises(ValueError):
+            dirfs.ls(path)
+    assert outside.read_bytes() == b"secret"
+
+
+def test_strict_rejects_symlink_escape(tmp_path):
+    root = tmp_path / "assigned"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"secret")
+    (root / "link").symlink_to(outside)
+    dirfs = DirFileSystem(str(root), LocalFileSystem(), strict=True)
+
+    with pytest.raises(ValueError):
+        dirfs.open("link", "rb")
+
+
+@pytest.mark.asyncio
+async def test_strict_async_sequence():
+    backend = MemoryFileSystem(global_store=False, skip_instance_cache=True)
+    fs = AsyncFileSystemWrapper(fs=backend, asynchronous=True)
+    dirfs = DirFileSystem("/root", fs, strict=True, asynchronous=True)
+
+    await dirfs._pipe("notes/todo.txt", b"hello")
+    assert await dirfs._ls("notes", detail=False) == ["notes/todo.txt"]
+    assert (await dirfs._info("notes/todo.txt"))["name"] == "notes/todo.txt"
+
+    await dirfs._mv("notes/todo.txt", "notes/done.txt")
+    assert await dirfs._cat_file("notes/done.txt") == b"hello"
+
+    await dirfs._rm("notes/done.txt")
+    assert not await dirfs._exists("notes/done.txt")
+
+    for operation in (
+        lambda: dirfs._pipe("../outside.txt", b"data"),
+        lambda: dirfs._cat_file("../outside.txt"),
+        lambda: dirfs._mv("ok", "../outside.txt"),
+        lambda: dirfs._rm(["ok", "../outside.txt"]),
+    ):
+        with pytest.raises(ValueError):
+            await operation()
+    assert not backend.exists("/outside.txt")
+
+
+@pytest.mark.asyncio
+async def test_strict_async_rejects_before_backend(asyncfs):
+    backend = asyncfs
+    backend.sep = "/"
+    backend._strip_protocol = lambda path: path
+    dirfs = DirFileSystem("root", backend, strict=True, asynchronous=True)
+
+    with pytest.raises(ValueError):
+        await dirfs._pipe("../outside", b"data")
+    with pytest.raises(ValueError):
+        await dirfs._rm(["ok", "../outside"])
+    with pytest.raises(ValueError):
+        await dirfs._copy(["ok"], ["../outside"])
+
+    backend.mock_calls.clear()
+    with pytest.raises(ValueError):
+        await dirfs._mv("ok", "../outside")
+    assert backend.mock_calls == []

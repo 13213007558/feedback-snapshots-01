@@ -266,6 +266,47 @@ successfully like this, it must look for exactly those named arguments. Implemen
 require access to the target path of their nested targets should inherit from ``ChainedFileSystem``,
 which will trigger pass-through of the nested path automatically.
 
+Confining access to a directory
+-------------------------------
+
+:class:`fsspec.implementations.dirfs.DirFileSystem` presents an existing
+filesystem rooted at one directory. Paths are relative to that root, and names
+returned by listing methods are made relative again:
+
+.. code-block:: python
+
+    fs = fsspec.filesystem(
+        "dir",
+        path="/data/assigned/job-42",
+        target_protocol="file",
+        strict=True,
+    )
+    fs.makedirs("notes")
+    fs.pipe_file("notes/todo.txt", b"hello")   # writes /data/assigned/job-42/notes/todo.txt
+    fs.ls("notes", detail=False)               # ["notes/todo.txt"]
+
+Pass ``strict=True`` when the root is a security boundary rather than just a
+convenience prefix. In strict mode:
+
+- ``.``, ``..``, duplicate and leading separators are normalized before the
+  root is applied; a path that would resolve above the root raises
+  ``ValueError``.
+- Absolute spellings are accepted only when they already point inside the root,
+  so relative names returned by a listing can be passed straight back in.
+- Backend names that fall outside the root are rejected instead of being
+  returned to the caller.
+- The check happens in the path-joining layer shared by every delegated
+  operation, so ``open``, ``ls``, single calls, bulk calls such as ``rm``,
+  ``copy`` and ``pipe`` with lists or dicts, and the ``_``-prefixed async
+  entry points all observe the same boundary. Rejected paths never reach the
+  wrapped backend.
+- For local storage the resolved path (after following symlinks) must also stay
+  below the root.
+
+``DirFileSystem`` supports both synchronous and asynchronous wrapped
+filesystems; construct it with ``asynchronous=True`` and an async backend to use
+the ``_``-prefixed coroutine methods (``_pipe``, ``_mv``, ``_rm``, ...).
+
 Caching Files Locally
 ---------------------
 
