@@ -44,6 +44,7 @@ nav:
       - OIDC: api/oidc.md
       - Sign: api/sign.md
       - Verify:
+          - Attestation: api/verify/attestation.md
           - Policy: api/verify/policy.md
           - Verifier: api/verify/verifier.md
   # end-api-section

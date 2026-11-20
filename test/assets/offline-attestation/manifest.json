@@ -1,0 +1,9 @@
+{
+  "artifact": "artifact.bin",
+  "artifact_sha256": "adf3db3d61471817f567d93c597ebe025a126b15a2c1e4bdf08058d805271d4f",
+  "other_sha256": "11de96226896b0fcf4ea66a11a63a5fd9f4e211fe94b62b7eebf4485c817b2d8",
+  "accepted_predicate_type": "https://slsa.dev/provenance/v1",
+  "unaccepted_predicate_type": "https://slsa.dev/provenance/v0.2",
+  "identity": "offline@example.com",
+  "generated_at": "2026-11-01T12:00:00+00:00"
+}

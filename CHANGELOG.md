@@ -12,6 +12,14 @@ All versions prior to 0.9.0 are untracked.
 
 * HTTP clients (most importantly Rekor) now retry requests when that makes
   sense ([#1970](https://github.com/sigstore/sigstore-python/pull/1970))
+* API: `sigstore.verify.AttestationVerifier` has been added for artifact
+  intake. It layers two authorization checks on top of the existing DSSE
+  verification: the statement must carry a selected subject covering the
+  reported artifact digest, and its predicate type must be one the service has
+  registered. Statements with multiple subjects require an explicit selector.
+  `Verifier.verify_dsse` is unchanged. Offline fixtures under
+  `test/assets/offline-attestation/` demonstrate the accepted and rejected
+  cases without network access.
 
 ### Changed
 

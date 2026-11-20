@@ -43,11 +43,14 @@ print(result)
 ```
 """
 
-from sigstore.verify import policy, verifier
+from sigstore.verify import attestation, policy, verifier
+from sigstore.verify.attestation import AttestationVerifier
 from sigstore.verify.verifier import Verifier
 
 __all__ = [
+    "AttestationVerifier",
     "Verifier",
+    "attestation",
     "policy",
     "verifier",
 ]

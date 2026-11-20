@@ -108,17 +108,49 @@ class Statement:
 
         No digests other than SHA256 are currently supported.
         """
+        return len(self._subjects_matching_digest(digest)) > 0
+
+    def _subjects_matching_digest(self, digest: Hashed) -> list[Subject]:
+        """
+        Returns every subject in this statement whose digest set matches `digest`.
+
+        A subject matches only if it declares a SHA256 digest that is exactly
+        equal to `digest`. Subjects that only carry other algorithms are
+        ignored: a SHA-256 artifact digest must never be matched against a
+        subject that merely declares an unrelated hash.
+
+        No digests other than SHA256 are currently supported.
+        """
         if digest.algorithm != HashAlgorithm.SHA2_256:
             raise VerificationError(f"unexpected digest algorithm: {digest.algorithm}")
 
-        for sub in self._inner.subjects:
-            sub_digest = sub.digest.root.get("sha256")
-            if sub_digest is None:
-                continue
-            if sub_digest == digest.digest.hex():
-                return True
+        expected = digest.digest.hex()
 
-        return False
+        return [
+            sub
+            for sub in self._inner.subjects
+            if sub.digest.root.get("sha256") == expected
+        ]
+
+    @property
+    def subjects(self) -> list[Subject]:
+        """
+        Returns the statement's subjects, as declared by the signer.
+
+        The returned values are informational: nothing about them is verified
+        by merely parsing the statement.
+        """
+        return list(self._inner.subjects)
+
+    @property
+    def predicate_type(self) -> str:
+        """
+        Returns the statement's predicate type, as declared by the signer.
+
+        This is informational only: callers that authorize on a predicate type
+        must compare it against their own allowlist after verification.
+        """
+        return self._inner.predicate_type
 
     def _pae(self) -> bytes:
         """
