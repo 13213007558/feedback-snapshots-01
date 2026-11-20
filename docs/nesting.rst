@@ -310,6 +310,69 @@ If the object to be marshalled has a relationship to an object of the same type,
     #     }
     # }
 
+.. _scoped-registry:
+
+Isolating named schemas per plugin
+----------------------------------
+
+By default, schemas that are referred to by name (e.g. ``fields.Nested("Invoice")``)
+are kept in one process-wide registry. When several independent plugins each declare a
+nested type with the same name, that shared registry cannot tell them apart.
+
+To keep a plugin's named types private, give it its own
+:class:`~marshmallow.class_registry.Registry` and select it through the
+``registry`` `class Meta <marshmallow.Schema.Meta>` option. Schemas with that option
+are registered in the isolated registry instead of the global one, and any string
+reference in their ``Nested`` fields is resolved only against that registry. The
+result does not depend on the order in which plugins are imported.
+
+.. code-block:: python
+
+    from marshmallow import Schema, fields
+    from marshmallow.class_registry import Registry
+
+    plugin_a = Registry(name="plugin_a")
+    plugin_b = Registry(name="plugin_b")
+
+
+    class InvoiceA(Schema):
+        class Meta:
+            registry = plugin_a
+
+        amount = fields.Integer()
+
+
+    class OrderA(Schema):
+        class Meta:
+            registry = plugin_a
+
+        # Resolves to InvoiceA, never to plugin_b's Invoice
+        invoice = fields.Nested("InvoiceA")
+
+
+    class InvoiceB(Schema):
+        class Meta:
+            registry = plugin_b
+
+        lines = fields.Integer()
+
+
+    class OrderB(Schema):
+        class Meta:
+            registry = plugin_b
+
+        invoice = fields.Nested("InvoiceB")
+
+A name can only be resolved if a schema with that name has been registered in the same
+registry. Referencing a type that lives in the global registry or in another plugin's
+registry raises a :class:`~marshmallow.exceptions.RegistryError`, so a plugin cannot
+silently pick up another plugin's type. Re-registering a schema from the same module
+(for example when the plugin is reloaded) replaces the previous entry and never touches
+any other registry.
+
+Schemas without a ``registry`` option keep using the historical global registry, so
+existing code and bare class names continue to work unchanged.
+
 Next steps
 ----------
 

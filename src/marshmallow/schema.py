@@ -152,7 +152,11 @@ class SchemaMeta(ABCMeta):
     def __init__(cls, name, bases, attrs):
         super().__init__(name, bases, attrs)
         if name and cls.opts.register:
-            class_registry.register(name, cls)
+            scoped_registry = cls.opts.registry
+            if scoped_registry is not None:
+                scoped_registry.register(name, cls)
+            else:
+                class_registry.register(name, cls)
         cls._hooks = cls.resolve_hooks()
 
     def resolve_hooks(cls) -> dict[str, list[tuple[str, bool, dict]]]:
@@ -219,6 +223,9 @@ class SchemaOpts:
         self.dump_only = getattr(meta, "dump_only", ())
         self.unknown = getattr(meta, "unknown", RAISE)
         self.register = getattr(meta, "register", True)
+        # When set, the schema and its string-referenced nested types are scoped
+        # to this registry instead of the process-wide class registry.
+        self.registry = getattr(meta, "registry", None)
         self.many = getattr(meta, "many", False)
 
 
@@ -403,6 +410,15 @@ class Schema(metaclass=SchemaMeta):
         class registry. Must be `True` if you intend to refer to this `Schema <marshmallow.Schema>`
         by class name in `Nested` fields. Only set this to `False` when memory
         usage is critical. Defaults to `True`.
+        """
+        registry: typing.ClassVar[class_registry.Registry | None]
+        """An isolated `~marshmallow.class_registry.Registry` that owns this
+        `Schema <marshmallow.Schema>`. When provided, the schema is registered
+        there instead of the process-wide class registry, and any string
+        references in `Nested` fields are resolved only against it. This keeps
+        plugins that declare same-named nested types (e.g. ``"Invoice"``)
+        isolated and independent of import order. Defaults to `None`, which keeps
+        the historical global-registry behavior.
         """
 
     def __init__(

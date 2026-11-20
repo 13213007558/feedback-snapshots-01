@@ -590,7 +590,13 @@ class Nested(Field):
                         f"`Schema`, not {nested.__class__}."
                     )
                 else:
-                    schema_class = class_registry.get_class(nested, all=False)
+                    scoped_registry = getattr(
+                        getattr(self.root, "opts", None), "registry", None
+                    )
+                    if scoped_registry is not None:
+                        schema_class = scoped_registry.get_class(nested, all=False)
+                    else:
+                        schema_class = class_registry.get_class(nested, all=False)
                 self._schema = schema_class(
                     many=bool(self.many),
                     only=self.only,
