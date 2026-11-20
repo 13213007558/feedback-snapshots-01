@@ -70,6 +70,8 @@ def test_crypto_cache_entry_init(patch_time):
     assert entry.creation_time == mock_creation_time
     assert entry.bytes_encrypted == 0
     assert entry.messages_encrypted == 0
+    assert entry.bytes_reserved == 0
+    assert entry.messages_reserved == 0
     assert entry.valid
     # Because Lock is a helper function that returns whatever native primitive is best,
     #  we cannot test for type.  Instead, testing for interface.
@@ -148,3 +150,130 @@ def test_crypto_cache_entry_invalidate():
     entry.invalidate()
 
     assert not entry.valid
+
+
+def build_entry():
+    return CryptoMaterialsCacheEntry(
+        cache_key=b"ex_cache_key",
+        value=MagicMock(__class__=EncryptionMaterials),
+        hints=CryptoMaterialsCacheEntryHints(lifetime=10.0),
+    )
+
+
+def test_reserve_tracks_outstanding_capacity_without_committing():
+    entry = build_entry()
+
+    reservation = entry.reserve(bytes_to_reserve=100, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    assert reservation.is_open
+    assert entry.messages_reserved == 1
+    assert entry.bytes_reserved == 100
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+
+
+def test_reserve_rejects_message_limit_overflow():
+    entry = build_entry()
+    super(CryptoMaterialsCacheEntry, entry).__setattr__("messages_encrypted", 4)
+    super(CryptoMaterialsCacheEntry, entry).__setattr__("messages_reserved", 1)
+
+    # 4 committed + 1 reserved + 1 new = 6, which exceeds the limit of 5
+    assert entry.reserve(bytes_to_reserve=10, max_messages_encrypted=5, max_bytes_encrypted=500) is None
+    assert entry.messages_reserved == 1
+    assert entry.bytes_reserved == 0
+
+
+def test_reserve_rejects_byte_limit_overflow_including_outstanding_reservations():
+    entry = build_entry()
+    reservation = entry.reserve(bytes_to_reserve=400, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    # 400 already reserved + 200 new = 600, which exceeds the limit of 500 even though nothing
+    # has been committed yet.
+    assert entry.reserve(bytes_to_reserve=200, max_messages_encrypted=5, max_bytes_encrypted=500) is None
+    assert reservation.is_open
+    assert entry.bytes_reserved == 400
+
+
+def test_reserve_accepted_right_up_to_the_limit():
+    entry = build_entry()
+
+    reservation = entry.reserve(bytes_to_reserve=500, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    assert reservation is not None
+    assert entry.bytes_reserved == 500
+    assert entry.messages_reserved == 1
+
+
+def test_reserve_rejected_on_invalidated_entry():
+    entry = build_entry()
+    entry.invalidate()
+
+    assert entry.reserve(bytes_to_reserve=10, max_messages_encrypted=5, max_bytes_encrypted=500) is None
+    assert entry.messages_reserved == 0
+
+
+def test_commit_moves_reservation_into_committed_usage():
+    entry = build_entry()
+    reservation = entry.reserve(bytes_to_reserve=100, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    reservation.commit(bytes_encrypted=80)
+
+    assert not reservation.is_open
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 80
+
+
+def test_release_returns_reserved_capacity():
+    entry = build_entry()
+    reservation = entry.reserve(bytes_to_reserve=100, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    reservation.release()
+
+    assert not reservation.is_open
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+
+
+def test_released_capacity_is_available_again():
+    entry = build_entry()
+    first = entry.reserve(bytes_to_reserve=450, max_messages_encrypted=5, max_bytes_encrypted=500)
+    first.release()
+
+    second = entry.reserve(bytes_to_reserve=500, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    assert second is not None
+    assert entry.bytes_reserved == 500
+
+
+def test_concurrent_reservations_share_one_limit():
+    entry = build_entry()
+
+    first = entry.reserve(bytes_to_reserve=300, max_messages_encrypted=5, max_bytes_encrypted=500)
+    second = entry.reserve(bytes_to_reserve=200, max_messages_encrypted=5, max_bytes_encrypted=500)
+    third = entry.reserve(bytes_to_reserve=1, max_messages_encrypted=5, max_bytes_encrypted=500)
+
+    assert first is not None and second is not None
+    assert third is None
+    assert entry.bytes_reserved == 500
+    assert entry.messages_reserved == 2
+
+    second.release()
+    assert entry.bytes_reserved == 300
+    assert entry.messages_reserved == 1
+
+
+def test_commit_and_release_are_idempotent():
+    entry = build_entry()
+    reservation = entry.reserve(bytes_to_reserve=100, max_messages_encrypted=5, max_bytes_encrypted=500)
+    reservation.commit(bytes_encrypted=100)
+    reservation.commit(bytes_encrypted=100)
+    reservation.release()
+
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 100
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0

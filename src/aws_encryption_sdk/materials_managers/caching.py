@@ -3,6 +3,8 @@
 """Caching crypto material manager."""
 import logging
 import uuid
+import weakref
+from threading import Lock
 
 import attr
 import six
@@ -13,7 +15,7 @@ from ..caches import (
     build_encryption_materials_cache_key,
 )
 from ..caches.base import CryptoMaterialsCache
-from ..exceptions import CacheKeyError
+from ..exceptions import CacheKeyError, NotSupportedError
 from ..internal.defaults import MAX_BYTES_PER_KEY, MAX_MESSAGES_PER_KEY
 from ..internal.str_ops import to_bytes
 from ..key_providers.base import MasterKeyProvider
@@ -109,6 +111,17 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         if self.partition_name is None:
             self.partition_name = to_bytes(str(uuid.uuid4()))
 
+        # Open reservations keyed by the materials object they were granted against. A single
+        # materials object can be handed to several concurrent streams, so each value is a list
+        # of reservations. Weak keys let abandoned streams clean up on their own even if close()
+        # is never called.
+        self._open_reservations = weakref.WeakKeyDictionary()
+        self._reservation_lock = Lock()
+        # Serializes the read-miss-put flow so concurrent jobs cannot each create and cache their
+        # own materials for the same cache key. The backing material manager call happens inside
+        # this lock; reservation counters on the entries themselves remain independently locked.
+        self._materials_request_lock = Lock()
+
     def _cache_entry_has_encrypted_too_many_bytes(self, entry):
         """Determines if a cache entry has exceeded the max allowed bytes encrypted.
 
@@ -169,6 +182,12 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
     def get_encryption_materials(self, request):
         """Provides encryption materials appropriate for the request.
 
+        Capacity on the selected cache entry is reserved (not immediately committed) before the
+        materials are returned. The caller is responsible for invoking
+        :meth:`commit_encryption_materials_usage` when the stream completes or
+        :meth:`release_encryption_materials_usage` if it stops early; the streaming client does
+        this automatically on close.
+
         :param request: Encryption materials request
         :type request: aws_encryption_sdk.materials_managers.EncryptionMaterialsRequest
         :returns: encryption materials
@@ -188,33 +207,100 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         )
         cache_key = build_encryption_materials_cache_key(partition=self.partition_name, request=inner_request)
 
-        # Attempt to retrieve from cache
-        try:
-            cache_entry = self.cache.get_encryption_materials(
-                cache_key=cache_key, plaintext_length=request.plaintext_length
+        with self._materials_request_lock:
+            # Attempt to reserve capacity on an existing cache entry.
+            try:
+                reservation = self.cache.reserve_encryption_materials(
+                    cache_key=cache_key,
+                    plaintext_length=request.plaintext_length,
+                    max_messages_encrypted=self.max_messages_encrypted,
+                    max_bytes_encrypted=self.max_bytes_encrypted,
+                )
+            except NotSupportedError:
+                # This cache cannot coordinate reservations, so bypass it entirely rather than
+                # charging usage we cannot settle later.
+                _LOGGER.debug("Cache does not support reservations; bypassing the cache for this request")
+                return self.backing_materials_manager.get_encryption_materials(request)
+            except CacheKeyError:
+                reservation = None
+
+            if reservation is not None:
+                cache_entry = reservation.entry
+                if self._cache_entry_is_too_old(cache_entry):
+                    reservation.release()
+                    self.cache.remove(cache_entry)
+                else:
+                    self._register_reservation(cache_entry.value, reservation)
+                    return cache_entry.value
+
+            # Nothing usable found in cache: try the material manager
+            new_result = self.backing_materials_manager.get_encryption_materials(inner_request)
+
+            if not new_result.algorithm.safe_to_cache() or request.plaintext_length >= self.max_bytes_encrypted:
+                return new_result
+
+            # Add a fresh, unused entry to the cache and reserve its capacity for this job.
+            new_entry = self.cache.put_encryption_materials(
+                cache_key=cache_key,
+                encryption_materials=new_result,
+                plaintext_length=0,
+                entry_hints=CryptoMaterialsCacheEntryHints(lifetime=self.max_age),
             )
-        except CacheKeyError:
-            pass
-        else:
-            if self._cache_entry_has_exceeded_limits(cache_entry):
-                self.cache.remove(cache_entry)
-            else:
-                return cache_entry.value
-
-        # Nothing found in cache: try the material manager
-        new_result = self.backing_materials_manager.get_encryption_materials(inner_request)
-
-        if not new_result.algorithm.safe_to_cache() or request.plaintext_length >= self.max_bytes_encrypted:
+            reservation = new_entry.reserve(
+                bytes_to_reserve=request.plaintext_length,
+                max_messages_encrypted=self.max_messages_encrypted,
+                max_bytes_encrypted=self.max_bytes_encrypted,
+            )
+            if reservation is None:
+                # A plaintext that fits the configured byte limit always fits on a fresh entry, so
+                # a failure here means the cache entry cannot be trusted with reservations.
+                self.cache.remove(new_entry)
+                raise NotSupportedError(
+                    "Cache was unable to reserve capacity for a new encryption materials entry"
+                )
+            self._register_reservation(new_result, reservation)
             return new_result
 
-        # Add results into cache
-        self.cache.put_encryption_materials(
-            cache_key=cache_key,
-            encryption_materials=new_result,
-            plaintext_length=request.plaintext_length,
-            entry_hints=CryptoMaterialsCacheEntryHints(lifetime=self.max_age),
-        )
-        return new_result
+    def _register_reservation(self, materials, reservation):
+        """Associates an open reservation with the materials returned to a stream."""
+        with self._reservation_lock:
+            self._open_reservations.setdefault(materials, []).append(reservation)
+
+    def _pop_reservation(self, materials):
+        """Removes and returns one open reservation for ``materials``, or ``None`` if there is none."""
+        with self._reservation_lock:
+            reservations = self._open_reservations.get(materials)
+            if not reservations:
+                return None
+            return reservations.pop(0)
+
+    def commit_encryption_materials_usage(self, encryption_materials, plaintext_length):
+        """Commits the reservation held for ``encryption_materials`` after a successful stream.
+
+        :param encryption_materials: Materials returned by :meth:`get_encryption_materials`
+        :param int plaintext_length: Number of plaintext bytes actually encrypted
+        """
+        reservation = self._pop_reservation(encryption_materials)
+        if reservation is None:
+            _LOGGER.debug("No open reservation found; usage is accounted outside of the cache")
+            return
+        reservation.commit(plaintext_length)
+
+    def release_encryption_materials_usage(self, encryption_materials):
+        """Releases the reservation held for ``encryption_materials`` without committing usage.
+
+        :param encryption_materials: Materials returned by :meth:`get_encryption_materials`
+        """
+        reservation = self._pop_reservation(encryption_materials)
+        if reservation is None:
+            _LOGGER.debug("No open reservation found; nothing to release")
+            return
+        reservation.release()
+
+    def has_open_reservation(self, encryption_materials):
+        """Returns whether an open reservation is currently registered for the materials."""
+        with self._reservation_lock:
+            return bool(self._open_reservations.get(encryption_materials))
 
     def decrypt_materials(self, request):
         """Provides decryption materials appropriate for the request.

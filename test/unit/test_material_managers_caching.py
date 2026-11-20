@@ -8,7 +8,7 @@ from pytest_mock import mocker  # noqa pylint: disable=unused-import
 
 import aws_encryption_sdk.materials_managers.caching
 from aws_encryption_sdk.caches.base import CryptoMaterialsCache
-from aws_encryption_sdk.exceptions import CacheKeyError
+from aws_encryption_sdk.exceptions import CacheKeyError, NotSupportedError
 from aws_encryption_sdk.internal.defaults import MAX_BYTES_PER_KEY, MAX_MESSAGES_PER_KEY
 from aws_encryption_sdk.internal.str_ops import to_bytes
 from aws_encryption_sdk.key_providers.base import MasterKeyProvider
@@ -200,12 +200,6 @@ def patch_crypto_cache_entry_hints(mocker):
 
 
 @pytest.fixture
-def patch_cache_entry_has_exceeded_limits(mocker):
-    mocker.patch.object(CachingCryptoMaterialsManager, "_cache_entry_has_exceeded_limits")
-    yield CachingCryptoMaterialsManager._cache_entry_has_exceeded_limits
-
-
-@pytest.fixture
 def patch_encryption_materials_request(mocker):
     mocker.patch.object(aws_encryption_sdk.materials_managers.caching, "EncryptionMaterialsRequest")
     yield aws_encryption_sdk.materials_managers.caching.EncryptionMaterialsRequest
@@ -254,121 +248,177 @@ def test_get_encryption_materials_do_not_cache(patch_should_cache_encryption_req
     assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
 
 
-def test_get_encryption_materials_cache_hit_expired_entry(
+def test_get_encryption_materials_cache_hit_reserved_entry(
     patch_encryption_materials_request,
     patch_should_cache_encryption_request,
-    patch_cache_entry_has_exceeded_limits,
     patch_build_encryption_materials_cache_key,
-    patch_crypto_cache_entry_hints,
 ):
-    patch_cache_entry_has_exceeded_limits.return_value = True
     mock_request = fake_encryption_request()
     mock_request.plaintext_length = 10
     ccmm = build_ccmm()
-    ccmm.backing_materials_manager.get_encryption_materials.return_value.algorithm.safe_to_cache.return_value = True
+    mock_reservation = MagicMock()
+    mock_reservation.entry.age = 0.0
+    mock_reservation.entry.value = sentinel.cached_materials
+    ccmm.cache.reserve_encryption_materials.return_value = mock_reservation
 
     test = ccmm.get_encryption_materials(mock_request)
 
-    patch_encryption_materials_request.assert_called_once_with(
-        encryption_context=sentinel.encryption_context,
-        frame_length=sentinel.frame_length,
-        algorithm=sentinel.algorithm,
-        commitment_policy=sentinel.commitment_policy,
+    ccmm.cache.reserve_encryption_materials.assert_called_once_with(
+        cache_key=patch_build_encryption_materials_cache_key.return_value,
+        plaintext_length=10,
+        max_messages_encrypted=ccmm.max_messages_encrypted,
+        max_bytes_encrypted=ccmm.max_bytes_encrypted,
     )
-    patch_build_encryption_materials_cache_key.assert_called_once_with(
-        partition=ccmm.partition_name, request=patch_encryption_materials_request.return_value
-    )
-    ccmm.cache.get_encryption_materials.assert_called_once_with(
-        cache_key=patch_build_encryption_materials_cache_key.return_value, plaintext_length=10
-    )
+    assert not ccmm.backing_materials_manager.get_encryption_materials.called
+    assert not ccmm.cache.put_encryption_materials.called
+    assert test is sentinel.cached_materials
+    assert ccmm.has_open_reservation(sentinel.cached_materials)
 
-    patch_cache_entry_has_exceeded_limits.assert_called_once_with(ccmm.cache.get_encryption_materials.return_value)
-    ccmm.cache.remove.assert_called_once_with(ccmm.cache.get_encryption_materials.return_value)
+
+def test_get_encryption_materials_cache_miss_creates_and_reserves_entry(
+    patch_encryption_materials_request,
+    patch_should_cache_encryption_request,
+    patch_build_encryption_materials_cache_key,
+    patch_crypto_cache_entry_hints,
+):
+    mock_request = fake_encryption_request()
+    mock_request.plaintext_length = 10
+    ccmm = build_ccmm()
+    ccmm.cache.reserve_encryption_materials.side_effect = CacheKeyError
+    new_materials = ccmm.backing_materials_manager.get_encryption_materials.return_value
+    new_materials.algorithm.safe_to_cache.return_value = True
+    mock_reservation = MagicMock()
+    mock_reservation.entry.value = new_materials
+    ccmm.cache.put_encryption_materials.return_value.reserve.return_value = mock_reservation
+
+    test = ccmm.get_encryption_materials(mock_request)
 
     ccmm.backing_materials_manager.get_encryption_materials.assert_called_once_with(
         patch_encryption_materials_request.return_value
     )
-    ccmm.backing_materials_manager.get_encryption_materials.return_value.algorithm.safe_to_cache.assert_called_once_with()  # noqa pylint: disable=line-too-long
-
-    patch_crypto_cache_entry_hints.assert_called_once_with(lifetime=ccmm.max_age)
     ccmm.cache.put_encryption_materials.assert_called_once_with(
         cache_key=patch_build_encryption_materials_cache_key.return_value,
-        encryption_materials=ccmm.backing_materials_manager.get_encryption_materials.return_value,
-        plaintext_length=10,
+        encryption_materials=new_materials,
+        plaintext_length=0,
         entry_hints=patch_crypto_cache_entry_hints.return_value,
     )
-
-    assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
-
-
-def test_get_encryption_materials_cache_hit_good_entry(
-    patch_encryption_materials_request,
-    patch_should_cache_encryption_request,
-    patch_cache_entry_has_exceeded_limits,
-    patch_build_encryption_materials_cache_key,
-):
-    patch_cache_entry_has_exceeded_limits.return_value = False
-    mock_request = fake_encryption_request()
-    ccmm = build_ccmm()
-
-    test = ccmm.get_encryption_materials(mock_request)
-
-    assert not ccmm.cache.remove.called
-    assert not ccmm.backing_materials_manager.get_encryption_materials.called
-    assert test is ccmm.cache.get_encryption_materials.return_value.value
-
-
-def test_get_encryption_materials_cache_miss(
-    patch_encryption_materials_request,
-    patch_should_cache_encryption_request,
-    patch_cache_entry_has_exceeded_limits,
-    patch_build_encryption_materials_cache_key,
-):
-    mock_request = fake_encryption_request()
-    mock_request.plaintext_length = 10
-    ccmm = build_ccmm()
-    ccmm.cache.get_encryption_materials.side_effect = CacheKeyError
-    ccmm.backing_materials_manager.get_encryption_materials.return_value.algorithm.safe_to_cache.return_value = True
-
-    test = ccmm.get_encryption_materials(mock_request)
-
-    assert not patch_cache_entry_has_exceeded_limits.called
-    assert not ccmm.cache.remove.called
-    assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
+    ccmm.cache.put_encryption_materials.return_value.reserve.assert_called_once_with(
+        bytes_to_reserve=10,
+        max_messages_encrypted=ccmm.max_messages_encrypted,
+        max_bytes_encrypted=ccmm.max_bytes_encrypted,
+    )
+    assert test is new_materials
+    assert ccmm.has_open_reservation(new_materials)
 
 
 def test_get_encryption_materials_cache_miss_plaintext_too_big_to_cache(
     patch_encryption_materials_request,
     patch_should_cache_encryption_request,
-    patch_cache_entry_has_exceeded_limits,
     patch_build_encryption_materials_cache_key,
 ):
     mock_request = fake_encryption_request()
     mock_request.plaintext_length = 100
     ccmm = build_ccmm(max_bytes_encrypted=10)
-    ccmm.cache.get_encryption_materials.side_effect = CacheKeyError
+    ccmm.cache.reserve_encryption_materials.side_effect = CacheKeyError
     ccmm.backing_materials_manager.get_encryption_materials.return_value.algorithm.safe_to_cache.return_value = True
 
     test = ccmm.get_encryption_materials(mock_request)
 
     assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
+    assert not ccmm.cache.put_encryption_materials.called
 
 
 def test_get_encryption_materials_cache_miss_algorithm_not_safe_to_cache(
     patch_encryption_materials_request,
     patch_should_cache_encryption_request,
-    patch_cache_entry_has_exceeded_limits,
     patch_build_encryption_materials_cache_key,
 ):
     mock_request = fake_encryption_request()
     mock_request.plaintext_length = 10
     ccmm = build_ccmm()
-    ccmm.cache.get_encryption_materials.side_effect = CacheKeyError
+    ccmm.cache.reserve_encryption_materials.side_effect = CacheKeyError
     ccmm.backing_materials_manager.get_encryption_materials.return_value.algorithm.safe_to_cache.return_value = False
 
     test = ccmm.get_encryption_materials(mock_request)
 
     assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
+    assert not ccmm.cache.put_encryption_materials.called
+
+
+def test_get_encryption_materials_unsupported_cache_falls_back_to_uncached(
+    patch_encryption_materials_request,
+    patch_should_cache_encryption_request,
+    patch_build_encryption_materials_cache_key,
+):
+    mock_request = fake_encryption_request()
+    mock_request.plaintext_length = 10
+    ccmm = build_ccmm()
+    ccmm.cache.reserve_encryption_materials.side_effect = NotSupportedError
+
+    test = ccmm.get_encryption_materials(mock_request)
+
+    assert test is ccmm.backing_materials_manager.get_encryption_materials.return_value
+    assert not ccmm.cache.put_encryption_materials.called
+
+
+def test_get_encryption_materials_too_old_entry_is_removed_and_replaced(
+    patch_encryption_materials_request,
+    patch_should_cache_encryption_request,
+    patch_build_encryption_materials_cache_key,
+    patch_crypto_cache_entry_hints,
+):
+    mock_request = fake_encryption_request()
+    mock_request.plaintext_length = 10
+    ccmm = build_ccmm(max_age=10.0)
+    stale_reservation = MagicMock()
+    stale_reservation.entry.age = 99.0
+    ccmm.cache.reserve_encryption_materials.return_value = stale_reservation
+    new_materials = ccmm.backing_materials_manager.get_encryption_materials.return_value
+    new_materials.algorithm.safe_to_cache.return_value = True
+    fresh_reservation = MagicMock()
+    fresh_reservation.entry.value = new_materials
+    ccmm.cache.put_encryption_materials.return_value.reserve.return_value = fresh_reservation
+
+    test = ccmm.get_encryption_materials(mock_request)
+
+    stale_reservation.release.assert_called_once_with()
+    ccmm.cache.remove.assert_called_once_with(stale_reservation.entry)
+    assert test is new_materials
+
+
+def test_commit_and_release_encryption_materials_usage():
+    ccmm = build_ccmm()
+    materials = sentinel.materials
+    mock_reservation = MagicMock()
+    ccmm._register_reservation(materials, mock_reservation)
+
+    ccmm.commit_encryption_materials_usage(encryption_materials=materials, plaintext_length=77)
+
+    mock_reservation.commit.assert_called_once_with(77)
+    assert not ccmm.has_open_reservation(materials)
+
+    # A second settle attempt is a no-op because the reservation was consumed.
+    ccmm.release_encryption_materials_usage(materials)
+    mock_reservation.release.assert_not_called()
+
+
+def test_release_encryption_materials_usage_returns_capacity():
+    ccmm = build_ccmm()
+    materials = sentinel.materials
+    mock_reservation = MagicMock()
+    ccmm._register_reservation(materials, mock_reservation)
+
+    ccmm.release_encryption_materials_usage(materials)
+
+    mock_reservation.release.assert_called_once_with()
+    assert not ccmm.has_open_reservation(materials)
+
+
+def test_settle_without_open_reservation_is_safe():
+    ccmm = build_ccmm()
+
+    ccmm.commit_encryption_materials_usage(encryption_materials=sentinel.orphan, plaintext_length=10)
+    ccmm.release_encryption_materials_usage(sentinel.orphan)
 
 
 @pytest.fixture

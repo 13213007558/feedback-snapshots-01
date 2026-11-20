@@ -5,6 +5,8 @@ import abc
 
 import six
 
+from ..exceptions import NotSupportedError
+
 
 @six.add_metaclass(abc.ABCMeta)
 class CryptoMaterialsCache(object):
@@ -55,3 +57,26 @@ class CryptoMaterialsCache(object):
         :rtype: aws_encryption_sdk.caches.CryptoCacheEntry
         :raises CacheKeyError: if no values found in cache for cache_key
         """
+
+    def reserve_encryption_materials(
+        self, cache_key, plaintext_length, max_messages_encrypted, max_bytes_encrypted
+    ):
+        """Reserves capacity on the encryption materials cache entry for ``cache_key``.
+
+        Unlike :meth:`get_encryption_materials`, the usage counters are only provisionally
+        updated: the returned :class:`aws_encryption_sdk.caches.CacheReservation` must be either
+        committed on success or released on cancellation so that the entry's reported usage
+        always matches what was actually processed.
+
+        Caches that cannot coordinate reservations raise :class:`NotSupportedError`; callers
+        are expected to fall back to a non-cached flow in that case.
+
+        :param bytes cache_key: Cache ID for which to reserve capacity
+        :param int plaintext_length: Bytes that the job expects to encrypt
+        :param int max_messages_encrypted: Per-entry message limit to enforce
+        :param int max_bytes_encrypted: Per-entry byte limit to enforce
+        :rtype: aws_encryption_sdk.caches.CacheReservation
+        :raises CacheKeyError: if no live entry exists for cache_key
+        :raises NotSupportedError: if this cache does not support reservations
+        """
+        raise NotSupportedError("This cache does not support encryption materials reservations")

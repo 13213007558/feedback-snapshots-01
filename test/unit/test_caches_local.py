@@ -11,6 +11,7 @@ from pytest_mock import mocker  # noqa pylint: disable=unused-import
 import aws_encryption_sdk.caches.local
 from aws_encryption_sdk.caches.local import _OPPORTUNISTIC_EVICTION_ROUNDS, LocalCryptoMaterialsCache
 from aws_encryption_sdk.exceptions import CacheKeyError, NotSupportedError
+from aws_encryption_sdk.materials_managers import EncryptionMaterials
 
 pytestmark = [pytest.mark.unit, pytest.mark.local]
 
@@ -204,9 +205,9 @@ def test_put_encryption_materials(patch_add_value_to_cache, patch_try_to_evict_s
     patch_crypto_cache_entry.assert_called_once_with(
         cache_key=sentinel.cache_key, value=sentinel.encryption_materials, hints=sentinel.entry_hints
     )
-    patch_crypto_cache_entry.return_value._update_with_message_bytes_encrypted.assert_called_once_with(
-        sentinel.plaintext_length
-    )
+    # New entries start unused: usage is recorded later through the reservation lifecycle,
+    # not at insertion time.
+    assert not patch_crypto_cache_entry.return_value._update_with_message_bytes_encrypted.called
     patch_try_to_evict_some_entries.assert_called_once_with()
     patch_add_value_to_cache.assert_called_once_with(patch_crypto_cache_entry.return_value)
 
@@ -297,6 +298,125 @@ def test_get_encryption_materials(patch_get_single_entry):
     patch_get_single_entry.assert_called_once_with(sentinel.cache_key)
     patch_get_single_entry.return_value._update_with_message_bytes_encrypted.assert_called_once_with(plaintext_length)
     assert test is patch_get_single_entry.return_value
+
+
+def _build_real_cache_with_entry(max_messages_encrypted=10, max_bytes_encrypted=1000):
+    cache = build_lcmc()
+    mock_materials = MagicMock(__class__=EncryptionMaterials)
+    entry = cache.put_encryption_materials(
+        cache_key=b"cache key", encryption_materials=mock_materials, plaintext_length=0
+    )
+    return cache, entry
+
+
+def test_reserve_encryption_materials_grants_and_tracks_capacity():
+    cache, entry = _build_real_cache_with_entry()
+
+    reservation = cache.reserve_encryption_materials(
+        cache_key=b"cache key",
+        plaintext_length=100,
+        max_messages_encrypted=10,
+        max_bytes_encrypted=1000,
+    )
+
+    assert reservation.entry is entry
+    assert reservation.is_open
+    assert entry.messages_reserved == 1
+    assert entry.bytes_reserved == 100
+    # Committed usage is untouched until the reservation is committed.
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+
+
+def test_reserve_encryption_materials_removes_exhausted_entry():
+    cache, entry = _build_real_cache_with_entry()
+    entry.reserve(bytes_to_reserve=900, max_messages_encrypted=10, max_bytes_encrypted=1000)
+
+    with pytest.raises(CacheKeyError):
+        cache.reserve_encryption_materials(
+            cache_key=b"cache key",
+            plaintext_length=200,
+            max_messages_encrypted=10,
+            max_bytes_encrypted=1000,
+        )
+
+    assert b"cache key" not in cache._cache
+    assert not entry.valid
+
+
+def test_reserve_encryption_materials_unknown_key():
+    cache = build_lcmc()
+
+    with pytest.raises(CacheKeyError):
+        cache.reserve_encryption_materials(
+            cache_key=b"cache key",
+            plaintext_length=10,
+            max_messages_encrypted=10,
+            max_bytes_encrypted=1000,
+        )
+
+
+def test_reserve_release_returns_capacity():
+    cache, entry = _build_real_cache_with_entry()
+
+    reservation = cache.reserve_encryption_materials(
+        cache_key=b"cache key",
+        plaintext_length=300,
+        max_messages_encrypted=10,
+        max_bytes_encrypted=1000,
+    )
+    reservation.release()
+
+    assert not reservation.is_open
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+    # Released capacity becomes available again.
+    again = cache.reserve_encryption_materials(
+        cache_key=b"cache key",
+        plaintext_length=1000,
+        max_messages_encrypted=10,
+        max_bytes_encrypted=1000,
+    )
+    assert again.is_open
+
+
+def test_reserve_commit_records_actual_usage():
+    cache, entry = _build_real_cache_with_entry()
+
+    reservation = cache.reserve_encryption_materials(
+        cache_key=b"cache key",
+        plaintext_length=300,
+        max_messages_encrypted=10,
+        max_bytes_encrypted=1000,
+    )
+    reservation.commit(bytes_encrypted=240)
+
+    assert not reservation.is_open
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 240
+
+
+def test_reservation_commit_and_release_are_idempotent():
+    cache, entry = _build_real_cache_with_entry()
+
+    reservation = cache.reserve_encryption_materials(
+        cache_key=b"cache key",
+        plaintext_length=100,
+        max_messages_encrypted=10,
+        max_bytes_encrypted=1000,
+    )
+    reservation.commit(bytes_encrypted=100)
+    reservation.commit(bytes_encrypted=100)
+    reservation.release()
+
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 100
+    assert entry.messages_reserved == 0
+    assert entry.bytes_reserved == 0
 
 
 def test_get_decryption_materials(patch_get_single_entry):

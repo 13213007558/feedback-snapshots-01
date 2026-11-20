@@ -103,6 +103,11 @@ class LocalCryptoMaterialsCache(CryptoMaterialsCache):
     def put_encryption_materials(self, cache_key, encryption_materials, plaintext_length, entry_hints=None):
         """Adds encryption materials to the cache.
 
+        New entries start with zero committed usage and zero outstanding reservations.
+        Usage is recorded exclusively through the reservation lifecycle
+        (:meth:`reserve_encryption_materials` followed by a commit or release), so the
+        ``plaintext_length`` argument is retained for interface compatibility only.
+
         :param bytes cache_key: Identifier for entries in cache
         :param encryption_materials: Encryption materials to add to cache
         :type encryption_materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
@@ -112,7 +117,6 @@ class LocalCryptoMaterialsCache(CryptoMaterialsCache):
         :rtype: aws_encryption_sdk.caches.CryptoMaterialsCacheEntry
         """
         entry = CryptoMaterialsCacheEntry(cache_key=cache_key, value=encryption_materials, hints=entry_hints)
-        entry._update_with_message_bytes_encrypted(plaintext_length)  # pylint: disable=protected-access
         with self._cache_lock:
             self._try_to_evict_some_entries()
             self._add_value_to_cache(entry)
@@ -185,6 +189,34 @@ class LocalCryptoMaterialsCache(CryptoMaterialsCache):
             entry = self._get_single_entry(cache_key)
             entry._update_with_message_bytes_encrypted(plaintext_length)  # pylint: disable=protected-access
             return entry
+
+    def reserve_encryption_materials(
+        self, cache_key, plaintext_length, max_messages_encrypted, max_bytes_encrypted
+    ):
+        """Reserves capacity on the encryption materials entry for ``cache_key`` without recording
+        committed usage. The returned reservation must be committed or released by the caller.
+
+        :param bytes cache_key: Cache ID for which to reserve capacity
+        :param int plaintext_length: Number of plaintext bytes the caller expects to encrypt
+        :param int max_messages_encrypted: Maximum number of messages allowed on this entry
+        :param int max_bytes_encrypted: Maximum number of bytes allowed on this entry
+        :rtype: aws_encryption_sdk.caches.CacheReservation
+        :raises CacheKeyError: if no live entry exists in cache for cache_key
+        """
+        _LOGGER.debug("Reserving encryption materials in cache to encrypt %d bytes.", plaintext_length)
+        with self._cache_lock:
+            entry = self._get_single_entry(cache_key)
+            reservation = entry.reserve(
+                bytes_to_reserve=plaintext_length,
+                max_messages_encrypted=max_messages_encrypted,
+                max_bytes_encrypted=max_bytes_encrypted,
+            )
+            if reservation is None:
+                # The entry is still valid but no longer has enough capacity for this job.
+                # Remove it so the caller creates a fresh entry instead of reusing an exhausted key.
+                self.remove(entry)
+                raise CacheKeyError("Key not found in cache")
+            return reservation
 
     def get_decryption_materials(self, cache_key):
         """Locates exactly one available decryption materials cache entry for the specified cache_key.

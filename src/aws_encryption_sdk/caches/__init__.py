@@ -4,10 +4,12 @@
 
 .. versionadded:: 1.3.0
 """
+import logging
 import time
 from threading import Lock
 
 import attr
+import six
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 
@@ -15,6 +17,8 @@ from ..exceptions import NotSupportedError
 from ..internal.formatting.encryption_context import serialize_encryption_context
 from ..internal.formatting.serialize import serialize_encrypted_data_key
 from ..materials_managers import DecryptionMaterials, EncryptionMaterials
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _new_cache_key_hasher():
@@ -154,6 +158,8 @@ class CryptoMaterialsCacheEntry(object):
         self.creation_time = time.time()
         self.bytes_encrypted = 0
         self.messages_encrypted = 0
+        self.bytes_reserved = 0
+        self.messages_reserved = 0
         self.valid = True
         self._lock = Lock()
 
@@ -198,7 +204,121 @@ class CryptoMaterialsCacheEntry(object):
                 "bytes_encrypted", self.bytes_encrypted + bytes_encrypted
             )
 
+    def reserve(self, bytes_to_reserve, max_messages_encrypted, max_bytes_encrypted):
+        """Reserves capacity on this entry for a new encryption job.
+
+        The check and the counter update happen while holding the entry lock, so concurrent
+        jobs cannot both pass the limit check against the same remaining capacity. Limits are
+        evaluated against the sum of committed usage and outstanding reservations so that
+        in-flight jobs keep counting against the key while they are still running.
+
+        :param int bytes_to_reserve: Number of plaintext bytes the job expects to encrypt
+        :param int max_messages_encrypted: Maximum number of messages allowed on this entry
+        :param int max_bytes_encrypted: Maximum number of bytes allowed on this entry
+        :returns: a reservation handle if capacity was available, otherwise ``None``
+        :rtype: aws_encryption_sdk.caches.CacheReservation
+        """
+        with self._lock:
+            if not self.valid:
+                return None
+            projected_messages = self.messages_encrypted + self.messages_reserved + 1
+            projected_bytes = self.bytes_encrypted + self.bytes_reserved + bytes_to_reserve
+            if projected_messages > max_messages_encrypted or projected_bytes > max_bytes_encrypted:
+                return None
+            super(CryptoMaterialsCacheEntry, self).__setattr__("messages_reserved", self.messages_reserved + 1)
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "bytes_reserved", self.bytes_reserved + bytes_to_reserve
+            )
+            return CacheReservation(
+                entry=self,
+                reserved_bytes=bytes_to_reserve,
+                reserved_messages=1,
+            )
+
+    def commit_reservation(self, reservation, bytes_encrypted):
+        """Converts a reservation into committed usage once a job finishes successfully.
+
+        :param reservation: Reservation previously granted by :meth:`reserve`
+        :type reservation: aws_encryption_sdk.caches.CacheReservation
+        :param int bytes_encrypted: Number of plaintext bytes actually encrypted
+        """
+        with self._lock:
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "bytes_reserved", self.bytes_reserved - reservation.reserved_bytes
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "messages_reserved", self.messages_reserved - reservation.reserved_messages
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "bytes_encrypted", self.bytes_encrypted + bytes_encrypted
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "messages_encrypted", self.messages_encrypted + reservation.reserved_messages
+            )
+
+    def release_reservation(self, reservation):
+        """Returns a reservation's capacity without recording any committed usage.
+
+        Used when a job is cancelled or only reads part of its source before stopping, so
+        capacity that was reserved but never consumed becomes available to other jobs.
+
+        :param reservation: Reservation previously granted by :meth:`reserve`
+        :type reservation: aws_encryption_sdk.caches.CacheReservation
+        """
+        with self._lock:
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "bytes_reserved", self.bytes_reserved - reservation.reserved_bytes
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "messages_reserved", self.messages_reserved - reservation.reserved_messages
+            )
+
     def invalidate(self):
         """Marks a cache entry as invalidated."""
         with self._lock:
             super(CryptoMaterialsCacheEntry, self).__setattr__("valid", False)
+
+
+@attr.s(hash=False)
+class CacheReservation(object):
+    """Handle representing capacity reserved on a :class:`CryptoMaterialsCacheEntry` for one
+    encryption job. Exactly one of :meth:`commit` and :meth:`release` must be invoked for every
+    reservation; the object enforces this by making both operations idempotent.
+
+    :param entry: Cache entry on which capacity was reserved
+    :type entry: aws_encryption_sdk.caches.CryptoMaterialsCacheEntry
+    :param int reserved_bytes: Number of bytes reserved for the job
+    :param int reserved_messages: Number of message uses reserved for the job (always one)
+    """
+
+    entry = attr.ib(validator=attr.validators.instance_of(CryptoMaterialsCacheEntry))
+    reserved_bytes = attr.ib(validator=attr.validators.instance_of(six.integer_types))
+    reserved_messages = attr.ib(validator=attr.validators.instance_of(six.integer_types))
+
+    def __attrs_post_init__(self):
+        """Prepares initial values not handled by attrs."""
+        self._open = True
+
+    @property
+    def is_open(self):
+        """Returns whether this reservation still holds reserved capacity."""
+        return self._open
+
+    def commit(self, bytes_encrypted):
+        """Records the actual usage of a completed job and releases its reservation.
+
+        :param int bytes_encrypted: Number of plaintext bytes actually encrypted
+        """
+        if not self._open:
+            _LOGGER.debug("Ignoring commit on already closed cache reservation")
+            return
+        self.entry.commit_reservation(self, bytes_encrypted)
+        self._open = False
+
+    def release(self):
+        """Cancels the reservation without recording committed usage."""
+        if not self._open:
+            _LOGGER.debug("Ignoring release on already closed cache reservation")
+            return
+        self.entry.release_reservation(self)
+        self._open = False

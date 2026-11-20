@@ -297,8 +297,24 @@ class _EncryptionStream(io.IOBase):
         :rtype: aws_encryption_sdk.structures.MessageHeader
         """
         if not self._message_prepped:
-            self._prep_message()
+            self._prep_message_with_settlement()
         return self._header
+
+    def _prep_message_with_settlement(self):
+        """Runs message setup, settling any reserved materials usage if setup fails.
+
+        Only encryptors that participate in the caching reservation lifecycle define
+        ``_settle_materials_usage``; other streams simply propagate the original exception.
+        """
+        try:
+            self._prep_message()
+        except Exception:
+            settle = getattr(self, "_settle_materials_usage", None)
+            if settle is not None:
+                # Return reserved capacity so the data key is not charged for a message that
+                # was never produced.
+                settle()
+            raise
 
     def __enter__(self):
         """Handles entry to with block."""
@@ -339,7 +355,7 @@ class _EncryptionStream(io.IOBase):
         output = io.BytesIO()
 
         if not self._message_prepped:
-            self._prep_message()
+            self._prep_message_with_settlement()
 
         if self.closed:  # dynamic values confuse pylint: disable=using-constant-test
             raise ValueError("I/O operation on closed file")
@@ -519,6 +535,8 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
         self.__unframed_plaintext_cache = io.BytesIO()
         self.__message_complete = False
+        self._materials_usage_settled = False
+        self._materials_usage_reserved = False
 
     def ciphertext_length(self):
         """Returns the length of the resulting ciphertext message in bytes.
@@ -552,6 +570,10 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         self._encryption_materials = self.config.materials_manager.get_encryption_materials(
             request=encryption_materials_request
         )
+        # The caching CMM reserves capacity against the data key at this point. Unknown-length
+        # requests bypass the cache and therefore do not hold a reservation. The flag is set
+        # immediately so that any later failure in message setup can still release the reservation.
+        self._materials_usage_reserved = self._materials_manager_holds_reservation()
 
         validate_commitment_policy_on_encrypt(self.config.commitment_policy, self._encryption_materials.algorithm)
 
@@ -604,6 +626,15 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         if self.content_type == ContentType.NO_FRAMING:
             self._prep_non_framed()
         self._message_prepped = True
+
+    def _materials_manager_holds_reservation(self):
+        """Returns whether the configured materials manager currently holds an open reservation
+        for the materials of this stream. Non-caching managers never participate.
+        """
+        caching_manager = self.config.materials_manager
+        if not isinstance(caching_manager, aws_encryption_sdk.CachingCryptoMaterialsManager):
+            return False
+        return caching_manager.has_open_reservation(self._encryption_materials)
 
     def generate_header(self, message_id):
         """Generates the header object.
@@ -851,9 +882,29 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
                     )
                 )
 
+    def _settle_materials_usage(self):
+        """Settles any reservation the caching materials manager holds for this stream.
+
+        A fully read message commits the actual plaintext byte count; a stream that stops early
+        (partial read or explicit close before completion) releases the unused reservation so
+        the capacity is not permanently charged to the data key.
+        """
+        if self._materials_usage_settled or not self._materials_usage_reserved:
+            return
+        caching_manager = self.config.materials_manager
+        if self.__message_complete:
+            caching_manager.commit_encryption_materials_usage(
+                encryption_materials=self._encryption_materials,
+                plaintext_length=self._bytes_encrypted,
+            )
+        else:
+            caching_manager.release_encryption_materials_usage(self._encryption_materials)
+        self._materials_usage_settled = True
+
     def close(self):
         """Closes out the stream."""
         _LOGGER.debug("Closing stream")
+        self._settle_materials_usage()
         super(StreamEncryptor, self).close()
 
 
