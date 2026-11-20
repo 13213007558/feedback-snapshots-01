@@ -1,8 +1,15 @@
 from . import caching
 from .callbacks import Callback
 from .compression import available_compressions
+from .connections import (
+    clear_connections,
+    get_connection,
+    register_connection,
+    registered_connections,
+    unregister_connection,
+)
 from .core import get_fs_token_paths, open, open_files, open_local, url_to_fs
-from .exceptions import FSTimeoutError
+from .exceptions import ConnectionNotConfigured, FSTimeoutError
 from .mapping import FSMap, get_mapper
 from .registry import (
     available_protocols,
@@ -20,9 +27,15 @@ except ImportError:
 
 __all__ = [
     "AbstractFileSystem",
+    "ConnectionNotConfigured",
     "FSTimeoutError",
     "FSMap",
     "filesystem",
+    "clear_connections",
+    "get_connection",
+    "register_connection",
+    "registered_connections",
+    "unregister_connection",
     "register_implementation",
     "get_filesystem_class",
     "get_fs_token_paths",

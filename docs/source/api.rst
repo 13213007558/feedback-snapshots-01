@@ -22,6 +22,12 @@ User Functions
 .. autofunction:: fsspec.available_compressions
 .. autofunction:: fsspec.available_protocols
 .. autofunction:: fsspec.filesystem
+.. autofunction:: fsspec.register_connection
+.. autofunction:: fsspec.unregister_connection
+.. autofunction:: fsspec.registered_connections
+.. autofunction:: fsspec.get_connection
+.. autofunction:: fsspec.clear_connections
+.. autoclass:: fsspec.exceptions.ConnectionNotConfigured
 .. autofunction:: fsspec.fuse.run
 .. autofunction:: fsspec.generic.rsync
 .. autofunction:: fsspec.get_filesystem_class

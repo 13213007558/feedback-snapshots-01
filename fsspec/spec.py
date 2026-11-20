@@ -282,6 +282,15 @@ class AbstractFileSystem(metaclass=_Cached):
         return isinstance(other, type(self)) and self._fs_token == other._fs_token
 
     def __reduce__(self):
+        connection = getattr(self, "_connection_name", None)
+        if connection is not None:
+            # The instance came from a process-local named connection.  Send
+            # only the name, so constructor arguments (which may hold
+            # credentials) stay out of the payload; the receiving process
+            # resolves the name against its own configuration.
+            from .connections import _connection_fs
+
+            return _connection_fs, (connection,)
         return make_instance, (type(self), self.storage_args, self.storage_options)
 
     @classmethod

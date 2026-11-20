@@ -38,6 +38,60 @@ the initiation of the context which actually does the work of creating file-like
         # f is now a real file-like object holding resources
         f.read(...)
 
+Named connections and deferred-open objects
+-------------------------------------------
+
+By default an ``OpenFile`` serializes its filesystem, including the storage
+options it was built with.  For backends whose options hold credentials (for
+example a password or a token), that copies sensitive material into every
+pickled payload.  When deferred-open objects are passed between worker
+processes, the receiver should instead use a connection which is configured
+locally, and the payload should carry only a name for it.
+
+Register the connection in each process which is allowed to use it:
+
+.. code-block:: python
+
+    fs = fsspec.filesystem("s3", key="...", secret="...", token="...")
+    fsspec.register_connection("archive-store", fs=fs)
+
+Then create deferred-open objects which refer to the name:
+
+.. code-block:: python
+
+    of = fsspec.open("bucket/data/part-0.parquet", connection="archive-store")
+
+``of.fs`` is the registered filesystem for the current process, but
+``pickle.dumps(of)`` contains only ``"archive-store"`` and the path/mode, not
+the filesystem or its options.  Restoring the object resolves the name against
+the *receiving* process's configuration:
+
+.. code-block:: python
+
+    # runs in a worker
+    fsspec.register_connection("archive-store", fs=fs)
+    of = pickle.loads(payload)  # fs is the worker's own filesystem
+    with of as f:
+        f.read()
+
+If the name is not configured there, unpickling raises
+:class:`fsspec.exceptions.ConnectionNotConfigured`; it does not fall back to
+the producer's filesystem.  A filesystem obtained from a named connection also
+pickles by name, as do file objects which refer to it.
+
+Connections may be registered programmatically with
+:func:`fsspec.register_connection`, or supplied in the ``"connections"`` entry
+of ``fsspec.config.conf`` (and therefore in configuration files or environment
+variables), for example::
+
+    {"connections": {"archive-store": {"protocol": "s3", "storage_options": {
+        "key": "...", "secret": "..."}}}}
+
+Only names are put in pickled payloads; restricted names, filesystems and
+options remain in each process's configuration.  An object which has already
+been opened still reduces to a fresh deferred-open descriptor: it never carries
+live file handles or the filesystem's connection state to the worker.
+
 File Buffering and random access
 --------------------------------
 

@@ -54,7 +54,9 @@ class MemoryFileSystem(AbstractFileSystem):
 
     def __reduce__(self):
         reduced = super().__reduce__()
-        if self.global_store:
+        if self.global_store or self.__dict__.get("_connection_name"):
+            # A named connection is resolved by the receiving process; only
+            # the alias name goes into the payload.
             return reduced
         factory, (cls, args, kwargs) = reduced
         # Restore into a new instance even when the source is cached.

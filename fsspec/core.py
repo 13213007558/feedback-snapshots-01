@@ -30,6 +30,75 @@ from fsspec.utils import (
 logger = logging.getLogger("fsspec")
 
 
+def _connection_paths(fs, urlpath, mode, num=1, name_function=None, expand=True):
+    """Resolve paths for a named connection without creating a second FS."""
+    if isinstance(urlpath, (list, tuple, set)):
+        if not urlpath:
+            raise ValueError("empty urlpath sequence")
+        paths = [fs._strip_protocol(stringify_path(u)) for u in urlpath]
+        if expand:
+            paths = expand_paths_if_needed(paths, mode, num, fs, name_function)
+        else:
+            paths = list(paths)
+    else:
+        path = fs._strip_protocol(stringify_path(urlpath))
+        if ("w" in mode or "x" in mode) and expand:
+            paths = _expand_paths(path, name_function, num)
+        elif "*" in path:
+            paths = [f for f in sorted(fs.glob(path)) if not fs.isdir(f)]
+        else:
+            paths = [path]
+    return paths
+
+
+def _apply_auto_mkdir(fs, paths, mode, auto_mkdir):
+    # Mirrors the historical open_files behaviour for both the URL-based and
+    # named-connection paths.
+    if fs.protocol == "file":
+        fs.auto_mkdir = auto_mkdir
+    elif "r" not in mode and auto_mkdir:
+        parents = {fs._parent(path) for path in paths}
+        for parent in parents:
+            try:
+                fs.makedirs(parent, exist_ok=True)
+            except PermissionError:
+                pass
+
+
+def _openfile_from_fs(fs, path, mode, compression, encoding, errors, newline):
+    """Recreate an ordinary deferred open with the given filesystem"""
+    return OpenFile(
+        fs,
+        path,
+        mode=mode,
+        compression=compression,
+        encoding=encoding,
+        errors=errors,
+        newline=newline,
+    )
+
+
+def _openfile_from_connection(
+    connection, path, mode, compression, encoding, errors, newline
+):
+    """Recreate a deferred open using this process's configured connection"""
+    from fsspec.connections import get_connection
+
+    # Resolve now, so an unconfigured alias raises ConnectionNotConfigured
+    # while unpickling rather than yielding an object which only fails later.
+    fs = get_connection(connection)
+    return OpenFile(
+        fs,
+        path,
+        mode=mode,
+        compression=compression,
+        encoding=encoding,
+        errors=errors,
+        newline=newline,
+        connection=connection,
+    )
+
+
 class OpenFile:
     """
     File-like object to be used in a context
@@ -42,9 +111,10 @@ class OpenFile:
 
     Parameters
     ----------
-    fs: FileSystem
+    fs: FileSystem or None
         The file system to use for opening the file. Should be a subclass or duck-type
-        with ``fsspec.spec.AbstractFileSystem``
+        with ``fsspec.spec.AbstractFileSystem``.  Either this or ``connection``
+        must be given.
     path: str
         Location to open
     mode: str like 'rb', optional
@@ -57,18 +127,40 @@ class OpenFile:
         How to handle encoding errors if opened in text mode.
     newline: None or str
         Passed to TextIOWrapper in text mode, how to handle line endings.
+    connection: str or None
+        Name of a connection configured in the process which will handle this
+        file when it is opened.  When given, the filesystem is looked up by
+        name on restoration instead of being serialized with the object, so
+        credentials are not carried in the payload.
     """
 
     def __init__(
         self,
-        fs,
-        path,
+        fs=None,
+        path=None,
         mode="rb",
         compression=None,
         encoding=None,
         errors=None,
         newline=None,
+        connection=None,
     ):
+        from fsspec.connections import get_connection
+
+        if isinstance(fs, str) and path is None and connection is not None:
+            # Convenience form ``OpenFile("path", connection="name")``
+            fs, path = None, fs
+        if fs is None and connection is None:
+            raise ValueError("Provide fs or connection for the OpenFile")
+        if fs is None:
+            fs = get_connection(connection)
+        elif connection is not None:
+            if connection not in getattr(fs, "_connection_names", ()):
+                raise ValueError(
+                    f"Filesystem is not registered under connection {connection!r}"
+                )
+        else:
+            connection = getattr(fs, "_connection_name", None)
         self.fs = fs
         self.path = path
         self.mode = mode
@@ -76,11 +168,30 @@ class OpenFile:
         self.encoding = encoding
         self.errors = errors
         self.newline = newline
+        self.connection = connection
         self.fobjects = []
 
     def __reduce__(self):
+        # Only the descriptor is serialized, never self.fobjects.  An object
+        # which was opened in this process therefore reduces to a fresh
+        # deferred-open descriptor (for a named connection: a pending alias),
+        # not to a form carrying the live file or its connection state.
+        connection = self.connection or getattr(self.fs, "_connection_name", None)
+        if connection is not None:
+            return (
+                _openfile_from_connection,
+                (
+                    connection,
+                    self.path,
+                    self.mode,
+                    self.compression,
+                    self.encoding,
+                    self.errors,
+                    self.newline,
+                ),
+            )
         return (
-            OpenFile,
+            _openfile_from_fs,
             (
                 self.fs,
                 self.path,
@@ -164,6 +275,11 @@ class OpenFile:
         self.fobjects.clear()
 
 
+def _openfiles_from_descriptors(files, mode, fs):
+    """Rebuild a deferred ``OpenFiles`` without any materialised handles"""
+    return OpenFiles(files, mode=mode, fs=fs)
+
+
 class OpenFiles(list):
     """List of OpenFile instances
 
@@ -229,6 +345,12 @@ class OpenFiles(list):
             return OpenFiles(out, mode=self.mode, fs=self.fs)
         return out
 
+    def __reduce__(self):
+        # ``self.files`` holds handles created by ``__enter__`` (and may still
+        # list them after close).  Never serialize those: a restored object is
+        # always an unopened batch of descriptors.
+        return _openfiles_from_descriptors, (list(self), self.mode, self.fs)
+
     def __repr__(self):
         return f"<List of {len(self)} OpenFile instances>"
 
@@ -245,6 +367,7 @@ def open_files(
     newline=None,
     auto_mkdir=True,
     expand=True,
+    connection=None,
     **kwargs,
 ):
     """Given a path or paths, return a list of ``OpenFile`` objects.
@@ -286,6 +409,13 @@ def open_files(
         If in write mode, this will ensure the target directory exists before
         writing, by calling ``fs.mkdirs(exist_ok=True)``.
     expand: bool
+    connection: str or None
+        Name of a connection configured in the current process (see
+        :func:`fsspec.register_connection`).  When given, the returned
+        ``OpenFile`` objects record only this name; the filesystem is looked
+        up from the *restoring* process's configuration, so connection
+        credentials are not serialized.  The urlpath may be an already
+        stripped backend path.
     **kwargs: dict
         Extra options that make sense to a particular storage connection, e.g.
         host, port, username, password, etc.
@@ -312,24 +442,28 @@ def open_files(
     - For implementations in separate packages see
       https://filesystem-spec.readthedocs.io/en/latest/api.html#other-known-implementations
     """
-    fs, fs_token, paths = get_fs_token_paths(
-        urlpath,
-        mode,
-        num=num,
-        name_function=name_function,
-        storage_options=kwargs,
-        protocol=protocol,
-        expand=expand,
-    )
-    if fs.protocol == "file":
-        fs.auto_mkdir = auto_mkdir
-    elif "r" not in mode and auto_mkdir:
-        parents = {fs._parent(path) for path in paths}
-        for parent in parents:
-            try:
-                fs.makedirs(parent, exist_ok=True)
-            except PermissionError:
-                pass
+    if connection is not None:
+        if protocol is not None or kwargs:
+            raise ValueError(
+                "connection= cannot be combined with protocol or storage_options"
+            )
+        from fsspec.connections import get_connection
+
+        fs = get_connection(connection)
+        paths = _connection_paths(
+            fs, urlpath, mode, num=num, name_function=name_function, expand=expand
+        )
+    else:
+        fs, fs_token, paths = get_fs_token_paths(
+            urlpath,
+            mode,
+            num=num,
+            name_function=name_function,
+            storage_options=kwargs,
+            protocol=protocol,
+            expand=expand,
+        )
+    _apply_auto_mkdir(fs, paths, mode, auto_mkdir)
     return OpenFiles(
         [
             OpenFile(
@@ -340,6 +474,7 @@ def open_files(
                 encoding=encoding,
                 errors=errors,
                 newline=newline,
+                connection=connection,
             )
             for path in paths
         ],
@@ -465,6 +600,7 @@ def open(
     protocol=None,
     newline=None,
     expand=None,
+    connection=None,
     **kwargs,
 ) -> OpenFile:
     """Given a path or paths, return one ``OpenFile`` object.
@@ -496,6 +632,12 @@ def open(
         takes its value from the DEFAULT_EXPAND module variable, which takes
         its initial value from the "open_expand" config value at startup, which will
         be False if not set.
+    connection: str or None
+        Name of a connection configured in the current process (see
+        :func:`fsspec.register_connection`).  The returned ``OpenFile`` records
+        only the name instead of the filesystem, so restoring it in another
+        process uses that process's own configuration rather than serialized
+        credentials.
     **kwargs: dict
         Extra options that make sense to a particular storage connection, e.g.
         host, port, username, password, etc.
@@ -534,6 +676,7 @@ def open(
         protocol=protocol,
         newline=newline,
         expand=expand,
+        connection=connection,
         **kwargs,
     )
     if not out:

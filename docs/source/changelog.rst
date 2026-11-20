@@ -6,6 +6,12 @@ Dev
 
 Enhancements
 
+- Add process-local named connections (``fsspec.register_connection``) and a
+  ``connection=`` option for :func:`fsspec.open` / :func:`fsspec.open_files`.
+  Deferred-open objects and filesystems from a named connection pickle by
+  name only, and resolve that name against the receiving process's
+  configuration, so credentials are not serialized between workers.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 
