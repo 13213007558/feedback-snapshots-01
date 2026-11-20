@@ -24,6 +24,49 @@ drain events from all channels on that connection.
 
         >>> Consumer(conn, accept=['json', 'pickle', 'msgpack', 'yaml'])
 
+Restricting content types per queue
+-----------------------------------
+
+A single consumer subscribing to several queues can allow different content
+types on each of them with the ``accept_by_queue`` argument.  It maps a queue
+name to the formats that queue is allowed to receive; queues without an entry
+keep using the shared ``accept`` list.
+
+This is useful when only one queue is approved for a dedicated (for example
+``pickle``) format while the other department queues must stay on the ordinary
+``json`` and text formats:
+
+.. code-block:: python
+
+    >>> consumer = Consumer(
+    ...     conn,
+    ...     queues=[internal_archive_queue, department_queue],
+    ...     accept=['json', 'text/plain'],
+    ...     accept_by_queue={
+    ...         internal_archive_queue.name: ['json', 'text/plain', 'pickle'],
+    ...     },
+    ... )
+
+By default a message with a content type not allowed for its queue raises
+:class:`~kombu.exceptions.ContentDisallowed`, exactly like the shared
+``accept`` check.  Pass ``reject_content_disallowed=True`` to instead reject
+the offending message without requeue.  The business callbacks are then never
+called for that message and the following messages keep being delivered:
+
+.. code-block:: python
+
+    >>> consumer = Consumer(
+    ...     conn,
+    ...     queues=queues,
+    ...     accept=['json', 'text/plain'],
+    ...     accept_by_queue={internal_archive_queue.name: ['pickle']},
+    ...     reject_content_disallowed=True,
+    ... )
+
+The mapping is keyed by queue name, so the restrictions remain in force after
+a connection loss revives the consumer and when queues are added or removed at
+runtime.
+
 You can create a consumer using a Connection. This consumer is consuming from a single queue with name `'queue'`:
 
 .. code-block:: python

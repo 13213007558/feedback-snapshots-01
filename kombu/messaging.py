@@ -497,6 +497,10 @@ class Consumer:
         on_message (Callable): See :attr:`on_message`
         on_decode_error (Callable): see :attr:`on_decode_error`.
         prefetch_count (int): see :attr:`prefetch_count`.
+        accept_by_queue (Mapping[str, Sequence[str]]): see
+            :attr:`accept_by_queue`.
+        reject_content_disallowed (bool): see
+            :attr:`reject_content_disallowed`.
     """
 
     ContentDisallowed = ContentDisallowed
@@ -561,6 +565,26 @@ class Consumer:
     #: in which case only json is allowed.
     accept = None
 
+    #: Per-queue overrides of :attr:`accept`.
+    #:
+    #: Mapping of queue name to a list of the content-types (or serializer
+    #: aliases) that queue is allowed to receive.  A message is validated
+    #: against the list of the queue it was delivered from; queues without
+    #: an entry fall back to the shared :attr:`accept` list.  The mapping is
+    #: keyed by queue name only, so it stays in effect when the consumer is
+    #: revived after a connection loss or when subscriptions change.
+    accept_by_queue = None
+
+    #: Reject messages whose content-type is not allowed instead of raising.
+    #:
+    #: When enabled, a message that fails the content-type check for its
+    #: queue is discarded via :meth:`~kombu.Message.reject` (without
+    #: requeue), no business callback runs, and consumption continues with
+    #: the following message.  When disabled (the default) the historical
+    #: behavior is kept and :class:`~kombu.exceptions.ContentDisallowed`
+    #: is raised or passed to :attr:`on_decode_error`.
+    reject_content_disallowed = False
+
     #: Initial prefetch count
     #:
     #: If set, the consumer will set the prefetch_count QoS value at startup.
@@ -574,7 +598,8 @@ class Consumer:
 
     def __init__(self, channel, queues=None, no_ack=None, auto_declare=None,
                  callbacks=None, on_decode_error=None, on_message=None,
-                 accept=None, prefetch_count=None, tag_prefix=None):
+                 accept=None, prefetch_count=None, tag_prefix=None,
+                 accept_by_queue=None, reject_content_disallowed=None):
         self.channel = channel
         self.queues = maybe_list(queues or [])
         self.no_ack = self.no_ack if no_ack is None else no_ack
@@ -589,10 +614,49 @@ class Consumer:
         if on_decode_error is not None:
             self.on_decode_error = on_decode_error
         self.accept = prepare_accept_content(accept)
+        self.accept_by_queue = self._prepare_accept_by_queue(accept_by_queue)
+        if reject_content_disallowed is not None:
+            self.reject_content_disallowed = reject_content_disallowed
         self.prefetch_count = prefetch_count
 
         if self.channel:
             self.revive(self.channel)
+
+    @staticmethod
+    def _prepare_accept_by_queue(accept_by_queue):
+        """Normalize an ``{queue: content_types}`` mapping once, up front."""
+        if accept_by_queue is None:
+            return None
+        return {
+            queue_name: prepare_accept_content(content_types)
+            for queue_name, content_types in accept_by_queue.items()
+        }
+
+    def _queue_for_message(self, message):
+        """Return the name of the queue a message was delivered from."""
+        consumer_tag = message.delivery_info.get('consumer_tag')
+        if consumer_tag is not None:
+            for queue_name, active_tag in self._active_tags.items():
+                if active_tag == consumer_tag:
+                    return queue_name
+        return message.delivery_info.get('routing_key')
+
+    def _accept_for_message(self, message):
+        """Resolve the allowed content-types for the message's queue."""
+        if self.accept_by_queue:
+            queue_name = self._queue_for_message(message)
+            queue_accept = self.accept_by_queue.get(queue_name)
+            if queue_accept is not None:
+                return queue_accept
+        return self.accept
+
+    def _reject_disallowed(self, message, exc):
+        """Discard a message with a content-type not allowed for its queue.
+
+        The business callbacks are never invoked; the message is rejected
+        without requeue so the following messages keep being delivered.
+        """
+        message.reject(requeue=False)
 
     @property
     def queues(self):  # noqa
@@ -868,17 +932,24 @@ class Consumer:
         return tag
 
     def _receive_callback(self, message):
-        accept = self.accept
         on_m, channel, decoded = self.on_message, self.channel, None
         try:
             m2p = getattr(channel, 'message_to_python', None)
             if m2p:
                 message = m2p(message)
+            accept = self._accept_for_message(message)
             if accept is not None:
                 message.accept = accept
             if message.errors:
                 return message._reraise_error(self.on_decode_error)
             decoded = None if on_m else message.decode()
+        except ContentDisallowed as exc:
+            if not self.reject_content_disallowed:
+                if not self.on_decode_error:
+                    raise
+                self.on_decode_error(message, exc)
+            else:
+                self._reject_disallowed(message, exc)
         except Exception as exc:
             if not self.on_decode_error:
                 raise

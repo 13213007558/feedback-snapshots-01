@@ -1010,6 +1010,255 @@ class test_Consumer:
         body, message = callback.call_args[0]
         assert body['complex']
 
+    def _isolated_memory_connection(self):
+        # The stock memory transport keeps broker state in class-level
+        # attributes, so give each test its own state to stay independent.
+        class IsolatedChannel(memory.Channel):
+            queues = {}
+
+        class IsolatedTransport(memory.Transport):
+            Channel = IsolatedChannel
+            global_state = virtual.BrokerState()
+
+        return Connection(transport=IsolatedTransport)
+
+    def _per_queue_consumer(self, connection, queues, callback,
+                            reject=True, **kwargs):
+        internal = queues[0].name
+        options = dict(
+            queues=queues,
+            callbacks=[callback],
+            # the two ordinary formats every department queue may use
+            accept=['json', 'text/plain'],
+            # the dedicated pickle format is approved for the internal
+            # archive queue only, on top of the two ordinary formats
+            accept_by_queue={internal: ['json', 'text/plain', 'pickle']},
+            reject_content_disallowed=reject,
+        )
+        options.update(kwargs)
+        return connection.Consumer(**options)
+
+    def _record_rejections(self, consumer, rejected):
+        channel = consumer.channel
+        original_reject = channel.basic_reject
+
+        def record_reject(delivery_tag, requeue=False):
+            rejected.append(requeue)
+            return original_reject(delivery_tag, requeue=requeue)
+
+        channel.basic_reject = record_reject
+        return record_reject
+
+    def test_accept_by_queue_normalizes_to_content_types(self):
+        conn = Connection('memory://')
+        internal = Queue('archive.internal', routing_key='archive.internal')
+        consumer = Consumer(
+            conn, [internal], accept=['json'],
+            accept_by_queue={'archive.internal': ['json', 'pickle']},
+        )
+        assert consumer.accept == {'application/json'}
+        assert consumer.accept_by_queue == {
+            'archive.internal': {
+                'application/json', 'application/x-python-serialize',
+            },
+        }
+        # without the mapping the historical single-list behavior is untouched
+        assert Consumer(conn, [internal]).accept_by_queue is None
+
+    def test_accept_by_queue_delivers_dedicated_format_on_internal_queue(self):
+        conn = self._isolated_memory_connection()
+        exchange = Exchange('archive', 'direct')
+        internal = Queue('archive.internal', exchange, 'archive.internal')
+        general = Queue('archive.general', exchange, 'archive.general')
+        producer = conn.Producer()
+
+        # the two ordinary formats on their respective queues
+        producer.publish({'ok': 'json'}, routing_key='archive.general',
+                         exchange=exchange, declare=[internal, general],
+                         serializer='json')
+        producer.publish('plain text', routing_key='archive.internal',
+                         exchange=exchange)
+        # the dedicated pickle format on the queue approved for it
+        producer.publish({'secret': object()}, routing_key='archive.internal',
+                         exchange=exchange, serializer='pickle')
+
+        callback = Mock(name='business_handler')
+        rejected = []
+        with self._per_queue_consumer(
+                conn, [internal, general], callback) as consumer:
+            self._record_rejections(consumer, rejected)
+            for _ in range(3):
+                conn.drain_events(timeout=1)
+
+        assert rejected == []
+        delivered = [call[0][0] for call in callback.call_args_list]
+        # the virtual transport round-robins the two queues, so assert on
+        # the delivered contents rather than their ordering
+        assert {'ok': 'json'} in delivered
+        assert 'plain text' in delivered
+        assert any(
+            isinstance(body, dict) and body.get('secret') for body in delivered
+        )
+
+    def test_accept_by_queue_rejects_dedicated_format_on_other_queue(self):
+        conn = self._isolated_memory_connection()
+        exchange = Exchange('archive2', 'direct')
+        internal = Queue('archive2.internal', exchange, 'archive2.internal')
+        general = Queue('archive2.general', exchange, 'archive2.general')
+        producer = conn.Producer()
+
+        # forbidden dedicated format first, then ordinary messages that must
+        # still be processed afterwards on both queues
+        producer.publish({'evil': object()}, routing_key='archive2.general',
+                         exchange=exchange, declare=[internal, general],
+                         serializer='pickle')
+        producer.publish({'after': 'json'}, routing_key='archive2.general',
+                         exchange=exchange, serializer='json')
+        producer.publish('after text', routing_key='archive2.general',
+                         exchange=exchange)
+        producer.publish({'internal': object()},
+                         routing_key='archive2.internal', exchange=exchange,
+                         serializer='pickle')
+
+        callback = Mock(name='business_handler')
+        rejected = []
+        with self._per_queue_consumer(
+                conn, [internal, general], callback) as consumer:
+            self._record_rejections(consumer, rejected)
+            for _ in range(4):
+                conn.drain_events(timeout=1)
+
+        # exactly one controlled rejection, discarded rather than requeued
+        assert rejected == [False]
+        delivered = [call[0][0] for call in callback.call_args_list]
+        assert {'evil': object()} not in delivered
+        # the business handler never saw the forbidden payload
+        assert all(
+            not (isinstance(body, dict) and 'evil' in body)
+            for body in delivered
+        )
+        # the following ordinary messages were unaffected
+        assert {'after': 'json'} in delivered
+        assert 'after text' in delivered
+        assert any(
+            isinstance(body, dict) and 'internal' in body for body in delivered
+        )
+
+    def test_accept_by_queue_raises_without_reject_flag(self):
+        conn = self._isolated_memory_connection()
+        exchange = Exchange('archive3', 'direct')
+        internal = Queue('archive3.internal', exchange, 'archive3.internal')
+        general = Queue('archive3.general', exchange, 'archive3.general')
+        producer = conn.Producer()
+        producer.publish(
+            {'evil': object()}, routing_key='archive3.general',
+            exchange=exchange, declare=[internal, general],
+            serializer='pickle',
+        )
+
+        callback = Mock(name='business_handler')
+        with self._per_queue_consumer(
+                conn, [internal, general], callback,
+                reject=False) as consumer:
+            with pytest.raises(consumer.ContentDisallowed):
+                conn.drain_events(timeout=1)
+        callback.assert_not_called()
+
+    def test_accept_by_queue_survives_reconnect(self):
+        revived = []
+
+        class ReconnectingChannel(memory.Channel):
+            queues = {}
+
+        class ReconnectingTransport(memory.Transport):
+            Channel = ReconnectingChannel
+            # isolated broker state for this test
+            global_state = virtual.BrokerState()
+
+        conn = Connection(transport=ReconnectingTransport)
+        exchange = Exchange('archive4', 'direct')
+        internal = Queue('archive4.internal', exchange, 'archive4.internal')
+        general = Queue('archive4.general', exchange, 'archive4.general')
+        producer = conn.Producer()
+        producer.publish({'before': object()}, routing_key='archive4.internal',
+                         exchange=exchange, declare=[internal, general],
+                         serializer='pickle')
+        producer.publish({'blocked': object()}, routing_key='archive4.general',
+                         exchange=exchange, serializer='pickle')
+
+        callback = Mock(name='business_handler')
+        rejected = []
+        consumer = self._per_queue_consumer(
+            conn, [internal, general], callback)
+        with consumer:
+            self._record_rejections(consumer, rejected)
+            conn.drain_events(timeout=1)
+            conn.drain_events(timeout=1)
+
+            # connection loss: the worker revives the same Consumer on a
+            # fresh channel; queue-keyed policy must remain in force
+            new_channel = conn.channel()
+            consumer.revive(new_channel)
+            revived.append(new_channel)
+            assert consumer.accept_by_queue is not None
+            assert consumer.consuming_from('archive4.internal')
+            assert consumer.consuming_from('archive4.general')
+            self._record_rejections(consumer, rejected)
+
+            # dedicated format still allowed internally after reconnect ...
+            producer.publish({'after': object()},
+                             routing_key='archive4.internal',
+                             exchange=exchange, serializer='pickle')
+            # ... and still rejected on the general queue
+            producer.publish({'blocked2': object()},
+                             routing_key='archive4.general',
+                             exchange=exchange, serializer='pickle')
+            producer.publish({'fine': 'json'}, routing_key='archive4.general',
+                             exchange=exchange, serializer='json')
+            for _ in range(3):
+                conn.drain_events(timeout=1)
+
+        assert rejected == [False, False]
+        delivered = [call[0][0] for call in callback.call_args_list]
+        assert any(body.get('before') for body in delivered)
+        assert any(body.get('after') for body in delivered)
+        assert {'fine': 'json'} in delivered
+        assert all(
+            not (isinstance(body, dict) and 'blocked' in body)
+            for body in delivered
+        )
+
+    def test_accept_by_queue_survives_subscription_change(self):
+        conn = self._isolated_memory_connection()
+        exchange = Exchange('archive5', 'direct')
+        internal = Queue('archive5.internal', exchange, 'archive5.internal')
+        general = Queue('archive5.general', exchange, 'archive5.general')
+        callback = Mock(name='business_handler')
+        rejected = []
+        with self._per_queue_consumer(
+                conn, [internal, general], callback) as consumer:
+            consumer.consume()
+            self._record_rejections(consumer, rejected)
+
+            # unsubscribe then resubscribe the general queue
+            consumer.cancel_by_queue(general)
+            assert not consumer.consuming_from('archive5.general')
+            consumer.add_queue(general)
+            consumer.consume()
+            assert consumer.consuming_from('archive5.general')
+
+            producer = conn.Producer()
+            producer.publish({'still': object()},
+                             routing_key='archive5.general',
+                             exchange=exchange, serializer='pickle')
+            conn.drain_events(timeout=1)
+
+        assert rejected == [False]
+        assert all(
+            not (isinstance(body, dict) and 'still' in body)
+            for call in callback.call_args_list for body in [call[0][0]]
+        )
+
     def test_set_no_channel(self):
         c = Consumer(None)
         assert c.channel is None
