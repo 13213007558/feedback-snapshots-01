@@ -41,3 +41,6 @@ $ sigstore --trust-config public.trustconfig.json verify identity ...
 
 This will similarly result in fully offline operation, as the trust
 configuration contains a full trust root.
+
+For a deployment runbook covering trust-material staging, cache layout, and
+proof-class triage, see [Air-gapped Deployment](./air-gapped.md).

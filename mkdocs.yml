@@ -35,6 +35,7 @@ nav:
   - Advanced:
       - Custom Sigstore Instances: advanced/custom_trust.md
       - Offline Verification: advanced/offline.md
+      - Air-gapped Deployment: advanced/air-gapped.md
   # begin-api-section
   - API:
       - api/index.md

@@ -320,7 +320,10 @@ best effort critical bug fixes for the latest 3.6.x release.
    sigstore-python checks for updates to the trusted key material on every
    startup. This can be avoided temporarily with `--offline` but please read the
    [documentation](https://sigstore.github.io/sigstore-python/advanced/offline/)
-   for caveats
+   for caveats. For a deployment checklist that proves which inputs are needed
+   offline, see
+   [Air-gapped Deployment](https://sigstore.github.io/sigstore-python/advanced/air-gapped/)
+   and the `tools/offline_readiness.py` checker.
 1. Signing results in HTTP errors: Signing with sigstore-python depends on multiple
    Sigstore services. Retrying on failure may be a useful workaround if any of
    these services fail but filing issues for specific failures is appreciated
