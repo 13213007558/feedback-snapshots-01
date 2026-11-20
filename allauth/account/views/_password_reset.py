@@ -239,6 +239,12 @@ class CompletePasswordResetView(
         return kwargs
 
     def form_valid(self, form):
+        if self._process.is_password_changed():
+            # The password was changed (e.g. through the security settings)
+            # while this reset was pending. Submitting now would silently undo
+            # that change, so treat the pending reset as expired.
+            self._process.abort()
+            return self.render_to_response(self.get_context_data(token_fail=True))
         form.save()
         resp = self._process.finish()
         if resp:

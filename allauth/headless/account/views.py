@@ -393,6 +393,11 @@ class ResetPasswordView(APIView):
         return ret
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        if self.process and self.process.is_password_changed():
+            # The password was changed while this reset was pending. Completing
+            # now would silently undo that change, so consider the reset stale.
+            self.process.abort()
+            return ConflictResponse(request)
         user = self.input.user
         flows.password_reset.reset_password(user, self.input.cleaned_data["password"])
         if self.process:

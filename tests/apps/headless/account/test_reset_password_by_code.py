@@ -212,3 +212,70 @@ def test_indirect_email_verification_on_post(
     assert resp.status_code == HTTPStatus.UNAUTHORIZED
     address.refresh_from_db()
     assert address.verified
+
+
+def test_password_changed_while_reset_pending(
+    client,
+    user,
+    mailoutbox,
+    user_password,
+    password_factory,
+    headless_reverse,
+    get_last_password_reset_code,
+):
+    """A pending reset-by-code must not undo a password that was changed through
+    the security settings in the meantime.
+    """
+    changed_password = password_factory()
+    reset_password = password_factory()
+
+    resp = client.post(
+        headless_reverse("headless:account:request_password_reset"),
+        data={"email": user.email},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+    code = get_last_password_reset_code(client, mailoutbox)
+
+    other = client.__class__()
+    other.force_login(user)
+    resp = other.post(
+        headless_reverse("headless:account:change_password"),
+        data={
+            "current_password": user_password,
+            "new_password": changed_password,
+        },
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.OK
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+
+    resp = client.post(
+        headless_reverse("headless:account:reset_password"),
+        data={"key": code, "password": reset_password},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.CONFLICT
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+    assert not user.check_password(reset_password)
+
+    # The pending process was dropped: requesting a new reset works as usual.
+    resp = client.post(
+        headless_reverse("headless:account:request_password_reset"),
+        data={"email": user.email},
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+    resp = client.post(
+        headless_reverse("headless:account:reset_password"),
+        data={
+            "key": get_last_password_reset_code(client, mailoutbox),
+            "password": reset_password,
+        },
+        content_type="application/json",
+    )
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+    user.refresh_from_db()
+    assert user.check_password(reset_password)

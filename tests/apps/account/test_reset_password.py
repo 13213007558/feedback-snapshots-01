@@ -4,7 +4,7 @@ from http import HTTPStatus
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core import mail
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.test.utils import override_settings
 from django.urls import reverse, reverse_lazy
 from django.utils.http import urlencode
@@ -358,3 +358,95 @@ def test_reset_password_from_key_next_url(
     resp = client.post(resp["location"], data)
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"] == expected_location
+
+
+@pytest.mark.django_db
+def test_password_changed_while_reset_link_pending(
+    user,
+    client,
+    mailoutbox,
+    user_password,
+    password_factory,
+    password_reset_url,
+):
+    """A reset link that was opened before the user changed the password through
+    the security settings must not overwrite the new password at the time of
+    final submission. The client can then request a new reset as usual.
+    """
+    changed_password = password_factory()
+    reset_password = password_factory()
+
+    client.post(reverse("account_reset_password"), {"email": user.email})
+    assert len(mailoutbox) == 1
+    url = mailoutbox[0].body[
+        mailoutbox[0].body.find("/accounts/password/reset/") :
+    ].split()[0]
+
+    # Follow the link so the key is stashed in the session, then render the
+    # password form.
+    resp = client.get(url)
+    form_url = resp["location"]
+    resp = client.get(form_url)
+    assert "token_fail" not in resp.context_data
+
+    # Meanwhile, the user changes the password in another client.
+    other = Client()
+    other.force_login(user)
+    resp = other.post(
+        reverse("account_change_password"),
+        {
+            "oldpassword": user_password,
+            "password1": changed_password,
+            "password2": changed_password,
+        },
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+
+    # Submitting the pending reset no longer overwrites the new password.
+    resp = client.post(
+        form_url, {"password1": reset_password, "password2": reset_password}
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.context_data["token_fail"]
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+    assert not user.check_password(reset_password)
+
+    # The client can request a new reset, and that one does complete.
+    resp = client.get(password_reset_url(user))
+    form_url = resp["location"]
+    resp = client.post(
+        form_url, {"password1": reset_password, "password2": reset_password}
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_reset_password_from_key_done")
+    user.refresh_from_db()
+    assert user.check_password(reset_password)
+
+
+@pytest.mark.django_db
+def test_password_reset_link_success_with_two_clients(
+    user, client, mailoutbox, password_factory
+):
+    """The emailed reset link can be completed from a different client than the
+    one that requested it, as long as the password was not changed meanwhile.
+    """
+    new_password = password_factory()
+
+    client.post(reverse("account_reset_password"), {"email": user.email})
+    assert len(mailoutbox) == 1
+    url = mailoutbox[0].body[
+        mailoutbox[0].body.find("/accounts/password/reset/") :
+    ].split()[0]
+
+    other = Client()
+    resp = other.get(url)
+    resp = other.post(
+        resp["location"], {"password1": new_password, "password2": new_password}
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_reset_password_from_key_done")
+    user.refresh_from_db()
+    assert user.check_password(new_password)

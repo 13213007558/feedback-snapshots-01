@@ -77,6 +77,12 @@ Users can request a password reset using the
 will be sent containing a reset link pointing to ``PasswordResetFromKeyView``
 view.
 
+A pending reset -- either the reset link, or the reset code, when
+``ACCOUNT_PASSWORD_RESET_BY_CODE_ENABLED`` is enabled -- expires as soon as the
+password is changed while the reset is pending. Submitting the reset after such
+a change does not overwrite the newly set password; users have to request a new
+reset instead.
+
 
 Emails Management
 -----------------

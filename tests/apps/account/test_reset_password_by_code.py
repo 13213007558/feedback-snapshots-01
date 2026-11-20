@@ -1,6 +1,7 @@
 from http import HTTPStatus
 from unittest.mock import patch
 
+from django.test import Client
 from django.urls import reverse
 
 import pytest
@@ -141,3 +142,109 @@ def test_indirect_email_verification(
     assert resp.status_code == HTTPStatus.FOUND
     address.refresh_from_db()
     assert address.verified
+
+
+@pytest.mark.parametrize("code_confirmed_first", [False, True])
+def test_password_changed_while_reset_pending(
+    user,
+    client,
+    mailoutbox,
+    user_password,
+    password_factory,
+    get_last_password_reset_code,
+    code_confirmed_first,
+):
+    """A reset that is pending when the user changes the password through the
+    security settings must not undo that change at the time of final
+    submission. The pending process is dropped, and the client can request a
+    new reset as usual.
+    """
+    changed_password = password_factory()
+    reset_password = password_factory()
+
+    resp = client.post(reverse("account_reset_password"), {"email": user.email})
+    assert resp.status_code == HTTPStatus.FOUND
+    code = get_last_password_reset_code(client, mailoutbox)
+    if code_confirmed_first:
+        # The user already went through the "enter your code" step.
+        resp = client.post(
+            reverse("account_confirm_password_reset_code"), {"code": code}
+        )
+        assert resp.status_code == HTTPStatus.FOUND
+
+    # Meanwhile, the user actively changes the password in another client.
+    other = Client()
+    other.force_login(user)
+    resp = other.post(
+        reverse("account_change_password"),
+        {
+            "oldpassword": user_password,
+            "password1": changed_password,
+            "password2": changed_password,
+        },
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+
+    # The pending reset no longer overwrites the new password.
+    if not code_confirmed_first:
+        resp = client.post(
+            reverse("account_confirm_password_reset_code"), {"code": code}
+        )
+        assert resp.status_code == HTTPStatus.FOUND
+        assert resp["location"] == reverse("account_complete_password_reset")
+    resp = client.post(
+        reverse("account_complete_password_reset"),
+        {"password1": reset_password, "password2": reset_password},
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.context_data["token_fail"]
+    user.refresh_from_db()
+    assert user.check_password(changed_password)
+    assert not user.check_password(reset_password)
+
+    # The client can request a new reset through the normal flow, and that one
+    # does complete.
+    resp = client.post(reverse("account_reset_password"), {"email": user.email})
+    assert resp.status_code == HTTPStatus.FOUND
+    resp = client.post(
+        reverse("account_confirm_password_reset_code"),
+        {"code": get_last_password_reset_code(client, mailoutbox)},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    resp = client.post(
+        reverse("account_complete_password_reset"),
+        {"password1": reset_password, "password2": reset_password},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_password_reset_completed")
+    user.refresh_from_db()
+    assert user.check_password(reset_password)
+
+
+def test_password_reset_code_success_with_two_clients(
+    user, client, mailoutbox, password_factory, get_last_password_reset_code
+):
+    """A reset-by-code completes normally while the user is logged in elsewhere,
+    as long as the password was not changed in the meantime.
+    """
+    new_password = password_factory()
+
+    resp = client.post(reverse("account_reset_password"), {"email": user.email})
+    assert resp.status_code == HTTPStatus.FOUND
+    code = get_last_password_reset_code(client, mailoutbox)
+
+    other = Client()
+    other.force_login(user)
+
+    resp = client.post(reverse("account_confirm_password_reset_code"), {"code": code})
+    assert resp.status_code == HTTPStatus.FOUND
+    resp = client.post(
+        reverse("account_complete_password_reset"),
+        {"password1": new_password, "password2": new_password},
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_password_reset_completed")
+    user.refresh_from_db()
+    assert user.check_password(new_password)

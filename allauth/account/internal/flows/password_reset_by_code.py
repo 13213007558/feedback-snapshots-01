@@ -4,6 +4,7 @@ import time
 
 from django.contrib.auth.base_user import AbstractBaseUser
 from django.http import HttpRequest, HttpResponse
+from django.utils.crypto import constant_time_compare, salted_hmac
 
 from allauth.account import app_settings, signals
 from allauth.account.adapter import get_adapter
@@ -18,6 +19,17 @@ from allauth.account.internal.flows.signup import send_unknown_account_mail
 PASSWORD_RESET_VERIFICATION_SESSION_KEY = (
     "account_password_reset_verification"  # nosec: B105
 )
+
+
+def _create_password_fingerprint(user: AbstractBaseUser) -> str:
+    """
+    Captures the state of the password at the time the reset was initiated, so
+    that the reset can be rejected at the time of final submission in case the
+    password was changed in the meantime (for example, by actively changing
+    it through the security settings while the reset was pending).
+    """
+    key_salt = "allauth.account.internal.flows.password_reset_by_code"
+    return salted_hmac(key_salt, user.password, algorithm="sha256").hexdigest()
 
 
 class PasswordResetVerificationProcess(AbstractCodeVerificationProcess):
@@ -79,11 +91,26 @@ class PasswordResetVerificationProcess(AbstractCodeVerificationProcess):
         }
         adapter.send_mail("account/email/password_reset_code", email, context)
 
+    def is_password_changed(self) -> bool:
+        """
+        Returns whether the password was changed after this reset was initiated.
+        If so, the pending reset must no longer be allowed to complete, as it
+        would silently undo the password that was set in the meantime.
+        """
+        expected = self.state.get("password_fingerprint")
+        user = self.user
+        if not expected or not user:
+            return False
+        current = _create_password_fingerprint(user)
+        return not constant_time_compare(expected, current)
+
     @classmethod
     def initiate(
         cls, *, request: HttpRequest, user: AbstractBaseUser | None, email: str
     ) -> PasswordResetVerificationProcess:
         state = cls.initial_state(user, email)
+        if user:
+            state["password_fingerprint"] = _create_password_fingerprint(user)
         process = PasswordResetVerificationProcess(request, state=state, user=user)
         process.send()
         process.persist()
