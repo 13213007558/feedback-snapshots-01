@@ -16,6 +16,7 @@ from django.db.models import (
     BigIntegerField,
     CharField,
     Count,
+    F,
     ForeignKey,
     IntegerField,
     Manager,
@@ -436,6 +437,96 @@ def get_users_with_perms(
             else:
                 users[user] = sorted(get_user_perms(user, obj))
         return users
+
+
+def get_user_perm_sources(
+    obj: Model,
+    perm: str | Permission,
+    user_queryset: QuerySet | None = None,
+) -> QuerySet:
+    """Get user identifiers holding a given permission for `obj`, attributed to their grant source.
+
+    This is a restricted alternative to `get_users_with_perms` aimed at audit-style
+    listings: it only selects identifier columns (`user_id`, `group_id`) and never
+    fetches `User` (or `Group`) model instances or any of their profile fields.
+
+    Parameters:
+        obj (Model): Instance of a Django `Model`.
+        perm (str | Permission): Permission codename, either plain (`"change_flatpage"`)
+            or prefixed (`"flatpages.change_flatpage"`), or a `Permission` instance.
+        user_queryset (QuerySet): Optional queryset of users restricting the scope
+            of the lookup. Only users matching this queryset are listed. It is used
+            as a subquery, so caller-side restrictions (e.g. `is_active`, tenant
+            membership) are honored without evaluating the queryset.
+
+    Returns:
+        A queryset of dictionaries, one row per grant path, with keys:
+
+            - `user_id`: primary key of the user holding the permission.
+            - `source`: `"direct"` for a direct user object permission,
+              `"group"` for a permission inherited through group membership.
+            - `group_id`: primary key of the group granting the permission,
+              or `None` for direct grants.
+
+        A user granted the same permission through multiple paths (e.g. directly
+        and via a group, or via two groups) appears once per path, so grants stay
+        attributable. The whole lookup is performed in a single SQL query.
+
+    Example:
+        ```shell
+        >>> from guardian.shortcuts import assign_perm, get_user_perm_sources
+        >>> assign_perm('change_flatpage', joe, page)
+        >>> list(get_user_perm_sources(page, 'change_flatpage'))
+        [{'user_id': 1, 'source': 'direct', 'group_id': None}]
+        ```
+    """
+    ctype = get_content_type(obj)
+    perm = _normalize_perm(perm)
+    if isinstance(perm, Permission):
+        perm = perm.codename
+    permission_ids = Permission.objects.filter(content_type=ctype, codename=perm).values("id")
+
+    user_model = get_user_obj_perms_model(obj)
+    if user_model.objects.is_generic():
+        user_filters = {
+            "content_type": ctype,
+            "object_pk": obj.pk,
+        }
+    else:
+        user_filters = {"content_object": obj}
+
+    group_model = get_group_obj_perms_model(obj)
+    group_pk_field = group_model.group.field.target_field
+
+    direct = user_model.objects.filter(permission_id__in=permission_ids, **user_filters).annotate(
+        source=Value("direct", output_field=CharField()),
+        group_id=Value(None, output_field=group_pk_field.__class__()),
+    )
+    if user_queryset is not None:
+        direct = direct.filter(user_id__in=user_queryset.values("pk"))
+    direct = direct.values("user_id", "source", "group_id")
+
+    if group_model.objects.is_generic():
+        group_filters = {
+            "content_type": ctype,
+            "object_pk": obj.pk,
+        }
+    else:
+        group_filters = {"content_object": obj}
+    group_ids = group_model.objects.filter(permission_id__in=permission_ids, **group_filters).values("group_id")
+
+    users = user_queryset if user_queryset is not None else get_user_model().objects.all()
+    via_group = (
+        users.filter(groups__in=group_ids)
+        .annotate(
+            user_id=F("pk"),
+            group_id=F("groups"),
+            source=Value("group", output_field=CharField()),
+        )
+        .values("user_id", "source", "group_id")
+    )
+
+    return direct.union(via_group)
 
 
 def get_groups_with_perms(

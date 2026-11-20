@@ -7,6 +7,7 @@ from guardian.shortcuts import (
     get_groups_with_perms,
     get_objects_for_group,
     get_objects_for_user,
+    get_user_perm_sources,
     get_users_with_perms,
     remove_perm,
 )
@@ -20,6 +21,33 @@ from guardian.testapp.models import (
 from guardian.testapp.tests.conf import skipUnlessTestApp
 
 User = get_user_model()
+
+
+@skipUnlessTestApp
+class TestGetUserPermSourcesDirectRel(TestCase):
+    def setUp(self):
+        self.joe = User.objects.create_user("joe", "joe@example.com", "foobar")
+        self.jane = User.objects.create_user("jane", "jane@example.com", "foobar")
+        self.group = Group.objects.create(name="project-shared")
+        self.joe.groups.add(self.group)
+        self.jane.groups.add(self.group)
+        self.project = Project.objects.create(name="Foobar")
+        assign_perm("change_project", self.joe, self.project)
+        assign_perm("change_project", self.group, self.project)
+
+    def test_direct_rel_model_sources(self):
+        result = get_user_perm_sources(self.project, "change_project")
+        expected = {
+            (self.joe.pk, "direct", None),
+            (self.joe.pk, "group", self.group.pk),
+            (self.jane.pk, "group", self.group.pk),
+        }
+        self.assertEqual({(row["user_id"], row["source"], row["group_id"]) for row in result}, expected)
+
+    def test_direct_rel_model_respects_user_queryset(self):
+        restricted = User.objects.filter(pk=self.joe.pk)
+        result = get_user_perm_sources(self.project, "change_project", user_queryset=restricted)
+        self.assertEqual({row["user_id"] for row in result}, {self.joe.pk})
 
 
 @skipUnlessTestApp

@@ -6,9 +6,11 @@ import django
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.contenttypes.models import ContentType
+from django.db import connection
 from django.db.models import IntegerField, Value
 from django.db.models.query import QuerySet
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 
 from guardian.compat import get_user_permission_full_codename
 from guardian.conf import settings as guardian_settings
@@ -31,6 +33,7 @@ from guardian.shortcuts import (
     get_objects_for_user,
     get_perms,
     get_perms_for_model,
+    get_user_perm_sources,
     get_user_perms,
     get_users_with_perms,
     remove_perm,
@@ -55,8 +58,7 @@ def get_group_content_type(obj):
 def assert_query_does_not_cast_object_pk(testcase, query):
     testcase.assertIsNone(
         re.search(
-            r"(cast\([^)]*\bobject_pk\b[^)]*\))|"
-            r"(\bobject_pk\b::[a-z_][a-z0-9_]*)",
+            r"(cast\([^)]*\bobject_pk\b[^)]*\))|" r"(\bobject_pk\b::[a-z_][a-z0-9_]*)",
             query,
         )
     )
@@ -908,6 +910,86 @@ class GetUsersWithPermsTest(TestCase):
         result = get_users_with_perms(self.obj1, with_group_users=False, with_superusers=True)
         expected = [admin]
         self.assertEqual(set(result), set(expected))
+
+
+class GetUserPermSourcesTest(TestCase):
+    """
+    Tests get_user_perm_sources function.
+    """
+
+    def setUp(self):
+        self.obj = ContentType.objects.create(model="foo", app_label="guardian-tests")
+        self.both = User.objects.create(username="both")
+        self.group_only = User.objects.create(username="group-only")
+        self.direct_only = User.objects.create(username="direct-only")
+        self.outside = User.objects.create(username="outside")
+        self.shared_group = Group.objects.create(name="shared")
+        self.other_group = Group.objects.create(name="other")
+        self.both.groups.add(self.shared_group, self.other_group)
+        self.group_only.groups.add(self.shared_group)
+        self.outside.groups.add(self.shared_group)
+        assign_perm("change_contenttype", self.both, self.obj)
+        assign_perm("change_contenttype", self.direct_only, self.obj)
+        assign_perm("change_contenttype", self.shared_group, self.obj)
+        assign_perm("change_contenttype", self.other_group, self.obj)
+        assign_perm("delete_contenttype", self.group_only, self.obj)
+
+    def _tuples(self, rows):
+        return {(row["user_id"], row["source"], row["group_id"]) for row in rows}
+
+    def test_returns_identifiers_and_sources_without_fetching_user_data(self):
+        restricted = User.objects.filter(pk__in=[self.both.pk, self.group_only.pk, self.direct_only.pk])
+        with CaptureQueriesContext(connection) as captured:
+            result = list(get_user_perm_sources(self.obj, "change_contenttype", user_queryset=restricted))
+        self.assertEqual(len(captured), 1)
+        sql = captured[0]["sql"].lower()
+        self.assertNotIn("username", sql)
+        self.assertNotIn("password", sql)
+        self.assertNotIn("email", sql)
+        self.assertNotIn("auth_group", sql)
+        expected = {
+            (self.both.pk, "direct", None),
+            (self.both.pk, "group", self.shared_group.pk),
+            (self.both.pk, "group", self.other_group.pk),
+            (self.group_only.pk, "group", self.shared_group.pk),
+            (self.direct_only.pk, "direct", None),
+        }
+        self.assertEqual(self._tuples(result), expected)
+
+    def test_multiple_grant_paths_stay_attributable(self):
+        result = get_user_perm_sources(self.obj, "change_contenttype")
+        both_rows = [row for row in result if row["user_id"] == self.both.pk]
+        self.assertEqual(
+            self._tuples(both_rows),
+            {
+                (self.both.pk, "direct", None),
+                (self.both.pk, "group", self.shared_group.pk),
+                (self.both.pk, "group", self.other_group.pk),
+            },
+        )
+
+    def test_respects_user_queryset_restriction(self):
+        unrestricted = get_user_perm_sources(self.obj, "change_contenttype")
+        self.assertIn(self.outside.pk, {row["user_id"] for row in unrestricted})
+
+        restricted = User.objects.exclude(pk=self.outside.pk)
+        result = get_user_perm_sources(self.obj, "change_contenttype", user_queryset=restricted)
+        self.assertNotIn(self.outside.pk, {row["user_id"] for row in result})
+
+    def test_only_requested_permission_is_listed(self):
+        result = get_user_perm_sources(self.obj, "delete_contenttype")
+        self.assertEqual(self._tuples(result), {(self.group_only.pk, "direct", None)})
+
+    def test_accepts_prefixed_codename_and_permission_instance(self):
+        permission = Permission.objects.get(content_type__app_label="contenttypes", codename="change_contenttype")
+        expected = self._tuples(get_user_perm_sources(self.obj, "change_contenttype"))
+        self.assertEqual(self._tuples(get_user_perm_sources(self.obj, "contenttypes.change_contenttype")), expected)
+        self.assertEqual(self._tuples(get_user_perm_sources(self.obj, permission)), expected)
+
+    def test_unknown_permission_returns_empty_queryset(self):
+        result = get_user_perm_sources(self.obj, "nonexistent_permission")
+        self.assertIsInstance(result, QuerySet)
+        self.assertEqual(list(result), [])
 
 
 class GetGroupsWithPerms(TestCase):

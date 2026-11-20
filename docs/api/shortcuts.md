@@ -14,6 +14,8 @@
 
 ::: guardian.shortcuts.get_users_with_perms
 
+::: guardian.shortcuts.get_user_perm_sources
+
 ::: guardian.shortcuts.get_groups_with_perms
 
 ::: guardian.shortcuts.get_objects_for_user
