@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## Unreleased
+* Add `Warden::Manager.on_failed_authentication` hook that yields a sanitized
+  `Warden::FailedAuthenticationEvent` exposing only the failure category and
+  scope, suitable for audit systems. Credentials, strategy messages and the
+  raw Rack env are never exposed; the failure app still receives the strategy
+  message via `env["warden.options"]` as before.
+* Define `Warden::BlockNotGiven`, raised by hook registration methods when no
+  block is given (previously an uninitialized constant).
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)

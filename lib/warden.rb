@@ -3,6 +3,7 @@
 require 'forwardable'
 
 require 'warden/mixins/common'
+require 'warden/failed_authentication_event'
 require 'warden/proxy'
 require 'warden/manager'
 require 'warden/errors'
@@ -12,6 +13,7 @@ require 'warden/strategies/base'
 
 module Warden
   class NotAuthenticated < StandardError; end
+  class BlockNotGiven < StandardError; end
 
   module Test
     autoload :WardenHelpers,  'warden/test/warden_helpers'

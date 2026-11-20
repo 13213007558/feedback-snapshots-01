@@ -118,6 +118,10 @@ module Warden
       proxy  = env['warden']
       result = options[:result] || proxy.result
 
+      _run_callbacks(:on_failed_authentication,
+                     FailedAuthenticationEvent.new(result, options[:scope] || config.default_scope),
+                     :category => result, :scope => options[:scope] || config.default_scope)
+
       case result
       when :redirect
         body = proxy.message || "You are being redirected to #{proxy.headers['Location']}"

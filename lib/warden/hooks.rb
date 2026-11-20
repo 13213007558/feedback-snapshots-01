@@ -118,6 +118,42 @@ module Warden
       @_before_failure ||= []
     end
 
+    # A callback that runs when an authentication attempt has failed and the
+    # request is about to be handled as unauthenticated (failure app, redirect
+    # or custom response).
+    #
+    # Unlike before_failure, this hook does not receive the Rack env or the
+    # authentication options. It only receives a Warden::FailedAuthenticationEvent
+    # exposing the failure category and scope, making it a safe recording point
+    # for audit systems. Credentials, strategy messages and the raw env are
+    # never exposed here. The failure application still receives the strategy
+    # message through env["warden.options"] as usual.
+    #
+    # Parameters:
+    # <options> Some options which specify when the callback should be executed
+    #   scope    - Executes the callback only if it matches the scope(s) given
+    #   category - Executes the callback only if it matches the failure category(ies) given
+    # <block> A block to contain logic for the callback
+    #   Block Parameters: |event|
+    #     event - A Warden::FailedAuthenticationEvent with only #category and #scope
+    #
+    # Example:
+    #   Warden::Manager.on_failed_authentication do |event|
+    #     AuditLog.record(event.to_h) # => { :category => :failure, :scope => :default }
+    #   end
+    #
+    # :api: public
+    def on_failed_authentication(options = {}, method = :push, &block)
+      raise BlockNotGiven unless block_given?
+      _on_failed_authentication.send(method, [block, options])
+    end
+
+    # Provides access to the callback array for on_failed_authentication
+    # :api: private
+    def _on_failed_authentication
+      @_on_failed_authentication ||= []
+    end
+
     # A callback that runs if no user could be fetched, meaning there is now no user logged in.
     #
     # Parameters:
@@ -201,7 +237,7 @@ module Warden
 
     # Add prepend filters version
     %w(after_set_user after_authentication after_fetch on_request
-       before_failure before_logout).each do |filter|
+       before_failure on_failed_authentication before_logout).each do |filter|
       class_eval <<-METHOD, __FILE__, __LINE__ + 1
         def prepend_#{filter}(options={}, &block)
           #{filter}(options, :unshift, &block)
