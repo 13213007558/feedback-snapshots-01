@@ -72,6 +72,27 @@ class UserProfile(models.Model):
         return f"Profile for {self.user.username}"
 
 
+# Parent/child pair for testing two-layer inline admin permissions.
+class Archive(models.Model):
+    """Parent record whose attachments may be maintained by another team."""
+
+    name = models.CharField(max_length=128)
+
+    def __str__(self):
+        return self.name
+
+
+class ArchiveAttachment(models.Model):
+    """Child of :class:`Archive`, used to exercise per-object inline grants."""
+
+    archive = models.ForeignKey(Archive, on_delete=models.CASCADE, related_name="attachments")
+    title = models.CharField(max_length=128)
+    body = models.TextField(blank=True)
+
+    def __str__(self):
+        return self.title
+
+
 class MixedGroupObjectPermission(GroupObjectPermissionBase):
     content_object = models.ForeignKey("Mixed", on_delete=models.CASCADE)
 

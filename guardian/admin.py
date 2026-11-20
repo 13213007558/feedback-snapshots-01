@@ -1,11 +1,13 @@
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from django import VERSION, forms
 from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin.widgets import FilteredSelectMultiple
 from django.contrib.auth import get_user_model
+from django.forms.formsets import DELETION_FIELD_NAME
+from django.forms.models import _get_foreign_key
 from django.http import HttpRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import path, reverse
@@ -24,11 +26,183 @@ from guardian.shortcuts import (
 from guardian.utils import get_group_obj_perms_model
 
 
+class GuardedInlineFormSet(forms.BaseInlineFormSet):
+    """Inline formset that applies the declared parent and child permissions.
+
+    Django decides inline permissions once for the whole section, and a
+    view-only row is protected only by rendering its fields as disabled. A
+    crafted POST can still submit values for those rows. This formset keeps
+    both permission layers in the loop for every row: it hides children the
+    user may not view, locks the fields of children the user may not change or
+    delete, and re-checks the layers again while saving, so a denied edit never
+    reaches the database while allowed edits still save normally.
+    """
+
+    guarded_inline = None
+    guarded_request = None
+    guarded_parent = None
+
+    def _guard(self):
+        inline = self.guarded_inline
+        if inline is None or self.guarded_request is None:
+            return None
+        if not inline.has_declared_permissions():
+            return None
+        return inline
+
+    def _unfiltered_children(self):
+        queryset = self.model._default_manager.all()
+        parent = self.guarded_parent
+        if parent is not None and parent.pk is not None:
+            queryset = queryset.filter(**{self.fk.name: parent})
+        return queryset
+
+    def _existing_object(self, pk):
+        obj = super()._existing_object(pk)
+        if obj is not None or self._guard() is None:
+            return obj
+        # The submitted primary key may belong to a child hidden from this
+        # user. Resolve it anyway so the form is handled as an edit of that
+        # object and the save-time check can deny it, instead of treating the
+        # payload as a brand new child.
+        return self._unfiltered_children().filter(pk=pk).first()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        inline = self._guard()
+        if inline is None:
+            return queryset
+        return inline.filter_permitted_children(self.guarded_request, ("view", "change"), queryset)
+
+    def add_fields(self, form, index):
+        super().add_fields(form, index)
+        inline = self._guard()
+        if inline is None:
+            return
+        child = form.instance
+        is_new = child is None or child.pk is None or child._state.adding
+        action = "add" if is_new else "change"
+        if not self._allowed(action, None if is_new else child):
+            self._lock_form(form, is_new=is_new)
+        elif not is_new and not self._allowed("delete", child):
+            self._lock_deletion(form)
+
+    def _lock_form(self, form, is_new):
+        protected = {self.model._meta.pk.name, self.fk.name, self._pk_field.name}
+        for name, field in form.fields.items():
+            if name not in protected:
+                field.disabled = True
+        self._lock_deletion(form)
+
+    @staticmethod
+    def _lock_deletion(form):
+        deletion_field = form.fields.get(DELETION_FIELD_NAME)
+        if deletion_field is not None:
+            deletion_field.disabled = True
+
+    def _allowed(self, action, child):
+        inline = self._guard()
+        if inline is None:
+            return True
+        if not inline.has_parent_permission(self.guarded_request, self.guarded_parent, action):
+            return False
+        return inline.has_child_permission(action, self.guarded_request, self.guarded_parent, child)
+
+    def save_existing_objects(self, commit=True):
+        if self._guard() is None or not self.initial_forms:
+            return super().save_existing_objects(commit=commit)
+
+        saved_instances = []
+        self.changed_objects = []
+        self.deleted_objects = []
+        forms_to_delete = self.deleted_forms
+        for form in self.initial_forms:
+            obj = form.instance
+            if obj is None or not obj._is_pk_set() or obj._state.adding:
+                continue
+            if form in forms_to_delete:
+                if self._allowed("delete", obj):
+                    self.deleted_objects.append(obj)
+                    self.delete_existing(obj, commit=commit)
+            elif form.has_changed() and self._allowed("change", obj):
+                self.changed_objects.append((obj, form.changed_data))
+                saved_instances.append(self.save_existing(form, obj, commit=commit))
+                if not commit:
+                    self.saved_forms.append(form)
+        return saved_instances
+
+    def save_new_objects(self, commit=True):
+        if self._guard() is None:
+            return super().save_new_objects(commit=commit)
+        self.new_objects = []
+        for form in self.extra_forms:
+            if not form.has_changed():
+                continue
+            if self.can_delete and self._should_delete_form(form):
+                continue
+            existing = self._posted_existing_child(form)
+            if existing is not None:
+                # A row beyond INITIAL_FORMS can still carry the primary key of
+                # an existing child. Treat it as an edit, never as a new child.
+                if self._allowed("change", existing):
+                    self.changed_objects.append((existing, form.changed_data))
+                    saved = self.save_existing(form, existing, commit=commit)
+                    if not commit:
+                        self.saved_forms.append(form)
+                    self.new_objects.append(saved)
+                continue
+            if not self._allowed("add", None):
+                continue
+            self.new_objects.append(self.save_new(form, commit=commit))
+            if not commit:
+                self.saved_forms.append(form)
+        return self.new_objects
+
+    def _posted_existing_child(self, form):
+        """Return an existing child referenced by a posted primary key, if any."""
+        posted_pk = form.data.get(form.add_prefix(self._pk_field.name))
+        if not posted_pk:
+            return None
+        try:
+            return self._unfiltered_children().filter(pk=posted_pk).first()
+        except (TypeError, ValueError):
+            return None
+
+
 class GuardedInlineAdminMixin:
     """Mixin for Django admin inline classes to work with Guardian permissions.
 
     This mixin provides the necessary permission checking methods that Django's
     inline admin forms expect, integrating with Guardian's object-level permissions.
+
+    Inlines often sit on a parent record owned by a different team, so being
+    allowed to change the parent does not imply being allowed to change every
+    inline child. Declare both layers explicitly to model that:
+
+        class AttachmentInline(GuardedInlineAdminMixin, admin.StackedInline):
+            model = Attachment
+            parent_permissions = {
+                "view": "records.view_record",
+                "change": "records.change_record",
+            }
+            child_permissions = {
+                "view": "records.view_attachment",
+                "change": "records.change_attachment",
+                "delete": "records.delete_attachment",
+                "add": "records.add_attachment",
+            }
+
+    ``parent_permissions`` is checked against the parent instance.
+    ``child_permissions`` is checked against each child instance, so a user may
+    edit one attachment and not another. Admin users who may only view still
+    see the children they were granted, rendered without editable fields;
+    children outside their view grants are omitted from the page. The same two
+    layers are checked again when the inline formset is saved, so a crafted
+    POST cannot write a child the user is not allowed to change or delete.
+
+    Leave both mappings empty to keep the historical behaviour, where the
+    inline model's default ``<action>_<model_name>`` permission is checked
+    against the object supplied by Django.
 
     Usage:
         class MyInline(GuardedInlineAdminMixin, admin.StackedInline):
@@ -38,57 +212,130 @@ class GuardedInlineAdminMixin:
             inlines = [MyInline]
     """
 
+    #: Permissions required on the parent object, keyed by action
+    #: (``add``, ``view``, ``change``, ``delete``). Actions missing from the
+    #: mapping are not checked at the parent layer.
+    parent_permissions: Mapping[str, str] = {}
+    #: Permissions required on each child object, keyed by action. Actions
+    #: missing from the mapping fall back to the inline model's default
+    #: ``<action>_<model_name>`` permission.
+    child_permissions: Mapping[str, str] = {}
+
+    def has_declared_permissions(self):
+        """Return whether either permission layer was declared explicitly."""
+        return bool(self.parent_permissions or self.child_permissions)
+
+    def _default_permission(self, action):
+        opts = self.model._meta
+        return f"{opts.app_label}.{action}_{opts.model_name}"
+
+    def get_parent_permission(self, action):
+        """Return the permission string required on the parent for ``action``."""
+        return self.parent_permissions.get(action)
+
+    def get_child_permission(self, action):
+        """Return the permission string required on a child for ``action``."""
+        return self.child_permissions.get(action) or self._default_permission(action)
+
+    def has_parent_permission(self, request, obj, action):
+        """Return whether the user passes the parent layer for ``action``."""
+        permission = self.get_parent_permission(action)
+        if permission is None:
+            return True
+        if obj is None:
+            return request.user.has_perm(permission)
+        return request.user.has_perm(permission, obj)
+
+    def has_child_permission(self, action, request, obj, child=None):
+        """Return whether the user passes the child layer for ``action``.
+
+        ``obj`` is the parent instance the inline is attached to. ``child`` is
+        the concrete child for a per-object check; pass ``None`` to ask whether
+        the user can act on any child of this inline.
+        """
+        permission = self.get_child_permission(action)
+        if child is not None:
+            return request.user.has_perm(permission, child)
+        if request.user.has_perm(permission):
+            return True
+        return self._has_any_child_permission(request, action, obj)
+
+    def _has_any_child_permission(self, request, action, obj):
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return False
+        cache = getattr(request, "_guarded_inline_child_cache", None)
+        if cache is None:
+            cache = {}
+            request._guarded_inline_child_cache = cache
+        key = (action, id(self), getattr(obj, "pk", None))
+        if key not in cache:
+            queryset = self.model._default_manager.all()
+            if obj is not None:
+                fk = _get_foreign_key(self.parent_model, self.model, fk_name=self.fk_name)
+                queryset = queryset.filter(**{fk.name: obj})
+            cache[key] = self.filter_permitted_children(request, (action,), queryset).exists()
+        return cache[key]
+
+    def filter_permitted_children(self, request, actions, queryset):
+        """Return the subset of ``queryset`` the user may act on."""
+        permissions = []
+        for action in actions:
+            permission = self.get_child_permission(action)
+            if permission is not None:
+                permissions.append(permission)
+        if not permissions:
+            return queryset
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return queryset.none()
+        if user.is_superuser:
+            return queryset
+        return get_objects_for_user(
+            user,
+            permissions,
+            klass=queryset,
+            any_perm=True,
+            accept_global_perms=True,
+        )
+
+    def _has_permission(self, action, request, obj):
+        if not self.has_declared_permissions():
+            permission = self._default_permission(action)
+            if obj is None:
+                return request.user.has_perm(permission)
+            return request.user.has_perm(permission, obj)
+        return self.has_parent_permission(request, obj, action) and self.has_child_permission(
+            action, request, obj, None
+        )
+
     def has_add_permission(self, request, obj=None):
         """Check if the user has permission to add instances of this inline model."""
-        opts = self.model._meta
-        codename = f"add_{opts.model_name}"
-        perm = f"{opts.app_label}.{codename}"
-
-        if obj is None:
-            # For global permissions when obj is None
-            return request.user.has_perm(perm)
-        else:
-            # For object-level permissions
-            return request.user.has_perm(perm, obj)
+        return self._has_permission("add", request, obj)
 
     def has_view_permission(self, request, obj=None):
         """Check if the user has permission to view instances of this inline model."""
-        opts = self.model._meta
-        codename = f"view_{opts.model_name}"
-        perm = f"{opts.app_label}.{codename}"
-
-        if obj is None:
-            # For global permissions when obj is None
-            return request.user.has_perm(perm)
-        else:
-            # For object-level permissions
-            return request.user.has_perm(perm, obj)
+        return self._has_permission("view", request, obj)
 
     def has_change_permission(self, request, obj=None):
         """Check if the user has permission to change instances of this inline model."""
-        opts = self.model._meta
-        codename = f"change_{opts.model_name}"
-        perm = f"{opts.app_label}.{codename}"
-
-        if obj is None:
-            # For global permissions when obj is None
-            return request.user.has_perm(perm)
-        else:
-            # For object-level permissions
-            return request.user.has_perm(perm, obj)
+        return self._has_permission("change", request, obj)
 
     def has_delete_permission(self, request, obj=None):
         """Check if the user has permission to delete instances of this inline model."""
-        opts = self.model._meta
-        codename = f"delete_{opts.model_name}"
-        perm = f"{opts.app_label}.{codename}"
+        return self._has_permission("delete", request, obj)
 
-        if obj is None:
-            # For global permissions when obj is None
-            return request.user.has_perm(perm)
-        else:
-            # For object-level permissions
-            return request.user.has_perm(perm, obj)
+    def get_formset(self, request, obj=None, **kwargs):
+        """Return an inline formset that applies both permission layers."""
+        formset = super().get_formset(request, obj, **kwargs)
+
+        class GuardedFormSet(GuardedInlineFormSet, formset):
+            pass
+
+        GuardedFormSet.guarded_inline = self
+        GuardedFormSet.guarded_request = request
+        GuardedFormSet.guarded_parent = obj
+        return GuardedFormSet
 
 
 class AdminUserObjectPermissionsForm(UserObjectPermissionsForm):

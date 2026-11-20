@@ -188,6 +188,51 @@ These methods integrate with Guardian's object-level permissions system. When `o
 is provided, they check for object-level permissions. When `obj` is `None`, they
 check for global permissions.
 
+### Declaring Parent and Child Permissions
+
+An inline usually hangs off a parent record that another team owns. Being
+allowed to change the parent should not by itself allow changing every child,
+and different children may belong to different owners. Declare the two layers
+explicitly with `parent_permissions` and `child_permissions`:
+
+``` python
+class ArchiveAttachmentInline(GuardedInlineAdminMixin, admin.StackedInline):
+    model = ArchiveAttachment
+    extra = 0
+    parent_permissions = {
+        "view": "records.view_archive",
+        "change": "records.change_archive",
+    }
+    child_permissions = {
+        "view": "records.view_archiveattachment",
+        "change": "records.change_archiveattachment",
+        "delete": "records.delete_archiveattachment",
+        "add": "records.add_archiveattachment",
+    }
+```
+
+- `parent_permissions` is checked against the parent instance. An action that
+  is missing from the mapping is not checked at the parent layer.
+- `child_permissions` is checked against each child instance, so a user may be
+  allowed to edit one attachment and not another. An action that is missing
+  falls back to the inline model's default `<action>_<model_name>` permission.
+- The inline is rendered when the user holds either the `view` or `change`
+  child permission on at least one child of the parent. Children outside the
+  user's `view` grant are omitted from the page; children the user may view but
+  not change are rendered read-only.
+
+Both layers are checked again when the inline formset is saved. Django enables
+view-only inline rows by rendering their widgets as disabled, but a crafted
+`POST` can still carry values for them, so the save path filters the children
+through the same parent and child checks: a child the user may not change or
+delete is skipped instead of written, and a child the user may not add is not
+created. Authorized edits in the same submission still save.
+
+The admin's own change view still gates the parent first, so the user also
+needs Django's model-level view/change permission for the parent model to reach
+the page at all. `parent_permissions` then narrows that further per parent
+object.
+
 ### Supported Inline Types
 
 The mixin works with both types of Django admin inline classes:
@@ -210,6 +255,8 @@ class UserPhoneTabularInline(GuardedInlineAdminMixin, admin.TabularInline):
 - **Global permissions**: When no specific object is provided, checks global model permissions
 - **Object-level permissions**: When a parent object is provided, checks permissions on that specific object
 - **Permission isolation**: Users only see inline forms for objects they have appropriate permissions for
+- **Two layers**: When declared, `parent_permissions` and `child_permissions` are checked
+  independently, on render and again on save
 
 !!! tip
     The inline permission checks are performed in the context of the parent object.

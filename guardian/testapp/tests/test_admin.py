@@ -20,7 +20,7 @@ from guardian.admin import GuardedInlineAdminMixin, GuardedModelAdmin, Reinforce
 from guardian.models import Group
 from guardian.shortcuts import assign_perm, get_perms, get_perms_for_model, remove_perm
 from guardian.testapp.models import LogEntryWithGroup as LogEntry
-from guardian.testapp.models import Post, Project, UserProfile
+from guardian.testapp.models import Archive, ArchiveAttachment, Post, Project, UserProfile
 from guardian.testapp.tests.conf import skipUnlessTestApp
 
 User = get_user_model()
@@ -56,6 +56,31 @@ try:
 except admin.sites.NotRegistered:
     pass
 admin.site.register(Post, ReinforcedGuardedModelAdmin)
+
+
+class ArchiveAttachmentInline(GuardedInlineAdminMixin, admin.StackedInline):
+    """Inline guarded by explicit parent and child permissions."""
+
+    model = ArchiveAttachment
+    extra = 0
+    parent_permissions = {"view": "testapp.view_archive", "change": "testapp.change_archive"}
+    child_permissions = {
+        "view": "testapp.view_archiveattachment",
+        "change": "testapp.change_archiveattachment",
+        "delete": "testapp.delete_archiveattachment",
+        "add": "testapp.add_archiveattachment",
+    }
+
+
+class ArchiveAdmin(GuardedModelAdmin):
+    inlines = [ArchiveAttachmentInline]
+
+
+try:
+    admin.site.unregister(Archive)
+except admin.sites.NotRegistered:
+    pass
+admin.site.register(Archive, ArchiveAdmin)
 
 
 class AdminTests(TestCase):
@@ -1060,3 +1085,236 @@ class GuardedInlineAdminMixinTests(TestCase):
         self.assertFalse(inline.has_change_permission(request, other_profile))
         self.assertFalse(inline.has_add_permission(request, other_profile))
         self.assertFalse(inline.has_delete_permission(request, other_profile))
+
+
+@unittest.skipUnless("django.contrib.admin" in settings.INSTALLED_APPS, "django.contrib.admin must be installed")
+class GuardedInlineParentChildPermissionTests(TestCase):
+    """Two-layer inline delegation exercised through the admin test site."""
+
+    def setUp(self):
+        self.superuser = User.objects.create_superuser("root", "root@example.com", "root")
+        self.staff = User.objects.create_user("editor", "editor@example.com", "editor", is_staff=True)
+        self.viewer = User.objects.create_user("watcher", "watcher@example.com", "watcher", is_staff=True)
+
+        self.archive = Archive.objects.create(name="Budget 2026")
+        self.editable = ArchiveAttachment.objects.create(
+            archive=self.archive, title="Editable attachment", body="original"
+        )
+        self.readonly = ArchiveAttachment.objects.create(
+            archive=self.archive, title="Other team's attachment", body="untouchable"
+        )
+
+        # Both staff users may see the parent archive; the editor may change it.
+        # The object grants satisfy the inline's declared parent layer, while
+        # the global grants let Django's own change view run at all.
+        for user in (self.staff, self.viewer):
+            assign_perm("testapp.view_archive", user, self.archive)
+            user.user_permissions.add(
+                Permission.objects.get(content_type__app_label="testapp", codename="view_archive")
+            )
+        assign_perm("testapp.change_archive", self.staff, self.archive)
+        self.staff.user_permissions.add(
+            Permission.objects.get(content_type__app_label="testapp", codename="change_archive")
+        )
+
+        # The editor may only change/delete the editable attachment.
+        assign_perm("testapp.view_archiveattachment", self.staff, self.editable)
+        assign_perm("testapp.change_archiveattachment", self.staff, self.editable)
+        assign_perm("testapp.delete_archiveattachment", self.staff, self.editable)
+
+        # The viewer may only view the editable attachment.
+        assign_perm("testapp.view_archiveattachment", self.viewer, self.editable)
+
+        self.change_url = reverse("admin:testapp_archive_change", args=[self.archive.pk])
+        self.client = Client()
+
+    def tearDown(self):
+        self.client.logout()
+
+    def _login(self, username, password):
+        self.assertTrue(self.client.login(username=username, password=password))
+
+    def _change_payload(self, **overrides):
+        payload = {
+            "name": self.archive.name,
+            "attachments-TOTAL_FORMS": "2",
+            "attachments-INITIAL_FORMS": "2",
+            "attachments-MIN_NUM_FORMS": "0",
+            "attachments-MAX_NUM_FORMS": "1000",
+            f"attachments-0-id": str(self.editable.pk),
+            f"attachments-0-archive": str(self.archive.pk),
+            "attachments-0-title": self.editable.title,
+            "attachments-0-body": self.editable.body,
+            f"attachments-1-id": str(self.readonly.pk),
+            f"attachments-1-archive": str(self.archive.pk),
+            "attachments-1-title": self.readonly.title,
+            "attachments-1-body": self.readonly.body,
+            "_save": "Save",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_viewer_can_read_permitted_attachment_but_not_others(self):
+        self._login("watcher", "watcher")
+        response = self.client.get(self.change_url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn("Editable attachment", content)
+        self.assertNotIn("Other team&#x27;s attachment", content)
+
+    def test_viewer_sees_readonly_permitted_attachment(self):
+        self._login("watcher", "watcher")
+        response = self.client.get(self.change_url)
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        self.assertIn("Editable attachment", html)
+        # The permitted child is shown as a read-only row, with no editable
+        # body input, and the ungranted child is not rendered at all.
+        self.assertIn('<div class="readonly">original</div>', html)
+        self.assertNotIn('name="attachments-0-body"', html)
+        self.assertNotIn("Other team&#x27;s attachment", html)
+
+    def test_submission_cannot_change_ungranted_child(self):
+        self._login("editor", "editor")
+        response = self.client.get(self.change_url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn("Editable attachment", content)
+        self.assertNotIn("Other team&#x27;s attachment", content)
+
+        response = self.client.post(
+            self.change_url,
+            self._change_payload(
+                **{
+                    "attachments-0-body": "updated by owner team",
+                    "attachments-1-body": "tampered by other team",
+                }
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+
+        self.editable.refresh_from_db()
+        self.readonly.refresh_from_db()
+        self.assertEqual(self.editable.body, "updated by owner team")
+        self.assertEqual(self.readonly.body, "untouchable")
+
+    def test_submission_cannot_create_child_without_child_permission(self):
+        self._login("editor", "editor")
+        response = self.client.post(
+            self.change_url,
+            {
+                "name": self.archive.name,
+                "attachments-TOTAL_FORMS": "3",
+                "attachments-INITIAL_FORMS": "1",
+                "attachments-MIN_NUM_FORMS": "0",
+                "attachments-MAX_NUM_FORMS": "1000",
+                f"attachments-0-id": str(self.editable.pk),
+                f"attachments-0-archive": str(self.archive.pk),
+                "attachments-0-title": self.editable.title,
+                "attachments-0-body": self.editable.body,
+                f"attachments-1-id": str(self.readonly.pk),
+                f"attachments-1-archive": str(self.archive.pk),
+                "attachments-1-title": self.readonly.title,
+                "attachments-1-body": self.readonly.body,
+                "attachments-2-archive": str(self.archive.pk),
+                "attachments-2-title": "Injected attachment",
+                "attachments-2-body": "should not be saved",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ArchiveAttachment.objects.filter(title="Injected attachment").exists())
+
+    def test_extra_row_cannot_edit_hidden_child(self):
+        self._login("editor", "editor")
+        response = self.client.post(
+            self.change_url,
+            {
+                "name": self.archive.name,
+                "attachments-TOTAL_FORMS": "3",
+                "attachments-INITIAL_FORMS": "1",
+                "attachments-MIN_NUM_FORMS": "0",
+                "attachments-MAX_NUM_FORMS": "1000",
+                f"attachments-0-id": str(self.editable.pk),
+                f"attachments-0-archive": str(self.archive.pk),
+                "attachments-0-title": self.editable.title,
+                "attachments-0-body": self.editable.body,
+                f"attachments-1-id": str(self.readonly.pk),
+                f"attachments-1-archive": str(self.archive.pk),
+                "attachments-1-title": self.readonly.title,
+                "attachments-1-body": "hidden child tampered",
+                f"attachments-2-id": str(self.readonly.pk),
+                f"attachments-2-archive": str(self.archive.pk),
+                "attachments-2-title": self.readonly.title,
+                "attachments-2-body": "tampered via extra row",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.readonly.refresh_from_db()
+        self.assertEqual(self.readonly.body, "untouchable")
+
+    def test_submission_cannot_delete_ungranted_child(self):
+        self._login("editor", "editor")
+        response = self.client.post(
+            self.change_url,
+            self._change_payload(**{"attachments-1-DELETE": "on"}),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(ArchiveAttachment.objects.filter(pk=self.readonly.pk).exists())
+        self.assertTrue(ArchiveAttachment.objects.filter(pk=self.editable.pk).exists())
+
+    def test_authorized_delete_is_saved(self):
+        self._login("editor", "editor")
+        response = self.client.post(
+            self.change_url,
+            self._change_payload(**{"attachments-0-DELETE": "on"}),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ArchiveAttachment.objects.filter(pk=self.editable.pk).exists())
+        self.assertTrue(ArchiveAttachment.objects.filter(pk=self.readonly.pk).exists())
+
+    def test_child_without_child_grant_is_not_changed(self):
+        parentless = User.objects.create_user("parentless", "parentless@example.com", "parentless", is_staff=True)
+        assign_perm("testapp.view_archive", parentless, self.archive)
+        assign_perm("testapp.change_archive", parentless, self.archive)
+        for codename in ("view_archive", "change_archive"):
+            parentless.user_permissions.add(
+                Permission.objects.get(content_type__app_label="testapp", codename=codename)
+            )
+
+        self._login("parentless", "parentless")
+        response = self.client.get(self.change_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Editable attachment", response.content.decode())
+
+        response = self.client.post(
+            self.change_url,
+            self._change_payload(**{"attachments-0-body": "no child grant"}),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.editable.refresh_from_db()
+        self.assertEqual(self.editable.body, "original")
+
+    def test_parent_layer_uses_object_permission(self):
+        inline = ArchiveAttachmentInline(Archive, admin.site)
+        request = HttpRequest()
+        user = User.objects.create_user("parentonly", "parentonly@example.com", "parentonly")
+        request.user = user
+        self.assertFalse(inline.has_parent_permission(request, self.archive, "change"))
+        assign_perm("testapp.change_archive", user, self.archive)
+        self.assertTrue(inline.has_parent_permission(request, self.archive, "change"))
+        other = Archive.objects.create(name="Other archive")
+        self.assertFalse(inline.has_parent_permission(request, other, "change"))
+
+    def test_declared_layers_are_independent(self):
+        inline = ArchiveAttachmentInline(Archive, admin.site)
+        request = HttpRequest()
+        request.user = self.viewer
+
+        self.assertTrue(inline.has_parent_permission(request, self.archive, "view"))
+        self.assertFalse(inline.has_parent_permission(request, self.archive, "change"))
+        self.assertTrue(inline.has_child_permission("view", request, self.archive, self.editable))
+        self.assertFalse(inline.has_child_permission("view", request, self.archive, self.readonly))
+        self.assertFalse(inline.has_change_permission(request, self.archive))
+        self.assertTrue(inline.has_view_permission(request, self.archive))
