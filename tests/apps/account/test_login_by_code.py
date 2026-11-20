@@ -23,6 +23,16 @@ def get_expected_login_code():
 
 
 @pytest.fixture
+def get_login_code_state():
+    def f(client):
+        return client.session[LOGIN_SESSION_KEY]["state"]["stages"][
+            LoginByCodeStage.key
+        ]["data"]
+
+    return f
+
+
+@pytest.fixture
 def request_login_by_code(mailoutbox, get_expected_login_code):
     def f(client, email):
         resp = client.get(f"{reverse('account_request_login_code')}?next=/foo")
@@ -99,6 +109,152 @@ def test_login_by_code_resend_uses_new_code(
     resp = client.post(reverse("account_confirm_login_code"), data={"code": new_code})
     assert resp.status_code == HTTPStatus.FOUND
     assert resp["location"] == settings.LOGIN_REDIRECT_URL
+
+
+def test_login_by_code_resend_keeps_attempts_and_replaces_code(
+    client,
+    user,
+    mailoutbox,
+    settings,
+    get_expected_login_code,
+    get_login_code_state,
+):
+    settings.ACCOUNT_LOGIN_BY_CODE_MAX_ATTEMPTS = 3
+    settings.ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND = 2
+    settings.ACCOUNT_LOGIN_BY_CODE_TIMEOUT = 10
+    confirm_url = reverse("account_confirm_login_code")
+    time_path = "allauth.account.internal.flows.code_verification.time.time"
+    with patch(time_path) as now:
+        # Issue the first code at t=1000.
+        now.return_value = 1000
+        resp = client.post(reverse("account_request_login_code"), {"email": user.email})
+        assert resp.status_code == HTTPStatus.FOUND
+        assert len(mailoutbox) == 1
+        first_code = get_expected_login_code(client)
+        assert first_code in mailoutbox[0].body
+        state = get_login_code_state(client)
+        assert state["failed_attempts"] == 0
+        assert state["resend_count"] == 0
+        assert state["code_generation"] == 1
+
+        # One wrong attempt: 2 of 3 attempts remain, no resend is consumed.
+        now.return_value = 1001
+        resp = client.post(confirm_url, data={"code": "wrong"})
+        assert resp.status_code == HTTPStatus.OK
+        state = get_login_code_state(client)
+        assert get_expected_login_code(client) == first_code
+        assert state["failed_attempts"] == 1
+        assert state["resend_count"] == 0
+        assert len(mailoutbox) == 1
+
+        # Resend after the first code expired: the code is replaced and gets a
+        # fresh validity window, while the attempt budget is untouched and only
+        # the resend budget is consumed.
+        now.return_value = 1011
+        resp = client.post(confirm_url, data={"action": "resend"})
+        assert resp.status_code == HTTPStatus.FOUND
+        assert resp["location"] == confirm_url
+        assert len(mailoutbox) == 2
+        state = get_login_code_state(client)
+        second_code = get_expected_login_code(client)
+        assert second_code != first_code
+        assert second_code in mailoutbox[1].body
+        assert state["failed_attempts"] == 1
+        assert state["resend_count"] == 1
+        assert state["code_generation"] == 2
+        assert state["at"] == 1011
+
+        # The replaced (old) code is no longer accepted.
+        now.return_value = 1012
+        resp = client.post(confirm_url, data={"code": first_code})
+        assert resp.status_code == HTTPStatus.OK
+        state = get_login_code_state(client)
+        assert state["failed_attempts"] == 2
+        assert state["resend_count"] == 1
+
+        # The fresh code still completes the login, using the shared budget.
+        resp = client.post(confirm_url, data={"code": second_code})
+        assert resp.status_code == HTTPStatus.FOUND
+        assert resp["location"] == settings.LOGIN_REDIRECT_URL
+        assert LOGIN_SESSION_KEY not in client.session
+
+
+def test_login_by_code_resend_after_timeout(
+    client, user, mailoutbox, settings, get_expected_login_code, get_login_code_state
+):
+    settings.ACCOUNT_LOGIN_BY_CODE_MAX_ATTEMPTS = 3
+    settings.ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND = 2
+    settings.ACCOUNT_LOGIN_BY_CODE_TIMEOUT = 10
+    confirm_url = reverse("account_confirm_login_code")
+    time_path = "allauth.account.internal.flows.code_verification.time.time"
+    with patch(time_path) as now:
+        now.return_value = 1000
+        resp = client.post(reverse("account_request_login_code"), {"email": user.email})
+        assert resp.status_code == HTTPStatus.FOUND
+        first_code = get_expected_login_code(client)
+
+        now.return_value = 1001
+        resp = client.post(confirm_url, data={"code": "wrong"})
+        assert resp.status_code == HTTPStatus.OK
+
+        # The first code has timed out, but the process can still be revived by
+        # requesting a new code, without restoring the spent attempt.
+        now.return_value = 1011
+        resp = client.post(confirm_url, data={"action": "resend"})
+        assert resp.status_code == HTTPStatus.FOUND
+        assert len(mailoutbox) == 2
+        state = get_login_code_state(client)
+        second_code = get_expected_login_code(client)
+        assert second_code != first_code
+        assert state["at"] == 1011
+        assert state["failed_attempts"] == 1
+        assert state["resend_count"] == 1
+
+        # The timed out code is rejected and consumes another attempt.
+        now.return_value = 1012
+        resp = client.post(confirm_url, data={"code": first_code})
+        assert resp.status_code == HTTPStatus.OK
+        state = get_login_code_state(client)
+        assert state["failed_attempts"] == 2
+
+        # The code issued by the resend logs the user in.
+        resp = client.post(confirm_url, data={"code": second_code})
+        assert resp.status_code == HTTPStatus.FOUND
+        assert resp["location"] == settings.LOGIN_REDIRECT_URL
+        assert LOGIN_SESSION_KEY not in client.session
+
+
+def test_login_by_code_resend_does_not_reset_attempts(
+    client, user, mailoutbox, settings, get_expected_login_code
+):
+    settings.ACCOUNT_LOGIN_BY_CODE_MAX_ATTEMPTS = 2
+    settings.ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND = 2
+    confirm_url = reverse("account_confirm_login_code")
+    resp = client.post(reverse("account_request_login_code"), {"email": user.email})
+    assert resp.status_code == HTTPStatus.FOUND
+
+    # First wrong attempt: one attempt left.
+    resp = client.post(confirm_url, data={"code": "wrong"})
+    assert resp.status_code == HTTPStatus.OK
+    assert LOGIN_SESSION_KEY in client.session
+
+    # Resending consumes the resend budget, not the attempt budget.
+    resp = client.post(confirm_url, data={"action": "resend"})
+    assert resp.status_code == HTTPStatus.FOUND
+    assert len(mailoutbox) == 2
+    new_code = get_expected_login_code(client)
+
+    # The new code does not come with a fresh attempt budget: the next wrong
+    # entry exhausts the login and the pending login state is cleared.
+    resp = client.post(confirm_url, data={"code": "wrong"})
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_request_login_code")
+    assert LOGIN_SESSION_KEY not in client.session
+
+    # The code that was issued before the budget ran out is no longer usable.
+    resp = client.post(confirm_url, data={"code": new_code})
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp["location"] == reverse("account_request_login_code")
 
 
 def test_login_by_code_max_attempts(client, user, request_login_by_code, settings):

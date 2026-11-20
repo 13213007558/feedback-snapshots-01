@@ -143,7 +143,8 @@ class ConfirmLoginCodeView(BaseConfirmAuthenticationCodeView):
     ) -> HttpResponseBase:
         self.stage = request._login_stage  # type:ignore[attr-defined]
         self._process = flows.login_by_code.LoginCodeVerificationProcess.resume(
-            self.stage
+            self.stage,
+            allow_expired_resend=request.POST.get("action") == "resend",
         )
         if not self._process:
             return HttpResponseRedirect(reverse(_login_by_code_urlname()))

@@ -95,7 +95,9 @@ class ResendLoginCodeView(APIView):
         process = None
         stage = LoginStageController.enter(request, LoginStageKey.LOGIN_BY_CODE)
         if stage:
-            process = flows.login_by_code.LoginCodeVerificationProcess.resume(stage)
+            process = flows.login_by_code.LoginCodeVerificationProcess.resume(
+                stage, allow_expired_resend=True
+            )
         if not process or not process.can_resend:
             return ConflictResponse(request)
         try:

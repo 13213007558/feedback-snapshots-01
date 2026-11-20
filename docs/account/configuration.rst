@@ -110,7 +110,8 @@ Login
 
 ``ACCOUNT_LOGIN_BY_CODE_MAX_ATTEMPTS`` (default: ``3``)
   This setting controls the maximum number of attempts the user has at inputting
-  a valid code.
+  a valid code. The attempts are shared by all codes issued for the same login
+  attempt: requesting a new code does not restore the attempts already used.
 
 ``ACCOUNT_LOGIN_BY_CODE_REQUIRED`` (default: ``False``)
   When enabled (in case of ``True``), every user logging in is required to input
@@ -119,7 +120,10 @@ Login
   for which login codes are required.
 
 ``ACCOUNT_LOGIN_BY_CODE_SUPPORTS_RESEND`` (default: ``False``)
-  Whether or not the user can request a new login code.
+  Whether or not the user can request a new login code. The number of resends
+  and the number of remaining code entry attempts are tracked independently:
+  requesting a new code invalidates the previous code and starts a new validity
+  window, but does not reset the attempts already used.
 
 ``ACCOUNT_LOGIN_BY_CODE_TIMEOUT`` (default: ``180``)
   The code that is emailed has a limited life span. It expires this many seconds after

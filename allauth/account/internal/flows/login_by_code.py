@@ -95,6 +95,11 @@ class LoginCodeVerificationProcess(BaseConfirmAuthenticationCodeProcess):
         return process
 
     @classmethod
-    def resume(cls, stage):
+    def resume(cls, stage, *, allow_expired_resend: bool = False):
         process = LoginCodeVerificationProcess(stage=stage)
+        if allow_expired_resend and process.state and process.can_resend:
+            # An expired code can still be replaced by a new one, as long as
+            # the resend quota allows it. The attempt budget (if any) remains
+            # shared with the new code.
+            return process
         return process.abort_if_invalid()

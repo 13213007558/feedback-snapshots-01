@@ -16,6 +16,14 @@ class BaseConfirmAuthenticationCodeProcess(AbstractCodeVerificationProcess):
     stage: Any
     reauthentication: bool = False
 
+    @property
+    def resend_quota(self) -> int:
+        return app_settings.LOGIN_BY_CODE_MAX_RESEND_COUNT
+
+    @property
+    def resends_left(self) -> int:
+        return max(self.resend_quota - self.resend_count, 0)
+
     def send(self, skip_enumeration_mails: bool = False) -> None:
         email = self.state.get("email")
         phone = self.state.get("phone")
@@ -25,6 +33,13 @@ class BaseConfirmAuthenticationCodeProcess(AbstractCodeVerificationProcess):
             self.send_by_phone(phone, skip_enumeration_mails=skip_enumeration_mails)
         else:
             raise ValueError()
+
+    def _ensure_code(self) -> str:
+        # Generate a code only if none was issued yet, so that sending never
+        # silently replaces a code that was just generated (e.g. on resend).
+        if not self.code:
+            return self.generate_code()
+        return self.code
 
     def generate_code(self) -> str:
         email = self.state.get("email")
@@ -40,12 +55,13 @@ class BaseConfirmAuthenticationCodeProcess(AbstractCodeVerificationProcess):
         else:
             raise ValueError()
         self.state["code"] = code
+        self.record_code_generated()
         return code
 
     def send_by_phone(self, phone: str, skip_enumeration_mails: bool = False) -> None:
         adapter = get_adapter()
         if self.user:
-            code = self.generate_code()
+            code = self._ensure_code()
             adapter.send_verification_code_sms(
                 user=self.user,
                 phone=phone,
@@ -62,7 +78,7 @@ class BaseConfirmAuthenticationCodeProcess(AbstractCodeVerificationProcess):
     def send_by_email(self, email: str, skip_enumeration_mails: bool = False) -> None:
         adapter = get_adapter()
         if self.user:
-            code = self.generate_code()
+            code = self._ensure_code()
             context = {
                 "request": self.request,
                 "code": code,
@@ -92,11 +108,12 @@ class BaseConfirmAuthenticationCodeProcess(AbstractCodeVerificationProcess):
 
     @property
     def can_resend(self) -> bool:
-        return not self.is_resend_quota_reached(
-            app_settings.LOGIN_BY_CODE_MAX_RESEND_COUNT
-        )
+        return self.resends_left > 0
 
     def resend(self) -> None:
+        # A resend replaces the code and starts a new validity window. The
+        # attempt budget is shared across all codes for this process and must
+        # not be reset here.
         self.generate_code()
         self.send(skip_enumeration_mails=True)
         self.record_resend()

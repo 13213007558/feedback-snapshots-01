@@ -38,6 +38,40 @@ class AbstractCodeVerificationProcess(abc.ABC):
     def code(self) -> str:
         return self.state.get("code", "")
 
+    @property
+    def failed_attempts(self) -> int:
+        """The number of incorrect codes entered for this process."""
+        return self.state["failed_attempts"]
+
+    @property
+    def attempts_left(self) -> int:
+        """The number of attempts left at entering the code for this process."""
+        return max(self.max_attempts - self.failed_attempts, 0)
+
+    @property
+    def resend_count(self) -> int:
+        """The number of times a new code was sent for this same process."""
+        return self.state["resend_count"]
+
+    @property
+    def code_generation(self) -> int:
+        """Identifies the current code.
+
+        It increments every time a fresh code is issued for this process, so a
+        replacement (resend) is distinguishable from the code it replaced.
+        """
+        return self.state.get("code_generation", 0)
+
+    def record_code_generated(self) -> None:
+        """Marks that a fresh code was issued.
+
+        The new code replaces the previous one and starts a new validity
+        window. The attempt budget is intentionally left untouched: it is
+        shared by all codes issued for this process.
+        """
+        self.state["code_generation"] = self.code_generation + 1
+        self.state["at"] = time.time()
+
     @classmethod
     def initial_state(
         cls,
