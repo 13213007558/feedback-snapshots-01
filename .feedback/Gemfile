@@ -1,0 +1,7 @@
+source 'https://rubygems.org'
+ruby '>= 3.3', '< 4'
+gem 'devise-two-factor', path: '..'
+gem 'rspec'
+gem 'activerecord', '~> 7.2.0'
+gem 'sqlite3', '~> 2.0'
+gem 'simplecov'
