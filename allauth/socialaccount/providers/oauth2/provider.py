@@ -22,6 +22,11 @@ class OAuth2Provider(Provider):
 
     def get_login_url(self, request: HttpRequest, **kwargs):
         url = reverse(f"{self.id}_login")
+        if self.uses_apps and self.app:
+            # Multiple app configurations can exist for one and the same
+            # provider. Record which one is being used so that the flow is not
+            # ambiguous from the start.
+            kwargs.setdefault("client_id", self.app.client_id)
         if kwargs:
             url = f"{url}?{urlencode(kwargs)}"
         return url

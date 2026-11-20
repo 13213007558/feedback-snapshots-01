@@ -55,7 +55,11 @@ def callback(request: HttpRequest):
         app = provider.app
         login = draugiem_complete_login(request, app, request.GET["dr_auth_code"])
         login.state = statekit.unstash_last_state(
-            request, provider_id=provider.sub_id, raises=True
+            request,
+            provider_id=provider.sub_id,
+            app_id=provider.app_id,
+            unique=True,
+            raises=True,
         )
 
         ret = complete_social_login(request, login)

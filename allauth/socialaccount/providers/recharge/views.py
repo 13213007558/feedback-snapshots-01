@@ -92,13 +92,19 @@ class RechargeOAuth2Adapter(OAuth2Adapter):
 
 
 class RechargeOAuth2CallbackView(OAuth2CallbackView):
+    def _state_matches_callback(self, state: dict) -> bool:
+        # Recharge does not round-trip a `state` parameter, so the store
+        # domain echoed on the callback is the one-time binding between this
+        # callback and the login that initiated it. Only match the pending
+        # state that was stashed for that same store.
+        expected_domain = state.get("store_domain")
+        return bool(expected_domain) and expected_domain == get_store_domain(
+            self.request.GET
+        )
+
     def _get_state(self, request: HttpRequest, provider):
         state, resp = super()._get_state(request, provider)
         if state is not None:
-            # Recharge does not round-trip a `state` parameter, so the store
-            # domain echoed on the callback is the one-time binding between
-            # this callback and the login that initiated it. Reject callbacks
-            # for a different store than the state was stashed for.
             expected_domain = state.get("store_domain")
             if expected_domain and expected_domain != get_store_domain(request.GET):
                 return None, render_authentication_error(

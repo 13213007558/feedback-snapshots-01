@@ -99,3 +99,9 @@ browser redirect flow as hidden::
 Hidden apps remain available when selected explicitly by client ID, but are not
 offered as browser login options. There must be exactly one non-hidden app for a
 browser redirect flow to select.
+
+Pending authorization states remember which app configuration initiated the
+flow. When several apps share one and the same provider, a callback is completed
+using the credentials and endpoints of that same app -- also when other flows
+are pending at the same time. A callback that cannot be matched to exactly one
+pending state is rejected without consuming the state of any other flow.

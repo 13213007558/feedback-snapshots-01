@@ -157,7 +157,11 @@ class OpenIDCallbackView(View):
         if response.status == consumer.SUCCESS:
             login = provider.sociallogin_from_response(request, response)
             login.state = statekit.unstash_last_state(
-                request, provider_id=provider.sub_id, raises=True
+                request,
+                provider_id=provider.sub_id,
+                app_id=provider.app_id,
+                unique=True,
+                raises=True,
             )
             return self.complete_login(login)
         else:

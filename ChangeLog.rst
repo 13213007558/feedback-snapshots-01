@@ -1,3 +1,17 @@
+65.22.2 (unreleased)
+********************
+
+Fixes
+-----
+
+- socialaccount: Pending authorization states now record the app ("connector")
+  configuration that initiated the flow. Callbacks continue with that same
+  configuration, which matters when multiple apps are configured for one and
+  the same provider. Cancelled callbacks, and callbacks that cannot uniquely be
+  matched to a pending flow, no longer consume another flow's state. Expired
+  states are reclaimed.
+
+
 65.22.1 (2026-11-13)
 ********************
 

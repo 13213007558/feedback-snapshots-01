@@ -38,8 +38,15 @@ def on_authentication_error(
         if state is None:
             state_id = extra_context.get("state_id")
             if state_id:
+                # The provider here is derived from the callback URL, which
+                # does not necessarily identify the app configuration that
+                # initiated the flow. Only (conservatively) match the app of
+                # the state when it is known.
                 state = statekit.unstash_state(
-                    request, provider_id=provider.sub_id, state_id=state_id
+                    request,
+                    provider_id=provider.sub_id,
+                    app_id=statekit.get_state_app_id(request, state_id=state_id),
+                    state_id=state_id,
                 )
     params = {"error": error}
     if state is not None:

@@ -243,6 +243,17 @@ class Provider:
             pkg = cls.__module__.rpartition(".")[0]
         return pkg
 
+    @property
+    def app_id(self) -> str | None:
+        """Identifies the app ("connector") configuration this provider
+        instance was created for, if any. Multiple app configurations can
+        exist for one and the same (sub)provider ID -- the app ID is what
+        distinguishes them.
+        """
+        if not self.uses_apps:
+            return None
+        return self.app.client_id or None
+
     def stash_redirect_state(
         self,
         request: HttpRequest,
@@ -263,13 +274,18 @@ class Provider:
         return statekit.stash_state(
             request,
             provider_id=self.sub_id,
+            app_id=self.app_id,
             state=state,
             state_id=state_id,
         )
 
     def unstash_redirect_state(self, request: HttpRequest, state_id):
         return statekit.unstash_state(
-            request, provider_id=self.sub_id, state_id=state_id, raises=True
+            request,
+            provider_id=self.sub_id,
+            app_id=self.app_id,
+            state_id=state_id,
+            raises=True,
         )
 
     @property

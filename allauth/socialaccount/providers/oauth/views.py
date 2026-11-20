@@ -120,7 +120,11 @@ class OAuthCallbackView(OAuthView):
             )
             login.token = token
             login.state = statekit.unstash_last_state(
-                request, provider_id=provider.sub_id, raises=True
+                request,
+                provider_id=provider.sub_id,
+                app_id=provider.app_id,
+                unique=True,
+                raises=True,
             )
             return complete_social_login(request, login)
         except OAuthError as e:
