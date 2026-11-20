@@ -7,7 +7,7 @@ import pytest
 import six
 from mock import MagicMock, patch
 
-from aws_encryption_sdk import CommitmentPolicy
+from aws_encryption_sdk import AlgorithmSuiteStage, CommitmentPolicy
 from aws_encryption_sdk.internal.defaults import ALGORITHM, FRAME_LENGTH, LINE_LENGTH
 from aws_encryption_sdk.key_providers.base import MasterKeyProvider, MasterKeyProviderConfig
 from aws_encryption_sdk.materials_managers.base import CryptoMaterialsManager
@@ -136,6 +136,17 @@ def test_client_config_defaults():
     assert test.source_length is None
     assert test.line_length == LINE_LENGTH
     assert test.max_encrypted_data_keys is None
+    assert test.algorithm_suite_stage is None
+
+
+def test_client_config_accepts_algorithm_suite_stage():
+    test = _ClientConfig(algorithm_suite_stage=AlgorithmSuiteStage.READ_LEGACY_WRITE_COMMITTED, **BASE_KWARGS)
+    assert test.algorithm_suite_stage is AlgorithmSuiteStage.READ_LEGACY_WRITE_COMMITTED
+
+
+def test_client_config_rejects_unknown_algorithm_suite_stage():
+    with pytest.raises(TypeError):
+        _ClientConfig(algorithm_suite_stage="read-legacy-write-committed", **BASE_KWARGS)
 
 
 @pytest.mark.skipif(not HAS_MPL, reason="Test should only be executed with MPL in installation")

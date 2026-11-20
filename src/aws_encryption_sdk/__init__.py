@@ -6,6 +6,11 @@ import warnings
 
 import attr
 
+from aws_encryption_sdk.algorithm_suite_policy import (  # noqa
+    ALGORITHM_SUITE_STAGE_CONFIGS,
+    AlgorithmSuiteStage,
+    AlgorithmSuiteStageConfig,
+)
 from aws_encryption_sdk.caches.local import LocalCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.caches.null import NullCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.compatability import _warn_deprecated_python
@@ -38,6 +43,8 @@ class EncryptionSDKClientConfig(object):
     :param max_encrypted_data_keys: The maximum number of encrypted data keys to allow during
     encryption and decryption
     :type max_encrypted_data_keys: None or positive int
+    :param algorithm_suite_stage: Staged algorithm suite policy to enforce for writes and reads (optional)
+    :type algorithm_suite_stage: aws_encryption_sdk.algorithm_suite_policy.AlgorithmSuiteStage
     """
 
     commitment_policy = attr.ib(
@@ -47,6 +54,11 @@ class EncryptionSDKClientConfig(object):
     )
     max_encrypted_data_keys = attr.ib(
         hash=True, validator=attr.validators.optional(attr.validators.instance_of(int)), default=None
+    )
+    algorithm_suite_stage = attr.ib(
+        hash=True,
+        default=None,
+        validator=attr.validators.optional(attr.validators.instance_of(AlgorithmSuiteStage)),
     )
 
     def __attrs_post_init__(self):
@@ -75,7 +87,7 @@ class EncryptionSDKClient(object):
         Copy relevant StreamEncryptor/StreamDecryptor configuration from `self.config` into `kwargs`,
         raising and exception if the keys already exist in `kwargs`.
         """
-        for key in ("commitment_policy", "max_encrypted_data_keys"):
+        for key in ("commitment_policy", "max_encrypted_data_keys", "algorithm_suite_stage"):
             if key in kwargs_dict:
                 warnings.warn(
                     "Invalid keyword argument '{key}' passed to {callee}. "
@@ -85,6 +97,7 @@ class EncryptionSDKClient(object):
                 )
         kwargs_dict["commitment_policy"] = self.config.commitment_policy
         kwargs_dict["max_encrypted_data_keys"] = self.config.max_encrypted_data_keys
+        kwargs_dict["algorithm_suite_stage"] = self.config.algorithm_suite_stage
 
     def encrypt(self, **kwargs):
         """Encrypts and serializes provided plaintext.

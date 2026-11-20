@@ -55,6 +55,7 @@ def test_client_encrypt(mocker):
     client.encrypt(**kwargs)
     expected_kwargs = kwargs.copy()
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
+    expected_kwargs["algorithm_suite_stage"] = None
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = 3
     aws_encryption_sdk.StreamEncryptor.assert_called_once_with(**expected_kwargs)
@@ -73,6 +74,7 @@ def test_client_decrypt(mocker):
     client.decrypt(**kwargs)
     expected_kwargs = kwargs.copy()
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
+    expected_kwargs["algorithm_suite_stage"] = None
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = 3
     aws_encryption_sdk.StreamDecryptor.assert_called_once_with(**expected_kwargs)
@@ -92,6 +94,7 @@ def test_client_stream_encrypt(mocker, mode_string):
     expected_kwargs = kwargs.copy()
     expected_kwargs.pop("mode")
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
+    expected_kwargs["algorithm_suite_stage"] = None
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = None
     aws_encryption_sdk.StreamEncryptor.assert_called_once_with(**expected_kwargs)
@@ -111,13 +114,14 @@ def test_client_stream_decrypt(mocker, mode_string):
     expected_kwargs = kwargs.copy()
     expected_kwargs.pop("mode")
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
+    expected_kwargs["algorithm_suite_stage"] = None
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = None
     aws_encryption_sdk.StreamDecryptor.assert_called_once_with(**expected_kwargs)
 
 
 @pytest.mark.parametrize("method", ("encrypt", "decrypt", "stream"))
-@pytest.mark.parametrize("key", ("commitment_policy", "max_encrypted_data_keys"))
+@pytest.mark.parametrize("key", ("commitment_policy", "max_encrypted_data_keys", "algorithm_suite_stage"))
 def test_client_bad_kwargs(mocker, method, key):
     mocker.patch.object(aws_encryption_sdk, "StreamEncryptor")
 

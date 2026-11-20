@@ -149,6 +149,43 @@ You must then create an instance of either a keyring (with the MPL installed) or
 Note: You must also install the `AWS Cryptographic Material Providers Library (MPL)`_ to use keyrings.
 (You may also provide an instance of a legacy master key provider, but this is not recommended.)
 
+Staged algorithm suite policies
+===============================
+``commitment_policy`` controls key commitment, but services that are progressively
+retiring older algorithm suites may also need to declare which suites are approved
+for writes and which are still approved for reads. The
+``algorithm_suite_stage`` client option provides that single, central declaration:
+
+.. code:: python
+
+    import aws_encryption_sdk
+    from aws_encryption_sdk import AlgorithmSuiteStage, CommitmentPolicy
+
+    # Migration stage 1: read legacy formats, write committed formats only.
+    client = aws_encryption_sdk.EncryptionSDKClient(
+        commitment_policy=CommitmentPolicy.REQUIRE_ENCRYPT_ALLOW_DECRYPT,
+        algorithm_suite_stage=AlgorithmSuiteStage.READ_LEGACY_WRITE_COMMITTED,
+    )
+
+The available stages are:
+
+* ``READ_LEGACY_WRITE_COMMITTED``: reads every supported suite, writes the two
+  committing suites, and defaults new writes to
+  ``AES_256_GCM_HKDF_SHA512_COMMIT_KEY_ECDSA_P384``.
+* ``READ_LEGACY_WRITE_HARDENED``: still reads every supported suite, but only writes
+  ``AES_256_GCM_HKDF_SHA512_COMMIT_KEY_ECDSA_P384``.
+* ``READ_HARDENED_WRITE_HARDENED``: reads and writes only
+  ``AES_256_GCM_HKDF_SHA512_COMMIT_KEY_ECDSA_P384``. Enable this once migration of
+  existing data is complete.
+
+The stage lists are declared once in
+``aws_encryption_sdk.algorithm_suite_policy.ALGORITHM_SUITE_STAGE_CONFIGS``.
+Both the one-shot (``encrypt``/``decrypt``) and streaming (``stream``) APIs enforce
+the stage before producing any output, so an unapproved write never yields
+ciphertext. Reading non-committing messages also still requires a
+``commitment_policy`` that allows it.
+
+
 
 AwsKmsMultiKeyring
 ==================

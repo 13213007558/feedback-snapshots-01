@@ -24,6 +24,12 @@ from aws_encryption_sdk.exceptions import (
     NotSupportedError,
     SerializationError,
 )
+from aws_encryption_sdk.algorithm_suite_policy import (
+    AlgorithmSuiteStage,
+    algorithm_suite_stage_config,
+    validate_algorithm_suite_stage_on_decrypt,
+    validate_algorithm_suite_stage_on_encrypt,
+)
 from aws_encryption_sdk.identifiers import Algorithm, CommitmentPolicy, ContentType, SerializationVersion
 from aws_encryption_sdk.internal.crypto.authentication import Signer, Verifier
 from aws_encryption_sdk.internal.crypto.data_keys import calculate_commitment_key, derive_data_encryption_key
@@ -93,6 +99,8 @@ class _ClientConfig(object):  # pylint: disable=too-many-instance-attributes
     :type commitment_policy: aws_encryption_sdk.identifiers.CommitmentPolicy
     :param max_encrypted_data_keys: The maximum number of encrypted data keys to allow during encryption and decryption
     :type max_encrypted_data_keys: None or positive int
+    :param algorithm_suite_stage: Staged algorithm suite policy to enforce for writes and reads (optional)
+    :type algorithm_suite_stage: aws_encryption_sdk.algorithm_suite_policy.AlgorithmSuiteStage
     :param materials_manager: `CryptoMaterialsManager` from which to obtain cryptographic materials
         (either `materials_manager` or `key_provider` required)
     :type materials_manager: aws_encryption_sdk.materials_manager.base.CryptoMaterialsManager
@@ -118,6 +126,11 @@ class _ClientConfig(object):  # pylint: disable=too-many-instance-attributes
     )
     max_encrypted_data_keys = attr.ib(
         hash=True, default=None, validator=attr.validators.optional(attr.validators.instance_of(int))
+    )
+    algorithm_suite_stage = attr.ib(
+        hash=True,
+        default=None,
+        validator=attr.validators.optional(attr.validators.instance_of(AlgorithmSuiteStage)),
     )
     if _HAS_MPL:
         # With the MPL, the provided materials_manager can be an instance of
@@ -517,6 +530,10 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         ):
             raise SerializationError("Source too large for non-framed message")
 
+        # Fail as early as possible: reject an explicit, unapproved suite before any
+        # cryptographic materials (or output) are produced.
+        validate_algorithm_suite_stage_on_encrypt(self.config.algorithm_suite_stage, self.config.algorithm)
+
         self.__unframed_plaintext_cache = io.BytesIO()
         self.__message_complete = False
 
@@ -537,12 +554,20 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         """
         validate_commitment_policy_on_encrypt(self.config.commitment_policy, self.config.algorithm)
 
+        # When a stage is enforced, always request a specific suite.  This keeps a
+        # caching CMM from later returning materials for a suite that a stricter
+        # stage does not approve.
+        stage_config = algorithm_suite_stage_config(self.config.algorithm_suite_stage)
+        request_algorithm = self.config.algorithm
+        if request_algorithm is None and stage_config is not None:
+            request_algorithm = stage_config.default_encrypt_suite
+
         try:
             plaintext_length = self.stream_length
         except NotSupportedError:
             plaintext_length = None
         encryption_materials_request = EncryptionMaterialsRequest(
-            algorithm=self.config.algorithm,
+            algorithm=request_algorithm,
             encryption_context=self.config.encryption_context.copy(),
             frame_length=self.config.frame_length,
             plaintext_rostream=aws_encryption_sdk.internal.utils.streams.ROStream(self.source_stream),
@@ -554,15 +579,18 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         )
 
         validate_commitment_policy_on_encrypt(self.config.commitment_policy, self._encryption_materials.algorithm)
+        validate_algorithm_suite_stage_on_encrypt(
+            self.config.algorithm_suite_stage, self._encryption_materials.algorithm
+        )
 
-        if self.config.algorithm is not None and self._encryption_materials.algorithm != self.config.algorithm:
+        if request_algorithm is not None and self._encryption_materials.algorithm != request_algorithm:
             raise ActionNotAllowedError(
                 (
                     "Cryptographic materials manager provided algorithm suite"
                     " differs from algorithm suite in request.\n"
                     "Required: {requested}\n"
                     "Provided: {provided}"
-                ).format(requested=self.config.algorithm, provided=self._encryption_materials.algorithm)
+                ).format(requested=request_algorithm, provided=self._encryption_materials.algorithm)
             )
 
         num_keys = len(self._encryption_materials.encrypted_data_keys)
@@ -1030,6 +1058,7 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         self.__unframed_bytes_read += len(raw_header)
 
         validate_commitment_policy_on_decrypt(self.config.commitment_policy, header.algorithm)
+        validate_algorithm_suite_stage_on_decrypt(self.config.algorithm_suite_stage, header.algorithm)
         validate_signature_policy_on_decrypt(self.config.signature_policy, header.algorithm)
 
         if (

@@ -2,6 +2,19 @@
 Changelog
 *********
 
+4.1.0 -- 2026-11-20
+===================
+
+Features
+--------
+* feat: add centrally declared staged algorithm suite policies
+  ``EncryptionSDKClient`` and the streaming configs accept a new
+  ``algorithm_suite_stage`` option.  ``AlgorithmSuiteStage`` declares, in one
+  place, which algorithm suites are approved for new writes and which remain
+  approved for reads, so a service can read legacy formats while restricting
+  writes and later tighten reads once migration is complete.  Both one-shot and
+  streaming APIs enforce the stage before emitting any ciphertext.
+
 4.0.7 -- 2026-08-31
 ===================
 
