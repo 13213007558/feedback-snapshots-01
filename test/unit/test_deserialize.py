@@ -12,12 +12,14 @@ from mock import MagicMock, patch, sentinel
 import aws_encryption_sdk.internal.formatting.deserialize
 from aws_encryption_sdk.exceptions import (
     CustomMaximumValueExceeded,
+    MaxHeaderLengthExceeded,
     NotSupportedError,
     SerializationError,
     UnknownIdentityError,
 )
 from aws_encryption_sdk.identifiers import AlgorithmSuite, SerializationVersion
 from aws_encryption_sdk.internal.structures import EncryptedData
+from aws_encryption_sdk.internal.utils.streams import InsistentReaderBytesIO
 
 from .test_values import VALUES
 
@@ -466,6 +468,39 @@ class TestDeserialize(object):
         with pytest.raises(CustomMaximumValueExceeded) as excinfo:
             aws_encryption_sdk.internal.formatting.deserialize.deserialize_encrypted_data_keys(edks_stream(4), 3)
             excinfo.match("Number of encrypted data keys found larger than custom value")
+
+
+@pytest.mark.parametrize("serialized_header", (VALUES["serialized_header"], VALUES["serialized_header_v2_committing"]))
+def test_deserialize_header_within_max_header_length(serialized_header):
+    header, raw_header = aws_encryption_sdk.internal.formatting.deserialize.deserialize_header(
+        io.BytesIO(serialized_header), max_header_length=len(serialized_header) + 100
+    )
+    assert raw_header == serialized_header
+    assert header.algorithm is not None
+
+
+@pytest.mark.parametrize("serialized_header", (VALUES["serialized_header"], VALUES["serialized_header_v2_committing"]))
+def test_deserialize_header_over_max_header_length(serialized_header):
+    with pytest.raises(MaxHeaderLengthExceeded) as excinfo:
+        aws_encryption_sdk.internal.formatting.deserialize.deserialize_header(
+            io.BytesIO(serialized_header), max_header_length=len(serialized_header) - 1
+        )
+    excinfo.match("Message header length found larger than configured value")
+
+
+@pytest.mark.parametrize("serialized_header", (VALUES["serialized_header"], VALUES["serialized_header_v2_committing"]))
+def test_deserialize_header_over_max_header_length_short_reads(serialized_header):
+    class ShortReadStream(io.BytesIO):
+        def read(self, size=-1):
+            if size and size > 0:
+                size = min(size, 3)
+            return super(ShortReadStream, self).read(size)
+
+    with pytest.raises(MaxHeaderLengthExceeded):
+        aws_encryption_sdk.internal.formatting.deserialize.deserialize_header(
+            InsistentReaderBytesIO(ShortReadStream(serialized_header)),
+            max_header_length=len(serialized_header) - 1,
+        )
 
 
 def edks_stream(num_keys):

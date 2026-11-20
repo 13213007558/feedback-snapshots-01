@@ -31,6 +31,23 @@ class MaxEncryptedDataKeysExceeded(CustomMaximumValueExceeded):
         )
 
 
+class MaxHeaderLengthExceeded(CustomMaximumValueExceeded):
+    """
+    Exception class for use when a message header would be larger than
+    a configured maximum value.
+    """
+
+    def __init__(self, header_length, max_header_length):
+        """Prepares exception message."""
+        super(MaxHeaderLengthExceeded, self).__init__(
+            "Message header length found larger than configured value: {header_length:d} > "
+            "{max_header_length:d}".format(
+                header_length=header_length,
+                max_header_length=max_header_length,
+            )
+        )
+
+
 class UnknownIdentityError(AWSEncryptionSDKClientError):
     """Exception class for unknown identity errors."""
 

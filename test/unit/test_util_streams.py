@@ -5,9 +5,9 @@ import io
 
 import pytest
 
-from aws_encryption_sdk.exceptions import ActionNotAllowedError
+from aws_encryption_sdk.exceptions import ActionNotAllowedError, MaxHeaderLengthExceeded
 from aws_encryption_sdk.internal.str_ops import to_bytes, to_str
-from aws_encryption_sdk.internal.utils.streams import InsistentReaderBytesIO, ROStream, TeeStream
+from aws_encryption_sdk.internal.utils.streams import InsistentReaderBytesIO, LimitedReadStream, ROStream, TeeStream
 
 from .unit_test_utils import ExactlyTwoReads, NothingButRead, SometimesIncompleteReaderIO
 
@@ -77,3 +77,46 @@ def test_insistent_stream_close_partway_through():
     test += wrapped.read(10)  # reads 5 bytes, stream is closed before third read can complete, truncating the result
 
     assert test == raw.getvalue()[:15]
+
+
+@pytest.mark.parametrize("chunk", (1, 2, 3, 5))
+def test_limited_read_stream_allows_exact_budget(chunk):
+    raw = data(length=20)
+    source = LimitedReadStream(io.BytesIO(raw.getvalue()), 20)
+
+    result = b""
+    while len(result) < 20:
+        part = source.read(min(chunk, 20 - len(result)))
+        result += part
+
+    assert result == raw.getvalue()
+
+
+@pytest.mark.parametrize("limit", (0, 1, 5, 20))
+@pytest.mark.parametrize("chunk", (1, 2, 7, 30))
+def test_limited_read_stream_rejects_one_byte_over(limit, chunk):
+    raw = data(length=20)
+    source = LimitedReadStream(io.BytesIO(raw.getvalue()), limit)
+
+    with pytest.raises(MaxHeaderLengthExceeded):
+        while True:
+            source.read(chunk)
+
+
+def test_limited_read_stream_rejects_oversized_request_before_reading():
+    wrapped = NothingButRead(data(length=20).getvalue())
+    source = LimitedReadStream(wrapped, 10)
+
+    with pytest.raises(MaxHeaderLengthExceeded) as excinfo:
+        source.read(11)
+
+    excinfo.match(r"11 > 10")
+    assert wrapped._data.tell() == 0
+
+
+def test_limited_read_stream_short_source_returns_short_read():
+    source = LimitedReadStream(io.BytesIO(b"abc"), 10)
+
+    assert source.read(3) == b"abc"
+    assert source.read(7) == b""
+    assert source.read(10) == b""

@@ -96,7 +96,7 @@ VALID_KWARGS = {
     EncryptorConfig: build_valid_kwargs_list(
         BASE_KWARGS, dict(encryption_context={}, algorithm=ALGORITHM, frame_length=8192)
     ),
-    DecryptorConfig: build_valid_kwargs_list(BASE_KWARGS, dict(max_body_length=10)),
+    DecryptorConfig: build_valid_kwargs_list(BASE_KWARGS, dict(max_body_length=10, max_header_length=100)),
 }
 INVALID_KWARGS = {
     _ClientConfig: [
@@ -111,7 +111,10 @@ INVALID_KWARGS = {
         dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), encryption_context=None),
         dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), frame_length=None),
     ],
-    DecryptorConfig: [dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), max_body_length="not an int")],
+    DecryptorConfig: [
+        dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), max_body_length="not an int"),
+        dict(source=b"", materials_manager=FakeCryptoMaterialsManager(), max_header_length="not an int"),
+    ],
 }
 
 
@@ -160,6 +163,7 @@ def test_encryptor_config_defaults():
 def test_decryptor_config_defaults():
     test = DecryptorConfig(**BASE_KWARGS)
     assert test.max_body_length is None
+    assert test.max_header_length is None
 
 
 @pytest.mark.parametrize(

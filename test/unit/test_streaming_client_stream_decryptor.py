@@ -11,6 +11,7 @@ from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
     CustomMaximumValueExceeded,
     MasterKeyProviderError,
+    MaxHeaderLengthExceeded,
     NotSupportedError,
     SerializationError,
 )
@@ -190,7 +191,7 @@ class TestStreamDecryptor(object):
 
         test_header, test_header_auth = test_decryptor._read_header()
 
-        self.mock_deserialize_header.assert_called_once_with(ct_stream, None)
+        self.mock_deserialize_header.assert_called_once_with(ct_stream, None, None)
         mock_verifier.from_key_bytes.assert_called_once_with(
             algorithm=self.mock_header.algorithm, key_bytes=sentinel.verification_key
         )
@@ -355,6 +356,47 @@ class TestStreamDecryptor(object):
             algorithm=self.mock_header.algorithm, encoded_point=mock_b64encoding()
         )
 
+    @patch("aws_encryption_sdk.streaming_client.DecryptionMaterialsRequest")
+    @patch("aws_encryption_sdk.streaming_client.derive_data_encryption_key")
+    def test_GIVEN_header_budget_WHEN_read_header_THEN_passes_budget_before_materials(
+        self, mock_derive_datakey, mock_request
+    ):
+        self.mock_deserialize_header.return_value = self.mock_header, self.mock_raw_header
+        self.mock_materials_manager.decrypt_materials.return_value = MagicMock(
+            data_key=VALUES["data_key_obj"], verification_key=None
+        )
+        ct_stream = io.BytesIO(VALUES["data_128"])
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=ct_stream,
+            max_header_length=1234,
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_decryptor.source_stream = ct_stream
+        test_decryptor._stream_length = len(VALUES["data_128"])
+
+        test_decryptor._read_header()
+
+        self.mock_deserialize_header.assert_called_once_with(ct_stream, None, 1234)
+        self.mock_materials_manager.decrypt_materials.assert_called_once_with(request=mock_request.return_value)
+
+    def test_GIVEN_header_over_budget_WHEN_read_header_THEN_no_materials_request(self):
+        self.mock_deserialize_header.side_effect = MaxHeaderLengthExceeded(200, 100)
+        ct_stream = io.BytesIO(VALUES["data_128"])
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=ct_stream,
+            max_header_length=100,
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_decryptor.source_stream = ct_stream
+        test_decryptor._stream_length = len(VALUES["data_128"])
+
+        with pytest.raises(MaxHeaderLengthExceeded):
+            test_decryptor._read_header()
+
+        self.mock_materials_manager.decrypt_materials.assert_not_called()
+
     @patch("aws_encryption_sdk.streaming_client.derive_data_encryption_key")
     def test_read_header_frame_too_large(self, mock_derive_datakey):
         self.mock_header.content_type = ContentType.FRAMED_DATA
@@ -422,7 +464,7 @@ class TestStreamDecryptor(object):
         test_decryptor.source_stream = self.mock_input_stream
         test_decryptor._stream_length = len(VALUES["data_128"])
         test_decryptor._read_header()
-        self.mock_deserialize_header.assert_called_once_with(self.mock_input_stream, None)
+        self.mock_deserialize_header.assert_called_once_with(self.mock_input_stream, None, None)
 
     @patch("aws_encryption_sdk.streaming_client.Verifier")
     @patch("aws_encryption_sdk.streaming_client.DecryptionMaterialsRequest")
@@ -468,7 +510,7 @@ class TestStreamDecryptor(object):
             commitment_policy=policy,
         )
         test_decryptor._read_header()
-        self.mock_deserialize_header.assert_called_once_with(self.mock_input_stream, None)
+        self.mock_deserialize_header.assert_called_once_with(self.mock_input_stream, None, None)
         self.mock_compare_digest.assert_not_called()
 
     @patch("aws_encryption_sdk.streaming_client.Verifier")

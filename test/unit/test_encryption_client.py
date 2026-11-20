@@ -18,15 +18,18 @@ def test_init_defaults():
     test = aws_encryption_sdk.EncryptionSDKClient()
     assert test.config.commitment_policy == CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT
     assert test.config.max_encrypted_data_keys is None
+    assert test.config.max_header_length is None
 
 
 def test_init_success():
     test = aws_encryption_sdk.EncryptionSDKClient(
         commitment_policy=CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT,
         max_encrypted_data_keys=1,
+        max_header_length=100,
     )
     assert test.config.commitment_policy == CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
     assert test.config.max_encrypted_data_keys == 1
+    assert test.config.max_header_length == 100
 
 
 @pytest.mark.parametrize("max_encrypted_data_keys", (1, 10, 2 ** 16 - 1, 2 ** 16))
@@ -40,6 +43,19 @@ def test_init_invalid_max_encrypted_data_keys(max_encrypted_data_keys):
     with pytest.raises(ValueError) as exc_info:
         aws_encryption_sdk.EncryptionSDKClient(max_encrypted_data_keys=max_encrypted_data_keys)
     exc_info.match("max_encrypted_data_keys cannot be less than 1")
+
+
+@pytest.mark.parametrize("max_header_length", (1, 100, 2 ** 32))
+def test_init_valid_max_header_length(max_header_length):
+    test = aws_encryption_sdk.EncryptionSDKClient(max_header_length=max_header_length)
+    assert test.config.max_header_length == max_header_length
+
+
+@pytest.mark.parametrize("max_header_length", (0, -1))
+def test_init_invalid_max_header_length(max_header_length):
+    with pytest.raises(ValueError) as exc_info:
+        aws_encryption_sdk.EncryptionSDKClient(max_header_length=max_header_length)
+    exc_info.match("max_header_length cannot be less than 1")
 
 
 def test_client_encrypt(mocker):
@@ -57,6 +73,7 @@ def test_client_encrypt(mocker):
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = 3
+    expected_kwargs["max_header_length"] = None
     aws_encryption_sdk.StreamEncryptor.assert_called_once_with(**expected_kwargs)
 
 
@@ -75,6 +92,7 @@ def test_client_decrypt(mocker):
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = 3
+    expected_kwargs["max_header_length"] = None
     aws_encryption_sdk.StreamDecryptor.assert_called_once_with(**expected_kwargs)
 
 
@@ -94,6 +112,7 @@ def test_client_stream_encrypt(mocker, mode_string):
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = None
+    expected_kwargs["max_header_length"] = None
     aws_encryption_sdk.StreamEncryptor.assert_called_once_with(**expected_kwargs)
 
 
@@ -113,11 +132,12 @@ def test_client_stream_decrypt(mocker, mode_string):
     expected_kwargs["commitment_policy"] = CommitmentPolicy.FORBID_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
     expected_kwargs["max_encrypted_data_keys"] = None
+    expected_kwargs["max_header_length"] = None
     aws_encryption_sdk.StreamDecryptor.assert_called_once_with(**expected_kwargs)
 
 
 @pytest.mark.parametrize("method", ("encrypt", "decrypt", "stream"))
-@pytest.mark.parametrize("key", ("commitment_policy", "max_encrypted_data_keys"))
+@pytest.mark.parametrize("key", ("commitment_policy", "max_encrypted_data_keys", "max_header_length"))
 def test_client_bad_kwargs(mocker, method, key):
     mocker.patch.object(aws_encryption_sdk, "StreamEncryptor")
 

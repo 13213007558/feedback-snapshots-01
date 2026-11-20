@@ -5,7 +5,7 @@ import io
 
 from wrapt import ObjectProxy
 
-from aws_encryption_sdk.exceptions import ActionNotAllowedError
+from aws_encryption_sdk.exceptions import ActionNotAllowedError, MaxHeaderLengthExceeded
 from aws_encryption_sdk.internal.str_ops import to_bytes
 
 
@@ -23,6 +23,62 @@ class ROStream(ObjectProxy):
         :raises ActionNotAllowedError: when called
         """
         raise ActionNotAllowedError("Write not allowed on ROStream objects")
+
+
+class LimitedReadStream(ObjectProxy):
+    """Provides a read-only view of a stream that may read at most a fixed
+    number of bytes.
+
+    A read larger than the remaining budget is rejected before any of the
+    wrapped stream is consumed.  Reads within the budget are forwarded as
+    normal, including short reads at the end of the wrapped stream.
+
+    :param wrapped: File-like object
+    :param int max_bytes: Maximum number of bytes that may be read
+    """
+
+    def __init__(self, wrapped, max_bytes):
+        """Creates the limited view."""
+        super(LimitedReadStream, self).__init__(wrapped)
+        self.__max_bytes = max_bytes
+        self.__bytes_read = 0
+        self.__exceeded = False
+        self.__eof = False
+
+    @property
+    def bytes_read(self):
+        """Number of bytes handed out through this view."""
+        return self.__bytes_read
+
+    def read(self, b=-1):
+        """Read up to ``b`` bytes without reading past the configured limit.
+
+        A request larger than the remaining budget is rejected before any
+        underlying bytes are consumed, so a header field that would cross the
+        limit is never read.  Reads that reach the end of the wrapped stream
+        first return a short read (or ``b""``) as usual, allowing a truncated
+        header to surface as a normal parse error.
+
+        :param int b: Number of bytes to read
+        :raises MaxHeaderLengthExceeded: if the request would pass the limit
+        """
+        if self.__exceeded:
+            raise MaxHeaderLengthExceeded(self.__bytes_read + 1, self.__max_bytes)
+        if self.__eof:
+            return b""
+        remaining = self.__max_bytes - self.__bytes_read
+        if b is None or b < 0:
+            b = remaining
+        if b == 0:
+            return b""
+        if b > remaining:
+            self.__exceeded = True
+            raise MaxHeaderLengthExceeded(self.__bytes_read + b, self.__max_bytes)
+        data = self.__wrapped__.read(b)
+        if not data:
+            self.__eof = True
+        self.__bytes_read += len(data)
+        return data
 
 
 class TeeStream(ObjectProxy):

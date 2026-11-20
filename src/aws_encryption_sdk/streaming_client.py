@@ -93,6 +93,8 @@ class _ClientConfig(object):  # pylint: disable=too-many-instance-attributes
     :type commitment_policy: aws_encryption_sdk.identifiers.CommitmentPolicy
     :param max_encrypted_data_keys: The maximum number of encrypted data keys to allow during encryption and decryption
     :type max_encrypted_data_keys: None or positive int
+    :param max_header_length: The maximum number of header bytes to allow during decryption
+    :type max_header_length: None or positive int
     :param materials_manager: `CryptoMaterialsManager` from which to obtain cryptographic materials
         (either `materials_manager` or `key_provider` required)
     :type materials_manager: aws_encryption_sdk.materials_manager.base.CryptoMaterialsManager
@@ -118,6 +120,9 @@ class _ClientConfig(object):  # pylint: disable=too-many-instance-attributes
     )
     max_encrypted_data_keys = attr.ib(
         hash=True, default=None, validator=attr.validators.optional(attr.validators.instance_of(int))
+    )
+    max_header_length = attr.ib(
+        hash=True, default=None, validator=attr.validators.optional(attr.validators.instance_of(six.integer_types))
     )
     if _HAS_MPL:
         # With the MPL, the provided materials_manager can be an instance of
@@ -881,6 +886,8 @@ class DecryptorConfig(_ClientConfig):
 
     :param int max_body_length: Maximum frame size (or content length for non-framed messages)
         in bytes to read from ciphertext message.
+    :param int max_header_length: Maximum total number of bytes in the message header,
+        including the header authentication tag. Message bodies are not bounded by this value.
     :param dict encryption_context: Dictionary defining encryption context to validate
             on decrypt. This is ONLY validated on decrypt if using a CMM
             from the aws-cryptographic-material-providers library.
@@ -929,6 +936,8 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
     :param int max_body_length: Maximum frame size (or content length for non-framed messages)
         in bytes to read from ciphertext message.
+    :param int max_header_length: Maximum total number of bytes in the message header,
+        including the header authentication tag. Message bodies are not bounded by this value.
     """
 
     _config_class = DecryptorConfig
@@ -1025,8 +1034,11 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             and aws_encryption_sdk.internal.structures.MessageHeaderAuthentication
         :raises CustomMaximumValueExceeded: if frame length is greater than the custom max value
         :raises CustomMaximumValueExceeded: if number of encrypted data keys is greater than the custom max value
+        :raises MaxHeaderLengthExceeded: if the header is larger than the configured maximum
         """
-        header, raw_header = deserialize_header(self.source_stream, self.config.max_encrypted_data_keys)
+        header, raw_header = deserialize_header(
+            self.source_stream, self.config.max_encrypted_data_keys, self.config.max_header_length
+        )
         self.__unframed_bytes_read += len(raw_header)
 
         validate_commitment_policy_on_decrypt(self.config.commitment_policy, header.algorithm)

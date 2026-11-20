@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 
 from aws_encryption_sdk.exceptions import (
     MaxEncryptedDataKeysExceeded,
+    MaxHeaderLengthExceeded,
     NotSupportedError,
     SerializationError,
     UnknownIdentityError,
@@ -38,7 +39,7 @@ from aws_encryption_sdk.internal.structures import (
     MessageFrameBody,
     MessageHeaderAuthentication,
 )
-from aws_encryption_sdk.internal.utils.streams import TeeStream
+from aws_encryption_sdk.internal.utils.streams import LimitedReadStream, TeeStream
 from aws_encryption_sdk.structures import EncryptedDataKey, MasterKeyInfo, MessageHeader
 
 try:  # Python 3.5.0 and 3.5.1 have incompatible typing modules
@@ -136,14 +137,41 @@ def _verified_algorithm_from_id(algorithm_id):
     return algorithm_suite
 
 
-def deserialize_encrypted_data_keys(stream, max_encrypted_data_keys=None):
-    # type: (IO, Union[int, None]) -> Set[EncryptedDataKey]
+def _read_header_field(tee_stream, max_header_length, length):
+    # type: (IO, Union[int, None], int) -> bytes
+    """Read a variable-length header field, respecting a total header byte budget.
+
+    The budget is checked against the number of bytes already consumed plus the
+    declared field length before any of the field is read, so that an oversized
+    field is rejected without reading its payload.  When no budget is configured,
+    the field is read as before.
+
+    :param tee_stream: The stream from which to read bytes
+    :type tee_stream: aws_encryption_sdk.internal.utils.streams.TeeStream
+    :param max_header_length: Maximum total number of header bytes to read
+    :type max_header_length: None or positive int
+    :param int length: Declared length of the field
+    :return: The field bytes
+    :rtype: bytes
+    :raises MaxHeaderLengthExceeded: if the field would exceed the budget
+    """
+    if max_header_length is not None:
+        bytes_read = getattr(tee_stream, "bytes_read", None)
+        if bytes_read is not None and bytes_read + length > max_header_length:
+            raise MaxHeaderLengthExceeded(bytes_read + length, max_header_length)
+    return tee_stream.read(length)
+
+
+def deserialize_encrypted_data_keys(stream, max_encrypted_data_keys=None, max_header_length=None):
+    # type: (IO, Union[int, None], Union[int, None]) -> Set[EncryptedDataKey]
     """Deserialize some encrypted data keys from a stream.
 
     :param stream: Stream from which to read encrypted data keys
     :param max_encrypted_data_keys: Maximum number of encrypted data keys to deserialize
+    :param max_header_length: Maximum total number of header bytes to read
     :return: Loaded encrypted data keys
     :rtype: set of :class:`EncryptedDataKey`
+    :raises MaxHeaderLengthExceeded: if reading an encrypted data key would exceed the budget
     """
     (encrypted_data_key_count,) = unpack_values(">H", stream)
     if max_encrypted_data_keys and encrypted_data_key_count > max_encrypted_data_keys:
@@ -151,11 +179,15 @@ def deserialize_encrypted_data_keys(stream, max_encrypted_data_keys=None):
     encrypted_data_keys = set([])
     for _ in range(encrypted_data_key_count):
         (key_provider_length,) = unpack_values(">H", stream)
-        (key_provider_identifier,) = unpack_values(">{}s".format(key_provider_length), stream)
+        (key_provider_identifier,) = unpack_values(
+            ">{}s".format(key_provider_length), stream, max_header_length=max_header_length
+        )
         (key_provider_information_length,) = unpack_values(">H", stream)
-        (key_provider_information,) = unpack_values(">{}s".format(key_provider_information_length), stream)
+        (key_provider_information,) = unpack_values(
+            ">{}s".format(key_provider_information_length), stream, max_header_length=max_header_length
+        )
         (encrypted_data_key_length,) = unpack_values(">H", stream)
-        encrypted_data_key = stream.read(encrypted_data_key_length)
+        encrypted_data_key = _read_header_field(stream, max_header_length, encrypted_data_key_length)
         # ESDK-Python <4.0.1 incorrectly computed the key provider length for non-ASCII key provider IDs.
         # The length in the header was computed as the length of the key provider ID as a string instead of
         #   the length of the key provider ID as UTF-8 bytes.
@@ -252,8 +284,8 @@ def _verified_frame_length(frame_length, content_type):
     return frame_length
 
 
-def _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys):
-    # type: (IO, Union[int, None]) -> MessageHeader
+def _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys, max_header_length=None):
+    # type: (IO, Union[int, None], Union[int, None]) -> MessageHeader
     """Deserializes the header from a source stream in SerializationVersion.V1.
 
     :param header: A dictionary in which to store deserialized values
@@ -262,43 +294,52 @@ def _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys):
     :type tee_stream: aws_encryption_sdk.internal.utils.streams.TeeStream
     :param max_encrypted_data_keys: Maximum number of encrypted keys to deserialize
     :type max_encrypted_data_keys: None or positive int
+    :param max_header_length: Maximum total number of header bytes to read
+    :type max_header_length: None or positive int
     :returns: Deserialized MessageHeader object
     :rtype: :class:`aws_encryption_sdk.structures.MessageHeader`
     :raises NotSupportedError: if unsupported data types are found
     :raises UnknownIdentityError: if unknown data types are found
     :raises SerializationError: if IV length does not match algorithm
+    :raises MaxHeaderLengthExceeded: if the header exceeds the configured budget
     """
     _LOGGER.debug("Deserializing header in version V1")
 
-    (message_type_id,) = unpack_values(">B", tee_stream)
+    (message_type_id,) = unpack_values(">B", tee_stream, max_header_length=max_header_length)
     header["type"] = _verified_message_type_from_id(message_type_id)
 
-    algorithm_id, message_id, ser_encryption_context_length = unpack_values(">H16sH", tee_stream)
+    algorithm_id, message_id, ser_encryption_context_length = unpack_values(
+        ">H16sH", tee_stream, max_header_length=max_header_length
+    )
 
     header["algorithm"] = _verified_algorithm_from_id(algorithm_id)
     header["message_id"] = message_id
 
-    header["encryption_context"] = deserialize_encryption_context(tee_stream.read(ser_encryption_context_length))
+    header["encryption_context"] = deserialize_encryption_context(
+        _read_header_field(tee_stream, max_header_length, ser_encryption_context_length)
+    )
 
-    header["encrypted_data_keys"] = deserialize_encrypted_data_keys(tee_stream, max_encrypted_data_keys)
+    header["encrypted_data_keys"] = deserialize_encrypted_data_keys(
+        tee_stream, max_encrypted_data_keys, max_header_length
+    )
 
-    (content_type_id,) = unpack_values(">B", tee_stream)
+    (content_type_id,) = unpack_values(">B", tee_stream, max_header_length=max_header_length)
     header["content_type"] = _verified_content_type_from_id(content_type_id)
 
-    (content_aad_length,) = unpack_values(">I", tee_stream)
+    (content_aad_length,) = unpack_values(">I", tee_stream, max_header_length=max_header_length)
     header["content_aad_length"] = _verified_content_aad_length(content_aad_length)
 
-    (iv_length,) = unpack_values(">B", tee_stream)
+    (iv_length,) = unpack_values(">B", tee_stream, max_header_length=max_header_length)
     header["header_iv_length"] = _verified_iv_length(iv_length, header["algorithm"])
 
-    (frame_length,) = unpack_values(">I", tee_stream)
+    (frame_length,) = unpack_values(">I", tee_stream, max_header_length=max_header_length)
     header["frame_length"] = _verified_frame_length(frame_length, header["content_type"])
 
     return MessageHeader(**header)
 
 
-def _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys):
-    # type: (IO) -> MessageHeader
+def _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys, max_header_length=None):
+    # type: (IO, Union[int, None], Union[int, None]) -> MessageHeader
     """Deserializes the header from a source stream in SerializationVersion.V2.
 
     :param header: A dictionary in which to store deserialized values
@@ -307,64 +348,109 @@ def _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys):
     :type tee_stream: aws_encryption_sdk.internal.utils.streams.TeeStream
     :param max_encrypted_data_keys: Maximum number of encrypted keys to deserialize
     :type max_encrypted_data_keys: None or positive int
+    :param max_header_length: Maximum total number of header bytes to read
+    :type max_header_length: None or positive int
     :returns: Deserialized MessageHeader object
     :rtype: :class:`aws_encryption_sdk.structures.MessageHeader`
     :raises NotSupportedError: if unsupported data types are found
     :raises UnknownIdentityError: if unknown data types are found
     :raises SerializationError: if IV length does not match algorithm
+    :raises MaxHeaderLengthExceeded: if the header exceeds the configured budget
     """
     _LOGGER.debug("Deserializing header in version V2")
 
-    algorithm_id, message_id, ser_encryption_context_length = unpack_values(">H32sH", tee_stream)
+    algorithm_id, message_id, ser_encryption_context_length = unpack_values(
+        ">H32sH", tee_stream, max_header_length=max_header_length
+    )
 
     header["algorithm"] = _verified_algorithm_from_id(algorithm_id)
     header["message_id"] = message_id
 
-    header["encryption_context"] = deserialize_encryption_context(tee_stream.read(ser_encryption_context_length))
+    header["encryption_context"] = deserialize_encryption_context(
+        _read_header_field(tee_stream, max_header_length, ser_encryption_context_length)
+    )
 
-    header["encrypted_data_keys"] = deserialize_encrypted_data_keys(tee_stream, max_encrypted_data_keys)
+    header["encrypted_data_keys"] = deserialize_encrypted_data_keys(
+        tee_stream, max_encrypted_data_keys, max_header_length
+    )
 
-    (content_type_id,) = unpack_values(">B", tee_stream)
+    (content_type_id,) = unpack_values(">B", tee_stream, max_header_length=max_header_length)
     header["content_type"] = _verified_content_type_from_id(content_type_id)
 
-    (frame_length,) = unpack_values(">I", tee_stream)
+    (frame_length,) = unpack_values(">I", tee_stream, max_header_length=max_header_length)
     header["frame_length"] = _verified_frame_length(frame_length, header["content_type"])
 
     algorithm_suite_data_length = header["algorithm"].algorithm_suite_data_length()
-    (algorithm_suite_data,) = unpack_values(">{}s".format(algorithm_suite_data_length), tee_stream)
+    (algorithm_suite_data,) = unpack_values(
+        ">{}s".format(algorithm_suite_data_length), tee_stream, max_header_length=max_header_length
+    )
     header["commitment_key"] = algorithm_suite_data
 
     return MessageHeader(**header)
 
 
-def deserialize_header(stream, max_encrypted_data_keys=None):
-    # type: (IO, Union[int, None]) -> MessageHeader
+def _header_authentication_length(header):
+    # type: (MessageHeader) -> int
+    """Returns the number of serialized header authentication bytes for a header.
+
+    V1 serializes both the header authentication IV and tag.
+    V2 uses a fixed all-zero IV and only serializes the tag.
+
+    :param header: Deserialized message header
+    :type header: aws_encryption_sdk.structures.MessageHeader
+    :rtype: int
+    """
+    if header.version == SerializationVersion.V2:
+        return header.algorithm.auth_len
+    return header.algorithm.iv_len + header.algorithm.auth_len
+
+
+def deserialize_header(stream, max_encrypted_data_keys=None, max_header_length=None):
+    # type: (IO, Union[int, None], Union[int, None]) -> MessageHeader
     """Deserializes the header from a source stream
 
     :param stream: Source data stream
     :type stream: io.BytesIO
     :param max_encrypted_data_keys: Maximum number of encrypted keys to deserialize
     :type max_encrypted_data_keys: None or positive int
+    :param max_header_length: Maximum total number of header bytes to read, including
+        the header authentication data
+    :type max_header_length: None or positive int
     :returns: Deserialized MessageHeader object
     :rtype: :class:`aws_encryption_sdk.structures.MessageHeader` and bytes
     :raises NotSupportedError: if unsupported data types are found
     :raises UnknownIdentityError: if unknown data types are found
     :raises SerializationError: if IV length does not match algorithm
+    :raises MaxHeaderLengthExceeded: if the header exceeds the configured budget
     """
     _LOGGER.debug("Starting header deserialization")
+    if max_header_length is not None:
+        stream = LimitedReadStream(stream, max_header_length)
     tee = io.BytesIO()
     tee_stream = TeeStream(stream, tee)
-    (version_id,) = unpack_values(">B", tee_stream)
+    (version_id,) = unpack_values(">B", tee_stream, max_header_length=max_header_length)
     version = _verified_version_from_id(version_id, tee_stream)
     header = {}
     header["version"] = version
 
     if version == SerializationVersion.V1:
-        return _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
+        parsed_header = _deserialize_header_v1(
+            header, tee_stream, max_encrypted_data_keys, max_header_length
+        )
     elif version == SerializationVersion.V2:
-        return _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
+        parsed_header = _deserialize_header_v2(
+            header, tee_stream, max_encrypted_data_keys, max_header_length
+        )
     else:
         raise NotSupportedError("Unrecognized message format version: {}".format(version))
+
+    raw_header = tee.getvalue()
+    if max_header_length is not None:
+        complete_header_length = len(raw_header) + _header_authentication_length(parsed_header)
+        if complete_header_length > max_header_length:
+            raise MaxHeaderLengthExceeded(complete_header_length, max_header_length)
+
+    return parsed_header, raw_header
 
 
 def _deserialize_header_auth_v1(stream, algorithm, verifier=None):
@@ -530,7 +616,7 @@ def deserialize_footer(stream, verifier=None):
     return MessageFooter(signature=signature)
 
 
-def unpack_values(format_string, stream, verifier=None):
+def unpack_values(format_string, stream, verifier=None, max_header_length=None):
     """Helper function to unpack struct data from a stream and update the signature verifier.
 
     :param str format_string: Struct format string
@@ -538,11 +624,20 @@ def unpack_values(format_string, stream, verifier=None):
     :type stream: io.BytesIO
     :param verifier: Signature verifier object
     :type verifier: aws_encryption_sdk.internal.crypto.Verifier
+    :param max_header_length: Maximum total number of header bytes to read
+    :type max_header_length: None or positive int
     :returns: Unpacked values
     :rtype: tuple
+    :raises SerializationError: if the stream does not contain enough bytes
+    :raises MaxHeaderLengthExceeded: if reading the field would exceed the budget
     """
+    field_length = struct.calcsize(format_string)
+    stream_bytes_read = getattr(stream, "bytes_read", None)
+    if max_header_length is not None and stream_bytes_read is not None:
+        if stream_bytes_read + field_length > max_header_length:
+            raise MaxHeaderLengthExceeded(stream_bytes_read + field_length, max_header_length)
     try:
-        message_bytes = stream.read(struct.calcsize(format_string))
+        message_bytes = stream.read(field_length)
         if verifier:
             verifier.update(message_bytes)
         values = struct.unpack(format_string, message_bytes)

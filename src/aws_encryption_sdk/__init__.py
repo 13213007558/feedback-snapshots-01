@@ -38,6 +38,10 @@ class EncryptionSDKClientConfig(object):
     :param max_encrypted_data_keys: The maximum number of encrypted data keys to allow during
     encryption and decryption
     :type max_encrypted_data_keys: None or positive int
+    :param max_header_length: The maximum number of header bytes to allow during decryption.
+        The limit applies to the complete message header, including the header authentication tag.
+        Large message bodies are still read as a stream and are not bounded by this value.
+    :type max_header_length: None or positive int
     """
 
     commitment_policy = attr.ib(
@@ -48,11 +52,16 @@ class EncryptionSDKClientConfig(object):
     max_encrypted_data_keys = attr.ib(
         hash=True, validator=attr.validators.optional(attr.validators.instance_of(int)), default=None
     )
+    max_header_length = attr.ib(
+        hash=True, validator=attr.validators.optional(attr.validators.instance_of(int)), default=None
+    )
 
     def __attrs_post_init__(self):
         """Applies post-processing which cannot be handled by attrs."""
         if self.max_encrypted_data_keys is not None and self.max_encrypted_data_keys < 1:
             raise ValueError("max_encrypted_data_keys cannot be less than 1")
+        if self.max_header_length is not None and self.max_header_length < 1:
+            raise ValueError("max_header_length cannot be less than 1")
 
 
 class EncryptionSDKClient(object):
@@ -75,7 +84,7 @@ class EncryptionSDKClient(object):
         Copy relevant StreamEncryptor/StreamDecryptor configuration from `self.config` into `kwargs`,
         raising and exception if the keys already exist in `kwargs`.
         """
-        for key in ("commitment_policy", "max_encrypted_data_keys"):
+        for key in ("commitment_policy", "max_encrypted_data_keys", "max_header_length"):
             if key in kwargs_dict:
                 warnings.warn(
                     "Invalid keyword argument '{key}' passed to {callee}. "
@@ -85,6 +94,7 @@ class EncryptionSDKClient(object):
                 )
         kwargs_dict["commitment_policy"] = self.config.commitment_policy
         kwargs_dict["max_encrypted_data_keys"] = self.config.max_encrypted_data_keys
+        kwargs_dict["max_header_length"] = self.config.max_header_length
 
     def encrypt(self, **kwargs):
         """Encrypts and serializes provided plaintext.
@@ -209,6 +219,8 @@ class EncryptionSDKClient(object):
             aws-cryptographic-material-providers library.
         :param int max_body_length: Maximum frame size (or content length for non-framed messages)
             in bytes to read from ciphertext message.
+        :param int max_header_length: Maximum total number of bytes in the message header,
+            including the header authentication tag. Message bodies are not bounded by this value.
         :returns: Tuple containing the decrypted plaintext and the message header object
         :rtype: tuple of bytes and :class:`aws_encryption_sdk.structures.MessageHeader`
         """
