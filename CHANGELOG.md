@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## Unreleased
+* Add `Warden::Proxy#with_user` for block-scoped temporary identities (e.g. support agents previewing as a customer) that nest, restore on return or error, and are not stored in the session by default
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)

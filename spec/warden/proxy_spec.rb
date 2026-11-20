@@ -444,6 +444,101 @@ RSpec.describe Warden::Proxy do
     end
   end
 
+  describe "with_user" do
+    it "should scope a temporary user, nest, restore, and keep the session to the original login" do
+      observations = []
+      app = lambda do |env|
+        warden = env['warden']
+        warden.authenticate!(:password)
+        observations << warden.user # outer: the support agent's own login
+        warden.with_user("Preview Customer") do
+          observations << warden.user # inner: previewing as the customer
+          warden.with_user("Nested Preview") do
+            observations << warden.user
+          end
+          observations << warden.user # nested level restores the preview
+        end
+        observations << warden.user # restored: back to the support agent
+        valid_response
+      end
+
+      env = env_with_params("/", :username => "fred", :password => "sekrit")
+      setup_rack(app).call(env)
+
+      expect(observations).to eq([
+        "Authenticated User",
+        "Preview Customer",
+        "Nested Preview",
+        "Preview Customer",
+        "Authenticated User"
+      ])
+      expect(env['rack.session']).to eq("warden.user.default.key" => "Authenticated User")
+
+      # A fresh request over the same persistent session only ever sees
+      # the support agent; the preview identity was never stored.
+      reobserved = nil
+      follow_up = lambda do |env|
+        reobserved = env['warden'].user
+        valid_response
+      end
+      session = env['rack.session']
+      setup_rack(follow_up).call(env_with_params("/", {}, 'rack.session' => session))
+
+      expect(reobserved).to eq("Authenticated User")
+      expect(session).to eq("warden.user.default.key" => "Authenticated User")
+    end
+
+    it "should restore the previous user when the block raises" do
+      app = lambda do |env|
+        warden = env['warden']
+        warden.authenticate(:pass)
+        begin
+          warden.with_user("Preview Customer") { raise "boom" }
+        rescue RuntimeError
+        end
+        expect(warden.user).to eq("Valid User")
+        expect(env['rack.session']).to eq("warden.user.default.key" => "Valid User")
+        valid_response
+      end
+      setup_rack(app).call(@env)
+    end
+
+    it "should clear the scope on exit when there was no previous user" do
+      app = lambda do |env|
+        warden = env['warden']
+        warden.with_user("Preview Customer") do
+          expect(warden.user).to eq("Preview Customer")
+        end
+        expect(warden.user).to be_nil
+        expect(env['rack.session']).to be_empty
+        valid_response
+      end
+      setup_rack(app).call(@env)
+    end
+
+    it "should require a block" do
+      app = lambda do |env|
+        expect { env['warden'].with_user("Preview Customer") }.to raise_error(ArgumentError)
+        valid_response
+      end
+      setup_rack(app).call(@env)
+    end
+
+    it "should honor a custom scope" do
+      app = lambda do |env|
+        warden = env['warden']
+        warden.set_user("Agent", :scope => :admin)
+        warden.with_user("Preview Customer", :scope => :admin) do
+          expect(warden.user(:admin)).to eq("Preview Customer")
+        end
+        expect(warden.user(:admin)).to eq("Agent")
+        expect(env['rack.session']).to eq("warden.user.admin.key" => "Agent")
+        valid_response
+      end
+      setup_rack(app).call(@env)
+    end
+  end
+
   describe "lock" do
     it "should not run any strategy" do
       app = lambda do |env|

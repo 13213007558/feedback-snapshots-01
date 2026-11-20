@@ -193,6 +193,47 @@ module Warden
       @users[scope]
     end
 
+    # Temporarily set the user for a scope within a block, restoring the
+    # previous user (if any) when the block exits, whether it returns
+    # normally or raises. The temporary user is not stored in the session
+    # by default, so a persistent session keeps only the original login.
+    #
+    # This is useful for controlled previews, e.g. a support agent
+    # previewing a page as a customer without replacing their own login.
+    # Blocks may be nested; each level restores its own previous user.
+    #
+    # Parameters:
+    #   user - An object that has been setup to serialize into and out of the session.
+    #   opts - An options hash. Use the :scope option to set the scope of the user.
+    #          The :store option defaults to false so the session is left untouched.
+    #
+    # Example:
+    #   env['warden'].with_user(customer) do
+    #     env['warden'].user # => customer
+    #   end
+    #   env['warden'].user # => the previously logged in user
+    #
+    # :api: public
+    def with_user(user, opts = {})
+      raise ArgumentError, "with_user requires a block" unless block_given?
+
+      scope = opts[:scope] || @config.default_scope
+      had_previous_user = @users.has_key?(scope)
+      previous_user = @users[scope]
+
+      set_user(user, { :store => false }.merge(opts))
+
+      begin
+        yield user
+      ensure
+        if had_previous_user
+          @users[scope] = previous_user
+        else
+          @users.delete(scope)
+        end
+      end
+    end
+
     # Provides access to the user object in a given scope for a request.
     # Will be nil if not logged in. Please notice that this method does not
     # perform strategies.
