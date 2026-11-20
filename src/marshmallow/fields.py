@@ -17,6 +17,7 @@ from enum import Enum as EnumType
 from typing import Unpack
 
 from marshmallow import class_registry, types, utils, validate
+from marshmallow.budget import current_budget
 from marshmallow.constants import missing as missing_
 from marshmallow.exceptions import (
     StringNotCollectionError,
@@ -365,6 +366,9 @@ class Field(typing.Generic[_InternalT]):
         """
         # Validate required fields, deserialize, then validate
         # deserialized value
+        budget = current_budget()
+        if budget is not None:
+            budget.consume()
         self._validate_missing(value)
         if value is missing_:
             _miss = self.load_default
@@ -773,6 +777,7 @@ class List(Field[list[_InternalT | None]]):
 
         result = []
         errors = {}
+        budget = current_budget()
         for idx, each in enumerate(value):
             try:
                 result.append(self.inner.deserialize(each, **kwargs))
@@ -780,6 +785,8 @@ class List(Field[list[_InternalT | None]]):
                 if error.valid_data is not None:
                     result.append(typing.cast("_InternalT", error.valid_data))
                 errors.update({idx: error.messages})
+                if budget is not None and budget.exceeded:
+                    break
         if errors:
             raise ValidationError(errors, valid_data=result)
         return result
@@ -875,6 +882,9 @@ class Tuple(Field[tuple]):
                 if error.valid_data is not None:
                     result.append(error.valid_data)
                 errors.update({idx: error.messages})
+                budget = current_budget()
+                if budget is not None and budget.exceeded:
+                    break
         if errors:
             raise ValidationError(errors, valid_data=result)
 
@@ -1682,6 +1692,7 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
             return self.mapping_type(value)
 
         errors = collections.defaultdict(dict)
+        budget = current_budget()
 
         # Deserialize keys
         if self.key_field is None:
@@ -1693,6 +1704,8 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                     keys[key] = self.key_field.deserialize(key, **kwargs)
                 except ValidationError as error:
                     errors[key]["key"] = error.messages
+                    if budget is not None and budget.exceeded:
+                        break
 
         # Deserialize values
         result = self.mapping_type()
@@ -1702,6 +1715,8 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                     result[keys[k]] = v
         else:
             for key, val in value.items():
+                if budget is not None and budget.exceeded:
+                    break
                 try:
                     deser_val = self.value_field.deserialize(val, **kwargs)
                 except ValidationError as error:

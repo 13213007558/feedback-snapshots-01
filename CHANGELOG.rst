@@ -1,6 +1,19 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Features:
+
+- Add ``max_traversal`` parameter to `Schema.load <marshmallow.Schema.load>`,
+  `Schema.loads <marshmallow.Schema.loads>`, and
+  `Schema.validate <marshmallow.Schema.validate>`, along with a matching
+  ``class Meta`` option. It sets a shared per-request budget for how many
+  field nodes are visited during deserialization. Nested schemas and
+  collection fields draw from the same budget, and once it is exhausted no
+  further validators are invoked for the request.
+
 4.4.0 (2026-11-03)
 ------------------
 

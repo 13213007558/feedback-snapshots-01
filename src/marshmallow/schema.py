@@ -20,6 +20,7 @@ from itertools import zip_longest
 
 from marshmallow import class_registry, types
 from marshmallow import fields as ma_fields
+from marshmallow.budget import TraversalBudget, current_budget
 from marshmallow.constants import EXCLUDE, INCLUDE, RAISE, missing
 from marshmallow.decorators import (
     POST_DUMP,
@@ -220,6 +221,7 @@ class SchemaOpts:
         self.unknown = getattr(meta, "unknown", RAISE)
         self.register = getattr(meta, "register", True)
         self.many = getattr(meta, "many", False)
+        self.max_traversal = getattr(meta, "max_traversal", None)
 
 
 class Schema(metaclass=SchemaMeta):
@@ -621,22 +623,25 @@ class Schema(metaclass=SchemaMeta):
         instances if `many` is `True`.
         """
         index = index if self.opts.index_errors else None
+        budget = current_budget()
         if many:
+            ret_l: list[typing.Any] = []
             if not is_sequence_but_not_string(data):
                 error_store.store_error([self.error_messages["type"]], index=index)
-                ret_l = []
             else:
-                ret_l = [
-                    self._deserialize(
-                        d,
-                        error_store=error_store,
-                        many=False,
-                        partial=partial,
-                        unknown=unknown,
-                        index=idx,
+                for idx, d in enumerate(data):
+                    if budget is not None and budget.exceeded:
+                        break
+                    ret_l.append(
+                        self._deserialize(
+                            d,
+                            error_store=error_store,
+                            many=False,
+                            partial=partial,
+                            unknown=unknown,
+                            index=idx,
+                        )
                     )
-                    for idx, d in enumerate(data)
-                ]
             return ret_l
         ret_d = self.dict_class()
         # Check data is a dict
@@ -684,6 +689,8 @@ class Schema(metaclass=SchemaMeta):
                     error_store=error_store,
                     index=index,
                 )
+                if budget is not None and budget.exceeded:
+                    break
                 if value is not missing:
                     key = field_obj.attribute or attr_name
                     set_value(ret_d, key, value)
@@ -711,6 +718,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        max_traversal: int | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
 
@@ -724,15 +732,27 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param max_traversal: Maximum number of field nodes to visit for this
+            request. Nested schemas and collection fields share the same budget.
+            If `None`, the value of the ``max_traversal``
+            `class Meta <marshmallow.Schema.Meta>` option is used. If both are
+            `None`, no budget is enforced.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
             This method returns the deserialized data rather than a ``(data, errors)`` tuple.
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if invalid data are passed.
+        .. versionchanged:: 4.5.0
+            Add ``max_traversal`` parameter.
         """
         return self._do_load(
-            data, many=many, partial=partial, unknown=unknown, postprocess=True
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            max_traversal=max_traversal,
         )
 
     def loads(
@@ -743,6 +763,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        max_traversal: int | None = None,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,6 +779,8 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param max_traversal: Maximum number of field nodes to visit for this
+            request. See :meth:`load`.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -766,9 +789,17 @@ class Schema(metaclass=SchemaMeta):
             if invalid data are passed.
         .. versionchanged:: 4.0.0
             Rename ``json_module`` parameter to ``s``.
+        .. versionchanged:: 4.5.0
+            Add ``max_traversal`` parameter.
         """
         data = self.opts.render_module.loads(s, **kwargs)
-        return self.load(data, many=many, partial=partial, unknown=unknown)
+        return self.load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            max_traversal=max_traversal,
+        )
 
     def _run_validator(
         self,
@@ -818,6 +849,7 @@ class Schema(metaclass=SchemaMeta):
         *,
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
+        max_traversal: int | None = None,
     ) -> dict[str, list[str]]:
         """Validate `data` against the schema, returning a dictionary of
         validation errors.
@@ -829,10 +861,21 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+        :param max_traversal: Maximum number of field nodes to visit for this
+            request. See :meth:`load`.
         :return: A dictionary of validation errors.
+
+        .. versionchanged:: 4.5.0
+            Add ``max_traversal`` parameter.
         """
         try:
-            self._do_load(data, many=many, partial=partial, postprocess=False)
+            self._do_load(
+                data,
+                many=many,
+                partial=partial,
+                postprocess=False,
+                max_traversal=max_traversal,
+            )
         except ValidationError as exc:
             return typing.cast("dict[str, list[str]]", exc.messages)
         return {}
@@ -847,6 +890,7 @@ class Schema(metaclass=SchemaMeta):
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
         postprocess: bool = True,
+        max_traversal: int | None = None,
     ):
         """Deserialize `data`, returning the deserialized result.
         This method is private API.
@@ -862,14 +906,28 @@ class Schema(metaclass=SchemaMeta):
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
         :param postprocess: Whether to run post_load methods.
+        :param max_traversal: Maximum number of field nodes to visit for this
+            request. Nested loads share the active budget. If `None`, the value
+            of the ``max_traversal`` Meta option is used.
         :return: Deserialized data
         """
+        limit = max_traversal if max_traversal is not None else self.opts.max_traversal
+        if limit is not None and current_budget() is None:
+            with TraversalBudget(limit):
+                return self._do_load(
+                    data,
+                    many=many,
+                    partial=partial,
+                    unknown=unknown,
+                    postprocess=postprocess,
+                )
         error_store = ErrorStore()
         errors: dict[str, list[str]] = {}
         many = self.many if many is None else bool(many)
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
+        budget = current_budget()
         # Run preprocessors
         if self._hooks[PRE_LOAD]:
             try:
@@ -895,33 +953,35 @@ class Schema(metaclass=SchemaMeta):
                 partial=partial,
                 unknown=unknown,
             )
-            # Run field-level validation
-            self._invoke_field_validators(
-                error_store=error_store, data=result, many=many
-            )
-            # Run schema-level validation
-            if self._hooks[VALIDATES_SCHEMA]:
-                field_errors = bool(error_store.errors)
-                self._invoke_schema_validators(
-                    error_store=error_store,
-                    pass_collection=True,
-                    data=result,
-                    original_data=data,
-                    many=many,
-                    partial=partial,
-                    unknown=unknown,
-                    field_errors=field_errors,
+            # Run field-level validation, unless the traversal budget is
+            # exhausted, in which case no further validators are invoked.
+            if budget is None or not budget.exceeded:
+                self._invoke_field_validators(
+                    error_store=error_store, data=result, many=many
                 )
-                self._invoke_schema_validators(
-                    error_store=error_store,
-                    pass_collection=False,
-                    data=result,
-                    original_data=data,
-                    many=many,
-                    partial=partial,
-                    unknown=unknown,
-                    field_errors=field_errors,
-                )
+                # Run schema-level validation
+                if self._hooks[VALIDATES_SCHEMA]:
+                    field_errors = bool(error_store.errors)
+                    self._invoke_schema_validators(
+                        error_store=error_store,
+                        pass_collection=True,
+                        data=result,
+                        original_data=data,
+                        many=many,
+                        partial=partial,
+                        unknown=unknown,
+                        field_errors=field_errors,
+                    )
+                    self._invoke_schema_validators(
+                        error_store=error_store,
+                        pass_collection=False,
+                        data=result,
+                        original_data=data,
+                        many=many,
+                        partial=partial,
+                        unknown=unknown,
+                        field_errors=field_errors,
+                    )
             errors = error_store.errors
             # Run post processors
             if not errors and postprocess and self._hooks[POST_LOAD]:
