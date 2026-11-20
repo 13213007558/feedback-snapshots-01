@@ -12,6 +12,13 @@ All versions prior to 0.9.0 are untracked.
 
 * HTTP clients (most importantly Rekor) now retry requests when that makes
   sense ([#1970](https://github.com/sigstore/sigstore-python/pull/1970))
+* Bundle loading and verification failures now carry a stable, structured
+  `category` (`sigstore.errors.BundleErrorCategory`), so applications can
+  distinguish a bundle that is missing material the publisher must supply
+  (`MISSING_MATERIAL`) from one that uses a valid format the client must be
+  upgraded to support (`UNSUPPORTED_CLIENT`). The existing `InvalidBundle`,
+  `IncompatibleEntry` and `VerificationError` exception types, and the
+  exceptions' messages, are unchanged.
 
 ### Changed
 

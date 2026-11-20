@@ -93,3 +93,36 @@ $ sigstore verify identity sha256:ce8ab2822671752e201ea1e19e8c85e73d497e1c315bfd
     --cert-oidc-issuer 'https://github.com/login/oauth'
     --bundle 'foo.txt.sigstore.json'
 ```
+## Sorting verification failures by owner
+
+Bundle ingestion and verification failures carry a structured category, so a
+service can route them without matching on error text. Both
+`Bundle.from_json()` (via `InvalidBundle`) and the `Verifier` methods (via
+`VerificationError`) attach a `category` attribute, and the existing exception
+classes can still be caught as before.
+
+```python
+from sigstore.errors import BundleErrorCategory
+from sigstore.models import Bundle, InvalidBundle
+from sigstore.verify.verifier import Verifier, VerificationError
+
+try:
+    bundle = Bundle.from_json(blob)
+    verifier.verify_artifact(artifact, bundle, policy)
+except (InvalidBundle, VerificationError) as exc:
+    if exc.category is BundleErrorCategory.MISSING_MATERIAL:
+        # The bundle is well-formed but lacks evidence: ask the publisher
+        # to re-publish with the missing material.
+        ...
+    elif exc.category is BundleErrorCategory.UNSUPPORTED_CLIENT:
+        # The bundle uses a valid format this client does not understand:
+        # upgrade the verifying runtime.
+        ...
+    else:
+        # `BundleErrorCategory.MALFORMED`: reject the input.
+        ...
+```
+
+For convenience, `exc.remediation` returns `"publisher"` or `"platform"`
+accordingly, and `sigstore.errors.error_category()` resolves a category
+through a wrapper's `__cause__`/`__context__` chain.

@@ -25,7 +25,13 @@ from sigstore_models.trustroot import v1 as trustroot_v1
 
 from sigstore._internal.trust import CertificateAuthority
 from sigstore.dsse import StatementBuilder, Subject
-from sigstore.errors import CertValidationError, VerificationError
+from sigstore.errors import (
+    BundleErrorCategory,
+    CertValidationError,
+    MissingVerificationMaterial,
+    UnsupportedVerificationVersion,
+    VerificationError,
+)
 from sigstore.models import Bundle, TrustedRoot
 from sigstore.verify import policy
 from sigstore.verify.verifier import Verifier
@@ -328,6 +334,50 @@ class TestVerifierWithTimestamp:
                 Bundle.from_json(asset("tsa/bundle.txt.sigstore").read_bytes()),
                 null_policy,
             )
+
+    def test_missing_time_is_categorized(
+        self, verifier, asset, null_policy, monkeypatch
+    ):
+        """
+        A bundle that carries no usable source of signed time is missing
+        evidence, so the publisher is responsible for supplying it.
+        """
+        monkeypatch.setattr(verifier, "_establish_time", lambda *args: [])
+
+        with pytest.raises(MissingVerificationMaterial) as excinfo:
+            verifier.verify_artifact(
+                asset("tsa/bundle.txt").read_bytes(),
+                Bundle.from_json(asset("tsa/bundle.txt.sigstore").read_bytes()),
+                null_policy,
+            )
+
+        # Existing `except VerificationError` handlers keep working.
+        assert isinstance(excinfo.value, VerificationError)
+        assert excinfo.value.category is BundleErrorCategory.MISSING_MATERIAL
+        assert excinfo.value.remediation == "publisher"
+
+    def test_unsupported_integrated_time_entry_is_categorized(
+        self, verifier, asset, null_policy
+    ):
+        """
+        A log entry kind/version that this client cannot use is a client
+        capability problem, so the platform must upgrade the runtime.
+        """
+        raw = json.loads(asset("tsa/bundle.txt.sigstore").read_bytes())
+        (entry,) = raw["verificationMaterial"]["tlogEntries"]
+        entry["kindVersion"] = {"kind": "hashedrekord", "version": "0.0.2"}
+        bundle = Bundle.from_json(json.dumps(raw))
+
+        with pytest.raises(UnsupportedVerificationVersion) as excinfo:
+            verifier.verify_artifact(
+                asset("tsa/bundle.txt").read_bytes(),
+                bundle,
+                null_policy,
+            )
+
+        assert isinstance(excinfo.value, VerificationError)
+        assert excinfo.value.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+        assert excinfo.value.remediation == "platform"
 
     def test_verifier_too_many_timestamp(self, verifier, asset, null_policy):
         with pytest.raises(VerificationError, match="too many"):

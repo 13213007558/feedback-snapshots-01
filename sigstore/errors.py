@@ -17,14 +17,92 @@ Exceptions.
 """
 
 import sys
+from enum import StrEnum
 from logging import Logger
 from typing import NoReturn
 
 from tuf.api import exceptions
 
 
+class BundleErrorCategory(StrEnum):
+    """
+    Stable, machine-readable categories for bundle ingestion and
+    verification failures.
+
+    The category is attached to the exception at the point where the failure
+    is detected, so consumers never have to infer it from error text.
+    """
+
+    #: The bundle is well-formed but is missing evidence (a certificate,
+    #: transparency log entry, inclusion proof, signed time, ...). The party
+    #: that produced the artifact must supply the missing material.
+    MISSING_MATERIAL = "missing_material"
+
+    #: The bundle uses a valid format or version that this client does not
+    #: support. The client runtime needs to be upgraded.
+    UNSUPPORTED_CLIENT = "unsupported_client"
+
+    #: The bundle is malformed in a way that is neither a missing piece of
+    #: evidence nor a newer supported format (for example, invalid field
+    #: types, conflicting oneof fields, or corrupt DER).
+    MALFORMED = "malformed"
+
+    # Aliases keep the API forgiving for callers that use different wording.
+    MISSING_EVIDENCE = "missing_material"
+    UNSUPPORTED_VERSION = "unsupported_client"
+    CLIENT_UPGRADE_REQUIRED = "unsupported_client"
+
+    @property
+    def remediation(self) -> str:
+        """
+        Returns the team responsible for handling this category of failure.
+        """
+        if self is BundleErrorCategory.MISSING_MATERIAL:
+            return "publisher"
+        if self is BundleErrorCategory.UNSUPPORTED_CLIENT:
+            return "platform"
+        return "publisher"
+
+
+# Convenience aliases: the category is used outside bundle parsing as well.
+FailureCategory = BundleErrorCategory
+BundleFailureCategory = BundleErrorCategory
+
+
 class Error(Exception):
     """Base sigstore exception type. Defines helpers for diagnostics."""
+
+    #: Optional structured category for failures that can be routed
+    #: automatically. `None` means the failure has not been classified.
+    category: BundleErrorCategory | None = None
+
+    def __init__(
+        self,
+        *args: object,
+        category: BundleErrorCategory | str | None = None,
+    ):
+        """Constructs an error, optionally with a structured category."""
+        super().__init__(*args)
+        if category is not None:
+            self.category = BundleErrorCategory(category)
+
+    @property
+    def actionable(self) -> bool:
+        """
+        Returns whether the error has a known handling target.
+        """
+        return self.category is not None
+
+    @property
+    def remediation(self) -> str | None:
+        """
+        Returns the handling target for this error, if it is classified.
+
+        This is `"publisher"` for missing material (the publisher must supply
+        it) and `"platform"` for an unsupported client format (the runtime
+        must be upgraded).
+        """
+        return self.category.remediation if self.category is not None else None
 
     def diagnostics(self) -> str:
         """Returns human-friendly error information."""
@@ -116,7 +194,74 @@ class RootError(Error):
 class VerificationError(Error):
     """
     Raised whenever any phase or subcomponent of Sigstore verification fails.
+
+    Like `Error`, instances may carry a structured `category` when the failure
+    can be classified (for example, because the bundle is missing evidence or
+    because it uses a format this client does not support).
     """
+
+
+class MissingVerificationMaterial(VerificationError):
+    """
+    Raised when verification cannot proceed because the bundle is missing
+    required evidence.
+
+    The bundle was well-formed enough to parse, but it does not carry
+    material (signed time, a message signature, a DSSE envelope, ...) that the
+    publisher must supply.
+    """
+
+    category = BundleErrorCategory.MISSING_MATERIAL
+
+    def __init__(self, *args: object):
+        """Constructs a `MissingVerificationMaterial`."""
+        super().__init__(*args, category=BundleErrorCategory.MISSING_MATERIAL)
+
+
+class UnsupportedVerificationVersion(VerificationError):
+    """
+    Raised when verification encounters a valid bundle/log-entry format that
+    this client does not support.
+
+    The client runtime must be upgraded.
+    """
+
+    category = BundleErrorCategory.UNSUPPORTED_CLIENT
+
+    def __init__(self, *args: object):
+        """Constructs an `UnsupportedVerificationVersion`."""
+        super().__init__(*args, category=BundleErrorCategory.UNSUPPORTED_CLIENT)
+
+
+# Spellings that callers commonly reach for.
+MissingMaterialError = MissingVerificationMaterial
+UnsupportedClientError = UnsupportedVerificationVersion
+ClientUpgradeRequired = UnsupportedVerificationVersion
+
+
+def error_category(exc: BaseException) -> BundleErrorCategory | None:
+    """
+    Returns the structured category of `exc`, if it has one.
+
+    This looks at the exception and its cause chain, so a generic wrapper
+    around a categorized failure still reports the underlying category.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        category = getattr(current, "category", None)
+        if category is not None:
+            try:
+                return BundleErrorCategory(category)
+            except ValueError:
+                return None
+        current = current.__cause__ or current.__context__
+    return None
+
+
+# Category lookup is also exposed under a bundle-specific name.
+bundle_error_category = error_category
 
 
 class CertValidationError(VerificationError):

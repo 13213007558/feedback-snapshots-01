@@ -59,7 +59,12 @@ from sigstore._internal.sct import (
 from sigstore._internal.timestamp import TimestampSource, TimestampVerificationResult
 from sigstore._internal.trust import KeyringPurpose
 from sigstore._utils import base64_encode_pem_cert, sha256_digest
-from sigstore.errors import CertValidationError, VerificationError
+from sigstore.errors import (
+    CertValidationError,
+    MissingVerificationMaterial,
+    UnsupportedVerificationVersion,
+    VerificationError,
+)
 from sigstore.hashes import Hashed
 from sigstore.models import Bundle, ClientTrustConfig, TrustedRoot
 from sigstore.verify.policy import VerificationPolicy
@@ -240,7 +245,7 @@ class Verifier:
         ) and bundle.log_entry._inner.inclusion_promise:
             kv = bundle.log_entry._inner.kind_version
             if not (kv.kind in ["dsse", "hashedrekord"] and kv.version == "0.0.1"):
-                raise VerificationError(
+                raise UnsupportedVerificationVersion(
                     "Integrated time only supported for dsse/hashedrekord 0.0.1 types"
                 )
 
@@ -326,7 +331,7 @@ class Verifier:
         # rekor log integrated time.
         verified_timestamps = self._establish_time(bundle)
         if len(verified_timestamps) < VERIFIED_TIME_THRESHOLD:
-            raise VerificationError("not enough sources of verified time")
+            raise MissingVerificationMaterial("not enough sources of verified time")
 
         # (1): verify that the signing certificate is signed by the root
         #      certificate and that the signing certificate was valid at the
@@ -410,7 +415,7 @@ class Verifier:
         #      signing certificate's public key.
         envelope = bundle._dsse_envelope
         if envelope is None:
-            raise VerificationError(
+            raise MissingVerificationMaterial(
                 "cannot perform DSSE verification on a bundle without a DSSE envelope"
             )
 
@@ -436,7 +441,7 @@ class Verifier:
         elif kind == "dsse" and version == "0.0.1":
             _validate_dsse_v001_entry_body(bundle)
         else:
-            raise VerificationError(
+            raise UnsupportedVerificationVersion(
                 f"Unsupported DSSE log entry type: {kind}/{version}"
             )
 
@@ -467,7 +472,7 @@ class Verifier:
         hashed_input = sha256_digest(input_)
         bundle_signature = bundle._inner.message_signature
         if bundle_signature is None:
-            raise VerificationError("Missing bundle message signature")
+            raise MissingVerificationMaterial("Missing bundle message signature")
 
         # signature is verified over input digest, but if the bundle documents the digest we still
         # want to ensure it matches the input digest:
@@ -504,7 +509,7 @@ class Verifier:
         elif entry._inner.kind_version.version == "0.0.1":
             _validate_hashedrekord_v001_entry_body(bundle, hashed_input)
         else:
-            raise VerificationError(
+            raise UnsupportedVerificationVersion(
                 f"Unsupported hashedrekord version {entry._inner.kind_version.version}"
             )
 
@@ -516,7 +521,7 @@ def _validate_dsse_v001_entry_body(bundle: Bundle) -> None:
     entry = bundle.log_entry
     envelope = bundle._dsse_envelope
     if envelope is None:
-        raise VerificationError(
+        raise MissingVerificationMaterial(
             "cannot perform DSSE verification on a bundle without a DSSE envelope"
         )
     try:
@@ -531,7 +536,9 @@ def _validate_dsse_v001_entry_body(bundle: Bundle) -> None:
         entry_body.spec.root.payload_hash.algorithm  # type: ignore[union-attr]
         != rekor_types.dsse.Algorithm.SHA256
     ):
-        raise VerificationError("expected SHA256 payload hash in DSSE log entry")
+        raise UnsupportedVerificationVersion(
+            "expected SHA256 payload hash in DSSE log entry"
+        )
     if payload_hash != entry_body.spec.root.payload_hash.value:  # type: ignore[union-attr]
         raise VerificationError("log entry payload hash does not match bundle")
 
@@ -585,7 +592,7 @@ def _validate_hashedrekord_v002_dsse_entry_body(bundle: Bundle) -> None:
     entry = bundle.log_entry
     envelope = bundle._dsse_envelope
     if envelope is None:
-        raise VerificationError(
+        raise MissingVerificationMaterial(
             "cannot perform DSSE verification on a bundle without a DSSE envelope"
         )
     if len(envelope._inner.signatures) != 1:
@@ -628,7 +635,7 @@ def _validate_hashedrekord_v002_entry_body(
     """
     entry = bundle.log_entry
     if bundle._inner.message_signature is None:
-        raise VerificationError(
+        raise MissingVerificationMaterial(
             "invalid hashedrekord log entry: missing message signature"
         )
     v2_expected_body = v2.entry.Entry(

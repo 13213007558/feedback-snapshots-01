@@ -16,15 +16,25 @@ import json
 from base64 import b64encode
 
 import pytest
+from sigstore_models.bundle.v1 import Bundle as _Bundle
 from sigstore_models.rekor.v1 import KindVersion
 from sigstore_models.rekor.v1 import TransparencyLogEntry as _TransparencyLogEntry
 
-from sigstore.errors import VerificationError
+from sigstore.errors import (
+    BundleErrorCategory,
+    MissingMaterialError,
+    UnsupportedClientError,
+    VerificationError,
+    error_category,
+)
 from sigstore.models import (
     Bundle,
+    IncompatibleEntry,
     InvalidBundle,
+    MissingBundleMaterial,
     TimestampVerificationData,
     TransparencyLogEntry,
+    UnsupportedBundleVersion,
     VerificationMaterial,
 )
 
@@ -163,6 +173,195 @@ class TestBundle:
             match=r"bundle must contain an inclusion promise or signed timestamp\(s\)",
         ):
             signing_bundle("bundle_v3_no_signed_time.txt")
+
+
+class TestBundleFailureCategory:
+    """
+    The bundle ingestion API reports stable, structured failure categories
+    while remaining catch-compatible with the existing `InvalidBundle`
+    hierarchy.
+    """
+
+    def test_valid_bundle_has_no_category(self, signing_bundle):
+        _, bundle = signing_bundle("bundle.txt")
+        assert bundle is not None
+
+    @pytest.mark.parametrize(
+        "filename",
+        (
+            "bundle_no_cert_v1.txt",
+            "bundle_no_log_entry.txt",
+            "bundle_no_checkpoint.txt",
+            "bundle_v3_no_signed_time.txt",
+        ),
+    )
+    def test_missing_material_is_categorized(self, signing_bundle, filename):
+        with pytest.raises(MissingBundleMaterial) as excinfo:
+            signing_bundle(filename)
+
+        # The existing catch-compatible hierarchy still applies.
+        assert isinstance(excinfo.value, InvalidBundle)
+
+        error = excinfo.value
+        assert error.category is BundleErrorCategory.MISSING_MATERIAL
+        assert error.remediation == "publisher"
+        assert error.category == "missing_material"
+
+    @pytest.mark.parametrize(
+        "kind_version",
+        (
+            {"kind": "hashedrekord", "version": "0.0.3"},
+            {"kind": "hashedrekord", "version": "1.0.0"},
+            {"kind": "intoto", "version": "0.0.3"},
+        ),
+    )
+    def test_unsupported_log_entry_version_is_categorized(self, asset, kind_version):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        entry = raw["verificationMaterial"]["tlogEntries"][0]
+        entry["kindVersion"] = kind_version
+
+        with pytest.raises(IncompatibleEntry) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        error = excinfo.value
+        assert isinstance(error, InvalidBundle)
+        assert error.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+        assert error.remediation == "platform"
+
+    def test_malformed_log_entry_version_is_not_upgrade(self, asset):
+        raw = json.loads(asset("bundle_invalid_version.txt.sigstore").read_bytes())
+
+        with pytest.raises(InvalidBundle) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        assert excinfo.value.category is BundleErrorCategory.MALFORMED
+
+    def test_extra_log_entry_is_malformed_not_missing(self, asset):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        entries = raw["verificationMaterial"]["tlogEntries"]
+        entries.append(entries[0])
+
+        with pytest.raises(InvalidBundle) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        assert not isinstance(excinfo.value, MissingBundleMaterial)
+        assert excinfo.value.category is BundleErrorCategory.MALFORMED
+
+    @pytest.mark.parametrize(
+        "media_type",
+        (
+            "application/vnd.dev.sigstore.bundle.v0.4+json",
+            "application/vnd.dev.sigstore.bundle+json;version=0.4",
+            "application/vnd.dev.sigstore.bundle.v1.0+json",
+        ),
+    )
+    def test_newer_bundle_media_type_requires_upgrade(self, asset, media_type):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        raw["mediaType"] = media_type
+
+        with pytest.raises(UnsupportedBundleVersion) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        error = excinfo.value
+        # Existing handlers for both InvalidBundle and IncompatibleEntry work.
+        assert isinstance(error, IncompatibleEntry)
+        assert isinstance(error, InvalidBundle)
+        assert error.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+        assert error.remediation == "platform"
+
+    def test_missing_material_from_json(self, asset):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        del raw["verificationMaterial"]["certificate"]
+
+        with pytest.raises(MissingBundleMaterial) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        assert excinfo.value.category is BundleErrorCategory.MISSING_MATERIAL
+
+    def test_malformed_media_type_is_not_upgrade(self, asset):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        raw["mediaType"] = "this is completely wrong"
+
+        with pytest.raises(InvalidBundle) as excinfo:
+            Bundle.from_json(json.dumps(raw))
+
+        assert not isinstance(excinfo.value, MissingBundleMaterial)
+        assert not isinstance(excinfo.value, UnsupportedBundleVersion)
+        assert excinfo.value.category is BundleErrorCategory.MALFORMED
+
+    def test_categories_are_distinct(self):
+        assert (
+            BundleErrorCategory.MISSING_MATERIAL
+            is not BundleErrorCategory.UNSUPPORTED_CLIENT
+        )
+        assert (
+            BundleErrorCategory.MISSING_MATERIAL.remediation
+            != BundleErrorCategory.UNSUPPORTED_CLIENT.remediation
+        )
+
+    def test_verification_error_aliases(self):
+        # The same categories are available for verification-time failures.
+        missing = MissingMaterialError("missing")
+        unsupported = UnsupportedClientError("unsupported")
+
+        assert isinstance(missing, VerificationError)
+        assert isinstance(unsupported, VerificationError)
+        assert missing.category is BundleErrorCategory.MISSING_MATERIAL
+        assert unsupported.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+        assert missing.remediation == "publisher"
+        assert unsupported.remediation == "platform"
+
+    def test_object_api_matches_json_categories(self, asset):
+        """
+        The structured category is the same whether a bundle is assembled
+        from JSON or from an already-constructed model object.
+        """
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+
+        # Missing material, via the object API.
+        inner = _Bundle.from_json(json.dumps(raw))
+        inner.verification_material.certificate = None
+        inner.media_type = "application/vnd.dev.sigstore.bundle.v0.3+json"
+        with pytest.raises(MissingBundleMaterial) as excinfo:
+            Bundle(inner)
+        assert excinfo.value.category is BundleErrorCategory.MISSING_MATERIAL
+
+        # Newer-but-recognizable format, via the object API.
+        inner = _Bundle.from_json(json.dumps(raw))
+        inner.media_type = "application/vnd.dev.sigstore.bundle.v0.4+json"
+        with pytest.raises(UnsupportedBundleVersion) as excinfo:
+            Bundle(inner)
+        assert excinfo.value.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+
+        # Newer log entry version, via the object API.
+        inner = _Bundle.from_json(json.dumps(raw))
+        inner.verification_material.tlog_entries[0].kind_version.version = "0.0.7"
+        with pytest.raises(IncompatibleEntry) as excinfo:
+            Bundle(inner)
+        assert excinfo.value.category is BundleErrorCategory.UNSUPPORTED_CLIENT
+
+    def test_error_category_walks_cause_chain(self, asset):
+        raw = json.loads(asset("bundle_v3.txt.sigstore").read_bytes())
+        del raw["verificationMaterial"]["certificate"]
+
+        try:
+            Bundle.from_json(json.dumps(raw))
+        except InvalidBundle as exc:
+            wrapper = VerificationError("wrapped")
+            wrapper.__cause__ = exc
+        else:  # pragma: no cover - the bundle must fail to load
+            pytest.fail("bundle unexpectedly loaded")
+
+        assert error_category(wrapper) is BundleErrorCategory.MISSING_MATERIAL
+        assert error_category(RuntimeError("unclassified")) is None
+
+    def test_error_category_handles_cycles(self):
+        first = VerificationError("first")
+        second = VerificationError("second")
+        first.__cause__ = second
+        second.__cause__ = first
+
+        assert error_category(first) is None
 
 
 class TestKnownBundleTypes:

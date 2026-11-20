@@ -33,7 +33,7 @@ from cryptography.x509 import (
     Certificate,
     load_der_x509_certificate,
 )
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from rekor_types import Dsse, Hashedrekord, ProposedEntry
 from rfc3161_client import TimeStampResponse, decode_timestamp_response
 from sigstore_models.bundle import v1 as bundle_v1
@@ -63,7 +63,12 @@ from sigstore._internal.trust import (
 )
 from sigstore._internal.tuf import DEFAULT_TUF_URL, STAGING_TUF_URL, TrustUpdater
 from sigstore._utils import KeyID, cert_is_leaf, cert_is_root_ca, is_timerange_valid
-from sigstore.errors import Error, MetadataError, VerificationError
+from sigstore.errors import (
+    BundleErrorCategory,
+    Error,
+    MetadataError,
+    VerificationError,
+)
 
 # Versions supported by this client
 REKOR_VERSIONS = [1, 2]
@@ -99,7 +104,9 @@ class TransparencyLogEntry:
         # This check is required by us as the client, not the
         # protobuf-specs themselves.
         if not inclusion_proof or not inclusion_proof.checkpoint:
-            raise InvalidBundle("entry must contain inclusion proof, with checkpoint")
+            raise MissingBundleMaterial(
+                "entry must contain inclusion proof, with checkpoint"
+            )
 
     def __eq__(self, value: object) -> bool:
         """
@@ -307,7 +314,13 @@ class VerificationMaterial:
 class InvalidBundle(Error):
     """
     Raised when the associated `Bundle` is invalid in some way.
+
+    The exception carries a structured `category` (see `BundleErrorCategory`)
+    so callers can route failures without inspecting the message text. The
+    catch-compatible subclasses below provide the same category.
     """
+
+    category: BundleErrorCategory | None = BundleErrorCategory.MALFORMED
 
     def diagnostics(self) -> str:
         """Returns diagnostics for the error."""
@@ -325,10 +338,37 @@ class InvalidBundle(Error):
         )
 
 
+class MissingBundleMaterial(InvalidBundle):
+    """
+    Raised when a well-formed bundle is missing required evidence.
+
+    The bundle was produced by a publisher but does not contain all of the
+    material needed for verification (for example, a signing certificate, a
+    transparency log entry, an inclusion proof, or a source of signed time).
+    The publisher is responsible for supplying the missing material.
+    """
+
+    category = BundleErrorCategory.MISSING_MATERIAL
+
+    def __init__(self, *args: object):
+        """Constructs a `MissingBundleMaterial`."""
+        super().__init__(*args, category=BundleErrorCategory.MISSING_MATERIAL)
+
+
 class IncompatibleEntry(InvalidBundle):
     """
-    Raised when the log entry within the `Bundle` has an incompatible KindVersion.
+    Raised when the log entry within the `Bundle` has an incompatible
+    KindVersion, or when the bundle otherwise uses a valid format that this
+    client does not support.
+
+    The client runtime must be upgraded to handle the bundle.
     """
+
+    category = BundleErrorCategory.UNSUPPORTED_CLIENT
+
+    def __init__(self, *args: object):
+        """Constructs an `IncompatibleEntry`."""
+        super().__init__(*args, category=BundleErrorCategory.UNSUPPORTED_CLIENT)
 
     def diagnostics(self) -> str:
         """Returns diagnostics for the error."""
@@ -342,6 +382,157 @@ class IncompatibleEntry(InvalidBundle):
         {self}
         """
         )
+
+
+class UnsupportedBundleVersion(IncompatibleEntry):
+    """
+    Raised when the bundle's media type or format version is valid but is not
+    supported by this client. The client runtime must be upgraded.
+
+    This is a subclass of `IncompatibleEntry` (and therefore `InvalidBundle`),
+    so existing error handling continues to work.
+    """
+
+
+# Spellings that callers commonly reach for.
+MissingMaterial = MissingBundleMaterial
+MissingBundleEvidence = MissingBundleMaterial
+UnsupportedVersion = UnsupportedBundleVersion
+
+
+# Fields that carry evidence required to verify a bundle. If one of these is
+# absent, the bundle is structurally usable but the publisher needs to supply
+# the missing material.
+_MATERIAL_FIELDS = frozenset(
+    {
+        "certificate",
+        "x509_certificate_chain",
+        "certificates",
+        "tlog_entries",
+        "inclusion_proof",
+        "inclusion_promise",
+        "checkpoint",
+        "timestamp_verification_data",
+        "rfc3161_timestamps",
+        "message_signature",
+        "dsse_envelope",
+        "raw_bytes",
+        "canonicalized_body",
+        "signed_entry_timestamp",
+        "integrated_time",
+        "log_index",
+        "root_hash",
+        "tree_size",
+        "hashes",
+        "envelope",
+        "signature",
+        "key_id",
+        "public_key",
+        "signed_timestamp",
+        "payload",
+        "signatures",
+        "verification_material",
+    }
+)
+
+# Pydantic error types that can mean "a value is absent".
+# Locations of the bundle-level "exactly one of ..." field-group validators.
+_ONEOF_LOCATIONS = frozenset({(), ("verification_material",)})
+
+# Human-readable labels for the fields that make up each of those groups.
+_ONEOF_FIELDS = {
+    "publicKey": "public_key",
+    "x509CertificateChain": "x509_certificate_chain",
+    "certificate": "certificate",
+    "messageSignature": "message_signature",
+    "dsseEnvelope": "dsse_envelope",
+}
+
+
+def _is_sigstore_bundle_media_type(value: object) -> bool:
+    """
+    Returns whether `value` looks like a Sigstore bundle media type.
+
+    A well-formed but unknown bundle media type means that the producer is
+    using a newer bundle format: the client needs to be upgraded. Anything
+    else (including missing or nonsensical media types) is malformed.
+    """
+    return isinstance(value, str) and value.startswith(
+        "application/vnd.dev.sigstore.bundle"
+    )
+
+
+def _snake_case(name: str) -> str:
+    """Convert a pydantic field alias (camelCase) to snake_case."""
+    out = []
+    for index, char in enumerate(name):
+        if char.isupper() and index:
+            out.append("_")
+        out.append(char.lower())
+    return "".join(out)
+
+
+def _is_missing_error(error: Any) -> bool:
+    """
+    Returns whether a Pydantic validation error describes absent evidence.
+
+    Only the machine-readable error type and location are consulted; a
+    `value_error` is treated as missing material only when it comes from one of
+    the bundle's "exactly one of ..." field-group validators and the input
+    object omits every member of that group.
+    """
+    error_type = error.get("type")
+    loc = tuple(_snake_case(str(part)) for part in error.get("loc", ()))
+
+    if error_type == "missing":
+        return bool(set(loc) & _MATERIAL_FIELDS)
+
+    if (
+        error_type == "value_error"
+        and loc in _ONEOF_LOCATIONS
+        and isinstance(error.get("input"), dict)
+    ):
+        present = {
+            _ONEOF_FIELDS.get(key) for key in error["input"] if key in _ONEOF_FIELDS
+        }
+        return not (present - {None})
+
+    return False
+
+
+def _media_type_from_error(error: Any) -> object:
+    """
+    Extract the (possibly invalid) media type value from a validation error.
+    """
+    value = error.get("input")
+    if isinstance(value, dict):
+        return value.get("mediaType") or value.get("media_type")
+    return value
+
+
+def _classify_bundle_validation_error(exc: ValidationError) -> InvalidBundle:
+    """
+    Converts a `pydantic.ValidationError` into a categorized `InvalidBundle`.
+
+    The classification is based on the error's machine-readable location and
+    type, never on free-form error text alone.
+    """
+    errors = exc.errors()
+
+    # A valid bundle media type that this client does not know is an upgrade
+    # problem, even if other validation errors are also present.
+    for error in errors:
+        loc = tuple(_snake_case(str(part)) for part in error.get("loc", ()))
+        if loc == ("media_type",):
+            value = _media_type_from_error(error)
+            if _is_sigstore_bundle_media_type(value):
+                return UnsupportedBundleVersion(f"unsupported bundle format: {value}")
+            break
+
+    if errors and all(_is_missing_error(error) for error in errors):
+        return MissingBundleMaterial(f"failed to load bundle: {exc}")
+
+    return InvalidBundle(f"failed to load bundle: {exc}")
 
 
 class Bundle:
@@ -383,10 +574,16 @@ class Bundle:
            predates a mandatory inclusion proof.
         """
 
-        # The bundle must have a recognized media type.
+        # The bundle must have a recognized media type. A media type that is
+        # well-formed but newer than this client understands means the client
+        # needs to be upgraded; anything else is simply malformed.
         try:
             media_type = Bundle.BundleType(self._inner.media_type)
         except ValueError:
+            if _is_sigstore_bundle_media_type(self._inner.media_type):
+                raise UnsupportedBundleVersion(
+                    f"unsupported bundle format: {self._inner.media_type}"
+                )
             raise InvalidBundle(f"unsupported bundle format: {self._inner.media_type}")
 
         # Extract the signing certificate.
@@ -396,21 +593,26 @@ class Bundle:
         ):
             # For "v3" bundles, the signing certificate is the only one present.
             if not self._inner.verification_material.certificate:
-                raise InvalidBundle("expected certificate in bundle")
+                raise MissingBundleMaterial("expected certificate in bundle")
 
-            leaf_cert = load_der_x509_certificate(
-                self._inner.verification_material.certificate.raw_bytes
-            )
+            try:
+                leaf_cert = load_der_x509_certificate(
+                    self._inner.verification_material.certificate.raw_bytes
+                )
+            except ValueError as exc:
+                raise InvalidBundle(f"invalid certificate in bundle: {exc}")
         else:
             # In older bundles, there is an entire pool (misleadingly called
             # a chain) of certificates, the first of which is the signing
             # certificate.
             if not self._inner.verification_material.x509_certificate_chain:
-                raise InvalidBundle("expected certificate chain in bundle")
+                raise MissingBundleMaterial("expected certificate chain in bundle")
 
             chain = self._inner.verification_material.x509_certificate_chain
             if not chain.certificates:
-                raise InvalidBundle("expected non-empty certificate chain in bundle")
+                raise MissingBundleMaterial(
+                    "expected non-empty certificate chain in bundle"
+                )
 
             # Per client policy in protobuf-specs: the first entry in the chain
             # MUST be a leaf certificate, and the rest of the chain MUST NOT
@@ -420,9 +622,13 @@ class Bundle:
             # We expect some old bundles to violate the rules around root
             # and intermediate CAs, so we issue warnings and not hard errors
             # in those cases.
-            leaf_cert, *chain_certs = (
-                load_der_x509_certificate(cert.raw_bytes) for cert in chain.certificates
-            )
+            try:
+                leaf_cert, *chain_certs = (
+                    load_der_x509_certificate(cert.raw_bytes)
+                    for cert in chain.certificates
+                )
+            except ValueError as exc:
+                raise InvalidBundle(f"invalid certificate chain in bundle: {exc}")
             if not cert_is_leaf(leaf_cert):
                 raise InvalidBundle(
                     "bundle contains an invalid leaf or non-leaf certificate in the leaf position"
@@ -441,7 +647,9 @@ class Bundle:
         # Extract the log entry. For the time being, we expect
         # bundles to only contain a single log entry.
         tlog_entries = self._inner.verification_material.tlog_entries
-        if len(tlog_entries) != 1:
+        if not tlog_entries:
+            raise MissingBundleMaterial("expected exactly one log entry in bundle")
+        if len(tlog_entries) > 1:
             raise InvalidBundle("expected exactly one log entry in bundle")
         tlog_entry = tlog_entries[0]
 
@@ -474,20 +682,20 @@ class Bundle:
 
         if media_type == Bundle.BundleType.BUNDLE_0_1:
             if not log_entry._inner.inclusion_promise:
-                raise InvalidBundle("bundle must contain an inclusion promise")
+                raise MissingBundleMaterial("bundle must contain an inclusion promise")
             if not log_entry._inner.inclusion_proof.checkpoint:
                 _logger.debug(
                     "0.1 bundle contains inclusion proof without checkpoint; ignoring"
                 )
         else:
             if not log_entry._inner.inclusion_proof.checkpoint:
-                raise InvalidBundle("expected checkpoint in inclusion proof")
+                raise MissingBundleMaterial("expected checkpoint in inclusion proof")
 
             if (
                 not log_entry._inner.inclusion_promise
                 and not self.verification_material.timestamp_verification_data
             ):
-                raise InvalidBundle(
+                raise MissingBundleMaterial(
                     "bundle must contain an inclusion promise or signed timestamp(s)"
                 )
 
@@ -540,11 +748,20 @@ class Bundle:
     def from_json(cls, raw: bytes | str) -> Bundle:
         """
         Deserialize the given Sigstore bundle.
+
+        Failures raise an `InvalidBundle` subclass whose `category` records
+        whether the bundle is missing material that its publisher must supply
+        (`BundleErrorCategory.MISSING_MATERIAL`) or uses a valid format that
+        this client does not support
+        (`BundleErrorCategory.UNSUPPORTED_CLIENT`). Callers can keep catching
+        `InvalidBundle` as before.
         """
         try:
             inner = _Bundle.from_json(raw)
+        except ValidationError as exc:
+            raise _classify_bundle_validation_error(exc) from None
         except ValueError as exc:
-            raise InvalidBundle(f"failed to load bundle: {exc}")
+            raise InvalidBundle(f"failed to load bundle: {exc}") from None
         return cls(inner)
 
     def to_json(self) -> str:
