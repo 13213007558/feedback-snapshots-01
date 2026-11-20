@@ -8,7 +8,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractBaseUser
 from django.core import signing
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.db.models.constraints import UniqueConstraint
 from django.utils import timezone
@@ -98,11 +98,13 @@ class EmailAddress(models.Model):
         if old_primary:
             if conditional:
                 return False
-            old_primary.primary = False
-            old_primary.save()
-        self.primary = True
-        self.save()
-        user_email(self.user, self.email, commit=True)
+        with transaction.atomic():
+            if old_primary:
+                old_primary.primary = False
+                old_primary.save()
+            self.primary = True
+            self.save()
+            user_email(self.user, self.email, commit=True)
         return True
 
     def send_confirmation(

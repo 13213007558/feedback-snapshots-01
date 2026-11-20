@@ -98,14 +98,22 @@ def mark_as_primary(request: HttpRequest, email_address: EmailAddress) -> bool:
         from_email_address = EmailAddress.objects.filter(
             user=request.user, primary=True
         ).first()
-        email_address.set_as_primary()
         adapter = get_adapter()
-        adapter.add_message(
-            request,
-            messages.SUCCESS,
-            "account/messages/primary_email_set.txt",
-        )
-        emit_email_changed(request, from_email_address, email_address)
+        if from_email_address and from_email_address.pk == email_address.pk:
+            # Already primary -- no effective change, so no change event.
+            adapter.add_message(
+                request,
+                messages.SUCCESS,
+                "account/messages/primary_email_set.txt",
+            )
+        else:
+            email_address.set_as_primary()
+            adapter.add_message(
+                request,
+                messages.SUCCESS,
+                "account/messages/primary_email_set.txt",
+            )
+            emit_email_changed(request, from_email_address, email_address)
         success = True
     return success
 

@@ -1,13 +1,16 @@
 import json
+from contextlib import contextmanager
 from http import HTTPStatus
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError
 from django.urls import reverse
 
 import pytest
 from pytest_django.asserts import assertTemplateNotUsed, assertTemplateUsed
 
+from allauth.account import signals
 from allauth.account.app_settings import LoginMethod
 from allauth.account.models import EmailAddress, EmailConfirmationHMAC
 from allauth.account.utils import user_email
@@ -574,3 +577,174 @@ def test_change_unverified_email_to_verified_email_of_other_user(
     new_email.refresh_from_db()
     assert not new_email.verified
     assert not email_changed_mock.called
+
+
+@contextmanager
+def capture_email_changed(mailoutbox):
+    """Records every `email_changed` signal, along with the state of the world
+    (DB and outbox) at the moment the signal fired."""
+    events = []
+
+    def receiver(sender, **kwargs):
+        to_email_address = kwargs["to_email_address"]
+        events.append(
+            {
+                "user": kwargs["user"],
+                "from_email_address": kwargs["from_email_address"],
+                "to_email_address": to_email_address,
+                # Ordering probes: has the new primary been persisted, and has
+                # the external notification mail been sent yet?
+                "to_is_primary_in_db": EmailAddress.objects.get(
+                    pk=to_email_address.pk
+                ).primary,
+                "mails_sent": len(mailoutbox),
+            }
+        )
+
+    signals.email_changed.connect(receiver)
+    try:
+        yield events
+    finally:
+        signals.email_changed.disconnect(receiver)
+
+
+def test_set_primary_emits_single_change_event(auth_client, user, settings, mailoutbox):
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+    old_primary = EmailAddress.objects.get(user=user, primary=True)
+    secondary = EmailAddress.objects.create(
+        email="secondary@email.org", user=user, verified=True, primary=False
+    )
+    with capture_email_changed(mailoutbox) as events:
+        resp = auth_client.post(
+            reverse("account_email"),
+            {"action_primary": "", "email": secondary.email},
+        )
+    assert resp.status_code == HTTPStatus.FOUND
+    # User record is in sync with the new primary address.
+    user.refresh_from_db()
+    assert user_email(user) == secondary.email
+    # EmailAddress state flipped.
+    old_primary.refresh_from_db()
+    secondary.refresh_from_db()
+    assert not old_primary.primary
+    assert secondary.primary
+    # Exactly one change event, describing old -> new.
+    assert len(events) == 1
+    event = events[0]
+    assert event["user"].pk == user.pk
+    assert event["from_email_address"].pk == old_primary.pk
+    assert event["to_email_address"].pk == secondary.pk
+    # Ordering: state is persisted before the signal fires, and the signal
+    # fires before the external notification mail goes out.
+    assert event["to_is_primary_in_db"]
+    assert event["mails_sent"] == 0
+    # External notification is sent to the previous primary address.
+    assert len(mailoutbox) == 1
+    mail = mailoutbox[0]
+    assert mail.to == [old_primary.email]
+    assert mail.subject == "[example.com] Email Changed"
+    assert f"changed from {old_primary.email} to {secondary.email}" in mail.body
+
+
+def test_set_primary_unverified_emits_nothing(auth_client, user, settings, mailoutbox):
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+    old_primary = EmailAddress.objects.get(user=user, primary=True)
+    secondary = EmailAddress.objects.create(
+        email="secondary@email.org", user=user, verified=False, primary=False
+    )
+    with capture_email_changed(mailoutbox) as events:
+        resp = auth_client.post(
+            reverse("account_email"),
+            {"action_primary": "", "email": secondary.email},
+        )
+    assertTemplateUsed(resp, "account/messages/unverified_primary_email.txt")
+    assert events == []
+    assert len(mailoutbox) == 0
+    old_primary.refresh_from_db()
+    secondary.refresh_from_db()
+    assert old_primary.primary
+    assert not secondary.primary
+    user.refresh_from_db()
+    assert user_email(user) == old_primary.email
+
+
+def test_set_primary_already_primary_emits_nothing(
+    auth_client, user, settings, mailoutbox
+):
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+    primary = EmailAddress.objects.get(user=user, primary=True)
+    with capture_email_changed(mailoutbox) as events:
+        resp = auth_client.post(
+            reverse("account_email"),
+            {"action_primary": "", "email": primary.email},
+        )
+    # The request succeeds, but nothing effectively changed...
+    assert resp.status_code == HTTPStatus.FOUND
+    assertTemplateUsed(resp, "account/messages/primary_email_set.txt")
+    # ...so the audit trail must remain silent.
+    assert events == []
+    assert len(mailoutbox) == 0
+    primary.refresh_from_db()
+    assert primary.primary
+    user.refresh_from_db()
+    assert user_email(user) == primary.email
+
+
+def test_set_primary_db_failure_before_write_emits_nothing(
+    auth_client, user, settings, mailoutbox
+):
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+    old_primary = EmailAddress.objects.get(user=user, primary=True)
+    secondary = EmailAddress.objects.create(
+        email="secondary@email.org", user=user, verified=True, primary=False
+    )
+    auth_client.raise_request_exception = False
+    with capture_email_changed(mailoutbox) as events:
+        with patch.object(
+            EmailAddress, "set_as_primary", side_effect=DatabaseError("boom")
+        ):
+            resp = auth_client.post(
+                reverse("account_email"),
+                {"action_primary": "", "email": secondary.email},
+            )
+    assert resp.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    # Nothing was modified, and nothing was emitted.
+    assert events == []
+    assert len(mailoutbox) == 0
+    old_primary.refresh_from_db()
+    secondary.refresh_from_db()
+    assert old_primary.primary
+    assert not secondary.primary
+    user.refresh_from_db()
+    assert user_email(user) == old_primary.email
+
+
+def test_set_primary_db_failure_mid_write_rolls_back(
+    auth_client, user, settings, mailoutbox
+):
+    settings.ACCOUNT_EMAIL_NOTIFICATIONS = True
+    old_primary = EmailAddress.objects.get(user=user, primary=True)
+    secondary = EmailAddress.objects.create(
+        email="secondary@email.org", user=user, verified=True, primary=False
+    )
+    auth_client.raise_request_exception = False
+    # The EmailAddress rows are saved, then persisting the user record fails.
+    with capture_email_changed(mailoutbox) as events:
+        with patch(
+            "allauth.account.utils.user_email", side_effect=DatabaseError("boom")
+        ):
+            resp = auth_client.post(
+                reverse("account_email"),
+                {"action_primary": "", "email": secondary.email},
+            )
+    assert resp.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    # The partial modification was rolled back...
+    old_primary.refresh_from_db()
+    secondary.refresh_from_db()
+    assert old_primary.primary
+    assert not secondary.primary
+    user.refresh_from_db()
+    assert user_email(user) == old_primary.email
+    # ...and the audit trail only saw the (non-)change that actually stuck.
+    assert events == []
+    assert len(mailoutbox) == 0
