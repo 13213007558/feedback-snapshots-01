@@ -306,6 +306,7 @@ class SQLAlchemy:
         - :data:`.SQLALCHEMY_ECHO`
         - :data:`.SQLALCHEMY_BINDS`
         - :data:`.SQLALCHEMY_RECORD_QUERIES`
+        - :data:`.SQLALCHEMY_RECORD_QUERY_PARAMS`
         - :data:`.SQLALCHEMY_TRACK_MODIFICATIONS`
 
         :param app: The Flask application to initialize.
@@ -378,8 +379,14 @@ class SQLAlchemy:
         if app.config.setdefault("SQLALCHEMY_RECORD_QUERIES", False):
             from . import record_queries
 
-            for engine in engines.values():
-                record_queries._listen(engine)
+            parameter_policies = record_queries._parse_parameter_policies(
+                app.config.setdefault("SQLALCHEMY_RECORD_QUERY_PARAMS", True),
+                engines,
+            )
+            record_queries._app_parameter_policies[app] = parameter_policies
+
+            for key, engine in engines.items():
+                record_queries._listen(engine, app, bind_key=key)
 
         if app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False):
             from . import track_modifications

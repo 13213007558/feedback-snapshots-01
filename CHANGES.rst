@@ -1,3 +1,13 @@
+Version 3.2.0
+-------------
+
+-   Add the ``SQLALCHEMY_RECORD_QUERY_PARAMS`` config to control which query
+    parameter values are stored by ``SQLALCHEMY_RECORD_QUERIES``, per app and
+    per bind. Statement structure, timing, and location are always recorded.
+    Recorded info gains ``bind_key`` and ``parameters_restricted`` attributes,
+    and a query that raises is not added to the list.
+
+
 Version 3.1.2
 -------------
 

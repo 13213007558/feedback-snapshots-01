@@ -64,6 +64,43 @@ must happen before initializing the application.
     .. versionchanged:: 3.0
         Not enabled automatically in debug or testing mode.
 
+.. data:: SQLALCHEMY_RECORD_QUERY_PARAMS
+
+    Controls which parameter values are stored in the query information recorded by
+    :data:`SQLALCHEMY_RECORD_QUERIES`. The statement, parameter names, timing, and
+    location are always recorded; this config only hides values.
+
+    The value can be one of the following, applied to every bind:
+
+    -   ``True`` (the default): record every parameter value.
+    -   ``False``: replace every parameter value with ``"***"``.
+    -   A parameter name or a collection of names: record those values and replace
+        the others with ``"***"``.
+
+    It can also be a dict mapping bind keys to one of those values. ``None`` is the
+    default bind and ``"*"`` applies to binds without an explicit entry. A bind with
+    no entry and no ``"*"`` entry records no values.
+
+    Only names that a query actually uses are matched. For SQLAlchemy Core and ORM
+    statements, names come from the statement's bind parameters; for a statement whose
+    parameter names can't be determined, such as ``exec_driver_sql``, all values are
+    replaced.
+
+    .. code-block:: python
+
+        # Restrict only the default bind to numeric identifiers, and record the
+        # audit bind as-is. Other binds store no values.
+        SQLALCHEMY_RECORD_QUERY_PARAMS = {
+            None: ["id"],
+            "audit": True,
+        }
+
+    This does not change what is sent to the database. The policy is read when
+    :meth:`SQLAlchemy.init_app` is called, so it can differ between apps that share
+    an extension instance.
+
+    .. versionadded:: 3.2
+
 .. data:: SQLALCHEMY_TRACK_MODIFICATIONS
 
     If enabled, all ``insert``, ``update``, and ``delete`` operations on models are
