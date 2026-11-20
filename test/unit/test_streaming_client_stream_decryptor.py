@@ -7,6 +7,11 @@ import io
 import pytest
 from mock import MagicMock, call, patch, sentinel
 
+from aws_encryption_sdk.diagnostics import (
+    DecryptionFailureCategory,
+    DecryptionFailurePhase,
+    safe_decryption_diagnostic,
+)
 from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
     CustomMaximumValueExceeded,
@@ -128,6 +133,7 @@ class TestStreamDecryptor(object):
         self.mock_deserialize_footer_patcher.stop()
         self.mock_deserialize_frame_patcher.stop()
         self.mock_decrypt_patcher.stop()
+        self.mock_compare_digest_patcher.stop()
 
     def test_init(self):
         ct_stream = io.BytesIO(VALUES["data_128"])
@@ -1126,3 +1132,51 @@ class TestStreamDecryptor(object):
                     else:
                         # ... its EC is NOT in the StreamEncryptor._required_encryption_context
                         assert k not in test_decryptor._required_encryption_context
+
+    def test_GIVEN_decrypt_materials_raises_WHEN_read_header_THEN_materials_diagnostic_recorded(self):
+        # Given: material lookup fails
+        self.mock_header.encryption_context = {}
+        self.mock_materials_manager.decrypt_materials.side_effect = MasterKeyProviderError("no material")
+        ct_stream = io.BytesIO(VALUES["data_128"])
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=ct_stream,
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_decryptor.source_stream = ct_stream
+        test_decryptor._stream_length = len(VALUES["data_128"])
+
+        # When: read header
+        with pytest.raises(MasterKeyProviderError) as excinfo:
+            test_decryptor._read_header()
+
+        # Then: phase and category are usable for classification
+        diagnostic = safe_decryption_diagnostic(excinfo.value)
+        assert diagnostic.phase is DecryptionFailurePhase.GET_DECRYPTION_MATERIALS
+        assert diagnostic.category is DecryptionFailureCategory.MATERIALS_UNAVAILABLE
+
+    @patch("aws_encryption_sdk.streaming_client.derive_data_encryption_key")
+    def test_GIVEN_header_validation_raises_WHEN_read_header_THEN_integrity_diagnostic_recorded(
+        self, mock_derive_datakey
+    ):
+        # Given: header validation fails
+        self.mock_header.encryption_context = {}
+        self.mock_decrypt_materials.verification_key = None
+        self.mock_validate_header.side_effect = SerializationError("Header authorization failed")
+        ct_stream = io.BytesIO(VALUES["data_128"])
+        test_decryptor = StreamDecryptor(
+            materials_manager=self.mock_materials_manager,
+            source=ct_stream,
+            commitment_policy=self.mock_commitment_policy,
+        )
+        test_decryptor.source_stream = ct_stream
+        test_decryptor._stream_length = len(VALUES["data_128"])
+
+        # When: read header
+        with pytest.raises(SerializationError) as excinfo:
+            test_decryptor._read_header()
+
+        # Then: phase and category are usable for classification
+        diagnostic = safe_decryption_diagnostic(excinfo.value)
+        assert diagnostic.phase is DecryptionFailurePhase.VERIFY_HEADER
+        assert diagnostic.category is DecryptionFailureCategory.INTEGRITY_FAILED

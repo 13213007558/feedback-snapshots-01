@@ -15,6 +15,11 @@ import six
 from cryptography.hazmat.primitives import serialization
 
 import aws_encryption_sdk.internal.utils
+from aws_encryption_sdk.diagnostics import (
+    DecryptionFailurePhase,
+    _record_decryption_diagnostic,
+    decryption_failure_phase,
+)
 from aws_encryption_sdk.exceptions import (
     ActionNotAllowedError,
     AWSEncryptionSDKClientError,
@@ -943,7 +948,8 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         self._header, self.header_auth = self._read_header()
 
         if self._header.content_type == ContentType.NO_FRAMING:
-            self._prep_non_framed()
+            with decryption_failure_phase(DecryptionFailurePhase.DECRYPT_BODY):
+                self._prep_non_framed()
         self._message_prepped = True
 
     def _create_decrypt_materials_request(self, header):
@@ -1017,46 +1023,30 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
         return header, header_auth
 
-    def _read_header(self):
-        """Reads the message header from the input stream.
+    def _read_decryption_materials(self, header):
+        """Read decryption materials from the configured CMM, recording config/material phases."""
+        with decryption_failure_phase(DecryptionFailurePhase.CONFIGURATION):
+            validate_commitment_policy_on_decrypt(self.config.commitment_policy, header.algorithm)
+            validate_signature_policy_on_decrypt(self.config.signature_policy, header.algorithm)
 
-        :returns: tuple containing deserialized header and header_auth objects
-        :rtype: tuple of aws_encryption_sdk.structures.MessageHeader
-            and aws_encryption_sdk.internal.structures.MessageHeaderAuthentication
-        :raises CustomMaximumValueExceeded: if frame length is greater than the custom max value
-        :raises CustomMaximumValueExceeded: if number of encrypted data keys is greater than the custom max value
-        """
-        header, raw_header = deserialize_header(self.source_stream, self.config.max_encrypted_data_keys)
-        self.__unframed_bytes_read += len(raw_header)
-
-        validate_commitment_policy_on_decrypt(self.config.commitment_policy, header.algorithm)
-        validate_signature_policy_on_decrypt(self.config.signature_policy, header.algorithm)
-
-        if (
-            self.config.max_body_length is not None
-            and header.content_type == ContentType.FRAMED_DATA
-            and header.frame_length > self.config.max_body_length
-        ):
-            raise CustomMaximumValueExceeded(
-                "Frame Size in header found larger than custom value: {found:d} > {custom:d}".format(
-                    found=header.frame_length, custom=self.config.max_body_length
+            if (
+                self.config.max_body_length is not None
+                and header.content_type == ContentType.FRAMED_DATA
+                and header.frame_length > self.config.max_body_length
+            ):
+                raise CustomMaximumValueExceeded(
+                    "Frame Size in header found larger than custom value: {found:d} > {custom:d}".format(
+                        found=header.frame_length, custom=self.config.max_body_length
+                    )
                 )
-            )
 
-        decrypt_materials_request = self._create_decrypt_materials_request(header)
-        decryption_materials = self.config.materials_manager.decrypt_materials(request=decrypt_materials_request)
+            decrypt_materials_request = self._create_decrypt_materials_request(header)
 
-        # If the materials_manager passed required_encryption_context_keys,
-        # get the items out of the encryption_context with the keys.
-        # The items are used in header validation.
-        if hasattr(decryption_materials, "required_encryption_context_keys"):
-            self._required_encryption_context = {}
-            for (key, value) in decryption_materials.encryption_context.items():
-                if key in decryption_materials.required_encryption_context_keys:
-                    self._required_encryption_context[key] = value
-        else:
-            self._required_encryption_context = None
+        with decryption_failure_phase(DecryptionFailurePhase.GET_DECRYPTION_MATERIALS):
+            return self.config.materials_manager.decrypt_materials(request=decrypt_materials_request)
 
+    def _load_verifier(self, header, decryption_materials, raw_header):
+        """Load and prime the optional message verifier."""
         if decryption_materials.verification_key is None:
             self.verifier = None
         else:
@@ -1075,31 +1065,69 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         if self.verifier is not None:
             self.verifier.update(raw_header)
 
-        header_auth = deserialize_header_auth(
-            version=header.version, stream=self.source_stream, algorithm=header.algorithm, verifier=self.verifier
-        )
-        self._derived_data_key = derive_data_encryption_key(
-            source_key=decryption_materials.data_key.data_key, algorithm=header.algorithm, message_id=header.message_id
+    def _validate_commitment(self, header, decryption_materials):
+        """Validate the message key commitment, if the algorithm suite uses one."""
+        if not header.algorithm.is_committing():
+            return
+
+        expected_commitment_key = calculate_commitment_key(
+            source_key=decryption_materials.data_key.data_key,
+            algorithm=header.algorithm,
+            message_id=header.message_id,
         )
 
-        if header.algorithm.is_committing():
-            expected_commitment_key = calculate_commitment_key(
+        if not hmac.compare_digest(expected_commitment_key, header.commitment_key):
+            error = MasterKeyProviderError(
+                "Key commitment validation failed. Key identity does not match the identity asserted in the "
+                "message. Halting processing of this message."
+            )
+            _record_decryption_diagnostic(error, DecryptionFailurePhase.VERIFY_HEADER)
+            raise error
+
+    def _read_header(self):
+        """Reads the message header from the input stream.
+
+        :returns: tuple containing deserialized header and header_auth objects
+        :rtype: tuple of aws_encryption_sdk.structures.MessageHeader
+            and aws_encryption_sdk.internal.structures.MessageHeaderAuthentication
+        :raises CustomMaximumValueExceeded: if frame length is greater than the custom max value
+        :raises CustomMaximumValueExceeded: if number of encrypted data keys is greater than the custom max value
+        """
+        header, raw_header = deserialize_header(self.source_stream, self.config.max_encrypted_data_keys)
+        self.__unframed_bytes_read += len(raw_header)
+
+        decryption_materials = self._read_decryption_materials(header)
+
+        # If the materials_manager passed required_encryption_context_keys,
+        # get the items out of the encryption_context with the keys.
+        # The items are used in header validation.
+        if hasattr(decryption_materials, "required_encryption_context_keys"):
+            self._required_encryption_context = {}
+            for (key, value) in decryption_materials.encryption_context.items():
+                if key in decryption_materials.required_encryption_context_keys:
+                    self._required_encryption_context[key] = value
+        else:
+            self._required_encryption_context = None
+
+        with decryption_failure_phase(DecryptionFailurePhase.PARSE_HEADER):
+            self._load_verifier(header, decryption_materials, raw_header)
+            header_auth = deserialize_header_auth(
+                version=header.version, stream=self.source_stream, algorithm=header.algorithm, verifier=self.verifier
+            )
+            self._derived_data_key = derive_data_encryption_key(
                 source_key=decryption_materials.data_key.data_key,
                 algorithm=header.algorithm,
                 message_id=header.message_id,
             )
 
-            if not hmac.compare_digest(expected_commitment_key, header.commitment_key):
-                raise MasterKeyProviderError(
-                    "Key commitment validation failed. Key identity does not match the identity asserted in the "
-                    "message. Halting processing of this message."
-                )
+        self._validate_commitment(header, decryption_materials)
 
-        return self._validate_parsed_header(
-            header=header,
-            header_auth=header_auth,
-            raw_header=raw_header,
-        )
+        with decryption_failure_phase(DecryptionFailurePhase.VERIFY_HEADER):
+            return self._validate_parsed_header(
+                header=header,
+                header_auth=header_auth,
+                raw_header=raw_header,
+            )
 
     def _prep_non_framed(self):
         """Prepare the opening data for a non-framed message."""
@@ -1134,7 +1162,9 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         ciphertext = self.source_stream.read(bytes_to_read)
 
         if len(self.output_buffer) + len(ciphertext) < self.body_length:
-            raise SerializationError("Total message body contents less than specified in body description")
+            error = SerializationError("Total message body contents less than specified in body description")
+            _record_decryption_diagnostic(error, DecryptionFailurePhase.DECRYPT_BODY)
+            raise error
 
         if self.verifier is not None:
             self.verifier.update(ciphertext)
@@ -1159,9 +1189,11 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         )
 
         plaintext = self.decryptor.update(ciphertext)
-        plaintext += self.decryptor.finalize()
+        with decryption_failure_phase(DecryptionFailurePhase.DECRYPT_BODY):
+            plaintext += self.decryptor.finalize()
 
-        self.footer = deserialize_footer(stream=self.source_stream, verifier=self.verifier)
+        with decryption_failure_phase(DecryptionFailurePhase.VERIFY_SIGNATURE):
+            self.footer = deserialize_footer(stream=self.source_stream, verifier=self.verifier)
         return plaintext
 
     def _read_bytes_from_framed_body(self, b):
@@ -1176,12 +1208,15 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         _LOGGER.debug("collecting %d bytes", b)
         while len(plaintext) < b and not final_frame:
             _LOGGER.debug("Reading frame")
-            frame_data, final_frame = deserialize_frame(
-                stream=self.source_stream, header=self._header, verifier=self.verifier
-            )
+            with decryption_failure_phase(DecryptionFailurePhase.DECRYPT_BODY):
+                frame_data, final_frame = deserialize_frame(
+                    stream=self.source_stream, header=self._header, verifier=self.verifier
+                )
             _LOGGER.debug("Read complete for frame %d", frame_data.sequence_number)
             if frame_data.sequence_number != self.last_sequence_number + 1:
-                raise SerializationError("Malformed message: frames out of order")
+                error = SerializationError("Malformed message: frames out of order")
+                _record_decryption_diagnostic(error, DecryptionFailurePhase.DECRYPT_BODY)
+                raise error
             self.last_sequence_number += 1
             aad_content_string = aws_encryption_sdk.internal.utils.get_aad_content_string(
                 content_type=self._header.content_type, is_final_frame=frame_data.final_frame
@@ -1192,17 +1227,19 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
                 seq_num=frame_data.sequence_number,
                 length=len(frame_data.ciphertext),
             )
-            plaintext += decrypt(
-                algorithm=self._header.algorithm,
-                key=self._derived_data_key,
-                encrypted_data=frame_data,
-                associated_data=associated_data,
-            )
+            with decryption_failure_phase(DecryptionFailurePhase.DECRYPT_BODY):
+                plaintext += decrypt(
+                    algorithm=self._header.algorithm,
+                    key=self._derived_data_key,
+                    encrypted_data=frame_data,
+                    associated_data=associated_data,
+                )
             plaintext_length = len(plaintext)
             _LOGGER.debug("bytes collected: %d", plaintext_length)
         if final_frame:
             _LOGGER.debug("Reading footer")
-            self.footer = deserialize_footer(stream=self.source_stream, verifier=self.verifier)
+            with decryption_failure_phase(DecryptionFailurePhase.VERIFY_SIGNATURE):
+                self.footer = deserialize_footer(stream=self.source_stream, verifier=self.verifier)
 
         return plaintext
 

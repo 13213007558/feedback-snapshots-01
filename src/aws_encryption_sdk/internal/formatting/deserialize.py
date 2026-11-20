@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover
     # We only actually need these imports when running the mypy checks
     pass
 
+from aws_encryption_sdk.diagnostics import DecryptionFailurePhase, _record_decryption_diagnostic
 from aws_encryption_sdk.exceptions import (
     MaxEncryptedDataKeysExceeded,
     NotSupportedError,
@@ -70,8 +71,9 @@ def validate_header(header, header_auth, raw_header, data_key):
             encrypted_data=EncryptedData(header_auth.iv, b"", header_auth.tag),
             associated_data=raw_header,
         )
-    except InvalidTag:
-        raise SerializationError("Header authorization failed")
+    except InvalidTag as error:
+        _record_decryption_diagnostic(error, DecryptionFailurePhase.VERIFY_HEADER)
+        raise SerializationError("Header authorization failed") from error
 
 
 def _verified_version_from_id(version_id, stream):
@@ -354,17 +356,21 @@ def deserialize_header(stream, max_encrypted_data_keys=None):
     _LOGGER.debug("Starting header deserialization")
     tee = io.BytesIO()
     tee_stream = TeeStream(stream, tee)
-    (version_id,) = unpack_values(">B", tee_stream)
-    version = _verified_version_from_id(version_id, tee_stream)
-    header = {}
-    header["version"] = version
+    try:
+        (version_id,) = unpack_values(">B", tee_stream)
+        version = _verified_version_from_id(version_id, tee_stream)
+        header = {}
+        header["version"] = version
 
-    if version == SerializationVersion.V1:
-        return _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
-    elif version == SerializationVersion.V2:
-        return _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
-    else:
-        raise NotSupportedError("Unrecognized message format version: {}".format(version))
+        if version == SerializationVersion.V1:
+            return _deserialize_header_v1(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
+        elif version == SerializationVersion.V2:
+            return _deserialize_header_v2(header, tee_stream, max_encrypted_data_keys), tee.getvalue()
+        else:
+            raise NotSupportedError("Unrecognized message format version: {}".format(version))
+    except Exception as error:
+        _record_decryption_diagnostic(error, DecryptionFailurePhase.PARSE_HEADER)
+        raise
 
 
 def _deserialize_header_auth_v1(stream, algorithm, verifier=None):

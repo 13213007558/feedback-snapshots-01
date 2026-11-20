@@ -2,6 +2,24 @@
 Changelog
 *********
 
+Unreleased
+==========
+
+Features
+--------
+* feat: add opt-in, redacted diagnostics for decryption failures
+  `#838 <https://github.com/aws/aws-encryption-sdk-python/pull/838>`_
+
+  Decryption failures can now be classified for monitoring without exposing
+  sensitive values.  ``aws_encryption_sdk.safe_decryption_diagnostic(error)``,
+  or the ``diagnostic`` property on ESDK exceptions, returns a
+  ``DecryptionFailureDiagnostic`` containing only a ``DecryptionFailurePhase``
+  and a ``DecryptionFailureCategory`` (for example: configuration rejected,
+  materials unavailable, or integrity failed).  Diagnostics never contain
+  encryption context, data keys, wrapped keys, or exception messages, and the
+  original exception type, message, traceback, and cause chain are unchanged,
+  so existing ``except`` clauses continue to work.
+
 4.0.7 -- 2026-08-31
 ===================
 

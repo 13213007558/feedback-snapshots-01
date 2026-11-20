@@ -6,6 +6,25 @@
 class AWSEncryptionSDKClientError(Exception):
     """General exception class for AWS Encryption SDK."""
 
+    @property
+    def diagnostic(self):
+        """Return a redacted diagnostic for a failed decryption, if available.
+
+        This is an opt-in, read-only view.  Existing exception types, messages,
+        tracebacks, and exception chains are unchanged, so existing ``except``
+        clauses continue to work.  The diagnostic contains only a phase and a
+        category and never contains encryption context or material values.
+
+        Returns ``None`` for exceptions that were not raised while decrypting.
+
+        .. versionadded:: 4.1.0
+
+        :rtype: aws_encryption_sdk.diagnostics.DecryptionFailureDiagnostic or None
+        """
+        from aws_encryption_sdk.diagnostics import safe_decryption_diagnostic
+
+        return safe_decryption_diagnostic(self)
+
 
 class SerializationError(AWSEncryptionSDKClientError):
     """Exception class for serialization/deserialization errors."""
