@@ -16,4 +16,5 @@
     simple
     pools
     serialization
+    message-format-migration
     failover
