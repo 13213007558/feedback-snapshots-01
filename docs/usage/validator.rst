@@ -29,14 +29,19 @@ In this case, we will get the following three validation errors::
      GraphQLError(
         "Cannot query field 'homePlace' on type 'Human'."
          " Did you mean 'homePlanet'?",
-         locations=[SourceLocation(line=5, column=9)]),
+        locations=[SourceLocation(line=5, column=9)]),
      GraphQLError(
         "Field 'friends' of type '[Character]' must have a selection of subfields."
          "  Did you mean 'friends { ... }'?",
-         locations=[SourceLocation(line=6, column=9)])]
+        locations=[SourceLocation(line=6, column=9)])]
 
 These rules are available in the :data:`specified_rules` list and implemented in the
 :mod:`graphql.validation.rules` subpackage. Instead of the default rules, you can also
 use a subset or create custom rules. The rules are based on the :class:`ValidationRule`
 class which is based on the :class:`~graphql.language.Visitor` class which provides a
 way of walking through an AST document using the visitor pattern.
+
+When a gateway caches validation results, a cached result must stay bound to the
+schema and to the external permission policy it was accepted for. See
+:doc:`gateway` for the cache helpers that record these bindings and that re-apply the
+current policy before resolvers run.

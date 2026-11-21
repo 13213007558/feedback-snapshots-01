@@ -27,6 +27,7 @@ import statements are equivalent::
 
 The sub-packages of GraphQL-core 3 are:
 
+  - :mod:`graphql.gateway`: Cache parsed and validated documents in a gateway.
   - :mod:`graphql.language`: Parse and operate on the GraphQL language.
   - :mod:`graphql.type`: Define GraphQL types and schema.
   - :mod:`graphql.validation`: The Validation phase of fulfilling a GraphQL result.
@@ -541,6 +542,21 @@ from .harness import (
     default_harness,
 )
 
+# Opt-in helpers for gateways that cache parsed and validated documents.
+from .gateway import (
+    AllowListPermissionPolicy,
+    CacheStats,
+    GatewayDocumentCache,
+    ParseResult,
+    PermissionPolicy,
+    PreparedOperation,
+    ValidationResult,
+    authorization_middleware,
+    get_authorization_fingerprint,
+    get_document_fingerprint,
+    get_schema_fingerprint,
+)
+
 INVALID = Undefined  # deprecated alias
 
 # The GraphQL-core version info.
@@ -565,12 +581,14 @@ __all__ = [
     "AbortError",
     "AbortSignal",
     "AbortedGraphQLExecutionError",
+    "AllowListPermissionPolicy",
     "ArgumentCoordinateNode",
     "ArgumentNode",
     "AsyncWorkFinishedInfo",
     "BooleanValueNode",
     "BreakingChange",
     "BreakingChangeType",
+    "CacheStats",
     "ConstArgumentNode",
     "ConstDirectiveNode",
     "ConstListValueNode",
@@ -614,6 +632,7 @@ __all__ = [
     "FragmentDefinitionNode",
     "FragmentSpreadNode",
     "FragmentsOnCompositeTypesRule",
+    "GatewayDocumentCache",
     "GraphQLAbstractType",
     "GraphQLArgument",
     "GraphQLArgumentKwargs",
@@ -742,8 +761,11 @@ __all__ = [
     "OperationTypeDefinitionNode",
     "OverlappingFieldsCanBeMergedRule",
     "ParallelVisitor",
+    "ParseResult",
+    "PermissionPolicy",
     "PossibleFragmentSpreadsRule",
     "PossibleTypeExtensionsRule",
+    "PreparedOperation",
     "ProvidedRequiredArgumentsRule",
     "ResolvedDirective",
     "ResolvedDirectiveArgument",
@@ -807,6 +829,7 @@ __all__ = [
     "UniqueTypeNamesRule",
     "UniqueVariableNamesRule",
     "ValidationContext",
+    "ValidationResult",
     "ValidationRule",
     "ValueNode",
     "ValuesOfCorrectTypeRule",
@@ -846,6 +869,7 @@ __all__ = [
     "assert_wrapping_type",
     "ast_from_value",
     "ast_to_dict",
+    "authorization_middleware",
     "build_ast_schema",
     "build_client_schema",
     "build_schema",
@@ -867,12 +891,15 @@ __all__ = [
     "find_dangerous_changes",
     "find_schema_changes",
     "get_argument_values",
+    "get_authorization_fingerprint",
     "get_directive_values",
+    "get_document_fingerprint",
     "get_introspection_query",
     "get_location",
     "get_named_type",
     "get_nullable_type",
     "get_operation_ast",
+    "get_schema_fingerprint",
     "get_variable_values",
     "graphql",
     "graphql_sync",

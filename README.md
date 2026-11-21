@@ -138,6 +138,30 @@ ExecutionResult(data=None, errors=[GraphQLError(
     locations=[SourceLocation(line=1, column=3)])])
 ```
 
+Gateways that cache parsed and validated documents can bind a cached validation
+result to both a schema and an external permission policy with the opt-in helpers in
+`graphql.gateway`. A policy tightening is re-applied to every field before its
+resolver runs, so a cache hit never lets a restricted field through:
+
+```python
+from graphql import build_schema
+from graphql.gateway import AllowListPermissionPolicy, GatewayDocumentCache
+
+schema = build_schema("type User { name: String email: String } type Query { viewer: User }")
+policy = AllowListPermissionPolicy(
+    {("Query", "viewer"), ("User", "name")},
+    fingerprint="viewer-policy-2026-11-21",
+)
+cache = GatewayDocumentCache()
+result = cache.execute_sync(
+    schema,
+    "{ viewer { name email } }",
+    policy=policy,
+    root_value={"viewer": {"name": "Ada", "email": "ada@example.com"}},
+)
+print(result.data)  # {'viewer': {'name': 'Ada', 'email': None}}
+```
+
 The `graphql_sync` function assumes that all resolvers return values synchronously.
 By  using coroutines as resolvers, you can also create results in an asynchronous
 fashion with the `graphql` function.
