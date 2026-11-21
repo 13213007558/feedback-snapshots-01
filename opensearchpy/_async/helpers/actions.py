@@ -84,6 +84,8 @@ async def _process_bulk_chunk(
     raise_on_error: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
+    default_index: Any = None,
     **kwargs: Any
 ) -> AsyncGenerator[Tuple[bool, Any], None]:
     """
@@ -102,6 +104,8 @@ async def _process_bulk_chunk(
             ignore_status=ignore_status,
             raise_on_exception=raise_on_exception,
             raise_on_error=raise_on_error,
+            safe_error_summary=safe_error_summary,
+            default_index=default_index,
         )
     else:
         gen = _process_bulk_chunk_success(
@@ -109,6 +113,8 @@ async def _process_bulk_chunk(
             bulk_data=bulk_data,
             ignore_status=ignore_status,
             raise_on_error=raise_on_error,
+            safe_error_summary=safe_error_summary,
+            default_index=default_index,
         )
     for item in gen:
         yield item
@@ -159,6 +165,7 @@ async def async_streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
     **kwargs: Any
 ) -> AsyncGenerator[Tuple[bool, Any], None]:
     """
@@ -193,11 +200,21 @@ async def async_streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg safe_error_summary: if ``True``, yielded errors and ``BulkIndexError``
+        entries contain only the action type, ``_index``, ``_id``, status and a
+        non-sensitive category. The original document and authentication values
+        are never included, while retries keep using the original payload.
     """
 
     async def map_actions() -> Any:
         async for item in aiter(actions):
             yield expand_action_callback(item)
+
+    summary_kwargs: Any = {}
+    if safe_error_summary:
+        summary_kwargs["safe_error_summary"] = True
+        if kwargs.get("index") is not None:
+            summary_kwargs["default_index"] = kwargs["index"]
 
     async for bulk_data, bulk_actions in _chunk_actions(
         map_actions(), chunk_size, max_chunk_bytes, client.transport.serializer
@@ -221,6 +238,7 @@ async def async_streaming_bulk(
                         raise_on_error,
                         ignore_status,
                         *args,
+                        **summary_kwargs,
                         **kwargs,
                     ),
                 ):
@@ -261,6 +279,7 @@ async def async_bulk(
     stats_only: bool = False,
     ignore_status: Optional[Union[int, Collection[int]]] = (),
     *args: Any,
+    safe_error_summary: bool = False,
     **kwargs: Any
 ) -> Tuple[int, Union[int, List[Any]]]:
     """
@@ -285,6 +304,8 @@ async def async_bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg safe_error_summary: if ``True``, returned errors contain only the
+        action type, ``_index``, ``_id``, status and a non-sensitive category.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.async_streaming_bulk` which is used to execute
@@ -299,7 +320,12 @@ async def async_bulk(
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
     async for ok, item in async_streaming_bulk(  # type: ignore
-        client, actions, ignore_status=ignore_status, *args, **kwargs
+        client,
+        actions,
+        ignore_status=ignore_status,
+        *args,
+        safe_error_summary=safe_error_summary,
+        **kwargs,
     ):
         # go through request-response pairs and detect failures
         if not ok:

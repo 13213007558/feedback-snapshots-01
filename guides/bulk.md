@@ -2,6 +2,7 @@
   - [Line-Delimited JSON](#line-delimited-json)
   - [Bulk Helper](#bulk-helper)
   - [Parallel Bulk](#parallel-bulk)
+  - [Safe Error Summaries](#safe-error-summaries)
   - [Data Generator](#data-generator)
 
 # Bulk Indexing
@@ -101,6 +102,31 @@ if len(failed) > 0:
 if len(succeeded) > 0:
     print(f"Bulk-inserted {len(succeeded)} items.")
 ```
+
+## Safe Error Summaries
+
+The bulk helpers can return only the failure coordinates that support tickets
+need: the action type, `_index`, `_id`, status code, and a non-sensitive
+category. Pass `safe_error_summary=True` to `streaming_bulk`, `bulk`,
+`parallel_bulk`, `async_streaming_bulk`, or `async_bulk`:
+
+```python
+success, failed = helpers.bulk(
+    client,
+    docs,
+    raise_on_error=False,
+    max_retries=3,
+    safe_error_summary=True,
+)
+
+for entry in failed:
+    for op_type, detail in entry.items():
+        print(op_type, detail["_index"], detail["_id"], detail["status"], detail["category"])
+```
+
+The summary never contains the original document body or authentication values.
+Retries still send the original bulk payload exactly as they do without this
+option, so transient `429` failures continue to be retried.
 
 ## Data Generator
 

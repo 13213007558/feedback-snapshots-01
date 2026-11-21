@@ -26,6 +26,7 @@
 
 
 import logging
+import re
 import time
 from operator import methodcaller
 from typing import Any, Optional
@@ -174,8 +175,98 @@ def _chunk_actions(
         yield ret
 
 
+def _status_category(status: Any) -> str:
+    """Return a stable, non-sensitive category for an HTTP status code."""
+    if status == 400:
+        return "bad_request"
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "authorization_error"
+    if status == 404:
+        return "not_found"
+    if status == 408:
+        return "request_timeout"
+    if status == 409:
+        return "conflict"
+    if status == 413:
+        return "request_too_large"
+    if status == 429:
+        return "too_many_requests"
+    if isinstance(status, int) and 400 <= status < 500:
+        return "client_error"
+    if isinstance(status, int) and 500 <= status < 600:
+        return "server_error"
+    return "transport_error"
+
+
+_SAFE_ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,63}$")
+
+
+def _safe_error_type(error: Any) -> Optional[str]:
+    """Extract only the structural error type, never the reason or payload."""
+    if not isinstance(error, Mapping):
+        return None
+
+    candidates = [error.get("type")]
+    root_cause = error.get("root_cause")
+    if isinstance(root_cause, (list, tuple)) and root_cause:
+        first_cause = root_cause[0]
+        if isinstance(first_cause, Mapping):
+            candidates.append(first_cause.get("type"))
+
+    for error_type in candidates:
+        if (
+            isinstance(error_type, string_types)
+            and not isinstance(error_type, bytes)
+            and _SAFE_ERROR_TYPE.match(error_type)
+        ):
+            return error_type
+    return None
+
+
+def _safe_error_location(*sources: Any) -> Any:
+    """Keep only document coordinates; never keep the original document."""
+    location: Any = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("_index", "_id"):
+            if key in source and source[key] is not None and key not in location:
+                location[key] = source[key]
+    return location
+
+
+def _safe_error_summary(
+    op_type: Any, item: Any, action: Any, status: Any, default_index: Any = None
+) -> Any:
+    """Build a minimal failure summary for support-facing output."""
+    summary = _safe_error_location(item, action, {"_index": default_index})
+    summary["status"] = status
+    summary["category"] = _safe_error_type(item.get("error")) or _status_category(
+        status
+    )
+    return {op_type: summary}
+
+
+def _safe_exception_summary(
+    op_type: Any, action: Any, error: Any, default_index: Any = None
+) -> Any:
+    """Build a minimal failure summary for a transport-level failure."""
+    status = getattr(error, "status_code", "N/A")
+    summary = _safe_error_location(action, {"_index": default_index})
+    summary["status"] = status
+    summary["category"] = _status_category(status)
+    return {op_type: summary}
+
+
 def _process_bulk_chunk_success(
-    resp: Any, bulk_data: Any, ignore_status: Any = (), raise_on_error: bool = True
+    resp: Any,
+    bulk_data: Any,
+    ignore_status: Any = (),
+    raise_on_error: bool = True,
+    safe_error_summary: bool = False,
+    default_index: Any = None,
 ) -> Any:
     # if raise on error is set, we need to collect errors per chunk before raising them
     errors = []
@@ -188,15 +279,27 @@ def _process_bulk_chunk_success(
 
         ok = 200 <= status_code < 300
         if not ok and raise_on_error and status_code not in ignore_status:
-            # include original document source
-            if len(data) > 1:
-                item["data"] = data[1]
-            errors.append({op_type: item})
+            if safe_error_summary:
+                errors.append(
+                    _safe_error_summary(
+                        op_type, item, data[0], status_code, default_index
+                    )
+                )
+            else:
+                # include original document source
+                if len(data) > 1:
+                    item["data"] = data[1]
+                errors.append({op_type: item})
 
         if ok or not errors:
             # if we are not just recording all errors to be able to raise
             # them all at once, yield items individually
-            yield ok, {op_type: item}
+            if not ok and safe_error_summary:
+                yield ok, _safe_error_summary(
+                    op_type, item, data[0], status_code, default_index
+                )
+            else:
+                yield ok, {op_type: item}
 
     if errors:
         raise BulkIndexError(f"{len(errors)} document(s) failed to index.", errors)
@@ -208,19 +311,30 @@ def _process_bulk_chunk_error(
     ignore_status: Any = (),
     raise_on_exception: bool = True,
     raise_on_error: bool = True,
+    safe_error_summary: bool = False,
+    default_index: Any = None,
 ) -> Any:
     # default behavior - just propagate exception
     if raise_on_exception and error.status_code not in ignore_status:
         raise error
 
     # if we are not propagating, mark all actions in current chunk as failed
-    err_message = str(error)
     exc_errors = []
 
     for data in bulk_data:
         # collect all the information about failed actions
         op_type, action = data[0].copy().popitem()
-        info = {"error": err_message, "status": error.status_code, "exception": error}
+        if safe_error_summary:
+            exc_errors.append(
+                _safe_exception_summary(op_type, action, error, default_index)
+            )
+            continue
+
+        info = {
+            "error": str(error),
+            "status": error.status_code,
+            "exception": error,
+        }
         if op_type != "delete":
             info["data"] = data[1]
         info.update(action)
@@ -244,6 +358,8 @@ def _process_bulk_chunk(
     raise_on_error: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
+    default_index: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -262,6 +378,8 @@ def _process_bulk_chunk(
             ignore_status=ignore_status,
             raise_on_exception=raise_on_exception,
             raise_on_error=raise_on_error,
+            safe_error_summary=safe_error_summary,
+            default_index=default_index,
         )
     else:
         gen = _process_bulk_chunk_success(
@@ -269,6 +387,8 @@ def _process_bulk_chunk(
             bulk_data=bulk_data,
             ignore_status=ignore_status,
             raise_on_error=raise_on_error,
+            safe_error_summary=safe_error_summary,
+            default_index=default_index,
         )
     yield from gen
 
@@ -287,6 +407,7 @@ def streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -321,8 +442,17 @@ def streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg safe_error_summary: if ``True``, yielded errors and ``BulkIndexError``
+        entries contain only the action type, ``_index``, ``_id``, status and a
+        non-sensitive category. The original document and authentication values
+        are never included, while retries keep using the original payload.
     """
     actions = map(expand_action_callback, actions)
+    summary_kwargs: Any = {}
+    if safe_error_summary:
+        summary_kwargs["safe_error_summary"] = True
+        if kwargs.get("index") is not None:
+            summary_kwargs["default_index"] = kwargs["index"]
 
     for bulk_data, bulk_actions in _chunk_actions(
         actions, chunk_size, max_chunk_bytes, client.transport.serializer
@@ -344,6 +474,7 @@ def streaming_bulk(
                         raise_on_error,
                         ignore_status,
                         *args,
+                        **summary_kwargs,
                         **kwargs,
                     ),
                 ):
@@ -384,6 +515,7 @@ def bulk(
     stats_only: bool = False,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -408,6 +540,8 @@ def bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg safe_error_summary: if ``True``, returned errors contain only the
+        action type, ``_index``, ``_id``, status and a non-sensitive category.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.streaming_bulk` which is used to execute
@@ -421,7 +555,14 @@ def bulk(
 
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
-    for ok, item in streaming_bulk(client, actions, ignore_status=ignore_status, *args, **kwargs):  # type: ignore
+    for ok, item in streaming_bulk(  # type: ignore
+        client,
+        actions,
+        ignore_status=ignore_status,
+        *args,
+        safe_error_summary=safe_error_summary,
+        **kwargs,
+    ):
         # go through request-response pairs and detect failures
         if not ok:
             if not stats_only:
@@ -445,6 +586,7 @@ def parallel_bulk(
     raise_on_error: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    safe_error_summary: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -465,6 +607,8 @@ def parallel_bulk(
     :arg queue_size: size of the task queue between the main thread (producing
         chunks to send) and the processing threads.
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg safe_error_summary: if ``True``, yielded errors contain only the action
+        type, ``_index``, ``_id``, status and a non-sensitive category.
     """
     # Avoid importing multiprocessing unless parallel_bulk is used
     # to avoid exceptions on restricted environments like App Engine
@@ -482,6 +626,12 @@ def parallel_bulk(
 
     pool = BlockingPool(thread_count)
 
+    summary_kwargs: Any = {}
+    if safe_error_summary:
+        summary_kwargs["safe_error_summary"] = True
+        if kwargs.get("index") is not None:
+            summary_kwargs["default_index"] = kwargs["index"]
+
     try:
         for result in pool.imap(
             lambda bulk_chunk: list(
@@ -493,6 +643,7 @@ def parallel_bulk(
                     raise_on_error,
                     ignore_status,
                     *args,
+                    **summary_kwargs,
                     **kwargs,
                 )
             ),
