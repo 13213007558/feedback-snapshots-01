@@ -497,4 +497,58 @@ RSpec.describe Pundit::Authorization do
       expect(controller.pundit_policy_scoped?).to be false
     end
   end
+
+  describe "impersonation with pundit_reset!" do
+    let(:agent) { double("agent") }
+    let(:customer) { double("customer") }
+    let(:controller) { Controller.new(agent, "update", to_params({})) }
+    let(:post) { Post.new(customer) }
+
+    it "requires re-authorization after switching users and switching back" do
+      controller.authorize(post, :show?)
+      expect(controller.pundit_policy_authorized?).to be true
+      expect { controller.verify_authorized }.not_to raise_error
+      agent_policy = controller.policy(post)
+      expect(agent_policy.user).to be agent
+
+      controller.current_user = customer
+      controller.pundit_reset!
+
+      expect(controller.pundit_policy_authorized?).to be false
+      expect { controller.verify_authorized }.to raise_error(Pundit::AuthorizationNotPerformedError)
+
+      customer_policy = controller.policy(post)
+      expect(customer_policy.user).to be customer
+      expect(customer_policy).not_to be agent_policy
+
+      expect(controller.authorize(post, :update?)).to eq post
+      expect { controller.verify_authorized }.not_to raise_error
+
+      controller.current_user = agent
+      controller.pundit_reset!
+
+      expect(controller.pundit_policy_authorized?).to be false
+      expect { controller.verify_authorized }.to raise_error(Pundit::AuthorizationNotPerformedError)
+      expect(controller.policy(post).user).to be agent
+      expect(controller.policy(post)).not_to be customer_policy
+      expect { controller.authorize(post, :update?) }.to raise_error(Pundit::NotAuthorizedError)
+    end
+
+    it "reuses the cached policy and verify flag when the user never changes" do
+      controller.authorize(post, :show?)
+      expect(controller.policy(post)).to be controller.policy(post)
+      expect { controller.verify_authorized }.not_to raise_error
+    end
+
+    it "clears an explicit skip when the user changes" do
+      controller.skip_authorization
+      expect { controller.verify_authorized }.not_to raise_error
+
+      controller.current_user = customer
+      controller.pundit_reset!
+
+      expect(controller.pundit_policy_authorized?).to be false
+      expect { controller.verify_authorized }.to raise_error(Pundit::AuthorizationNotPerformedError)
+    end
+  end
 end
