@@ -51,11 +51,17 @@ from .pyutils import (
 
 # Create, format, and print GraphQL errors.
 from .error import (
+    PUBLIC_EXTENSION,
+    DefaultErrorCodes,
+    DisclosureMode,
+    ErrorDisclosurePolicy,
     GraphQLError,
     GraphQLErrorExtensions,
     GraphQLFormattedError,
     GraphQLFormattedErrorExtensions,
     GraphQLSyntaxError,
+    PublicGraphQLError,
+    disclose_execution_result,
     located_error,
 )
 

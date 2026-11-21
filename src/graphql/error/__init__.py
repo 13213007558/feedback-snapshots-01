@@ -15,6 +15,15 @@ from .syntax_error import GraphQLSyntaxError
 
 from .located_error import located_error
 
+from .disclosure import (
+    PUBLIC_EXTENSION,
+    DefaultErrorCodes,
+    DisclosureMode,
+    ErrorDisclosurePolicy,
+    PublicGraphQLError,
+    disclose_execution_result,
+)
+
 __all__ = [
     "GraphQLError",
     "GraphQLErrorExtensions",
@@ -22,4 +31,10 @@ __all__ = [
     "GraphQLFormattedErrorExtensions",
     "GraphQLSyntaxError",
     "located_error",
+    "PUBLIC_EXTENSION",
+    "DefaultErrorCodes",
+    "DisclosureMode",
+    "ErrorDisclosurePolicy",
+    "PublicGraphQLError",
+    "disclose_execution_result",
 ]
