@@ -29,6 +29,50 @@ Faraday.new(...) do |conn|
 end
 ```
 
+### With a credential provider
+
+For credentials that are issued inside the application and can be rotated while
+requests are in flight, pass a `Faraday::Request::Authorization::CredentialProvider`
+instead of a proc. The middleware asks the provider for an *explicit* decision for
+each request, and asks again when a request is retried, so a rotated or revoked
+credential is reconfirmed before anything is sent again.
+
+Subclass `CredentialProvider` and implement `#fetch_credential(env, state)`,
+returning either an approved or a denied `CredentialResult`:
+
+```ruby
+class TokenProvider < Faraday::Request::Authorization::CredentialProvider
+  def fetch_credential(env, state)
+    token = TokenStore.current
+    if token.usable?(env)
+      # The version is pinned for the whole request, including retries.
+      Faraday::Request::Authorization::CredentialResult
+        .approved(token.value, version: token.version)
+    else
+      Faraday::Request::Authorization::CredentialResult
+        .denied('token has been rotated')
+    end
+  end
+end
+
+Faraday.new(...) do |conn|
+  conn.request :authorization, 'Bearer', TokenProvider.new
+end
+```
+
+A single provider instance can be shared across the connection and therefore across
+many concurrent requests. It records, per request id:
+
+- how many times it was consulted (`fetch_count`),
+- the credential `version` pinned on the first approved lookup and reused on a
+  legitimate retry,
+- and whether an outbound attempt happened (`outbound_attempted?`).
+
+When the provider denies a request, the middleware raises
+`Faraday::Request::Authorization::CredentialDeniedError` and no credential is sent.
+A header set explicitly on the request still takes precedence and the provider is
+not consulted for it.
+
 ### Basic Authentication
 
 The middleware will automatically Base64 encode your Basic username and password:
