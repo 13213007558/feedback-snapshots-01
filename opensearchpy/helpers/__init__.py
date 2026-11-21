@@ -42,10 +42,11 @@ from .actions import (
     streaming_bulk,
 )
 from .asyncsigner import AWSV4SignerAsyncAuth
-from .errors import BulkIndexError, ScanError
+from .errors import BulkAuthorizationError, BulkIndexError, ScanError
 from .signer import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
 
 __all__ = [
+    "BulkAuthorizationError",
     "BulkIndexError",
     "ScanError",
     "expand_action",

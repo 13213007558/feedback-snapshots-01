@@ -25,20 +25,64 @@
 #  under the License.
 
 
+import json
 import threading
 import time
-from typing import Any
+from typing import Any, Dict, List
 from unittest import mock
 from unittest.mock import Mock
 
 import pytest
 
 from opensearchpy import OpenSearch, helpers
+from opensearchpy.helpers.errors import BulkAuthorizationError
 from opensearchpy.serializer import JSONSerializer
 
 from ..test_cases import TestCase
 
 lock_side_effect = threading.Lock()
+
+_OP_TYPES = frozenset(("index", "create", "update", "delete"))
+
+
+def _action_lines(body: str) -> List[Dict[str, Any]]:
+    """Return only the action metadata lines from a serialized bulk body."""
+    parsed = [json.loads(line) for line in body.splitlines() if line]
+    return [line for line in parsed if isinstance(line, dict) and _OP_TYPES & set(line)]
+
+
+class RecordingBulkClient:
+    """Fake bulk endpoint that records exactly what the helper sent."""
+
+    def __init__(self, statuses: Any = None) -> None:
+        self.transport = OpenSearch().transport
+        self.bodies: List[str] = []
+        self.kwargs: List[Dict[str, Any]] = []
+        # Per-call status lists; the last one repeats for later calls.
+        self.statuses = statuses or []
+
+    def _next_statuses(self, count: int) -> List[int]:
+        if len(self.statuses) > 1:
+            statuses = list(self.statuses.pop(0))
+        elif self.statuses:
+            statuses = list(self.statuses[0])
+        else:
+            statuses = []
+        return statuses + [201] * (count - len(statuses))
+
+    def bulk(self, body: str, *args: Any, **kwargs: Any) -> Any:
+        self.bodies.append(body)
+        self.kwargs.append(kwargs)
+        actions = _action_lines(body)
+        statuses = self._next_statuses(len(actions))
+        items = []
+        for action, status in zip(actions, statuses):
+            op_type = next(iter(action))
+            item: Dict[str, Any] = {"status": status}
+            if status >= 300:
+                item["error"] = {"type": "rejected", "reason": "retry"}
+            items.append({op_type: item})
+        return {"items": items}
 
 
 def mock_process_bulk_chunk(*args: Any, **kwargs: Any) -> Any:
@@ -134,7 +178,293 @@ class TestParallelBulk(TestCase):
         self.assertTrue(len({r[1] for r in results}) > 1)
 
 
-class TestChunkActions(TestCase):
+class TestBulkIndexAuthorization(TestCase):
+    def test_allowed_outer_index_is_checked_but_unchanged(self) -> None:
+        client = RecordingBulkClient()
+        actions = [{"_id": 1, "v": "a"}, {"_id": 2, "v": "b"}]
+
+        results = list(
+            helpers.streaming_bulk(
+                client, actions, index="approved-1", allowed_indexes={"approved-1"}
+            )
+        )
+
+        self.assertEqual([True, True], [ok for ok, _ in results])
+        self.assertEqual(1, len(client.bodies))
+        # The helper continues to pass the outer index to the client; the
+        # per-action metadata stays index-free, so the client uses it.
+        self.assertEqual("approved-1", client.kwargs[0]["index"])
+        self.assertEqual(
+            [{"index": {"_id": 1}}, {"index": {"_id": 2}}],
+            _action_lines(client.bodies[0]),
+        )
+
+    def test_denied_outer_index_never_reaches_client(self) -> None:
+        client = RecordingBulkClient()
+        actions = [{"_id": 1, "v": "a"}]
+
+        with self.assertRaises(BulkAuthorizationError):
+            list(
+                helpers.streaming_bulk(
+                    client, actions, index="other", allowed_indexes={"approved-1"}
+                )
+            )
+
+        self.assertEqual([], client.bodies)
+
+    def test_per_action_index_is_checked_against_allow_list(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1, "v": "a"},
+            {"_index": "other", "_id": 2, "v": "b"},
+            {"_index": "approved-2", "_id": 3, "v": "c"},
+        ]
+
+        with self.assertRaises(BulkAuthorizationError) as ctx:
+            list(
+                helpers.streaming_bulk(
+                    client, actions, allowed_indexes={"approved-1", "approved-2"}
+                )
+            )
+
+        # The approved subset is sent; the denied action is reported but never
+        # serialized into a request.
+        self.assertEqual(1, len(client.bodies))
+        self.assertEqual(
+            [
+                {"index": {"_index": "approved-1", "_id": 1}},
+                {"index": {"_index": "approved-2", "_id": 3}},
+            ],
+            _action_lines(client.bodies[0]),
+        )
+        self.assertEqual(1, len(ctx.exception.errors))
+        self.assertEqual("other", ctx.exception.errors[0]["index"]["_index"])
+
+    def test_raise_on_error_false_reports_denied_action_only(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1, "v": "a"},
+            {"_index": "other", "_id": 2, "v": "b"},
+        ]
+
+        results = list(
+            helpers.streaming_bulk(
+                client,
+                actions,
+                allowed_indexes={"approved-1"},
+                raise_on_error=False,
+            )
+        )
+
+        self.assertEqual([True, False], [ok for ok, _ in results])
+        self.assertEqual(1, len(client.bodies))
+        denied = results[1][1]["index"]
+        self.assertEqual("other", denied["_index"])
+        self.assertEqual(403, denied["status"])
+
+    def test_all_denied_chunk_is_not_sent(self) -> None:
+        client = RecordingBulkClient()
+        actions = [{"_index": "other", "_id": 1}, {"_index": "other", "_id": 2}]
+
+        results = list(
+            helpers.streaming_bulk(
+                client,
+                actions,
+                allowed_indexes={"approved-1"},
+                raise_on_error=False,
+            )
+        )
+
+        self.assertEqual([False, False], [ok for ok, _ in results])
+        self.assertEqual([], client.bodies)
+
+    def test_denied_actions_are_split_across_chunks(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1},
+            {"_index": "other", "_id": 2},
+            {"_index": "approved-1", "_id": 3},
+        ]
+
+        results = list(
+            helpers.streaming_bulk(
+                client,
+                actions,
+                chunk_size=1,
+                allowed_indexes={"approved-1"},
+                raise_on_error=False,
+            )
+        )
+
+        self.assertEqual([True, False, True], [ok for ok, _ in results])
+        self.assertEqual(2, len(client.bodies))
+        self.assertEqual(
+            [{"index": {"_index": "approved-1", "_id": 1}}],
+            _action_lines(client.bodies[0]),
+        )
+        self.assertEqual(
+            [{"index": {"_index": "approved-1", "_id": 3}}],
+            _action_lines(client.bodies[1]),
+        )
+
+    def test_per_action_index_overrides_unapproved_outer_index(self) -> None:
+        client = RecordingBulkClient()
+        actions = [{"_index": "approved-1", "_id": 1, "v": "a"}]
+
+        results = list(
+            helpers.streaming_bulk(
+                client, actions, index="other", allowed_indexes={"approved-1"}
+            )
+        )
+
+        self.assertEqual([True], [ok for ok, _ in results])
+        self.assertEqual("other", client.kwargs[0]["index"])
+        self.assertEqual(
+            [{"index": {"_index": "approved-1", "_id": 1}}],
+            _action_lines(client.bodies[0]),
+        )
+
+    def test_delete_with_per_action_index_is_checked(self) -> None:
+        client = RecordingBulkClient()
+        actions = [{"_op_type": "delete", "_index": "other", "_id": 1}]
+
+        with self.assertRaises(BulkAuthorizationError) as ctx:
+            list(helpers.streaming_bulk(client, actions, allowed_indexes={"approved-1"}))
+
+        self.assertEqual([], client.bodies)
+        self.assertEqual(
+            {"delete": {"_index": "other", "status": 403, "error": mock.ANY}},
+            ctx.exception.errors[0],
+        )
+
+    def test_bulk_summary_reports_denied_actions(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1},
+            {"_index": "other", "_id": 2},
+        ]
+
+        success, errors = helpers.bulk(
+            client,
+            actions,
+            allowed_indexes={"approved-1"},
+            raise_on_error=False,
+        )
+
+        self.assertEqual(1, success)
+        self.assertEqual(1, len(errors))
+        self.assertEqual("other", errors[0]["index"]["_index"])
+        self.assertEqual(1, len(client.bodies))
+
+    def test_parallel_bulk_uses_same_target_check(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1},
+            {"_index": "other", "_id": 2},
+            {"_index": "approved-1", "_id": 3},
+        ]
+
+        results = list(
+            helpers.parallel_bulk(
+                client,
+                actions,
+                chunk_size=2,
+                allowed_indexes={"approved-1"},
+                raise_on_error=False,
+            )
+        )
+
+        self.assertEqual([False, True, True], sorted(ok for ok, _ in results))
+        sent = [line for body in client.bodies for line in _action_lines(body)]
+        self.assertEqual(
+            [
+                {"index": {"_index": "approved-1", "_id": 1}},
+                {"index": {"_index": "approved-1", "_id": 3}},
+            ],
+            sent,
+        )
+
+    def test_parallel_bulk_mixed_chunk_sends_then_raises(self) -> None:
+        client = RecordingBulkClient()
+        actions = [
+            {"_index": "approved-1", "_id": 1},
+            {"_index": "other", "_id": 2},
+        ]
+
+        with self.assertRaises(BulkAuthorizationError) as ctx:
+            list(
+                helpers.parallel_bulk(
+                    client, actions, chunk_size=2, allowed_indexes={"approved-1"}
+                )
+            )
+
+        self.assertEqual(
+            [{"index": {"_index": "approved-1", "_id": 1}}],
+            _action_lines(client.bodies[0]),
+        )
+        self.assertEqual(1, len(ctx.exception.errors))
+
+    def test_parallel_bulk_denied_outer_index_is_not_sent(self) -> None:
+        client = RecordingBulkClient()
+
+        with self.assertRaises(BulkAuthorizationError):
+            list(
+                helpers.parallel_bulk(
+                    client, [{"_id": 1}], index="other", allowed_indexes={"approved-1"}
+                )
+            )
+
+        self.assertEqual([], client.bodies)
+
+    def test_callable_allow_list_receives_resolved_index(self) -> None:
+        seen = []
+
+        def approve(index: Any) -> bool:
+            seen.append(index)
+            return index.startswith("approved-")
+
+        client = RecordingBulkClient()
+        list(
+            helpers.streaming_bulk(
+                client,
+                [{"_index": "approved-1", "_id": 1}, {"_id": 2}],
+                index="approved-2",
+                allowed_indexes=approve,
+            )
+        )
+
+        self.assertEqual(["approved-1", "approved-2"], seen)
+        self.assertEqual(2, len(_action_lines(client.bodies[0])))
+
+    def test_retry_only_resends_approved_actions(self) -> None:
+        client = RecordingBulkClient(statuses=[[429, 201], [201]])
+        actions = [
+            {"_index": "approved-1", "_id": 1},
+            {"_index": "other", "_id": 2},
+        ]
+        sleeps = []
+
+        with mock.patch("opensearchpy.helpers.actions.time.sleep", sleeps.append):
+            results = list(
+                helpers.streaming_bulk(
+                    client,
+                    actions,
+                    allowed_indexes={"approved-1"},
+                    raise_on_error=False,
+                    max_retries=1,
+                    initial_backoff=0,
+                )
+            )
+
+        self.assertEqual([True, False], [ok for ok, _ in results])
+        self.assertEqual(2, len(client.bodies))
+        for body in client.bodies:
+            self.assertEqual(
+                [{"index": {"_index": "approved-1", "_id": 1}}],
+                _action_lines(body),
+            )
+        self.assertEqual([0], sleeps)
+
     def setup_method(self, _: Any) -> None:
         """
         creates some documents for testing

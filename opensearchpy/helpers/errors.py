@@ -37,6 +37,10 @@ class BulkIndexError(OpenSearchException):
         return self.args[1]  # type: ignore
 
 
+class BulkAuthorizationError(BulkIndexError):
+    """Raised when bulk actions target indexes that were not approved."""
+
+
 class ScanError(OpenSearchException):
     scroll_id: str
 

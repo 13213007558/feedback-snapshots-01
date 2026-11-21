@@ -32,9 +32,123 @@ from typing import Any, Optional
 
 from ..compat import Mapping, Queue, map, string_types
 from ..exceptions import TransportError
-from .errors import BulkIndexError, ScanError
+from .errors import BulkAuthorizationError, BulkIndexError, ScanError
 
 logger = logging.getLogger("opensearchpy.helpers")
+
+
+def _normalize_allowed_indexes(allowed_indexes: Any) -> Any:
+    """
+    Normalize the optional bulk target allow-list.
+
+    ``allowed_indexes`` may be a single index name, a collection of names or a
+    callable receiving the resolved index name. ``None`` disables the check.
+    """
+    if allowed_indexes is None or callable(allowed_indexes):
+        return allowed_indexes
+    if isinstance(allowed_indexes, string_types):
+        return frozenset((allowed_indexes,))
+    return frozenset(allowed_indexes)
+
+
+def _action_index(action: Any, default_index: Any, serializer: Any) -> Any:
+    """
+    Resolve the index a bulk action will actually target.
+
+    Per-action metadata wins over the index given to ``client.bulk``; actions
+    without metadata fall back to that outer index.
+    """
+    if isinstance(action, Mapping):
+        for metadata in action.values():
+            if isinstance(metadata, Mapping) and metadata.get("_index") is not None:
+                return metadata["_index"]
+        return default_index
+
+    # Raw JSON action lines are passed through by ``expand_action`` untouched.
+    if isinstance(action, string_types):
+        try:
+            line = action.decode("utf-8") if isinstance(action, bytes) else action
+            parsed = serializer.loads(line)
+        except Exception:
+            return default_index
+        if isinstance(parsed, Mapping):
+            for metadata in parsed.values():
+                if isinstance(metadata, Mapping) and metadata.get("_index") is not None:
+                    return metadata["_index"]
+    return default_index
+
+
+def _index_is_allowed(allowed_indexes: Any, index: Any) -> bool:
+    if index is None:
+        # Fail closed: an action whose target cannot be determined is denied.
+        return False
+    if callable(allowed_indexes):
+        return bool(allowed_indexes(index))
+    return index in allowed_indexes
+
+
+def _denied_action(action: Any, data: Any, index: Any, serializer: Any) -> Any:
+    op_type = "index"
+    metadata = action if isinstance(action, Mapping) else None
+    if metadata is None:
+        try:
+            line = action.decode("utf-8") if isinstance(action, bytes) else action
+            parsed = serializer.loads(line)
+            if isinstance(parsed, Mapping) and parsed:
+                metadata = parsed
+        except Exception:
+            metadata = None
+    if isinstance(metadata, Mapping) and metadata:
+        op_type = next(iter(metadata))
+
+    info = {
+        "error": f"bulk action is not authorized for index {index!r}",
+        "status": 403,
+        "_index": index,
+    }
+    if op_type != "delete" and data is not None:
+        info["data"] = data
+    return {op_type: info}
+
+
+def _authorize_bulk_chunk(
+    bulk_data: Any,
+    bulk_actions: Any,
+    serializer: Any,
+    allowed_indexes: Any,
+    default_index: Any,
+) -> Any:
+    """
+    Split a serialized chunk into approved actions and denied actions.
+
+    Denied actions are described in the same shape as bulk failures so callers
+    can report them without ever handing them to the client. Only the approved
+    lines are returned for sending, which keeps retries limited to actions
+    that were actually approved.
+    """
+    kept_data, kept_actions, denied = [], [], []
+    offset = 0
+    for entry in bulk_data:
+        width = 2 if len(entry) > 1 else 1
+        lines = bulk_actions[offset : offset + width]
+        offset += width
+
+        action = entry[0]
+        index = _action_index(action, default_index, serializer)
+        if _index_is_allowed(allowed_indexes, index):
+            kept_data.append(entry)
+            kept_actions.extend(lines)
+        else:
+            data = entry[1] if len(entry) > 1 else None
+            denied.append(_denied_action(action, data, index, serializer))
+
+    return kept_data, kept_actions, denied
+
+
+def _denied_error(denied: Any) -> BulkAuthorizationError:
+    return BulkAuthorizationError(
+        f"{len(denied)} document(s) target an unauthorized index.", denied
+    )
 
 
 def expand_action(data: Any) -> Any:
@@ -287,6 +401,7 @@ def streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    allowed_indexes: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -321,12 +436,39 @@ def streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg allowed_indexes: optional allow-list for the indexes a bulk action may
+        target. Per-action ``_index`` metadata wins over the ``index`` keyword
+        passed on to ``client.bulk``. Unapproved actions are removed from the
+        chunk before any request is sent; approved actions in the same chunk
+        are still sent and keep the normal ``429`` retry behavior. With the
+        default ``raise_on_error=True`` a ``BulkAuthorizationError`` is raised
+        after the approved actions of that chunk are processed. With
+        ``raise_on_error=False`` the unapproved actions are reported as failed
+        (status ``403``) instead.
     """
+    allowed_indexes = _normalize_allowed_indexes(allowed_indexes)
+    default_index = kwargs.get("index")
     actions = map(expand_action_callback, actions)
 
     for bulk_data, bulk_actions in _chunk_actions(
         actions, chunk_size, max_chunk_bytes, client.transport.serializer
     ):
+        denied: Any = []
+        if allowed_indexes is not None:
+            bulk_data, bulk_actions, denied = _authorize_bulk_chunk(
+                bulk_data,
+                bulk_actions,
+                client.transport.serializer,
+                allowed_indexes,
+                default_index,
+            )
+            if not bulk_actions:
+                if denied and raise_on_error:
+                    raise _denied_error(denied)
+                for item in denied:
+                    yield False, item
+                continue
+
         for attempt in range(max_retries + 1):
             to_retry: Any = []
             to_retry_data: Any = []
@@ -377,6 +519,12 @@ def streaming_bulk(
                 # retry only subset of documents that didn't succeed
                 bulk_actions, bulk_data = to_retry, to_retry_data
 
+        if denied:
+            if raise_on_error:
+                raise _denied_error(denied)
+            for item in denied:
+                yield False, item
+
 
 def bulk(
     client: Any,
@@ -384,6 +532,7 @@ def bulk(
     stats_only: bool = False,
     ignore_status: Any = (),
     *args: Any,
+    allowed_indexes: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -408,6 +557,9 @@ def bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg allowed_indexes: optional allow-list of index names that this import
+        may write to. Checked against the actual per-action target and the
+        ``index`` keyword before any request is sent.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.streaming_bulk` which is used to execute
@@ -421,7 +573,14 @@ def bulk(
 
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
-    for ok, item in streaming_bulk(client, actions, ignore_status=ignore_status, *args, **kwargs):  # type: ignore
+    for ok, item in streaming_bulk(
+        client,
+        actions,
+        ignore_status=ignore_status,
+        allowed_indexes=allowed_indexes,
+        *args,
+        **kwargs,
+    ):  # type: ignore
         # go through request-response pairs and detect failures
         if not ok:
             if not stats_only:
@@ -445,6 +604,7 @@ def parallel_bulk(
     raise_on_error: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    allowed_indexes: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -465,11 +625,16 @@ def parallel_bulk(
     :arg queue_size: size of the task queue between the main thread (producing
         chunks to send) and the processing threads.
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg allowed_indexes: optional allow-list for the indexes a bulk action may
+        target, checked before any chunk is handed to a worker thread. See
+        :func:`~opensearchpy.helpers.streaming_bulk` for the semantics.
     """
     # Avoid importing multiprocessing unless parallel_bulk is used
     # to avoid exceptions on restricted environments like App Engine
     from multiprocessing.pool import ThreadPool
 
+    allowed_indexes = _normalize_allowed_indexes(allowed_indexes)
+    default_index = kwargs.get("index")
     actions = map(expand_action_callback, actions)
 
     class BlockingPool(ThreadPool):
@@ -480,27 +645,51 @@ def parallel_bulk(
             self._inqueue: Any = Queue(max(queue_size, thread_count))
             self._quick_put = self._inqueue.put
 
-    pool = BlockingPool(thread_count)
+    def authorized_chunks() -> Any:
+        for bulk_data, bulk_actions in _chunk_actions(
+            actions, chunk_size, max_chunk_bytes, client.transport.serializer
+        ):
+            denied: Any = []
+            if allowed_indexes is not None:
+                bulk_data, bulk_actions, denied = _authorize_bulk_chunk(
+                    bulk_data,
+                    bulk_actions,
+                    client.transport.serializer,
+                    allowed_indexes,
+                    default_index,
+                )
+            yield bulk_data, bulk_actions, denied
 
-    try:
-        for result in pool.imap(
-            lambda bulk_chunk: list(
+    def process_chunk(bulk_chunk: Any) -> Any:
+        bulk_data, bulk_actions, denied = bulk_chunk
+        if raise_on_error and denied and not bulk_actions:
+            return [_denied_error(denied)]
+        results: Any = [] if raise_on_error else [(False, item) for item in denied]
+        if bulk_actions:
+            results.extend(
                 _process_bulk_chunk(
                     client,
-                    bulk_chunk[1],
-                    bulk_chunk[0],
+                    bulk_actions,
+                    bulk_data,
                     raise_on_exception,
                     raise_on_error,
                     ignore_status,
                     *args,
                     **kwargs,
                 )
-            ),
-            _chunk_actions(
-                actions, chunk_size, max_chunk_bytes, client.transport.serializer
-            ),
-        ):
-            yield from result
+            )
+        if denied and raise_on_error:
+            results.append(_denied_error(denied))
+        return results
+
+    pool = BlockingPool(thread_count)
+
+    try:
+        for result in pool.imap(process_chunk, authorized_chunks()):
+            for item in result:
+                if isinstance(item, BulkAuthorizationError):
+                    raise item
+                yield item
 
     finally:
         pool.terminate()

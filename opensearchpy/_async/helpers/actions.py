@@ -48,6 +48,9 @@ from ...compat import map
 from ...exceptions import TransportError
 from ...helpers.actions import (
     _ActionChunker,
+    _authorize_bulk_chunk,
+    _denied_error,
+    _normalize_allowed_indexes,
     _process_bulk_chunk_error,
     _process_bulk_chunk_success,
     expand_action,
@@ -159,6 +162,7 @@ async def async_streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    allowed_indexes: Any = None,
     **kwargs: Any
 ) -> AsyncGenerator[Tuple[bool, Any], None]:
     """
@@ -193,7 +197,14 @@ async def async_streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg allowed_indexes: optional allow-list for the indexes a bulk action may
+        target. Per-action ``_index`` metadata wins over the ``index`` keyword
+        passed on to ``client.bulk``. See the synchronous
+        :func:`~opensearchpy.helpers.streaming_bulk` for the exact rejection
+        and retry semantics.
     """
+    allowed_indexes = _normalize_allowed_indexes(allowed_indexes)
+    default_index = kwargs.get("index")
 
     async def map_actions() -> Any:
         async for item in aiter(actions):
@@ -202,6 +213,22 @@ async def async_streaming_bulk(
     async for bulk_data, bulk_actions in _chunk_actions(
         map_actions(), chunk_size, max_chunk_bytes, client.transport.serializer
     ):
+        denied: Any = []
+        if allowed_indexes is not None:
+            bulk_data, bulk_actions, denied = _authorize_bulk_chunk(
+                bulk_data,
+                bulk_actions,
+                client.transport.serializer,
+                allowed_indexes,
+                default_index,
+            )
+            if not bulk_actions:
+                if denied and raise_on_error:
+                    raise _denied_error(denied)
+                for item in denied:
+                    yield False, item
+                continue
+
         for attempt in range(max_retries + 1):
             to_retry: Any = []
             to_retry_data: Any = []
@@ -254,6 +281,12 @@ async def async_streaming_bulk(
                 # retry only subset of documents that didn't succeed
                 bulk_actions, bulk_data = to_retry, to_retry_data
 
+        if denied:
+            if raise_on_error:
+                raise _denied_error(denied)
+            for item in denied:
+                yield False, item
+
 
 async def async_bulk(
     client: Any,
@@ -261,6 +294,7 @@ async def async_bulk(
     stats_only: bool = False,
     ignore_status: Optional[Union[int, Collection[int]]] = (),
     *args: Any,
+    allowed_indexes: Any = None,
     **kwargs: Any
 ) -> Tuple[int, Union[int, List[Any]]]:
     """
@@ -285,6 +319,8 @@ async def async_bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg allowed_indexes: optional allow-list of index names that may be
+        targeted, checked before any request is sent.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.async_streaming_bulk` which is used to execute
@@ -299,7 +335,12 @@ async def async_bulk(
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
     async for ok, item in async_streaming_bulk(  # type: ignore
-        client, actions, ignore_status=ignore_status, *args, **kwargs
+        client,
+        actions,
+        ignore_status=ignore_status,
+        allowed_indexes=allowed_indexes,
+        *args,
+        **kwargs,
     ):
         # go through request-response pairs and detect failures
         if not ok:

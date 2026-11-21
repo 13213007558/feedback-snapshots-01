@@ -73,6 +73,29 @@ response = helpers.bulk(client, docs, max_retries=3)
 print(response)
 ```
 
+### Restricting target indexes
+
+Import jobs can pass `allowed_indexes` to make the helper verify the real
+target of every action before it is sent. A per-action `_index` takes
+precedence over the `index` keyword, just as it does for the bulk API. The
+option accepts a single index name, a collection of names, or a callable that
+receives the resolved index name and returns a boolean.
+
+```python
+helpers.bulk(
+    client,
+    docs,
+    index="import-batch-42",
+    allowed_indexes={"import-batch-42"},
+)
+```
+
+Unapproved actions are removed from the chunk before `client.bulk` is called.
+With the default `raise_on_error=True`, approved actions in a mixed chunk are
+still sent (and keep normal `429` retries), then a `BulkAuthorizationError`
+lists the rejected actions. With `raise_on_error=False`, each rejected action
+is reported as a failed item with status `403` instead.
+
 ## Parallel Bulk
 
 Bulk helpers support `parallel_bulk` which has options to turn off exceptions, chunk size, etc.
