@@ -73,3 +73,28 @@ but this method should be considered deprecated.
 
 For reference, please see an example using `run` from [em-synchrony](https://github.com/lostisland/faraday-em_synchrony/blob/main/lib/faraday/adapter/em_synchrony.rb)
 and its [ParallelManager implementation](https://github.com/lostisland/faraday-em_synchrony/blob/main/lib/faraday/adapter/em_synchrony/parallel_manager.rb).
+
+### Confirming authorization right before execution
+
+Because the adapter only *enqueues* requests while the `in_parallel` block runs,
+a parallel manager is the natural place to perform a final, per-request check
+immediately before the adapter would send anything. This is useful when an
+application's authorization can be revoked after the request was scheduled but
+before it actually runs.
+
+The pattern is:
+
+1. The adapter calls `parallel_manager.add(env, perform)` instead of sending the
+   request, where `perform` is the work that would execute it.
+2. Inside the manager's `execute`/`run`, re-check authorization for each queued
+   request. Rejected requests are handed back to the caller (for example via a
+   callback and a list) and their deferred work is never invoked.
+3. Only confirmed requests reach the adapter. Since `Adapter#save_response`
+   leaves a parallel response un-finished, do not call
+   `env.response.finish(env)` for a rejected request. Its `on_complete`
+   callbacks then never fire, so it is never reported as a successful response.
+
+A fully runnable, in-memory implementation (a parallel-capable adapter plus a
+manager that runs three queued requests, confirms them at execution time, and
+keeps the revoked one from ever going out) is available in
+[`examples/parallel_authorization_spec.rb`](https://github.com/lostisland/faraday/blob/main/examples/parallel_authorization_spec.rb).
