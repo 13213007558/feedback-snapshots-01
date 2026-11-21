@@ -734,3 +734,280 @@ def test_sentry_logs_no_parameters_no_template(sentry_init, capture_items):
 
     attrs = logs[0]["attributes"]
     assert "sentry.message.template" not in attrs
+
+
+def _log_envelopes(envelopes):
+    return [
+        envelope
+        for envelope in envelopes
+        if any(item.type == "log" for item in envelope)
+    ]
+
+
+def test_single_record_disclosure_across_event_log_and_breadcrumb(
+    sentry_init, capture_envelopes
+):
+    """
+    One error-level log record is captured by three pipelines at once: an error
+    event, a Sentry Log item, and a breadcrumb.
+
+    The logging integration runs the event handler before the breadcrumb
+    handler, so a record's breadcrumb is attached to the next event. A
+    precursor info record and a follow-up error record bracket the target
+    record so its breadcrumb can be inspected on the follow-up event.
+
+    Ordinary correlation fields must be matchable across all three artifacts,
+    while restricted attributes are handled per pipeline configuration: the
+    default EventScrubber redacts them from event extra and breadcrumb data,
+    whereas Sentry Logs have no scrubber of their own and keep the raw value.
+    """
+    sentry_init(
+        integrations=[LoggingIntegration(capture_sentry_logs=True)],
+        default_integrations=False,
+    )
+    envelopes = capture_envelopes()
+
+    python_logger = logging.Logger("cross-pipeline-logger")
+    python_logger.info(
+        "starting order %s",
+        "ORD-1000",
+        extra={"order_id": "ORD-1000", "tenant": "T-42"},
+    )
+    python_logger.error(
+        "order %s failed for tenant %s",
+        "ORD-1001",
+        "T-42",
+        extra={
+            "order_id": "ORD-1001",
+            "tenant": "T-42",
+            "request_count": 7,
+            "password": "super-secret",
+        },
+    )
+    python_logger.error(
+        "order %s closed",
+        "ORD-1002",
+        extra={"order_id": "ORD-1002"},
+    )
+    get_client().flush()
+
+    event_envelopes = [
+        envelope
+        for envelope in envelopes
+        if any(item.type == "event" for item in envelope)
+    ]
+    assert len(event_envelopes) == 2
+
+    target_event, followup_event = (
+        envelope.get_event() for envelope in event_envelopes
+    )
+
+    event = target_event
+    assert event["logger"] == "cross-pipeline-logger"
+    assert event["level"] == "error"
+    assert event["logentry"]["formatted"] == "order ORD-1001 failed for tenant T-42"
+
+    # Correlation fields survive on the event and match what was logged.
+    assert event["extra"]["order_id"] == "ORD-1001"
+    assert event["extra"]["tenant"] == "T-42"
+    assert event["extra"]["request_count"] == 7
+
+    # The restricted attribute is redacted by the default EventScrubber.
+    assert event["extra"]["password"] == "[Filtered]"
+
+    # The precursor record's breadcrumb is attached to the target event.
+    precursor_crumbs = [
+        crumb
+        for crumb in event["breadcrumbs"]["values"]
+        if crumb["type"] == "log" and crumb["category"] == "cross-pipeline-logger"
+    ]
+    assert len(precursor_crumbs) == 1
+    assert precursor_crumbs[0]["message"] == "starting order ORD-1000"
+    assert precursor_crumbs[0]["data"] == {
+        "order_id": "ORD-1000",
+        "tenant": "T-42",
+    }
+
+    # The target record's own breadcrumb lands on the follow-up event, carrying
+    # the same correlation fields and the same redaction treatment.
+    target_crumb = next(
+        crumb
+        for crumb in followup_event["breadcrumbs"]["values"]
+        if crumb["type"] == "log"
+        and crumb["message"] == "order ORD-1001 failed for tenant T-42"
+    )
+    assert target_crumb["level"] == "error"
+    assert target_crumb["data"]["order_id"] == "ORD-1001"
+    assert target_crumb["data"]["tenant"] == "T-42"
+    assert target_crumb["data"]["request_count"] == 7
+    assert target_crumb["data"]["password"] == "[Filtered]"
+
+    # All three records are sent as Sentry Logs. The target log keeps every
+    # correlation field and, because logs are not run through the EventScrubber,
+    # the raw restricted attribute.
+    log_envelopes = _log_envelopes(envelopes)
+    assert len(log_envelopes) == 1
+
+    log_items = log_envelopes[0].items
+    assert log_items[0].headers["item_count"] == 3
+    wire_logs = log_items[0].payload.json["items"]
+    assert [log["body"] for log in wire_logs] == [
+        "starting order ORD-1000",
+        "order ORD-1001 failed for tenant T-42",
+        "order ORD-1002 closed",
+    ]
+
+    target_log = wire_logs[1]
+    assert target_log["attributes"]["order_id"]["value"] == "ORD-1001"
+    assert target_log["attributes"]["tenant"]["value"] == "T-42"
+    assert target_log["attributes"]["request_count"]["value"] == 7
+    assert target_log["attributes"]["password"]["value"] == "super-secret"
+    assert target_log["attributes"]["logger.name"]["value"] == "cross-pipeline-logger"
+
+    # Correlation across artifacts: the same order_id is present everywhere.
+    target_log_attributes = {k: v["value"] for k, v in target_log["attributes"].items()}
+    assert (
+        event["extra"]["order_id"]
+        == target_crumb["data"]["order_id"]
+        == target_log_attributes["order_id"]
+        == "ORD-1001"
+    )
+
+
+def test_restricted_log_attributes_can_be_scrubbed_via_before_send_log(
+    sentry_init, capture_envelopes
+):
+    """
+    Sentry Logs don't go through the EventScrubber, so restricted attributes
+    have to be handled in before_send_log. Here a password is redacted on the
+    log item while ordinary correlation fields are left untouched.
+    """
+
+    def scrub_log(log, hint):
+        attributes = log.get("attributes") or {}
+        if "password" in attributes:
+            attributes = dict(attributes)
+            attributes["password"] = "[Filtered]"
+            log["attributes"] = attributes
+        return log
+
+    sentry_init(
+        integrations=[LoggingIntegration(capture_sentry_logs=True)],
+        before_send_log=scrub_log,
+    )
+    envelopes = capture_envelopes()
+
+    python_logger = logging.Logger("before-send-log-logger")
+    python_logger.error(
+        "login attempt",
+        extra={"user_id": "U-7", "password": "super-secret"},
+    )
+    get_client().flush()
+
+    log_envelopes = _log_envelopes(envelopes)
+    assert len(log_envelopes) == 1
+
+    log_item = next(item for item in log_envelopes[0] if item.type == "log")
+    attributes = {
+        k: v["value"]
+        for k, v in log_item.payload.json["items"][0]["attributes"].items()
+    }
+    assert attributes["user_id"] == "U-7"
+    assert attributes["password"] == "[Filtered]"
+    assert attributes["logger.name"] == "before-send-log-logger"
+
+
+def test_capturing_one_record_does_not_drop_fields_of_another_allowed_record(
+    sentry_init, capture_envelopes
+):
+    """
+    Three records are emitted in a row. A record's breadcrumb is attached to
+    the next event, so the middle record's breadcrumb lands on the third
+    event. Redacting the restricted attribute of the first record must not
+    leak into any other record or drop an allowed field of another record, in
+    any of the three capture pipelines.
+    """
+    sentry_init(
+        integrations=[LoggingIntegration(capture_sentry_logs=True)],
+        default_integrations=False,
+    )
+    envelopes = capture_envelopes()
+
+    python_logger = logging.Logger("multi-record-logger")
+    python_logger.error(
+        "order %s failed",
+        "ORD-1",
+        extra={"order_id": "ORD-1", "tenant": "T-1", "password": "secret-1"},
+    )
+    python_logger.error(
+        "order %s processed",
+        "ORD-2",
+        extra={"order_id": "ORD-2", "tenant": "T-2", "request_count": 9},
+    )
+    python_logger.error(
+        "order %s closed",
+        "ORD-3",
+        extra={"order_id": "ORD-3"},
+    )
+    get_client().flush()
+
+    # Every error record produces its own event.
+    events = [
+        envelope.get_event()
+        for envelope in envelopes
+        if any(item.type == "event" for item in envelope)
+    ]
+    assert len(events) == 3
+
+    first_event, second_event, third_event = events
+    assert first_event["extra"] == {
+        "order_id": "ORD-1",
+        "tenant": "T-1",
+        "password": "[Filtered]",
+    }
+    # The second event keeps all of its own allowed fields untouched.
+    assert second_event["extra"] == {
+        "order_id": "ORD-2",
+        "tenant": "T-2",
+        "request_count": 9,
+    }
+    assert third_event["extra"] == {"order_id": "ORD-3"}
+
+    # The middle record's breadcrumb is attached to the third event with every
+    # allowed field intact (no bleed-over from the first record's redaction).
+    middle_crumb = next(
+        crumb
+        for crumb in third_event["breadcrumbs"]["values"]
+        if crumb["type"] == "log" and crumb["message"] == "order ORD-2 processed"
+    )
+    assert middle_crumb["data"] == {
+        "order_id": "ORD-2",
+        "tenant": "T-2",
+        "request_count": 9,
+    }
+
+    # All three records are batched into a single log envelope item and each
+    # log retains its full attribute set on the wire.
+    log_envelopes = _log_envelopes(envelopes)
+    assert len(log_envelopes) == 1
+    log_item = next(item for item in log_envelopes[0] if item.type == "log")
+    assert log_item.headers["item_count"] == 3
+
+    wire_logs = log_item.payload.json["items"]
+    assert [log["body"] for log in wire_logs] == [
+        "order ORD-1 failed",
+        "order ORD-2 processed",
+        "order ORD-3 closed",
+    ]
+
+    first_log_attrs = {k: v["value"] for k, v in wire_logs[0]["attributes"].items()}
+    second_log_attrs = {k: v["value"] for k, v in wire_logs[1]["attributes"].items()}
+    third_log_attrs = {k: v["value"] for k, v in wire_logs[2]["attributes"].items()}
+    assert first_log_attrs["order_id"] == "ORD-1"
+    assert first_log_attrs["password"] == "secret-1"
+    assert second_log_attrs["order_id"] == "ORD-2"
+    assert second_log_attrs["tenant"] == "T-2"
+    assert second_log_attrs["request_count"] == 9
+    assert "password" not in second_log_attrs
+    assert third_log_attrs["order_id"] == "ORD-3"
+    assert "password" not in third_log_attrs
