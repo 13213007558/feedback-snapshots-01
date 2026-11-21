@@ -96,6 +96,7 @@ class HistoricalRecords:
         table_name=None,
         inherit=False,
         excluded_fields=None,
+        masked_fields=None,
         history_id_field=None,
         history_change_reason_field=None,
         user_model=None,
@@ -147,6 +148,8 @@ class HistoricalRecords:
         if excluded_fields is None:
             excluded_fields = []
         self.excluded_fields = excluded_fields
+
+        self.masked_fields = masked_fields or []
 
         if excluded_field_kwargs is None:
             excluded_field_kwargs = {}
@@ -218,6 +221,7 @@ class HistoricalRecords:
 
         # The HistoricalRecords object will be discarded,
         # so the signal handlers can't use weak references.
+        models.signals.pre_save.connect(self.pre_save, sender=sender, weak=False)
         models.signals.post_save.connect(self.post_save, sender=sender, weak=False)
         models.signals.post_delete.connect(self.post_delete, sender=sender, weak=False)
         models.signals.pre_delete.connect(self.pre_delete, sender=sender, weak=False)
@@ -292,9 +296,11 @@ class HistoricalRecords:
         """
         Creates a historical model to associate with the model provided.
         """
+        masked_fields = self.get_masked_fields(model)
         attrs = {
             "__module__": self.module,
             "_history_excluded_fields": self.excluded_fields,
+            "_history_masked_fields": masked_fields,
             "_history_m2m_fields": self.get_m2m_fields_from_model(model),
             "tracked_fields": self.fields_included(model),
         }
@@ -313,9 +319,19 @@ class HistoricalRecords:
             models_module = app.name
             attrs["__module__"] = models_module
 
-        fields = self.copy_fields(model)
+        fields = self.copy_fields(model, masked_fields=masked_fields)
         attrs.update(fields)
         attrs.update(self.get_extra_fields(model, fields))
+        for masked_field in masked_fields:
+            flag_field_name = utils.masked_flag_field_name(masked_field)
+            if flag_field_name in attrs:
+                raise ImproperlyConfigured(
+                    "The change-flag field '{}' for masked field '{}' clashes with"
+                    " an existing field on the historical model for {}.".format(
+                        flag_field_name, masked_field, model._meta.object_name
+                    )
+                )
+            attrs[flag_field_name] = models.BooleanField(null=True, editable=False)
         # type in python2 wants str as a first argument
         attrs.update(Meta=type("Meta", (), self.get_meta_options(model)))
         if not inherited and self.table_name is not None:
@@ -335,13 +351,37 @@ class HistoricalRecords:
                 fields.append(field)
         return fields
 
+    def get_masked_fields(self, model):
+        """
+        Return the sorted names of the model's fields whose values must not be
+        stored in the history table (only a ``<field>_changed`` flag is kept).
+        Combines the ``masked_fields`` option with the per-app
+        ``SIMPLE_HISTORY_FIELD_MASKING`` setting.
+        """
+        names = set(self.masked_fields)
+        names.update(utils.get_masked_field_names_for_model(model))
+        if not names:
+            return []
+        valid_names = {field.name for field in model._meta.fields}
+        unknown = sorted(names - valid_names)
+        if unknown:
+            raise ImproperlyConfigured(
+                "History field masking configured for unknown field(s) {} on "
+                "{}.{}.".format(
+                    ", ".join(unknown),
+                    model._meta.app_label,
+                    model._meta.object_name,
+                )
+            )
+        return sorted(names)
+
     def field_excluded_kwargs(self, field):
         """
         Find the excluded kwargs for a given field.
         """
         return self.excluded_field_kwargs.get(field.name, set())
 
-    def copy_fields(self, model):
+    def copy_fields(self, model, masked_fields=()):
         """
         Creates copies of the model's original fields, returning
         a dictionary mapping field name to copied field object.
@@ -402,6 +442,13 @@ class HistoricalRecords:
             # drop db index
             if field.name in self.no_db_index:
                 field.db_index = False
+
+            if field.name in masked_fields:
+                # Masked fields only ever store NULL in the history table;
+                # whether the value changed is recorded by a companion
+                # boolean flag field.
+                field.null = True
+                field.blank = True
 
             fields[field.name] = field
         return fields
@@ -650,6 +697,21 @@ class HistoricalRecords:
             )
         return meta_fields
 
+    def pre_save(self, instance, using=None, **kwargs):
+        """
+        Capture the pre-change values of masked fields, so that their change
+        flags can be computed without persisting the values themselves.
+        """
+        if not getattr(settings, "SIMPLE_HISTORY_ENABLED", True):
+            return
+        if instance._state.adding or instance.pk is None:
+            return
+        history_model = getattr(type(instance), self.manager_name).model
+        masked_fields = utils.get_history_model_masked_fields(history_model)
+        if not masked_fields:
+            return
+        utils.capture_masked_field_old_values(instance, masked_fields, using=using)
+
     def post_save(self, instance, created, using=None, **kwargs):
         if not getattr(settings, "SIMPLE_HISTORY_ENABLED", True):
             return
@@ -752,6 +814,9 @@ class HistoricalRecords:
         attrs = {}
         for field in self.fields_included(instance):
             attrs[field.attname] = getattr(instance, field.attname)
+        utils.apply_masked_fields_to_history_attrs(
+            manager.model, instance, attrs, history_type
+        )
 
         relation_field = getattr(manager.model, "history_relation", None)
         if relation_field is not None:

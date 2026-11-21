@@ -1082,3 +1082,17 @@ class TestHistoricParticipantToHistoricOrganizationOneToOne(
         related_name="historic_participant",
     )
     history = HistoricalRecords()
+
+
+class CustomerProfile(models.Model):
+    """
+    Customer record with restricted fields: their values must never be
+    persisted in the history table - only whether they changed.
+    The masking is configured per app via ``SIMPLE_HISTORY_FIELD_MASKING``.
+    """
+
+    name = models.CharField(max_length=100)
+    national_id = models.CharField(max_length=50, null=True, blank=True)
+    home_phone = models.CharField(max_length=50, null=True, blank=True)
+
+    history = HistoricalRecords()

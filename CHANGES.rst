@@ -6,6 +6,14 @@ Unreleased
 
 **New features:**
 
+- Added field masking for historical records: fields configured per app via
+  the new ``SIMPLE_HISTORY_FIELD_MASKING`` setting (or per model via the new
+  ``masked_fields`` option on ``HistoricalRecords``) are never persisted in
+  the history table; a ``<field>_changed`` boolean flag on the historical
+  model records whether the value changed. Regular saves,
+  ``bulk_create_with_history`` and ``bulk_update_with_history`` all apply the
+  masking consistently
+
 
 **Breaking changes:**
 

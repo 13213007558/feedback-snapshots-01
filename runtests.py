@@ -143,6 +143,11 @@ DEFAULT_SETTINGS = dict(  # nosec
     },
     DEFAULT_AUTO_FIELD="django.db.models.AutoField",
     USE_TZ=False,
+    SIMPLE_HISTORY_FIELD_MASKING={
+        "tests": {
+            "CustomerProfile": ["national_id", "home_phone"],
+        },
+    },
 )
 MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",

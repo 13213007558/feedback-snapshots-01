@@ -4,6 +4,7 @@ from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils import timezone
 
 from simple_history.utils import (
+    apply_masked_fields_to_history_attrs,
     get_app_model_primary_key_name,
     get_change_reason_from_object,
 )
@@ -236,6 +237,13 @@ class HistoryManager(models.Manager):
                 "_history_user",
                 default_user or self.model.get_default_history_user(instance),
             )
+            attrs = {
+                field.attname: getattr(instance, field.attname)
+                for field in self.model.tracked_fields
+            }
+            apply_masked_fields_to_history_attrs(
+                self.model, instance, attrs, history_type
+            )
             row = self.model(
                 history_date=getattr(
                     instance, "_history_date", default_date or timezone.now()
@@ -244,10 +252,7 @@ class HistoryManager(models.Manager):
                 history_change_reason=get_change_reason_from_object(instance)
                 or default_change_reason,
                 history_type=history_type,
-                **{
-                    field.attname: getattr(instance, field.attname)
-                    for field in self.model.tracked_fields
-                },
+                **attrs,
                 **(custom_historical_attrs or {}),
             )
             if hasattr(self.model, "history_relation"):

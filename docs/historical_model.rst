@@ -343,6 +343,52 @@ And you don't want to store the changes for the field ``pub_date``, it is necess
 
 By default, django-simple-history stores the changes for all fields in the model.
 
+Masked Fields
+--------------------------------
+
+Some fields (e.g. personal or otherwise restricted data) may be allowed in the
+live table, but their values must never be persisted in the history table -
+only the fact that they changed may be recorded. Masked fields are always
+stored as ``NULL`` in the history table, and a companion boolean field named
+``<field>_changed`` is added to the historical model to record whether the
+value changed in that revision.
+
+Masking can be configured per app with the ``SIMPLE_HISTORY_FIELD_MASKING``
+setting, mapping an app label to model names and their masked fields:
+
+.. code-block:: python
+
+    SIMPLE_HISTORY_FIELD_MASKING = {
+        "customers": {
+            "CustomerProfile": ["national_id", "home_phone"],
+        },
+    }
+
+or per model with the ``masked_fields`` parameter:
+
+.. code-block:: python
+
+    class CustomerProfile(models.Model):
+        name = models.CharField(max_length=100)
+        national_id = models.CharField(max_length=50, null=True)
+
+        history = HistoricalRecords(masked_fields=["national_id"])
+
+Both sources are merged. The change flags behave as follows:
+
+- On creates (``history_type == "+"``), the flag is ``True`` if the field had
+  a non-``None`` value.
+- On updates (``history_type == "~"``), the flag is ``True`` if the value
+  changed compared to the pre-save database state. This also holds for
+  ``bulk_update_with_history``, which captures the pre-update values before
+  writing. If the old value is unknown (e.g. when creating historical records
+  manually), the flag is ``None``.
+- On deletes (``history_type == "-"``), the flag is ``False``.
+
+Because the values are never stored, historical read-backs (``instance``,
+``as_of()``, ``most_recent()``, diffs) return ``None`` for masked fields and
+never expose restricted old values.
+
 Adding additional fields to historical models
 ---------------------------------------------
 

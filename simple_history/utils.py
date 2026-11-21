@@ -1,8 +1,13 @@
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, ForeignKey, ManyToManyField, Q, When
 from django.forms.models import model_to_dict
 
 from simple_history.exceptions import AlternativeManagerError, NotHistoricalModelError
+
+# Attribute used to stash pre-change values of masked fields on an instance,
+# so that change flags can be computed without persisting the values.
+MASKED_OLD_VALUES_ATTR = "_simple_history_masked_old_values"
 
 
 def update_change_reason(instance, reason):
@@ -11,8 +16,13 @@ def update_change_reason(instance, reason):
     manager = instance if instance.pk is not None else model
     history = get_history_manager_for_model(manager)
     history_fields = [field.attname for field in history.model._meta.fields]
+    # Masked fields are always stored as NULL in the history table, so they
+    # cannot be used to locate the most recent record.
+    masked_fields = set(get_history_model_masked_fields(history.model))
     for field in instance._meta.fields:
         if field.attname not in history_fields:
+            continue
+        if field.name in masked_fields:
             continue
         value = getattr(instance, field.attname)
         if field.primary_key is True:
@@ -214,6 +224,23 @@ def bulk_update_with_history(
     if model_manager.model is not model:
         raise AlternativeManagerError("The given manager does not belong to the model.")
 
+    masked_fields = get_history_model_masked_fields(history_manager.model)
+    if masked_fields and objs:
+        # Capture the pre-update values of masked fields, so that the change
+        # flags of the resulting history records match those of regular saves.
+        pk_attname = model._meta.pk.attname
+        attnames = [model._meta.get_field(name).attname for name in masked_fields]
+        old_values_by_pk = {
+            row[pk_attname]: row
+            for row in model_manager.filter(
+                **{f"{pk_attname}__in": [obj.pk for obj in objs]}
+            ).values(pk_attname, *attnames)
+        }
+        for obj in objs:
+            old_values = old_values_by_pk.get(obj.pk)
+            if old_values is not None:
+                setattr(obj, MASKED_OLD_VALUES_ATTR, old_values)
+
     with transaction.atomic(savepoint=False):
         if not fields:
             # Allow not passing any fields if the user wants to bulk-create history
@@ -241,3 +268,82 @@ def get_change_reason_from_object(obj):
         return getattr(obj, "_change_reason")
 
     return None
+
+
+def get_masked_field_names_for_model(model):
+    """
+    Return the names of ``model``'s fields configured for history masking
+    via the ``SIMPLE_HISTORY_FIELD_MASKING`` setting, e.g.::
+
+        SIMPLE_HISTORY_FIELD_MASKING = {
+            "customers": {
+                "CustomerProfile": ["national_id", "home_phone"],
+            },
+        }
+    """
+    config = getattr(settings, "SIMPLE_HISTORY_FIELD_MASKING", None) or {}
+    app_config = config.get(model._meta.app_label) or {}
+    names = set()
+    for key in (model._meta.object_name, model._meta.model_name):
+        names.update(app_config.get(key) or ())
+    return names
+
+
+def masked_flag_field_name(field_name):
+    """Name of the history model field recording whether ``field_name`` changed."""
+    return f"{field_name}_changed"
+
+
+def get_history_model_masked_fields(history_model):
+    """Return the masked field names of a historical model (empty by default)."""
+    return getattr(history_model, "_history_masked_fields", ())
+
+
+def capture_masked_field_old_values(instance, masked_fields, using=None):
+    """
+    Fetch the current (pre-change) database values of ``masked_fields`` and
+    stash them on the instance, so that change flags can later be computed
+    without persisting the values themselves.
+    """
+    model = type(instance)
+    attnames = [model._meta.get_field(name).attname for name in masked_fields]
+    old_values = (
+        model._default_manager.using(using)
+        .filter(pk=instance.pk)
+        .values(*attnames)
+        .first()
+    )
+    if old_values is not None:
+        setattr(instance, MASKED_OLD_VALUES_ATTR, old_values)
+
+
+def apply_masked_fields_to_history_attrs(history_model, instance, attrs, history_type):
+    """
+    Mask the configured fields in a dict of attributes for a historical record.
+
+    The stored value of each masked field is replaced with ``None`` so that
+    restricted values are never persisted in the history table, and the
+    companion ``<field>_changed`` flag is set to record whether the value
+    changed in this revision. Returns the mutated ``attrs`` dict.
+    """
+    masked_fields = get_history_model_masked_fields(history_model)
+    if not masked_fields:
+        return attrs
+    old_values = getattr(instance, MASKED_OLD_VALUES_ATTR, None) or {}
+    instance_fields = {f.name: f for f in history_model.instance_type._meta.fields}
+    for name in masked_fields:
+        attname = instance_fields[name].attname
+        new_value = attrs.get(attname)
+        attrs[attname] = None
+        if history_type == "+":
+            changed = new_value is not None
+        elif history_type == "~":
+            # The old value may be unknown (e.g. manual record creation);
+            # record the flag as unknown (None) in that case.
+            changed = (
+                old_values[attname] != new_value if attname in old_values else None
+            )
+        else:  # deletion: no field-level change to record
+            changed = False
+        attrs[masked_flag_field_name(name)] = changed
+    return attrs
