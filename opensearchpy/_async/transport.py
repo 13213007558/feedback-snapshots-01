@@ -40,6 +40,7 @@ from ..exceptions import (
     SerializationError,
     TransportError,
 )
+from ..host_allowlist import HostAllowlist
 from ..serializer import JSONSerializer
 from ..transport import Transport, get_host_info
 from .compat import get_running_loop
@@ -70,6 +71,7 @@ class AsyncTransport(Transport):
         sniffer_timeout: Any = None,
         sniff_timeout: float = 0.1,
         sniff_on_connection_fail: bool = False,
+        allowed_hosts: Optional[Union[Collection[str], HostAllowlist]] = None,
         serializer: Serializer = JSONSerializer(),
         serializers: Any = None,
         default_mimetype: str = "application/json",
@@ -97,6 +99,11 @@ class AsyncTransport(Transport):
             to fail quickly. Not used during initial sniffing (if
             ``sniff_on_start`` is on) when the connection still isn't
             initialized.
+        :arg allowed_hosts: network access policy for hosts returned by node
+            discovery. Accepts IP addresses, CIDR networks, exact hostnames and
+            ``*.suffix`` wildcards. Discovered hosts outside this policy are
+            never added to the connection pool. Hosts configured explicitly in
+            ``hosts`` are approved entry points and are not filtered.
         :arg serializer: serializer instance
         :arg serializers: optional dict of serializer instances that will be
             used for deserializing data coming from the server. (key is the mimetype)
@@ -133,6 +140,7 @@ class AsyncTransport(Transport):
             sniffer_timeout=sniffer_timeout,
             sniff_timeout=sniff_timeout,
             sniff_on_connection_fail=sniff_on_connection_fail,
+            allowed_hosts=allowed_hosts,
             serializer=serializer,
             serializers=serializers,
             default_mimetype=default_mimetype,
@@ -274,8 +282,12 @@ class AsyncTransport(Transport):
                         )
                     except (ConnectionError, SerializationError):
                         continue
-                    node_info = list(node_info["nodes"].values())
-                    return node_info
+                    # An empty or missing node collection is a valid empty
+                    # discovery result, not a malformed response.
+                    nodes = (
+                        node_info.get("nodes") if isinstance(node_info, dict) else None
+                    )
+                    return list((nodes or {}).values())
             else:
                 # no task has finished completely
                 raise TransportError("N/A", "Unable to sniff hosts.")
@@ -300,13 +312,23 @@ class AsyncTransport(Transport):
 
         node_info = await self._get_sniff_data(initial)
         hosts: Any = list(filter(None, (self._get_host_info(n) for n in node_info)))
+        hosts = self._filter_discovered_hosts(hosts)
 
-        # we weren't able to get any nodes, maybe using an incompatible
-        # transport_schema or host_info_callback blocked all - raise error.
+        # We weren't able to get any nodes, the host_info_callback blocked all
+        # or the network access policy rejected all of them. Without a policy
+        # this keeps the previous behavior and raises; with a policy the
+        # current pool is kept instead of widening (or emptying) the reachable
+        # hosts.
         if not hosts:
-            raise TransportError(
-                "N/A", "Unable to sniff hosts - no viable hosts found."
+            if self.allowed_hosts is None:
+                raise TransportError(
+                    "N/A", "Unable to sniff hosts - no viable hosts found."
+                )
+            logger.warning(
+                "Unable to sniff hosts - no viable hosts found. "
+                "Keeping the existing connection pool."
             )
+            return
 
         # remember current live connections
         orig_connections = self.connection_pool.connections[:]

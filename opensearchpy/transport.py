@@ -25,6 +25,7 @@
 #  under the License.
 
 
+import logging
 import time
 from itertools import chain
 from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Type, Union
@@ -39,7 +40,10 @@ from .exceptions import (
     SerializationError,
     TransportError,
 )
+from .host_allowlist import HostAllowlist
 from .serializer import DEFAULT_SERIALIZERS, Deserializer, JSONSerializer, Serializer
+
+logger: logging.Logger = logging.getLogger("opensearch")
 
 
 def get_host_info(
@@ -93,6 +97,7 @@ class Transport:
     last_sniff: float
     sniff_timeout: Optional[float]
     host_info_callback: Any
+    allowed_hosts: Optional[HostAllowlist]
     metrics: Metrics
 
     def __init__(
@@ -107,6 +112,7 @@ class Transport:
         sniffer_timeout: Optional[float] = None,
         sniff_timeout: float = 0.1,
         sniff_on_connection_fail: bool = False,
+        allowed_hosts: Optional[Union[Collection[str], HostAllowlist]] = None,
         serializer: Serializer = JSONSerializer(),
         serializers: Optional[Mapping[str, Serializer]] = None,
         default_mimetype: str = "application/json",
@@ -135,6 +141,11 @@ class Transport:
             to fail quickly. Not used during initial sniffing (if
             ``sniff_on_start`` is on) when the connection still isn't
             initialized.
+        :arg allowed_hosts: network access policy for hosts returned by node
+            discovery. Accepts IP addresses, CIDR networks, exact hostnames and
+            ``*.suffix`` wildcards. Discovered hosts outside this policy are
+            never added to the connection pool. Hosts configured explicitly in
+            ``hosts`` are approved entry points and are not filtered.
         :arg serializer: serializer instance
         :arg serializers: optional dict of serializer instances that will be
             used for deserializing data coming from the server. (key is the mimetype)
@@ -210,6 +221,15 @@ class Transport:
         self.sniff_on_connection_fail = sniff_on_connection_fail
         self.last_sniff = time.time()
         self.sniff_timeout = sniff_timeout
+
+        # Network access policy for hosts obtained through node discovery.
+        # Explicitly configured hosts remain approved entry points, so a
+        # policy that rejects every sniffed node leaves the current pool
+        # serving unchanged.
+        if allowed_hosts is None or isinstance(allowed_hosts, HostAllowlist):
+            self.allowed_hosts = allowed_hosts
+        else:
+            self.allowed_hosts = HostAllowlist(allowed_hosts)
 
         # callback to construct host dict from data in /_cluster/nodes
         self.host_info_callback = host_info_callback
@@ -317,7 +337,10 @@ class Transport:
             self.last_sniff = previous_sniff
             raise
 
-        return list(node_info["nodes"].values())
+        # An empty or missing node collection is a valid empty discovery
+        # result, not a malformed response.
+        nodes = node_info.get("nodes") if isinstance(node_info, dict) else None
+        return list((nodes or {}).values())
 
     def _get_host_info(self, host_info: Any) -> Any:
         host = {}
@@ -340,6 +363,26 @@ class Transport:
 
         return self.host_info_callback(host_info, host)
 
+    def _filter_discovered_hosts(
+        self, hosts: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply the configured network access policy to hosts returned by node
+        discovery. Hosts explicitly configured by the application are not
+        passed through this filter.
+        """
+        if self.allowed_hosts is None:
+            return hosts
+
+        approved = self.allowed_hosts.filter(hosts)
+        rejected = len(hosts) - len(approved)
+        if rejected:
+            logger.warning(
+                "Ignoring %i discovered host(s) outside of allowed_hosts.",
+                rejected,
+            )
+        return approved
+
     def sniff_hosts(self, initial: bool = False) -> Any:
         """
         Obtain a list of nodes from the cluster and create a new connection
@@ -347,19 +390,33 @@ class Transport:
 
         To extract the node connection parameters use the ``nodes_to_host_callback``.
 
+        When ``allowed_hosts`` is configured, only discovered hosts inside the
+        approved network area may enter the pool. If discovery returns no
+        approved hosts, the current connection pool is kept so that already
+        approved connections continue to serve.
+
         :arg initial: flag indicating if this is during startup
             (``sniff_on_start``), ignore the ``sniff_timeout`` if ``True``
         """
         node_info = self._get_sniff_data(initial)
 
         hosts: Any = list(filter(None, (self._get_host_info(n) for n in node_info)))
+        hosts = self._filter_discovered_hosts(hosts)
 
-        # we weren't able to get any nodes or host_info_callback blocked all -
-        # raise error.
+        # We weren't able to get any nodes, host_info_callback blocked all or
+        # the network access policy rejected all of them. Without a policy this
+        # keeps the previous behavior and raises; with a policy the current
+        # pool is kept instead of widening (or emptying) the reachable hosts.
         if not hosts:
-            raise TransportError(
-                "N/A", "Unable to sniff hosts - no viable hosts found."
+            if self.allowed_hosts is None:
+                raise TransportError(
+                    "N/A", "Unable to sniff hosts - no viable hosts found."
+                )
+            logger.warning(
+                "Unable to sniff hosts - no viable hosts found. "
+                "Keeping the existing connection pool."
             )
+            return
 
         self.set_connections(hosts)
 

@@ -46,6 +46,7 @@ t = Transport(
     retry_on_status={100, 400, 503},
     retry_on_timeout=True,
     send_get_body_as="source",
+    allowed_hosts=["10.0.0.0/8", "*.internal"],
 )
 
 
