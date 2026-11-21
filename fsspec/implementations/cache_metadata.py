@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     Detail: TypeAlias = dict[str, Any]
 
 
+_UNSET = object()
+
+
 class CacheMetadata:
     """Cache metadata.
 
@@ -86,18 +89,29 @@ class CacheMetadata:
             yield os.path.join(storage, self._metadata_name), storage, writable
 
     def check_file(
-        self, path: str, cfs: CachingFileSystem | None
+        self, path: str, cfs: CachingFileSystem | None, auth_version: Any = _UNSET
     ) -> Literal[False] | tuple[Detail, str]:
         """If path is in cache return its details, otherwise return ``False``.
 
         If the optional CachingFileSystem is specified then it is used to
         perform extra checks to reject possible matches, such as if they are
         too old.
+
+        If ``auth_version`` is given, entries recorded under a different
+        authorization version are skipped: data fetched under another
+        authorization scope must be re-confirmed, not reused.
         """
         for (fn, base, _), cache in zip(self._scan_locations(), self.cached_files):
             if path not in cache:
                 continue
             detail = cache[path].copy()
+
+            if (
+                auth_version is not _UNSET
+                and detail.get("auth_version") != auth_version
+            ):
+                # Fetched under another authorization version: not reusable
+                continue
 
             if cfs is not None:
                 if cfs.check_files and detail["uid"] != cfs.fs.ukey(path):
@@ -189,6 +203,13 @@ class CacheMetadata:
                 cached_files = self._load(fn)
                 for k, c in cached_files.items():
                     if k in cache:
+                        if c.get("auth_version") != cache[k].get("auth_version"):
+                            # Blocks fetched under another authorization
+                            # version must not be merged in: the in-memory
+                            # entry, re-confirmed with the target filesystem
+                            # under the current version, wins outright.
+                            cached_files[k] = cache[k]
+                            continue
                         if c["blocks"] is True or cache[k]["blocks"] is True:
                             c["blocks"] = True
                         else:

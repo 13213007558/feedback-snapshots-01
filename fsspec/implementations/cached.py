@@ -131,6 +131,7 @@ class CachingFileSystem(ChainedFileSystem):
         cache_storage_mode=None,
         cache_metadata_name="cache",
         callback=DEFAULT_CALLBACK,
+        auth_version=None,
         **kwargs,
     ):
         """
@@ -192,6 +193,15 @@ class CachingFileSystem(ChainedFileSystem):
             when ``filecache`` or ``simplecache`` first open, ``cat`` or
             ``cat_ranges`` a file. The block-wise ``blockcache`` fetches
             ranges on demand and does not use it.
+        auth_version: str (optional)
+            A caller-supplied tag identifying the authorization scope under
+            which cached data was fetched. Cached blocks or files are only
+            reused when the version recorded for them matches the version of
+            the requesting caller (given here, or per-call to ``open``); on a
+            mismatch the entry is treated as absent, so the read is
+            re-confirmed against the target filesystem instead of serving
+            bytes fetched under a previous authorization. The default None
+            matches cache entries written without a version.
         """
         super().__init__(**kwargs)
         if fs is None and target_protocol is None:
@@ -221,6 +231,7 @@ class CachingFileSystem(ChainedFileSystem):
         self.expiry = expiry_time
         self.compression = compression
         self.callback = callback
+        self.auth_version = auth_version
 
         # Size of cache in bytes. If None then the size is unknown and will be
         # recalculated the next time cache_size() is called. On writes to the
@@ -305,11 +316,43 @@ class CachingFileSystem(ChainedFileSystem):
         if timecond or not existcond:
             self.load_cache()
 
-    def _check_file(self, path):
-        """Is path in cache and still valid"""
+    def _resolve_auth_version(self, auth_version):
+        """The caller's authorization version: per-call value or instance one"""
+        return self.auth_version if auth_version is None else auth_version
+
+    def _check_file(self, path, auth_version=None):
+        """Is path in cache and still valid
+
+        A cached entry only counts as valid when it was stored under the same
+        authorization version as the caller's; a mismatch returns False so the
+        data is re-confirmed with the target filesystem rather than reused.
+        """
         path = self._strip_protocol(path)
         self._check_cache()
-        return self._metadata.check_file(path, self)
+        return self._metadata.check_file(
+            path, self, auth_version=self._resolve_auth_version(auth_version)
+        )
+
+    def _discard_other_version(self, path, auth_version=None):
+        """Remove the local copy of a cache entry that was fetched under a
+        different authorization version than the caller's.
+
+        Bytes fetched under a previous authorization scope must not leak into
+        the file about to be downloaded, and the remote file may have changed
+        size since they were written. Entries in read-only cache locations
+        are left alone.
+        """
+        previous = self._metadata.cached_files[-1].get(path)
+        if previous is not None and previous.get(
+            "auth_version"
+        ) != self._resolve_auth_version(auth_version):
+            logger.debug(
+                "Discarding cached copy of %s fetched under a different "
+                "authorization version",
+                path,
+            )
+            with suppress(OSError):
+                os.remove(os.path.join(self.storage[-1], previous["fn"]))
 
     def clear_cache(self):
         """Remove all files and metadata from the cache
@@ -375,6 +418,7 @@ class CachingFileSystem(ChainedFileSystem):
         block_size=None,
         autocommit=True,
         cache_options=None,
+        auth_version=None,
         **kwargs,
     ):
         """Wrap the target _open
@@ -388,6 +432,10 @@ class CachingFileSystem(ChainedFileSystem):
         updates, so does the entry in our ``cached_files`` attribute.
         We monkey-patch this file, so that when it closes, we call
         ``close_and_update`` to save the state of the blocks.
+
+        Cached blocks are only reused when they were fetched under the
+        caller's ``auth_version`` (or the filesystem-level one); otherwise
+        they are discarded and fetched anew from the target filesystem.
         """
         path = self._strip_protocol(path)
 
@@ -401,7 +449,11 @@ class CachingFileSystem(ChainedFileSystem):
                 cache_options=cache_options,
                 **kwargs,
             )
-        detail = self._check_file(path)
+        detail = (
+            self._check_file(path)
+            if auth_version is None
+            else self._check_file(path, auth_version=auth_version)
+        )
         if detail:
             # file is in cache
             detail, fn = detail
@@ -415,6 +467,7 @@ class CachingFileSystem(ChainedFileSystem):
         else:
             hash = self._mapper(path)
             fn = os.path.join(self.storage[-1], hash)
+            self._discard_other_version(path, auth_version)
             blocks = set()
             detail = {
                 "original": path,
@@ -423,6 +476,9 @@ class CachingFileSystem(ChainedFileSystem):
                 "time": time.time(),
                 "uid": self.fs.ukey(path),
             }
+            resolved = self._resolve_auth_version(auth_version)
+            if resolved is not None:
+                detail["auth_version"] = resolved
             self._metadata.update_file(path, detail)
             logger.debug("Creating local sparse file for %s", path)
 
@@ -542,6 +598,8 @@ class CachingFileSystem(ChainedFileSystem):
             "isfile",
             "isdir",
             "_check_file",
+            "_resolve_auth_version",
+            "_discard_other_version",
             "_check_cache",
             "_makedirs",
             "_mkcache",
@@ -617,6 +675,7 @@ class CachingFileSystem(ChainedFileSystem):
             and self.expiry == other.expiry
             and self.compression == other.compression
             and self.cache_metadata_name == other.cache_metadata_name
+            and self.auth_version == other.auth_version
             and self._mapper == other._mapper
             and self.target_protocol == other.target_protocol
         )
@@ -631,6 +690,7 @@ class CachingFileSystem(ChainedFileSystem):
             ^ hash(self.expiry)
             ^ hash(self.compression)
             ^ hash(self.cache_metadata_name)
+            ^ hash(self.auth_version)
             ^ hash(self._mapper)
             ^ hash(self.target_protocol)
         )
@@ -717,9 +777,10 @@ class WholeFileCacheFileSystem(CachingFileSystem):
                 pass
         self._cache_size = None
 
-    def _make_local_details(self, path, uid=None):
+    def _make_local_details(self, path, uid=None, auth_version=None):
         hash = self._mapper(path)
         fn = os.path.join(self.storage[-1], hash)
+        self._discard_other_version(path, auth_version)
         detail = {
             "original": path,
             "fn": hash,
@@ -727,6 +788,9 @@ class WholeFileCacheFileSystem(CachingFileSystem):
             "time": time.time(),
             "uid": self.fs.ukey(path) if uid is None else uid,
         }
+        resolved = self._resolve_auth_version(auth_version)
+        if resolved is not None:
+            detail["auth_version"] = resolved
         self._metadata.update_file(path, detail)
         logger.debug("Copying %s to local cache", path)
         return fn
@@ -741,7 +805,9 @@ class WholeFileCacheFileSystem(CachingFileSystem):
     async def _check_file_async(self, path):
         # _check_file, with the async-safe ukey for check_files
         self._check_cache()
-        detail = self._metadata.check_file(path, None)
+        detail = self._metadata.check_file(
+            path, None, auth_version=self._resolve_auth_version(None)
+        )
         if not detail:
             return False
         detail, fn = detail
@@ -810,8 +876,8 @@ class WholeFileCacheFileSystem(CachingFileSystem):
             out = out[paths[0]]
         return out
 
-    def _get_cached_file_before_open(self, path, **kwargs):
-        fn = self._make_local_details(path)
+    def _get_cached_file_before_open(self, path, auth_version=None, **kwargs):
+        fn = self._make_local_details(path, auth_version=auth_version)
         # call target filesystems open
         self._mkcache()
         if self.compression:
@@ -840,14 +906,20 @@ class WholeFileCacheFileSystem(CachingFileSystem):
         self.save_cache()
         return self._metadata.cached_files[-1][path].copy(), fn
 
-    def _open(self, path, mode="rb", **kwargs):
+    def _open(self, path, mode="rb", auth_version=None, **kwargs):
         path = self._strip_protocol(path)
         # For read (or append), (try) download from remote
         if "r" in mode or "a" in mode:
-            cached = self._check_file(path)
+            cached = (
+                self._check_file(path)
+                if auth_version is None
+                else self._check_file(path, auth_version=auth_version)
+            )
             if not cached:
                 if self.fs.exists(path):
-                    cached = self._get_cached_file_before_open(path, **kwargs)
+                    cached = self._get_cached_file_before_open(
+                        path, auth_version=auth_version, **kwargs
+                    )
                 elif "r" in mode:
                     raise FileNotFoundError(path)
 
@@ -986,6 +1058,12 @@ class SimpleCacheFileSystem(WholeFileCacheFileSystem):
         kw = kwargs.copy()
         for key in ["cache_check", "expiry_time", "check_files"]:
             kw[key] = False
+        if kw.get("auth_version") is not None:
+            raise ValueError(
+                "SimpleCacheFileSystem keeps no cache metadata, so it cannot "
+                "record or enforce an auth_version; use filecache or "
+                "blockcache instead"
+            )
         super().__init__(**kw)
         for storage in self.storage:
             if not os.path.exists(storage):
@@ -1152,6 +1230,12 @@ class SimpleCacheFileSystem(WholeFileCacheFileSystem):
     def _open(self, path, mode="rb", **kwargs):
         path = self._strip_protocol(path)
         sha = self._mapper(path)
+        if kwargs.pop("auth_version", None) is not None:
+            raise ValueError(
+                "SimpleCacheFileSystem keeps no cache metadata, so it cannot "
+                "record or enforce an auth_version; use filecache or "
+                "blockcache instead"
+            )
 
         # For read (or append), (try) download from remote
         if "r" in mode or "a" in mode:

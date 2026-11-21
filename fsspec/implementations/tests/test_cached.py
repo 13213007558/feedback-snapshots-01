@@ -28,6 +28,7 @@ from fsspec.implementations.cached import (
 from fsspec.implementations.local import make_path_posix
 from fsspec.implementations.memory import MemoryFileSystem
 from fsspec.implementations.zip import ZipFileSystem
+from fsspec.spec import AbstractBufferedFile
 from fsspec.tests.conftest import win
 
 from .test_ftp import FTPFileSystem
@@ -2215,3 +2216,226 @@ def test_write_transaction_failed_upload_ends_transaction(
     with fs.transaction:
         fs.pipe("/next-transaction", b"committed")
     assert m.cat("/next-transaction") == b"committed"
+
+
+
+
+class AuthGate:
+    """Mock authorization service: grants are versioned and every data
+    access by the remote file service must be confirmed against them."""
+
+    def __init__(self):
+        self.granted = set()
+        self.confirmations = []
+
+    def authorize(self, version):
+        self.granted.add(version)
+
+    def revoke(self, version):
+        self.granted.discard(version)
+
+    def confirm(self, version):
+        self.confirmations.append(version)
+        if version not in self.granted:
+            raise PermissionError(f"authorization version {version!r} not granted")
+
+
+class GatedMemoryFileSystem(MemoryFileSystem):
+    """Mock remote file service re-confirming authorization on data access.
+
+    The gateway sets ``auth_version`` to the caller's current authorization
+    version; every fetch of file content is confirmed with the gate. Read
+    opens produce buffered files whose fetches go through this filesystem,
+    as a genuinely remote implementation would.
+    """
+
+    def __init__(self, gate, **kwargs):
+        super().__init__(**kwargs)
+        self.gate = gate
+        self.auth_version = None
+
+    def _confirm(self):
+        self.gate.confirm(self.auth_version)
+
+    def _open(self, path, mode="rb", **kwargs):
+        if "r" not in mode:
+            return super()._open(path, mode=mode, **kwargs)
+        kwargs.setdefault("cache_type", "none")
+        return AbstractBufferedFile(self, path, mode=mode, **kwargs)
+
+    def cat_file(self, path, start=None, end=None, **kwargs):
+        self._confirm()
+        return super().cat_file(path, start=start, end=end, **kwargs)
+
+    def cat_ranges(self, paths, starts, ends, **kwargs):
+        self._confirm()
+        return super().cat_ranges(paths, starts, ends, **kwargs)
+
+    def get_file(self, rpath, lpath, **kwargs):
+        self._confirm()
+        return super().get_file(rpath, lpath, **kwargs)
+
+
+@pytest.fixture
+def gated_service():
+    """A mock remote file service behind an authorization gate, holding one
+    file, plus the path of that file."""
+    gate = AuthGate()
+    fs = GatedMemoryFileSystem(gate, skip_instance_cache=True)
+    return gate, fs, "/remote"
+
+
+def test_blockcache_auth_version(tmp_path, gated_service):
+    gate, mem, path = gated_service
+    data_v1 = b"v1-data!" * 100
+    data_v2 = b"v2-data?" * 100
+    mem.pipe_file(path, data_v1)
+
+    gate.authorize("v1")
+    mem.auth_version = "v1"
+    fs = CachingFileSystem(
+        fs=mem,
+        cache_storage=str(tmp_path),
+        auth_version="v1",
+        skip_instance_cache=True,
+    )
+    with fs.open(path, block_size=10) as f:
+        assert f.read(20) == data_v1[:20]
+    confirmed = len(gate.confirmations)
+    assert confirmed > 0
+
+    # Same approved copy: reopening under the same version reuses the cached
+    # blocks without re-confirming with the remote service.
+    with fs.open(path, block_size=10) as f:
+        assert f.read(20) == data_v1[:20]
+    assert len(gate.confirmations) == confirmed
+
+    # The user's authorization scope updates: v1 is revoked, v2 is required.
+    gate.revoke("v1")
+    mem.auth_version = "v2"
+    mem.pipe_file(path, data_v2)
+    with pytest.raises(PermissionError):
+        with fs.open(path, block_size=10, auth_version="v2") as f:
+            f.read(20)
+    # The read was re-confirmed with the remote service (and refused there);
+    # the blocks cached under v1 were not used as proof of authorization.
+    assert "v2" in gate.confirmations
+
+    # Once the gateway grants v2, the same read succeeds and returns the
+    # freshly confirmed bytes, not the stale v1 content.
+    gate.authorize("v2")
+    with fs.open(path, block_size=10, auth_version="v2") as f:
+        assert f.read(20) == data_v2[:20]
+
+    # And the v2 copy is now itself reusable without further confirmation.
+    confirmed = len(gate.confirmations)
+    with fs.open(path, block_size=10, auth_version="v2") as f:
+        assert f.read(20) == data_v2[:20]
+    assert len(gate.confirmations) == confirmed
+
+
+def test_blockcache_auth_version_shared_cache_dir(tmp_path, gated_service):
+    gate, mem, path = gated_service
+    data = b"shared!" * 100
+    mem.pipe_file(path, data)
+    cache = str(tmp_path)
+
+    gate.authorize("v1")
+    mem.auth_version = "v1"
+    fs1 = CachingFileSystem(
+        fs=mem, cache_storage=cache, auth_version="v1", skip_instance_cache=True
+    )
+    with fs1.open(path, block_size=10) as f:
+        assert f.read(20) == data[:20]
+
+    # A second caching layer over the same cache directory, but a different
+    # authorization version, must not inherit the blocks fetched under v1.
+    gate.revoke("v1")
+    mem.auth_version = "v2"
+    fs2 = CachingFileSystem(
+        fs=mem, cache_storage=cache, auth_version="v2", skip_instance_cache=True
+    )
+    with pytest.raises(PermissionError):
+        with fs2.open(path, block_size=10) as f:
+            f.read(20)
+    assert "v2" in gate.confirmations
+
+    # Saving through one layer must not merge the other version's blocks
+    # into the on-disk metadata.
+    gate.authorize("v2")
+    with fs2.open(path, block_size=10) as f:
+        assert f.read(20) == data[:20]
+    fs2.save_cache()
+    with open(os.path.join(cache, "cache")) as f:
+        assert json.load(f)[path]["auth_version"] == "v2"
+    fs1.save_cache()
+    with open(os.path.join(cache, "cache")) as f:
+        saved = json.load(f)[path]
+    assert saved["auth_version"] == "v1"
+    assert saved["blocks"] == [0, 1, 2]
+
+
+def test_filecache_auth_version(tmp_path, gated_service):
+    gate, mem, path = gated_service
+    mem.pipe_file(path, b"v1-whole-file")
+
+    gate.authorize("v1")
+    mem.auth_version = "v1"
+    fs = WholeFileCacheFileSystem(
+        fs=mem,
+        cache_storage=str(tmp_path),
+        auth_version="v1",
+        skip_instance_cache=True,
+    )
+    assert fs.cat(path) == b"v1-whole-file"
+    confirmed = len(gate.confirmations)
+    assert confirmed > 0
+
+    # Same version: the local copy is served without re-confirmation.
+    assert fs.cat(path) == b"v1-whole-file"
+    assert len(gate.confirmations) == confirmed
+
+    # Version bump with the grant revoked: the cached copy must not stand
+    # in for authorization; the read re-confirms and fails at the service.
+    gate.revoke("v1")
+    mem.auth_version = "v2"
+    mem.pipe_file(path, b"v2-whole-file")
+    with pytest.raises(PermissionError):
+        with fs.open(path, auth_version="v2") as f:
+            f.read()
+    assert "v2" in gate.confirmations
+
+    # With v2 granted, the file is downloaded again under the new version.
+    gate.authorize("v2")
+    with fs.open(path, auth_version="v2") as f:
+        assert f.read() == b"v2-whole-file"
+
+    # cat uses the filesystem-level version, so a v2 layer now reuses it.
+    fs2 = WholeFileCacheFileSystem(
+        fs=mem,
+        cache_storage=str(tmp_path),
+        auth_version="v2",
+        skip_instance_cache=True,
+    )
+    confirmed = len(gate.confirmations)
+    assert fs2.cat(path) == b"v2-whole-file"
+    assert len(gate.confirmations) == confirmed
+
+
+def test_simplecache_auth_version_unsupported(tmp_path):
+    from fsspec.implementations.cached import SimpleCacheFileSystem
+
+    mem = MemoryFileSystem(skip_instance_cache=True)
+    with pytest.raises(ValueError, match="auth_version"):
+        SimpleCacheFileSystem(
+            fs=mem,
+            cache_storage=str(tmp_path),
+            auth_version="v1",
+            skip_instance_cache=True,
+        )
+    fs = SimpleCacheFileSystem(
+        fs=mem, cache_storage=str(tmp_path), skip_instance_cache=True
+    )
+    mem.pipe_file("/remote", b"data")
+    with pytest.raises(ValueError, match="auth_version"):
+        fs.open("/remote", auth_version="v1")

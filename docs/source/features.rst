@@ -319,6 +319,14 @@ cache directory and renamed into place once complete, so a partial download is n
 temporary file is removed if the download fails, but not if the process is killed mid-download;
 leftover ``*.part`` files are ignored by the cache and safe to delete.
 
+For callers whose access to the target is governed by an authorization scope that can
+change over time, "filecache" and "blockcache" accept an ``auth_version`` tag, either at
+filesystem construction or per call to ``open``. Cached blocks and files are only reused
+when the version they were fetched under matches the caller's; when the version changes,
+the local copy is discarded and the data is fetched again, so the target filesystem
+re-confirms access instead of the cache serving bytes authorized under a previous scope.
+"simplecache" keeps no metadata and therefore does not support ``auth_version``.
+
 Remote Write Caching
 --------------------
 
