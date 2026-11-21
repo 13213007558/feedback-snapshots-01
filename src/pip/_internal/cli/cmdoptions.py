@@ -976,6 +976,24 @@ no_cache: Callable[..., Option] = partial(
     help="Disable the cache.",
 )
 
+
+require_cache_origin: Callable[..., Option] = partial(
+    Option,
+    "--require-cache-origin",
+    dest="require_cache_origin",
+    type="choice",
+    choices=["refetch", "error"],
+    default=None,
+    metavar="action",
+    help=(
+        "Only reuse a persistently cached wheel when its cache entry records a "
+        "download origin matching the requested source together with verifiable "
+        "content hashes. When the evidence is missing or does not match, "
+        "'refetch' ignores the entry and downloads the source again, while "
+        "'error' refuses the installation. [refetch, error]"
+    ),
+)
+
 no_deps: Callable[..., Option] = partial(
     Option,
     "--no-deps",

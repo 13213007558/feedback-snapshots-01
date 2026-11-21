@@ -6,22 +6,215 @@ import hashlib
 import json
 import logging
 import os
+import string
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping
 
 from pip._vendor.packaging.tags import Tag, interpreter_name, interpreter_version
 from pip._vendor.packaging.utils import canonicalize_name
 
-from pip._internal.exceptions import InvalidWheelFilename
+from pip._internal.exceptions import CacheProvenanceError, InvalidWheelFilename
 from pip._internal.models.direct_url import DirectUrl
-from pip._internal.models.link import Link
+from pip._internal.models.link import Link, links_equivalent
 from pip._internal.models.wheel import Wheel
+from pip._internal.utils.hashes import STRONG_HASHES
+from pip._internal.utils.misc import redact_auth_from_url
 from pip._internal.utils.temp_dir import TempDirectory, TempDirectoryKind
 from pip._internal.utils.urls import path_to_url
 
 logger = logging.getLogger(__name__)
 
 ORIGIN_JSON_NAME = "origin.json"
+
+# Expected digest lengths for the hash algorithms that we accept as content
+# evidence for a cached wheel.
+_STRONG_HASH_LENGTHS = {"sha256": 64, "sha384": 96, "sha512": 128}
+
+_HEX_DIGITS = frozenset(string.hexdigits)
+
+
+@dataclass(frozen=True)
+class CacheProvenancePolicy:
+    """Policy applied when a cached wheel is supposed to be reused.
+
+    ``action`` controls what happens when a cache entry cannot prove that it
+    was built from the requested source with a verifiable content digest:
+
+    * ``refetch``: ignore the entry and fetch the source again.
+    * ``error``: refuse the installation instead of silently re-fetching.
+    """
+
+    action: Literal["refetch", "error"] = "refetch"
+
+
+@dataclass(frozen=True)
+class CacheProvenance:
+    """What a cached wheel can say about where it came from."""
+
+    persistent: bool
+    # ``None`` means no provenance policy was active, so the evidence was not
+    # checked; ``True``/``False`` are the result of an actual check.
+    verified: bool | None
+    source_url: str | None = None
+    source_hashes: Mapping[str, str] | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "used": True,
+            "persistent": self.persistent,
+        }
+        if self.verified is not None:
+            result["verified"] = self.verified
+        if self.source_url is not None:
+            result["source_url"] = redact_auth_from_url(self.source_url)
+        if self.source_hashes:
+            result["source_hashes"] = dict(self.source_hashes)
+        if self.error is not None:
+            result["error"] = self.error
+        return result
+
+
+def _urls_match(origin_url: str, source_link: Link) -> bool:
+    """Return whether two URLs identify the same source location.
+
+    Fragments are ignored because ``origin.json`` stores the subdirectory
+    separately, and credentials are ignored by :func:`links_equivalent`.
+    """
+    origin_link = Link(origin_url)
+    if source_link.is_vcs:
+        # ``origin.url`` for VCS sources is the plain repository URL without
+        # the ``vcs+`` prefix or the requested revision, so compare the base.
+        source = urllib.parse.urlsplit(source_link.url_without_fragment)
+        scheme = source.scheme.split("+", 1)[-1]
+        path = source.path
+        if "@" in path:
+            path = path.rsplit("@", 1)[0]
+        base_url = urllib.parse.urlunsplit(
+            (scheme, source.netloc, path, source.query, "")
+        )
+        return links_equivalent(Link(base_url), origin_link)
+    return links_equivalent(Link(source_link.url_without_fragment), origin_link)
+
+
+def _strong_hashes(hashes: Mapping[str, str] | None) -> dict[str, str]:
+    """Return the usable, strong content hashes from ``hashes``."""
+    if not hashes:
+        return {}
+    usable: dict[str, str] = {}
+    for algorithm, digest in hashes.items():
+        algorithm = algorithm.lower()
+        digest = digest.lower()
+        if algorithm not in STRONG_HASHES:
+            continue
+        if len(digest) != _STRONG_HASH_LENGTHS[algorithm]:
+            continue
+        if not digest or not set(digest) <= _HEX_DIGITS:
+            continue
+        usable[algorithm] = digest
+    return usable
+
+
+def _hash_local_file(path: str, algorithms: Mapping[str, str]) -> dict[str, str]:
+    """Compute the requested digests of a local file."""
+    hashers = {algorithm: hashlib.new(algorithm) for algorithm in algorithms}
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1 << 20), b""):
+            for hasher in hashers.values():
+                hasher.update(chunk)
+    return {algorithm: hasher.hexdigest() for algorithm, hasher in hashers.items()}
+
+
+def verify_cache_provenance(
+    origin: DirectUrl | None,
+    source_link: Link,
+    *,
+    rehash_local_source: bool = True,
+) -> tuple[bool, str | None, dict[str, str]]:
+    """Check that ``origin`` proves the cache entry came from ``source_link``.
+
+    Returns ``(verified, error, hashes)`` where ``hashes`` are the strong
+    content digests recorded in the cache entry. When ``rehash_local_source``
+    is true and the source is a local file, its current bytes are hashed too.
+    """
+    if origin is None:
+        return False, "the cache entry has no readable origin.json", {}
+
+    if not _urls_match(origin.url, source_link):
+        return (
+            False,
+            "the recorded origin "
+            f"{redact_auth_from_url(origin.url)} does not match the requested "
+            f"source {redact_auth_from_url(source_link.url)}",
+            {},
+        )
+
+    if origin.vcs_info is not None:
+        commit_id = origin.vcs_info.commit_id
+        if len(commit_id) != 40 or not set(commit_id) <= _HEX_DIGITS:
+            return (
+                False,
+                "the cache entry does not record an immutable revision",
+                {},
+            )
+        # The URL comparison above already checked the repository; the
+        # recorded commit identifies the exact source revision.
+        return True, None, {}
+
+    if origin.archive_info is None:
+        return False, "the cache entry does not record an archive origin", {}
+
+    hashes = _strong_hashes(origin.archive_info.hashes)
+    if not hashes:
+        return (
+            False,
+            "the cache entry does not record a strong content hash "
+            f"(expected one of {', '.join(STRONG_HASHES)})",
+            {},
+        )
+
+    if source_link.hash_name is not None and source_link.hash is not None:
+        expected = source_link.hash.lower()
+        actual = hashes.get(source_link.hash_name.lower())
+        if actual is None:
+            return (
+                False,
+                "the requested source is pinned to a "
+                f"{source_link.hash_name} hash that the cache entry does not "
+                "record",
+                hashes,
+            )
+        if actual != expected:
+            return (
+                False,
+                "the cache entry records a "
+                f"{source_link.hash_name} hash that does not match the "
+                "requested source",
+                hashes,
+            )
+
+    if (
+        rehash_local_source
+        and source_link.is_file
+        and not source_link.is_existing_dir()
+    ):
+        # A local source is available, so the recorded digests can be checked
+        # against its current bytes instead of being trusted at face value.
+        try:
+            actual_hashes = _hash_local_file(source_link.file_path, hashes)
+        except OSError as e:
+            return False, f"the local source could not be read ({e})", hashes
+        if actual_hashes != hashes:
+            return (
+                False,
+                "the cache entry's content hash does not match the current "
+                "bytes of the local source",
+                hashes,
+            )
+
+    return True, None, hashes
 
 
 def _hash_dict(d: dict[str, str]) -> str:
@@ -194,6 +387,8 @@ class CacheEntry:
         self.link = link
         self.persistent = persistent
         self.origin: DirectUrl | None = None
+        self.origin_error: str | None = None
+        self.provenance: CacheProvenance | None = None
         origin_direct_url_path = Path(self.link.file_path).parent / ORIGIN_JSON_NAME
         if origin_direct_url_path.exists():
             try:
@@ -201,12 +396,45 @@ class CacheEntry:
                     origin_direct_url_path.read_text(encoding="utf-8")
                 )
             except Exception as e:
+                self.origin_error = f"invalid origin.json ({e})"
                 logger.warning(
                     "Ignoring invalid cache entry origin file %s for %s (%s)",
                     origin_direct_url_path,
                     link.filename,
                     e,
                 )
+        else:
+            self.origin_error = "missing origin.json"
+
+    def check_provenance(self, source_link: Link) -> CacheProvenance:
+        """Evaluate the evidence recorded for this cache entry."""
+        if self.origin_error is not None:
+            verified = False
+            error = self.origin_error
+            hashes: dict[str, str] = {}
+        else:
+            verified, error, hashes = verify_cache_provenance(
+                self.origin, source_link
+            )
+        return CacheProvenance(
+            persistent=self.persistent,
+            verified=verified,
+            source_url=self.origin.url if self.origin is not None else None,
+            source_hashes=hashes or None,
+            error=error,
+        )
+
+    def describe_origin(self) -> CacheProvenance:
+        """Describe the recorded origin without applying any policy."""
+        hashes: dict[str, str] = {}
+        if self.origin is not None and self.origin.archive_info is not None:
+            hashes = _strong_hashes(self.origin.archive_info.hashes)
+        return CacheProvenance(
+            persistent=self.persistent,
+            verified=None,
+            source_url=self.origin.url if self.origin is not None else None,
+            source_hashes=hashes or None,
+        )
 
 
 class WheelCache(Cache):
@@ -216,10 +444,15 @@ class WheelCache(Cache):
     when a certain link is not found in the simple wheel cache first.
     """
 
-    def __init__(self, cache_dir: str) -> None:
+    def __init__(
+        self,
+        cache_dir: str,
+        provenance_policy: CacheProvenancePolicy | None = None,
+    ) -> None:
         super().__init__(cache_dir)
         self._wheel_cache = SimpleWheelCache(cache_dir)
         self._ephem_cache = EphemWheelCache()
+        self.provenance_policy = provenance_policy
 
     def get_path_for_link(self, link: Link) -> str:
         return self._wheel_cache.get_path_for_link(link)
@@ -247,6 +480,11 @@ class WheelCache(Cache):
         """Returns a CacheEntry with a link to a cached item if it exists or
         None. The cache entry indicates if the item was found in the persistent
         or ephemeral cache.
+
+        When a provenance policy is configured, persistent entries must prove
+        they were built from ``link`` with a verifiable content digest. An
+        entry that cannot prove this is either ignored (so the source is
+        fetched again) or rejected, depending on the configured action.
         """
         retval = self._wheel_cache.get(
             link=link,
@@ -254,7 +492,28 @@ class WheelCache(Cache):
             supported_tags=supported_tags,
         )
         if retval is not link:
-            return CacheEntry(retval, persistent=True)
+            entry = CacheEntry(retval, persistent=True)
+            if self.provenance_policy is not None:
+                provenance = entry.check_provenance(link)
+                entry.provenance = provenance
+                if not provenance.verified:
+                    reason = (
+                        f"Cached wheel for {package_name or link.filename} "
+                        f"cannot prove its source ({provenance.error})."
+                    )
+                    if self.provenance_policy.action == "error":
+                        raise CacheProvenanceError(
+                            f"{reason} Refusing to use it as requested."
+                        )
+                    logger.warning(
+                        "%s Ignoring it and fetching the source again.", reason
+                    )
+                    return None
+            else:
+                # Without an active policy cache hits keep the fast path; the
+                # origin is still recorded so reports can name the source.
+                entry.provenance = entry.describe_origin()
+            return entry
 
         retval = self._ephem_cache.get(
             link=link,

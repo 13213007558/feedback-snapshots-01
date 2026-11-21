@@ -81,6 +81,21 @@ package with the following properties:
 - `requested_extras`: extras requested by the user. This field is only present when the
   `requested` field is true.
 
+- `cache_provenance`: present when the distribution was installed from a persistently
+  cached wheel. It describes the evidence recorded for that cache entry:
+
+  - `used`: `true`; the cached wheel was used.
+  - `persistent`: `true` when the entry came from the persistent wheel cache rather
+    than the ephemeral one.
+  - `verified`: the result of the provenance check: `true` when the recorded
+    origin matched the selected source and carried a verifiable strong content
+    hash, `false` when `--require-cache-origin` was given but the evidence did
+    not hold, and absent when no provenance policy was active.
+  - `source_url`: the download URL recorded in the cache entry's `origin.json`, with
+    any credentials redacted. Absent when the entry has no usable origin.
+  - `source_hashes`: the strong content hashes recorded for the source archive.
+  - `error`: present only when the evidence could not be verified.
+
 ## Example
 
 The following command:

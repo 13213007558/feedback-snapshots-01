@@ -431,6 +431,7 @@ class Resolver(BaseResolver):
             logger.debug("Using cached wheel link: %s", cache_entry.link)
             if req.link is req.original_link and cache_entry.persistent:
                 req.cached_wheel_source_link = req.link
+            req.cached_wheel_provenance = cache_entry.provenance
             if cache_entry.origin is not None:
                 req.download_info = cache_entry.origin
             else:

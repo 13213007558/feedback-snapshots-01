@@ -1,0 +1,5 @@
+Add ``--require-cache-origin`` to ``pip install`` so a persistently cached wheel is
+only reused when its cache entry records a download origin matching the selected
+source together with a verifiable strong content hash. Unproven entries are either
+re-fetched (``refetch``) or rejected (``error``). Installation reports gain a
+``cache_provenance`` field naming the source a reused wheel came from.

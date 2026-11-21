@@ -38,6 +38,10 @@ class InstallationReport:
         if ireq.user_supplied and ireq.extras:
             # For top level requirements, the list of requested extras, if any.
             res["requested_extras"] = sorted(ireq.extras)
+        if ireq.cached_wheel_provenance is not None:
+            # Report which source a reused cached wheel was built from, and
+            # whether that was proven before the cache entry was accepted.
+            res["cache_provenance"] = ireq.cached_wheel_provenance.to_dict()
         return res
 
     def to_dict(self) -> dict[str, Any]:

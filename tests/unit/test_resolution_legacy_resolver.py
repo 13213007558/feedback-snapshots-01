@@ -12,14 +12,16 @@ import pytest
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName
 
-from pip._internal.cache import WheelCache
+from pip._internal.cache import CacheProvenancePolicy, WheelCache
 from pip._internal.exceptions import (
+    CacheProvenanceError,
     InstallationError,
     NoneMetadataError,
     UnsupportedPythonVersion,
 )
 from pip._internal.metadata import BaseDistribution
 from pip._internal.models.candidate import InstallationCandidate
+from pip._internal.models.direct_url import ArchiveInfo, DirectUrl
 from pip._internal.req.constructors import install_req_from_line
 from pip._internal.req.req_set import RequirementSet
 from pip._internal.resolution.legacy.resolver import (
@@ -293,6 +295,81 @@ class TestPopulateLink:
         assert ireq.link is not None
         assert ireq.link.is_file
         assert ireq.source_link == source
+
+    def test_populate_link_records_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate = make_mock_candidate("1.0", hex_digest="a" * 64)
+        source = candidate.link
+        wheel_cache = WheelCache(
+            str(tmp_path / "cache"),
+            provenance_policy=CacheProvenancePolicy(action="error"),
+        )
+        cache_dir = Path(wheel_cache.get_path_for_link(source))
+        cache_dir.mkdir(parents=True)
+        wheel.make_wheel(name="mypackage", version="1.0").save_to_dir(cache_dir)
+        DirectUrl(
+            url=source.url_without_fragment,
+            archive_info=ArchiveInfo(hashes={"sha256": "a" * 64}),
+        )
+        (cache_dir / "origin.json").write_text(
+            DirectUrl(
+                url=source.url_without_fragment,
+                archive_info=ArchiveInfo(hashes={"sha256": "a" * 64}),
+            ).to_json(),
+            encoding="utf-8",
+        )
+        ireq = install_req_from_line("mypackage")
+
+        resolver = make_test_resolver(monkeypatch, [candidate], wheel_cache)
+        resolver.preparer.require_hashes = False
+        resolver._populate_link(ireq)
+
+        assert ireq.cached_wheel_provenance is not None
+        assert ireq.cached_wheel_provenance.verified
+        assert ireq.cached_wheel_provenance.source_url == source.url_without_fragment
+
+    def test_populate_link_rejects_unproven_cache_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate = make_mock_candidate("1.0")
+        source = candidate.link
+        wheel_cache = WheelCache(
+            str(tmp_path / "cache"),
+            provenance_policy=CacheProvenancePolicy(action="error"),
+        )
+        cache_dir = Path(wheel_cache.get_path_for_link(source))
+        cache_dir.mkdir(parents=True)
+        wheel.make_wheel(name="mypackage", version="1.0").save_to_dir(cache_dir)
+        ireq = install_req_from_line("mypackage")
+
+        resolver = make_test_resolver(monkeypatch, [candidate], wheel_cache)
+        resolver.preparer.require_hashes = False
+
+        with pytest.raises(CacheProvenanceError, match="cannot prove its source"):
+            resolver._populate_link(ireq)
+
+    def test_populate_link_refetches_unproven_cache_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate = make_mock_candidate("1.0")
+        source = candidate.link
+        wheel_cache = WheelCache(
+            str(tmp_path / "cache"),
+            provenance_policy=CacheProvenancePolicy(action="refetch"),
+        )
+        cache_dir = Path(wheel_cache.get_path_for_link(source))
+        cache_dir.mkdir(parents=True)
+        wheel.make_wheel(name="mypackage", version="1.0").save_to_dir(cache_dir)
+        ireq = install_req_from_line("mypackage")
+
+        resolver = make_test_resolver(monkeypatch, [candidate], wheel_cache)
+        resolver.preparer.require_hashes = False
+        resolver._populate_link(ireq)
+
+        assert ireq.link == source
+        assert ireq.cached_wheel_source_link is None
+        assert ireq.cached_wheel_provenance is None
 
 
 class TestYankedWarning:

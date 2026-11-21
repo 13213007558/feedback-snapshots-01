@@ -31,6 +31,7 @@ from pip._vendor.rich.text import Text
 
 from pip._internal.exceptions._base import (
     BlockedImportError,
+    CacheProvenanceError,
     DiagnosticPipError,
     InstallationError,
     PipError,

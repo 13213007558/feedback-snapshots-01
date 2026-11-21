@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -3336,3 +3337,90 @@ def test_blocked_target_move_reports_failure(
     assert result.returncode == ERROR
     assert "Blocked import of 'wave'" in result.stderr
     assert (target / "unrelated.txt").read_text() == "keep me\n"
+
+
+def _repackage_sdist(source: Path, destination: Path, extra: str) -> Path:
+    """Copy an sdist, adding a marker file so its bytes differ."""
+    import gzip
+
+    with tarfile.open(source, "r:gz") as archive:
+        members = [(member, archive.extractfile(member)) for member in archive]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for member, data in members:
+            tar.addfile(member, data)
+        marker = tarfile.TarInfo("source-marker.txt")
+        payload = extra.encode("utf-8")
+        marker.size = len(payload)
+        tar.addfile(marker, io.BytesIO(payload))
+    destination.write_bytes(gzip.compress(buffer.getvalue()))
+    return destination
+
+
+
+
+def test_require_cache_origin_keeps_proven_hits_and_refetches_stale_ones(
+    script: PipTestEnvironment, shared_data: TestData, tmp_path: Path
+) -> None:
+    """Two local sources serve the same name/version under the same cache key."""
+    cache_dir = tmp_path / "cache"
+    source_a = tmp_path / "source-a"
+    source_b = tmp_path / "source-b"
+    source_a.mkdir()
+    source_b.mkdir()
+    shared_sdist = shared_data.packages / "simple-1.0.tar.gz"
+    _repackage_sdist(shared_sdist, source_a / "simple-1.0.tar.gz", "a")
+    _repackage_sdist(shared_sdist, source_b / "simple-1.0.tar.gz", "b")
+    report_path = tmp_path / "report.json"
+
+    def install(*extra: str, expect_error: bool = False) -> TestPipResult:
+        return script.pip(
+            "install",
+            "--no-index",
+            "--no-build-isolation",
+            "--ignore-installed",
+            "--cache-dir",
+            os.fspath(cache_dir),
+            "--find-links",
+            os.fspath(source_a),
+            "--report",
+            os.fspath(report_path),
+            *extra,
+            "simple==1.0",
+            expect_error=expect_error,
+        )
+
+    # First install populates the wheel cache and records the origin.
+    install()
+    cache_entries = list((cache_dir / "wheels").rglob("origin.json"))
+    assert len(cache_entries) == 1
+    origin = json.loads(cache_entries[0].read_text())
+    assert origin["url"].endswith("source-a/simple-1.0.tar.gz")
+    assert "sha256" in origin["archive_info"]["hashes"]
+
+    # The unchanged source is a legitimate hit, and the report says which
+    # source the reused wheel came from.
+    result = install("--require-cache-origin", "error")
+    assert "Using cached simple-1.0" in result.stdout
+    report = json.loads(report_path.read_text())
+    provenance = report["install"][0]["cache_provenance"]
+    assert provenance["verified"] is True
+    assert provenance["persistent"] is True
+    assert provenance["source_url"].endswith("source-a/simple-1.0.tar.gz")
+
+    # Now the second source publishes the same name/version at the same
+    # location, so the cache entry no longer matches the approved bytes.
+    shutil.copy(source_b / "simple-1.0.tar.gz", source_a / "simple-1.0.tar.gz")
+    result = install("--require-cache-origin", "error", expect_error=True)
+    assert "cannot prove its source" in result.stderr
+    assert "Refusing to use it as requested" in result.stderr
+
+    # 'refetch' instead discards the unproven wheel and rebuilds from source.
+    result = install("--require-cache-origin", "refetch")
+    assert "cannot prove its source" in result.stderr
+    assert "Created wheel for simple" in result.stdout
+    report = json.loads(report_path.read_text())
+    assert report["install"][0]["cache_provenance"]["verified"] is True
+    assert report["install"][0]["cache_provenance"]["source_url"].endswith(
+        "source-a/simple-1.0.tar.gz"
+    )

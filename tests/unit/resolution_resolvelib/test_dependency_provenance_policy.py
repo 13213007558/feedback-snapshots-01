@@ -241,3 +241,48 @@ def test_non_pypi_metadata_can_declare_direct_reference(
         requirement is not None and requirement.project_name == "child"
         for requirement in candidate.iter_dependencies(with_requires=True)
     )
+
+
+def test_cached_candidate_records_verified_provenance(
+    finder: PackageFinder,
+    preparer: RequirementPreparer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pip._internal.cache import CacheProvenancePolicy
+    from pip._internal.models.direct_url import ArchiveInfo, DirectUrl
+
+    source = Link("https://packages.example/parent-1.0.tar.gz")
+    wheel = make_wheel("parent", "1.0")
+    cache = WheelCache(
+        str(tmp_path / "cache"),
+        provenance_policy=CacheProvenancePolicy(action="error"),
+    )
+    cache_dir = Path(cache.get_path_for_link(source))
+    cache_dir.mkdir(parents=True)
+    wheel.save_to_dir(cache_dir)
+    digest = "a" * 64
+    (cache_dir / "origin.json").write_text(
+        DirectUrl(
+            url=source.url_without_fragment,
+            archive_info=ArchiveInfo(hashes={"sha256": digest}),
+        ).to_json(),
+        encoding="utf-8",
+    )
+    factory = _make_factory(finder, preparer, tmp_path, cache)
+
+    candidate = factory._make_base_candidate_from_link(
+        source,
+        install_req_from_line("parent==1.0"),
+        canonicalize_name("parent"),
+        Version("1.0"),
+    )
+    assert isinstance(candidate, LinkCandidate)
+    requirement = candidate.get_install_requirement()
+    assert requirement is not None
+    assert requirement.cached_wheel_provenance is not None
+    assert requirement.cached_wheel_provenance.verified
+    assert requirement.cached_wheel_provenance.source_url == (
+        source.url_without_fragment
+    )
+    assert requirement.cached_wheel_provenance.source_hashes == {"sha256": digest}

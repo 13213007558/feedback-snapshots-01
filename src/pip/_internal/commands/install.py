@@ -32,7 +32,7 @@ import pip
 # wheel to execute arbitrary code on install by replacing
 # self_outdated_check.
 import pip._internal.self_outdated_check
-from pip._internal.cache import WheelCache
+from pip._internal.cache import CacheProvenancePolicy, WheelCache
 from pip._internal.cli import cmdoptions
 from pip._internal.cli.cmdoptions import make_target_python
 from pip._internal.cli.req_command import (
@@ -501,6 +501,7 @@ class InstallCommand(RequirementCommand):
         )
         self.cmd_opts.add_option(cmdoptions.require_hashes())
         self.cmd_opts.add_option(cmdoptions.no_require_hashes())
+        self.cmd_opts.add_option(cmdoptions.require_cache_origin())
         self.cmd_opts.add_option(cmdoptions.progress_bar())
         self.cmd_opts.add_option(cmdoptions.root_user_action())
 
@@ -625,7 +626,14 @@ class InstallCommand(RequirementCommand):
         try:
             reqs = self.get_requirements(args, options, finder, session)
 
-            wheel_cache = WheelCache(options.cache_dir)
+            wheel_cache = WheelCache(
+                options.cache_dir,
+                provenance_policy=(
+                    CacheProvenancePolicy(action=options.require_cache_origin)
+                    if options.require_cache_origin is not None
+                    else None
+                ),
+            )
 
             preparer = self.make_requirement_preparer(
                 temp_build_dir=directory,

@@ -40,6 +40,10 @@ class InstallationError(PipError):
     """General exception during installation"""
 
 
+class CacheProvenanceError(InstallationError):
+    """A cached wheel could not prove it came from the requested source."""
+
+
 class BlockedImportError(InstallationError):
     """An import blocked after wheel installation started.
 

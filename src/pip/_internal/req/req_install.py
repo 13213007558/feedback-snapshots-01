@@ -10,7 +10,7 @@ import zipfile
 from collections.abc import Collection, Iterable
 from optparse import Values
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pip._vendor.packaging.markers import Marker
 from pip._vendor.packaging.requirements import Requirement
@@ -56,6 +56,9 @@ from pip._internal.utils.virtualenv import running_under_virtualenv
 from pip._internal.vcs import vcs
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from pip._internal.cache import CacheProvenance
 
 
 class InstallRequirement:
@@ -113,6 +116,10 @@ class InstallRequirement:
         # built wheels, this is the source link corresponding to the cache entry, which
         # was used to download and build the cached wheel.
         self.cached_wheel_source_link: Link | None = None
+
+        # Evidence recorded for a cached wheel when a cache provenance policy is
+        # active, so callers can report which source the reused wheel came from.
+        self.cached_wheel_provenance: CacheProvenance | None = None
 
         # Information about the location of the artifact that was downloaded . This
         # property is guaranteed to be set in resolver results.

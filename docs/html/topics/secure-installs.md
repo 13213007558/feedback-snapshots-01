@@ -77,6 +77,46 @@ When installing from the cache of locally built wheels in hash-checking mode, pi
 the hashes against those of the original source distribution that was used to build the wheel.
 These original hashes are obtained from a `origin.json` file stored in each cache entry.
 
+## Requiring cache provenance
+
+```{versionadded} 27.0
+
+```
+
+A shared wheel cache can be populated by many machines, so a cache hit does not by
+itself say which source the wheel was built from. When a deployment must only use
+artifacts that can be traced back to an approved source, pip can be told to verify
+the evidence recorded in each cache entry before reusing it:
+
+```console
+$ pip install --require-cache-origin refetch -r requirements.txt
+```
+
+A persistently cached wheel is only reused when its `origin.json` records
+
+- a download URL equivalent to the source that pip selected for this run, and
+- at least one strong content hash (`sha256`, `sha384` or `sha512`) of the source
+  archive, matching the hash requested for the source when one is given.
+
+For local file sources, the recorded digest is also recomputed over the current
+bytes of the file, so a source that was replaced in place is not silently reused.
+Cache entries that do not exist, are invalid, or come from a different source are
+not accepted.
+
+The option accepts two actions:
+
+- `refetch` (the default) discards the unproven entry and downloads the source
+  again, exactly as if the wheel had not been cached.
+- `error` refuses the installation with an error instead, which is appropriate when
+  a silent re-download would hide the fact that the shared cache held untrusted
+  content.
+
+With either action, wheels that are accepted are reported by `pip install --report`
+under a `cache_provenance` field on the corresponding installation report item,
+naming the recorded source URL and the content hashes that were verified. Credentials
+in the source URL are redacted. Without `--require-cache-origin` the cache keeps its
+usual fast path, and the report still names the recorded source of a reused wheel.
+
 ### Using hashes from PyPI (or other index servers)
 
 PyPI (and certain other index servers) provides a hash for the distribution, in the fragment portion of each download URL, like `#sha256=123...`, which pip checks as a protection against download corruption.
