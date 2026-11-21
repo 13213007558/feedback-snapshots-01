@@ -25,6 +25,7 @@ from pip._internal.exceptions import (
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.models.target_python import TargetPython
 from pip._internal.network.session import PipSession
 from pip._internal.utils.misc import write_output
@@ -118,6 +119,7 @@ class IndexCommand(IndexGroupCommand):
             selection_prefs=selection_prefs,
             target_python=target_python,
             uploaded_prior_to=options.uploaded_prior_to,
+            source_policy=SourcePolicy(getattr(options, "approved_sources", ())),
         )
 
     def get_available_package_versions(self, options: Values, args: list[Any]) -> None:

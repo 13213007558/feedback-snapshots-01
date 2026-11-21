@@ -18,6 +18,7 @@ from pip._internal.exceptions import CommandError
 from pip._internal.metadata import BaseDistribution, get_environment
 from pip._internal.metadata.base import stdlib_pkgs
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.utils.misc import tabulate, write_output
 
 if TYPE_CHECKING:
@@ -168,6 +169,7 @@ class ListCommand(IndexGroupCommand):
             link_collector=link_collector,
             selection_prefs=selection_prefs,
             uploaded_prior_to=options.uploaded_prior_to,
+            source_policy=SourcePolicy(getattr(options, "approved_sources", ())),
         )
 
     def run(self, options: Values, args: list[str]) -> int:

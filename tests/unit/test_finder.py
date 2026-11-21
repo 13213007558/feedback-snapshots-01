@@ -1,6 +1,8 @@
 import datetime
 import logging
+import shutil
 from collections.abc import Iterable
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -19,6 +21,7 @@ from pip._internal.index.package_finder import (
     LinkEvaluator,
     LinkType,
 )
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.models.target_python import TargetPython
 from pip._internal.req.constructors import install_req_from_line
 
@@ -627,3 +630,45 @@ class TestPackageFinderUploadedPriorTo:
 
         link_evaluator = finder.make_link_evaluator("test-package")
         assert link_evaluator._uploaded_prior_to is None
+
+
+class TestPackageFinderSourcePolicy:
+    """A source policy filters valid links without hiding other rejects."""
+
+    def test_find_best_candidate_excludes_unapproved_versions(
+        self, data: TestData, tmp_path: Path
+    ) -> None:
+        approved = tmp_path / "approved"
+        unapproved = tmp_path / "unapproved"
+        approved.mkdir()
+        unapproved.mkdir()
+        shutil.copy(data.packages / "simple-1.0.tar.gz", approved)
+        shutil.copy(data.packages / "simple-2.0.tar.gz", unapproved)
+
+        finder = make_test_finder(
+            find_links=[str(approved), str(unapproved)],
+            source_policy=SourcePolicy([str(approved)]),
+        )
+        best = finder.find_best_candidate("simple").best_candidate
+
+        assert best is not None
+        assert str(best.version) == "1.0"
+        rejected = finder.source_policy_skipped("simple")
+        assert [r.version for r in rejected] == ["2.0"]
+
+    def test_missing_versions_are_not_reported_as_policy_rejections(
+        self, tmp_path: Path
+    ) -> None:
+        approved = tmp_path / "approved"
+        approved.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        finder = make_test_finder(
+            find_links=[str(approved), str(empty)],
+            source_policy=SourcePolicy([str(approved)]),
+        )
+        assert finder.find_best_candidate("simple").best_candidate is None
+        # Nothing was present, valid or otherwise, so the policy has nothing
+        # to report: this is an ordinary "no versions" result.
+        assert finder.source_policy_skipped("simple") == []

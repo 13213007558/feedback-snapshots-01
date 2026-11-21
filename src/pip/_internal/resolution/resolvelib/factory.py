@@ -17,6 +17,7 @@ from pip._vendor.packaging.requirements import InvalidRequirement
 from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
 from pip._vendor.packaging.version import InvalidVersion, Version
+from pip._vendor.packaging.version import parse as parse_version
 from pip._vendor.resolvelib import ResolutionImpossible
 from pip._vendor.rich.markup import escape
 
@@ -732,6 +733,38 @@ class Factory:
             if allows_pre is False:
                 version_type = "final version"
 
+        # A valid version may be present, but forbidden by the source policy.
+        # Report those separately so the user can tell a version constraint
+        # failure apart from a deployment policy decision.
+        _, requirement_ireq = req.get_candidate_lookup()
+        specifier = (
+            requirement_ireq.req.specifier
+            if requirement_ireq is not None and requirement_ireq.req is not None
+            else None
+        )
+
+        def policy_version_matches(version: str) -> bool:
+            if specifier is not None and not specifier.contains(
+                version, prereleases=True
+            ):
+                return False
+            return not (allows_pre is False and Version(version).is_prerelease)
+
+        policy_versions = sorted(
+            {
+                rejected.version
+                for rejected in self._finder.source_policy_skipped(req.project_name)
+                if policy_version_matches(rejected.version)
+            },
+            key=parse_version,
+        )
+        if policy_versions:
+            logger.critical(
+                "Ignored versions that satisfy the requirement but are not "
+                "from an approved source: %s",
+                ", ".join(policy_versions),
+            )
+
         if len(cands) == 1 and cands[0].locked:
             # The package finder ensures that requirements from pylock files
             # have exactly one candidate. So we can provide a specific error
@@ -764,6 +797,12 @@ class Factory:
                 'named "requirements.txt" (which cannot exist). Consider '
                 "using the '-r' flag to install the packages listed in "
                 "requirements.txt"
+            )
+        if policy_versions:
+            return DistributionNotFound(
+                f"No matching distribution found for {req_disp}: "
+                f"version(s) {', '.join(policy_versions)} exist but are not "
+                "from an approved source"
             )
         return DistributionNotFound(f"No matching distribution found for {req_disp}")
 

@@ -34,6 +34,7 @@ from pip._internal.models.direct_url import DIRECT_URL_METADATA_NAME, DirectUrl
 from pip._internal.models.release_control import ReleaseControl
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.models.target_python import TargetPython
 from pip._internal.network.session import PipSession
 
@@ -96,6 +97,7 @@ def make_test_finder(
     session: PipSession | None = None,
     target_python: TargetPython | None = None,
     uploaded_prior_to: datetime.datetime | None = None,
+    source_policy: SourcePolicy | None = None,
 ) -> PackageFinder:
     """
     Create a PackageFinder for testing purposes.
@@ -121,6 +123,7 @@ def make_test_finder(
         selection_prefs=selection_prefs,
         target_python=target_python,
         uploaded_prior_to=uploaded_prior_to,
+        source_policy=source_policy,
     )
 
 
