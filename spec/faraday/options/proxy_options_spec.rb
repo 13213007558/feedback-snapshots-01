@@ -82,4 +82,20 @@ RSpec.describe Faraday::ProxyOptions do
     expect(proxy.user).to eq('a+b')
     expect(proxy.password).to eq('pw+d+')
   end
+
+  describe '#dup' do
+    it 'gives the copy its own URI' do
+      proxy = Faraday::ProxyOptions.from 'http://user:pass@example.org'
+      copy = proxy.dup
+
+      expect(copy.uri).not_to equal(proxy.uri)
+      expect(copy.uri).to eq(proxy.uri)
+      expect(copy.user).to eq('user')
+      expect(copy.password).to eq('pass')
+
+      copy.host = 'other.example.org'
+      expect(proxy.host).to eq('example.org')
+      expect(copy.host).to eq('other.example.org')
+    end
+  end
 end

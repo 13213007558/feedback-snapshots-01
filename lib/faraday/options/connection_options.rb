@@ -31,10 +31,14 @@ module Faraday
   #   #
   #   # @!attribute builder_class
   #   #   @return [Class] the class used to build the middleware stack
+  #   #
+  #   # @!attribute proxy_required
+  #   #   @return [Boolean] when true, every request on the connection must use
+  #   #     an approved proxy; otherwise {Faraday::ProxyRequiredError} is raised.
   #   class ConnectionOptions < Options; end
   ConnectionOptions = Options.new(:request, :proxy, :ssl, :builder, :url,
                                   :parallel_manager, :params, :headers,
-                                  :builder_class) do
+                                  :builder_class, :proxy_required) do
     options request: RequestOptions, ssl: SSLOptions
 
     memoized(:request) { self.class.options_for(:request).new }

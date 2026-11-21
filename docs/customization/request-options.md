@@ -8,6 +8,7 @@ Not every adapter supports all of them: check your adapter's documentation (e.g.
 |-------------------|-------------------|----------------------------------------------------------------|-------------------------------------------------------------------------|
 | `:params_encoder` | Class             | `Faraday::Utils.nested_params_encoder` (`NestedParamsEncoder`) | A custom class to use as the params encoder.                            |
 | `:proxy`          | URI, String, Hash | nil                                                            | Proxy options, either as a URL or as a Hash of [ProxyOptions].          |
+| `:proxy_required` | Boolean           | nil                                                            | Require an explicitly configured proxy; see [Approved proxy].           |
 | `:bind`           | Hash              | nil                                                            | Hash of bind options. Requires the `:host` and `:port` keys.            |
 | `:timeout`        | Integer, Float    | nil (adapter default)                                          | The max number of seconds to wait for the request to complete.          |
 | `:open_timeout`   | Integer, Float    | nil (adapter default)                                          | The max number of seconds to wait for the connection to be established. |
@@ -37,5 +38,6 @@ end
 ```
 
 [ProxyOptions]: /customization/proxy-options.md
+[Approved proxy]: /customization/proxy-options.md#approved-proxies
 [Streaming]: /advanced/streaming-responses.md
 [net_http]: /adapters/net-http.md

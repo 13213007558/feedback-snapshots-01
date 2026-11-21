@@ -10,6 +10,12 @@ module Faraday
   #   # @!attribute proxy
   #   #   @return [ProxyOptions] proxy options for this request
   #   #
+  #   # @!attribute proxy_required
+  #   #   @return [Boolean] when true, the request must use a proxy that was
+  #   #     explicitly configured for the request or the connection. If none is
+  #   #     configured, {Faraday::ProxyRequiredError} is raised instead of
+  #   #     falling back to the environment proxy or a direct connection.
+  #   #
   #   # @!attribute bind
   #   #   @return [Hash] the local host and port to bind the connection to
   #   #
@@ -42,13 +48,46 @@ module Faraday
   RequestOptions = Options.new(:params_encoder, :proxy, :bind,
                                :timeout, :open_timeout, :read_timeout,
                                :write_timeout, :boundary, :oauth,
-                               :context, :on_data) do
+                               :context, :on_data, :proxy_required) do
     def []=(key, value)
       if key && key.to_sym == :proxy
         super(key, value ? ProxyOptions.from(value) : nil)
       else
         super
       end
+    end
+
+    # Normalise a proxy passed straight to the constructor, which Struct would
+    # otherwise assign without coercion.
+    #
+    # @api private
+    def initialize(...)
+      super
+      proxy = self[:proxy]
+      self[:proxy] = proxy if proxy
+    end
+
+    # Coerce every proxy assignment, including plain writer calls that do not
+    # go through {#[]=}.
+    #
+    # The Struct-generated writer is replaced rather than wrapped to avoid a
+    # recursion warning.
+    #
+    # @api private
+    remove_method :proxy= if method_defined?(:proxy=, false)
+
+    # @param value [ProxyOptions, Hash, URI, String, nil]
+    def proxy=(value)
+      self[:proxy] = value
+    end
+
+    # Give each request its own proxy options, so changing the proxy of one
+    # request cannot leak into the connection defaults or the next request.
+    #
+    # @api private
+    def initialize_copy(other)
+      super
+      self[:proxy] = other[:proxy] if other[:proxy]
     end
 
     def stream_response?

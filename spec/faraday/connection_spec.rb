@@ -689,6 +689,150 @@ RSpec.describe Faraday::Connection do
         end
       end
     end
+
+    context 'when a request requires an approved proxy' do
+      let(:seen) { [] }
+      let(:recording_adapter) do
+        Class.new(Faraday::Adapter) do
+          define_method(:initialize) do |app, seen|
+            super(app)
+            @seen = seen
+          end
+
+          define_method(:call) do |env|
+            super(env)
+            @seen << env.request.proxy
+            save_response(env, 200, 'ok', {})
+            @app.call(env)
+          end
+        end
+      end
+
+      def connection(options = {})
+        Faraday.new('http://example.com', options) do |f|
+          f.adapter recording_adapter, seen
+        end
+      end
+
+      it 'uses a proxy declared on the connection' do
+        connection(proxy: 'http://approved.proxy:8080')
+          .get('/') { |req| req.options.proxy_required = true }
+
+        expect(seen.map(&:host)).to eq(['approved.proxy'])
+      end
+
+      it 'uses a proxy declared in the request block' do
+        connection.get('/') do |req|
+          req.options.proxy_required = true
+          req.options.proxy = 'http://approved.proxy:8080'
+        end
+
+        expect(seen.map(&:host)).to eq(['approved.proxy'])
+      end
+
+      it 'uses a proxy declared in the request options' do
+        connection(request: { proxy: 'http://approved.proxy:8080' })
+          .get('/') { |req| req.options.proxy_required = true }
+
+        expect(seen.map(&:host)).to eq(['approved.proxy'])
+      end
+
+      it 'fails instead of using the environment proxy' do
+        with_env 'http_proxy' => 'http://env.proxy:3128' do
+          expect do
+            connection.get('/') { |req| req.options.proxy_required = true }
+          end.to raise_error(Faraday::ProxyRequiredError)
+        end
+
+        expect(seen).to be_empty
+      end
+
+      it 'fails instead of connecting directly' do
+        expect do
+          connection.get('/') { |req| req.options.proxy_required = true }
+        end.to raise_error(Faraday::ProxyRequiredError)
+        expect(seen).to be_empty
+      end
+
+      it 'fails when the request clears an approved proxy' do
+        expect do
+          connection(proxy: 'http://approved.proxy:8080').get('/') do |req|
+            req.options.proxy_required = true
+            req.options.proxy = nil
+          end
+        end.to raise_error(Faraday::ProxyRequiredError)
+        expect(seen).to be_empty
+      end
+
+      it 'reports the request in the error message' do
+        expect do
+          connection.get('/managed') { |req| req.options.proxy_required = true }
+        end.to raise_error(Faraday::ProxyRequiredError, %r{GET http://example.com/managed})
+      end
+
+      it 'does not affect requests that do not require a proxy' do
+        with_env 'http_proxy' => 'http://env.proxy:3128' do
+          connection.get('/')
+        end
+
+        expect(seen.map(&:host)).to eq(['env.proxy'])
+      end
+    end
+
+    context 'when switching proxies between requests' do
+      it 'does not carry a per-request proxy into the next request' do
+        calls = []
+        recorder = Class.new(Faraday::Adapter) do
+          define_method(:initialize) do |app, calls|
+            super(app)
+            @calls = calls
+          end
+
+          define_method(:call) do |env|
+            super(env)
+            @calls << env.request.proxy
+            save_response(env, 200, 'ok', {})
+            @app.call(env)
+          end
+        end
+
+        conn = Faraday.new('http://example.com') { |f| f.adapter recorder, calls }
+
+        conn.get('/') { |req| req.options.proxy = 'http://first.proxy:8080' }
+        conn.get('/')
+        conn.get('/') { |req| req.options.proxy = 'http://third.proxy:8080' }
+
+        expect(calls.map { |proxy| proxy&.host }).to eq(['first.proxy', nil, 'third.proxy'])
+        expect(conn.options.proxy).to be_nil
+      end
+
+      it 'does not mutate the connection proxy from a request' do
+        calls = []
+        recorder = Class.new(Faraday::Adapter) do
+          define_method(:initialize) do |app, calls|
+            super(app)
+            @calls = calls
+          end
+
+          define_method(:call) do |env|
+            super(env)
+            @calls << env.request.proxy
+            save_response(env, 200, 'ok', {})
+            @app.call(env)
+          end
+        end
+
+        conn = Faraday.new('http://example.com', proxy: 'http://default.proxy:8080') do |f|
+          f.adapter recorder, calls
+        end
+
+        conn.get('/') { |req| req.options.proxy.port = 9090 }
+        conn.get('/')
+
+        expect(calls.map(&:port)).to eq([9090, 8080])
+        expect(conn.proxy.port).to eq(8080)
+      end
+    end
   end
 
   describe '#dup' do
@@ -777,6 +921,25 @@ RSpec.describe Faraday::Connection do
 
         conn.get('/')
         expect(calls).to eq([:ran])
+      end
+    end
+
+    context 'with a proxy-required connection' do
+      let(:options) { { proxy: 'http://approved.proxy:8080', proxy_required: true } }
+
+      it 'keeps requiring an approved proxy on the duplicate' do
+        duplicate = conn.dup
+        request = duplicate.build_request(:get)
+
+        expect(request.options.proxy_required).to be(true)
+      end
+
+      it 'keeps the flag independent between the duplicate and the original' do
+        duplicate = conn.dup
+        duplicate.instance_variable_set(:@proxy_required, false)
+
+        expect(duplicate.build_request(:get).options.proxy_required).to be_nil
+        expect(conn.build_request(:get).options.proxy_required).to be(true)
       end
     end
   end

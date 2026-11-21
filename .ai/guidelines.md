@@ -45,6 +45,12 @@ Specs under `spec/integration/` exercise the Options classes (`RequestOptions`, 
 - `nil` values never overwrite (`new`, `update`, `merge!`), `false` does. Keys may be strings or symbols. Unknown keys raise `NoMethodError`, like `Faraday::Options`.
 - `merge!` deep-merges nested hashes and options; `merge`/`deep_dup` share no nested objects with the original. An attribute holding an options object needs a `COERCIONS` entry to stay one through `to_hash`.
 - `Faraday::Options` and `BaseOptions` both include the marker module `Faraday::OptionsLike`. In `Faraday::Utils`, check `OptionsLike`, never `Options`.
+- Legacy `Options` subclasses that override `initialize_copy` (e.g. `RequestOptions`, `ProxyOptions`) must duplicate nested mutable members so per-request changes cannot leak into connection defaults.
+
+## Proxy Handling
+- A proxy set on `RequestOptions#proxy` wins over the connection proxy, which wins over the environment proxy (`URI#find_proxy`). `Connection#run_request` resolves this per request; never mutate the connection when resolving a request proxy.
+- `proxy_required` (on `RequestOptions` or `ConnectionOptions`) means "use an approved proxy or fail". Only a proxy declared by the application counts; the environment proxy does not. Raise `Faraday::ProxyRequiredError` before the adapter runs, never fall back to a direct connection.
+- Requests without `proxy_required` must keep the existing fallback order (explicit, environment, direct) and must not carry a proxy from one request into the next.
 
 ## Documentation
 - All new public APIs must be documented with YARD-style comments.

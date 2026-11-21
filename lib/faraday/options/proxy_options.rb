@@ -44,5 +44,13 @@ module Faraday
 
     memoized(:user) { uri&.user && URI::DEFAULT_PARSER.unescape(uri.user) }
     memoized(:password) { uri&.password && URI::DEFAULT_PARSER.unescape(uri.password) }
+
+    # Duplicate the URI too, so a copy can be modified without changing the
+    # original proxy. This keeps per-request proxy tweaks from leaking into
+    # connection defaults or the next request.
+    def initialize_copy(other)
+      super
+      self[:uri] = other[:uri].dup if other[:uri]
+    end
   end
 end

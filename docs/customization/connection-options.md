@@ -5,8 +5,9 @@ All these options are optional.
 
 | Option              | Type              | Default         | Description                                                                                                   |
 |---------------------|-------------------|-----------------|---------------------------------------------------------------------------------------------------------------|
-| `:request`          | Hash              | nil             | Hash of request options. Will be use to build [RequestOptions].                                               |
 | `:proxy`            | URI, String, Hash | nil             | Proxy options, either as a URL or as a Hash of [ProxyOptions].                                                |
+| `:proxy_required`   | Boolean           | nil             | Require an approved proxy for every request on the connection; see [Approved proxies].                        |
+| `:request`          | Hash              | nil             | Hash of request options. Will be use to build [RequestOptions].                                               |
 | `:ssl`              | Hash              | nil             | Hash of SSL options. Will be use to build [SSLOptions].                                                       |
 | `:url`              | URI, String       | nil             | URI or String base URL. This can also be passed as positional argument.                                       |
 | `:parallel_manager` |                   | nil             | Default parallel manager to use. This is normally set by the adapter, but you have the option to override it. |
@@ -45,4 +46,5 @@ end
 
 [RequestOptions]: /customization/request-options.md
 [ProxyOptions]: /customization/proxy-options.md
+[Approved proxies]: /customization/proxy-options.md#approved-proxies
 [SSLOptions]: /customization/ssl-options.md

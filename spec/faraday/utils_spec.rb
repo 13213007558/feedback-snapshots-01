@@ -168,7 +168,8 @@ RSpec.describe Faraday::Utils do
           boundary: nil,
           oauth: { consumer_key: 'anonymous' },
           context: nil,
-          on_data: nil
+          on_data: nil,
+          proxy_required: nil
         }
       end
       let(:ssl) do

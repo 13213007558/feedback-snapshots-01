@@ -218,6 +218,15 @@ module Faraday
   class ConnectionFailed < Error
   end
 
+  # Raised when a request is marked as requiring a proxy, but no proxy was
+  # explicitly configured for the request or the connection.
+  #
+  # This error is raised before the request reaches the adapter, so the
+  # request can never silently fall back to the environment proxy or to a
+  # direct connection.
+  class ProxyRequiredError < Error
+  end
+
   # A unified client error for SSL errors.
   class SSLError < Error
   end

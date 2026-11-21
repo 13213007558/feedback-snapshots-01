@@ -10,6 +10,7 @@ Below is a list of errors that Faraday may raise, and that you should be prepare
 |-----------------------------|--------------------------------------------------------------------------------|
 | `Faraday::Error`            | Base class for all Faraday errors, also used for generic or unexpected errors. |
 | `Faraday::ConnectionFailed` | Raised when the connection to the remote server failed.                        |
+| `Faraday::ProxyRequiredError` | Raised when a request marked `proxy_required` has no approved proxy.          |
 | `Faraday::TimeoutError`     | Raised when the connection to the remote server timed out.                     |
 | `Faraday::SSLError`         | Raised when the connection to the remote server failed due to an SSL error.    |
 

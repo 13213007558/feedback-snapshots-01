@@ -59,6 +59,8 @@ module Faraday
     # @option options [URI, String] :proxy[:uri]
     # @option options [String] :proxy[:user]
     # @option options [String] :proxy[:password]
+    # @option options [Boolean] :proxy_required when true, every request on the
+    #                 connection must use an approved proxy
     # @yield [self] after all setup has been done
     def initialize(url = nil, options = nil)
       options = ConnectionOptions.from(options)
@@ -75,6 +77,7 @@ module Faraday
       @ssl = options.ssl
       @default_parallel_manager = options.parallel_manager
       @manual_proxy = nil
+      @proxy_required = !!options.proxy_required
 
       @builder = options.builder || begin
         # pass an empty block to Builder so it doesn't assume default middleware
@@ -439,17 +442,32 @@ module Faraday
     # @param headers [Hash, nil] unencoded HTTP header key/value pairs.
     #
     # @return [Faraday::Response]
+    # @raise [Faraday::ProxyRequiredError] if the request options set
+    #   `proxy_required` and no proxy was explicitly configured for the
+    #   request or the connection
     def run_request(method, url, body, headers)
       unless METHODS.include?(method)
         raise ArgumentError, "unknown http method: #{method}"
       end
 
       request = build_request(method) do |req|
-        req.options.proxy = proxy_for_request(url)
+        # Only a proxy declared by the application counts as approved: one set
+        # on the request, on the connection, or in the request block. A proxy
+        # Faraday infers for the request, such as from the environment, does
+        # not qualify.
+        declared_proxy = req.options.proxy
+        declared_proxy ||= proxy if @manual_proxy
+
+        inferred_proxy = declared_proxy ? nil : proxy_for_request(url)
+        req.options.proxy = declared_proxy || inferred_proxy
+        initial_proxy = req.options.proxy
+
         req.url(url)                if url
         req.headers.update(headers) if headers
         req.body = body             unless body.nil?
         yield(req) if block_given?
+
+        ensure_approved_proxy(req, declared_proxy, initial_proxy) if req.options.proxy_required
       end
 
       builder.build_response(self, request)
@@ -466,6 +484,7 @@ module Faraday
         req.params  = params.dup
         req.headers = headers.dup
         req.options = options.dup
+        req.options.proxy_required = true if @proxy_required
         yield(req) if block_given?
       end
     end
@@ -506,6 +525,7 @@ module Faraday
                      params: params.dup,
                      builder: builder.dup,
                      ssl: ssl.dup,
+                     proxy_required: @proxy_required,
                      request: options.dup).tap { |copy| copy.proxy = proxy if @manual_proxy }
     end
 
@@ -551,6 +571,14 @@ module Faraday
       uri
     end
 
+    # Resolve the proxy to infer for a request from the connection and the
+    # environment.
+    #
+    # A manual connection proxy takes precedence over the one inferred from
+    # the environment.
+    #
+    # @param url [String, URI, nil]
+    # @return [ProxyOptions, nil]
     def proxy_for_request(url)
       return proxy if @manual_proxy
 
@@ -559,6 +587,45 @@ module Faraday
       else
         proxy
       end
+    end
+
+    # Make sure a managed request ends up with an approved proxy.
+    #
+    # A proxy declared by the application (on the connection or the request)
+    # is approved. A proxy that Faraday inferred for the request, such as from
+    # the environment, is not: the request fails before reaching the adapter
+    # rather than silently going direct.
+    #
+    # @param request [Faraday::Request]
+    # @param declared_proxy [ProxyOptions, nil] proxy declared by the
+    #   application before the request block ran
+    # @param initial_proxy [ProxyOptions, nil] proxy assigned before the
+    #   request block ran
+    # @raise [Faraday::ProxyRequiredError]
+    # @return [void]
+    def ensure_approved_proxy(request, declared_proxy, initial_proxy)
+      proxy = request.options.proxy
+      # A proxy left over from the request block is a different object than
+      # the one assigned before the block, so the caller set it and it is
+      # approved. The proxy inferred before the block is not approved unless
+      # the application declared one for the connection or the request.
+      approved = !proxy.nil? && (declared_proxy || !proxy.equal?(initial_proxy))
+
+      raise_proxy_required(request) unless approved
+    end
+
+    # Raise when a request that must use an approved proxy has none.
+    #
+    # This happens before the request reaches the adapter, so it can never
+    # silently fall back to a direct connection.
+    #
+    # @param request [Faraday::Request]
+    # @raise [Faraday::ProxyRequiredError]
+    def raise_proxy_required(request)
+      url = build_exclusive_url(request.path, request.params)
+      message = "a proxy is required for #{request.http_method.to_s.upcase} #{url}, " \
+                'but no approved proxy was configured'
+      raise Faraday::ProxyRequiredError, message
     end
 
     # Determine if an adapter can make parallel requests.
