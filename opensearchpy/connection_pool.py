@@ -127,6 +127,8 @@ class ConnectionPool:
     dead_timeout: float
     timeout_cutoff: int
     selector: Any
+    generation: Any
+    label: Any
 
     def __init__(
         self,
@@ -135,6 +137,8 @@ class ConnectionPool:
         timeout_cutoff: int = 5,
         selector_class: Type[ConnectionSelector] = RoundRobinSelector,
         randomize_hosts: bool = True,
+        generation: Any = None,
+        label: Any = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -155,6 +159,8 @@ class ConnectionPool:
             )
         self.connection_opts = connections
         self.connections = [c for (c, opts) in connections]
+        self.generation = generation
+        self.label = label
         # remember original connection list for resurrect(force=True)
         self.orig_connections = tuple(self.connections)
         # PriorityQueue for thread safety and ease of timeout management
@@ -284,9 +290,12 @@ class ConnectionPool:
 
     def close(self) -> Any:
         """
-        Explicitly closes connections
+        Explicitly closes connections.
+
+        Uses the original connection list so dead connections (which were
+        moved out of ``connections``) are not leaked when a pool is retired.
         """
-        for conn in self.connections:
+        for conn in self.orig_connections:
             conn.close()
 
     def __repr__(self) -> str:
@@ -303,6 +312,8 @@ class DummyConnectionPool(ConnectionPool):
         self.connection_opts = connections
         self.connection: Any = connections[0][0]
         self.connections = (self.connection,)
+        self.generation = kwargs.get("generation")
+        self.label = kwargs.get("label")
 
     def get_connection(self) -> Any:
         return self.connection
@@ -325,6 +336,8 @@ class EmptyConnectionPool(ConnectionPool):
     def __init__(self, *_: Any, **__: Any) -> None:
         self.connections = []
         self.connection_opts = []
+        self.generation = None
+        self.label = None
 
     def get_connection(self) -> Connection:
         raise ImproperlyConfigured("No connections were configured")

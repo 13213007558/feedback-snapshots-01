@@ -30,12 +30,15 @@ import logging
 from itertools import chain
 from typing import Any, Collection, Mapping, Optional, Type, Union
 
+from opensearchpy.connection_policy import ConnectionPolicy
+
 from opensearchpy.connection.base import Connection
 from opensearchpy.serializer import Serializer
 
 from ..connection_pool import ConnectionPool
 from ..exceptions import (
     ConnectionError,
+    ConnectionPolicyError,
     ConnectionTimeout,
     SerializationError,
     TransportError,
@@ -162,6 +165,8 @@ class AsyncTransport(Transport):
         # on all already created HTTP connections.
         self.loop = get_running_loop()
         self.kwargs["loop"] = self.loop
+        # Policy-built connections must receive the same event loop.
+        self._base_kwargs["loop"] = self.loop
 
         # Now that we have a loop we can create all our HTTP connections...
         self.set_connections(self.hosts)
@@ -312,9 +317,11 @@ class AsyncTransport(Transport):
         orig_connections = self.connection_pool.connections[:]
         self.set_connections(hosts)
         # close those connections that are not in use any more
+        to_close = []
         for c in orig_connections:
             if c not in self.connection_pool.connections:
-                await c.close()
+                to_close.append(c)
+        await self._close_connections(to_close)
 
     def create_sniff_task(self, initial: bool = False) -> None:
         """
@@ -340,6 +347,11 @@ class AsyncTransport(Transport):
         :arg connection: instance of :class:`~opensearchpy.Connection` that failed
         """
         self.connection_pool.mark_dead(connection)
+        if self.sniff_on_connection_fail:
+            self.create_sniff_task()
+
+    def _mark_dead_on(self, pool: Any, connection: Connection) -> None:
+        pool.mark_dead(connection)
         if self.sniff_on_connection_fail:
             self.create_sniff_task()
 
@@ -384,62 +396,102 @@ class AsyncTransport(Transport):
             method, params, body, ignore, timeout
         )
 
-        for attempt in range(self.max_retries + 1):
-            connection = self.get_connection()
+        # ``_async_call`` may have sniffed and rebuilt the pool; pin the pool
+        # now and use it for every retry of this request.
+        pool = self._acquire_pool()
+        try:
+            for attempt in range(self.max_retries + 1):
+                connection = pool.get_connection()
 
-            try:
-                status, headers_response, data = await connection.perform_request(
-                    method,
-                    url,
-                    params,
-                    body,
-                    headers=headers,
-                    ignore=ignore,
-                    timeout=timeout,
-                )
-
-                # Lowercase all the header names for consistency in accessing them.
-                headers_response = {
-                    header.lower(): value for header, value in headers_response.items()
-                }
-            except TransportError as e:
-                if method == "HEAD" and e.status_code == 404:
-                    return False
-
-                retry = False
-                if isinstance(e, ConnectionTimeout):
-                    retry = self.retry_on_timeout
-                elif isinstance(e, ConnectionError):
-                    retry = True
-                elif e.status_code in self.retry_on_status:
-                    retry = True
-
-                if retry:
-                    try:
-                        # only mark as dead if we are retrying
-                        self.mark_dead(connection)
-                    except TransportError:
-                        # If sniffing on failure, it could fail too. Catch the
-                        # exception not to interrupt the retries.
-                        pass
-                    # raise exception on last retry
-                    if attempt == self.max_retries:
-                        raise e
-                else:
-                    raise e
-
-            else:
-                # connection didn't fail, confirm its live status
-                self.connection_pool.mark_live(connection)
-
-                if method == "HEAD":
-                    return 200 <= status < 300
-
-                if data:
-                    data = self.deserializer.loads(
-                        data, headers_response.get("content-type")
+                try:
+                    status, headers_response, data = await connection.perform_request(
+                        method,
+                        url,
+                        params,
+                        body,
+                        headers=headers,
+                        ignore=ignore,
+                        timeout=timeout,
                     )
-                return data
+
+                    # Lowercase all the header names for consistency in accessing them.
+                    headers_response = {
+                        header.lower(): value
+                        for header, value in headers_response.items()
+                    }
+                except TransportError as e:
+                    if method == "HEAD" and e.status_code == 404:
+                        return False
+
+                    retry = False
+                    if isinstance(e, ConnectionTimeout):
+                        retry = self.retry_on_timeout
+                    elif isinstance(e, ConnectionError):
+                        retry = True
+                    elif e.status_code in self.retry_on_status:
+                        retry = True
+
+                    if retry:
+                        try:
+                            # only mark as dead if we are retrying
+                            self._mark_dead_on(pool, connection)
+                        except TransportError:
+                            # If sniffing on failure, it could fail too. Catch the
+                            # exception not to interrupt the retries.
+                            pass
+                        # raise exception on last retry
+                        if attempt == self.max_retries:
+                            raise e
+                    else:
+                        raise e
+
+                else:
+                    # connection didn't fail, confirm its live status
+                    pool.mark_live(connection)
+
+                    if method == "HEAD":
+                        return 200 <= status < 300
+
+                    if data:
+                        data = self.deserializer.loads(
+                            data, headers_response.get("content-type")
+                        )
+                    return data
+        finally:
+            retired = self._release_pool(pool)
+            if retired is not None:
+                await self._close_connections(retired.connections)
+
+    async def _close_connections(self, connections: Any) -> None:
+        for connection in connections:
+            try:
+                await connection.close()
+            except Exception:  # pragma: no cover - closing is best effort
+                logger.exception("Error while closing a superseded connection.")
+
+    async def reload_connection_policy(self, policy: Any) -> Any:
+        """Async counterpart of :meth:`Transport.reload_connection_policy`.
+
+        The new policy is loaded and its pool constructed before the swap.
+        In-flight requests keep using the pool they were delegated to; that
+        pool's connections are closed once they all finish.
+        """
+        await self._async_call()
+
+        try:
+            resolved = self._resolve_connection_policy(policy)
+            new_pool = self._build_policy_pool(resolved)
+        except ConnectionPolicyError:
+            raise
+        except Exception as e:
+            raise ConnectionPolicyError(
+                f"Unable to load connection policy: {e}"
+            ) from e
+
+        to_close = self._install_policy(resolved, new_pool)
+        if to_close is not None:
+            await self._close_connections(to_close.connections)
+        return new_pool
 
     async def close(self) -> None:
         """
@@ -453,8 +505,15 @@ class AsyncTransport(Transport):
                 pass
             self.sniffing_task = None
 
-        for connection in self.connection_pool.connections:
-            await connection.close()
+        with self._pool_lock:
+            pools = [self.connection_pool]
+            pools.extend(self._retired_pools.values())
+            self._retired_pools.clear()
+            self._pool_refcounts.clear()
+        connections = []
+        for pool in pools:
+            connections.extend(getattr(pool, "orig_connections", pool.connections))
+        await self._close_connections(connections)
 
 
 __all__ = ["TransportError"]

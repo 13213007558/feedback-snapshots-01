@@ -29,6 +29,7 @@ from typing import Any, Dict, Type, Union
 
 __all__ = [
     "ImproperlyConfigured",
+    "ConnectionPolicyError",
     "OpenSearchException",
     "SerializationError",
     "TransportError",
@@ -52,6 +53,15 @@ __all__ = [
 class ImproperlyConfigured(Exception):
     """
     Exception raised when the config passed to the client is inconsistent or invalid.
+    """
+
+
+class ConnectionPolicyError(ImproperlyConfigured):
+    """
+    Exception raised when a connection policy cannot be loaded, validated or
+    activated.  When this is raised by
+    :meth:`~opensearchpy.Transport.reload_connection_policy` the previously
+    active connection pool remains in use.
     """
 
 

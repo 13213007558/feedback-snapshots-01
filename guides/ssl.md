@@ -65,3 +65,50 @@ client = OpenSearch(
     ca_certs = ca_certs_path
 )
 ```
+
+## Rotating the CA without restarting the client
+
+When the cluster switches to a new CA, the application can load a new
+connection policy and atomically replace the live connection pool. New
+requests use the new policy while requests that were already delegated to the
+old pool finish there. The old pool is closed only after its last in-flight
+request returns.
+
+```python
+from opensearchpy import ConnectionPolicy, ConnectionPolicyError
+
+def load_company_ca_policy():
+    # Read the rotated bundle at reload time, not at process start.
+    return ConnectionPolicy(
+        hosts=[{"host": "search.internal", "port": 9200}],
+        generation="company-ca-2026",
+        options={
+            "use_ssl": True,
+            "verify_certs": True,
+            "ca_certs": "/etc/company/company-ca.pem",
+        },
+    )
+
+try:
+    pool = client.transport.reload_connection_policy(load_company_ca_policy)
+except ConnectionPolicyError:
+    # Loading or validating the new policy failed: the previous pool is
+    # still active and keeps serving.
+    log.exception("CA rotation failed; keeping the current connection pool")
+else:
+    log.info("Now using connection generation %s", pool.generation)
+```
+
+The policy may be a `ConnectionPolicy`, a mapping with the same fields, or a
+zero-argument callable that returns one. The replacement connections are
+built and validated before the swap, so a missing CA file, an invalid
+`ssl_context`, or a bad host entry raises `ConnectionPolicyError` without
+affecting the current pool.
+
+Every connection and pool exposes a `generation` (and a human-readable
+`generation_label`), which makes it possible to tell which policy served a
+given request. Requests pick their pool once, before the first attempt, and
+keep it for all retries of that request.
+
+`AsyncTransport.reload_connection_policy()` provides the same behaviour for
+`AsyncOpenSearch`.

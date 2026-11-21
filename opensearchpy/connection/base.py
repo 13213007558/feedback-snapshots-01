@@ -71,6 +71,11 @@ class Connection:
         For tracing all requests made by this transport.
     """
 
+    # Set by the transport when a connection is built.  They identify the
+    # configuration generation the connection belongs to.
+    generation: Any = None
+    generation_label: Any = None
+
     def __init__(
         self,
         host: str = "localhost",

@@ -25,21 +25,38 @@
 #  under the License.
 
 
+import inspect
+import logging
+import threading
 import time
 from itertools import chain
-from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Type,
+    Union,
+)
 
 from opensearchpy.metrics import Metrics, MetricsNone
 
 from .connection import Connection, Urllib3HttpConnection
+from .connection_policy import ConnectionPolicy
 from .connection_pool import ConnectionPool, DummyConnectionPool, EmptyConnectionPool
 from .exceptions import (
     ConnectionError,
+    ConnectionPolicyError,
     ConnectionTimeout,
     SerializationError,
     TransportError,
 )
 from .serializer import DEFAULT_SERIALIZERS, Deserializer, JSONSerializer, Serializer
+
+logger = logging.getLogger("opensearch")
 
 
 def get_host_info(
@@ -94,6 +111,8 @@ class Transport:
     sniff_timeout: Optional[float]
     host_info_callback: Any
     metrics: Metrics
+    generation: Any
+    generation_label: Any
 
     def __init__(
         self,
@@ -189,12 +208,25 @@ class Transport:
 
         # ...save kwargs to be passed to the connections
         self.kwargs = kwargs
+        # Client-wide options are kept separately: policy options are merged
+        # onto these on every reload, never onto the previous policy.
+        self._base_kwargs = dict(kwargs)
         self.hosts = hosts
 
         # Start with an empty pool specifically for `AsyncTransport`.
         # It should never be used, will be replaced on first call to
         # .set_connections()
         self.connection_pool = EmptyConnectionPool()
+        self.generation: Any = 0
+        self.generation_label: Any = "initial"
+
+        # Guards replacement of ``connection_pool`` and tracks requests that
+        # were delegated to a pool which has since been superseded.  Old pools
+        # are only closed once the last in-flight request using them returns.
+        self._pool_lock = threading.RLock()
+        self._pool_refcounts: Dict[int, int] = {}
+        self._retired_pools: Dict[int, Any] = {}
+        self._generation_counter = 0
 
         if hosts:
             # ...and instantiate them
@@ -226,13 +258,16 @@ class Transport:
         self.hosts.append(host)
         self.set_connections(self.hosts)
 
-    def set_connections(self, hosts: Any) -> None:
+    def set_connections(self, hosts: Any, reuse_connections: bool = True) -> None:
         """
         Instantiate all the connections and create new connection pool to hold them.
         Tries to identify unchanged hosts and re-use existing
         :class:`~opensearchpy.Connection` instances.
 
         :arg hosts: same as `__init__`
+        :arg reuse_connections: when ``False`` every connection is rebuilt.  A
+            policy reload uses this so that new TLS material is guaranteed to
+            be used even when the host options did not change.
         """
 
         # construct the connections
@@ -240,7 +275,7 @@ class Transport:
             # if this is not the initial setup look at the existing connection
             # options and identify connections that haven't changed and can be
             # kept around.
-            if hasattr(self, "connection_pool"):
+            if reuse_connections and hasattr(self, "connection_pool"):
                 for connection, old_host in self.connection_pool.connection_opts:
                     if old_host == host:
                         return connection
@@ -253,23 +288,68 @@ class Transport:
             return self.connection_class(metrics=self.metrics, **kwargs)
 
         connections = list(zip(map(_create_connection, hosts), hosts))
-        if len(connections) == 1:
-            self.connection_pool = DummyConnectionPool(connections)
-        else:
-            # pass the hosts dicts to the connection pool to optionally extract parameters from
-            self.connection_pool = self.connection_pool_class(
-                connections, **self.kwargs
-            )
+        self.connection_pool = self._make_pool(connections)
+
+    def _make_pool(
+        self,
+        connections: Any,
+        pool_class: Optional[Type[ConnectionPool]] = None,
+        pool_kwargs: Optional[Mapping[str, Any]] = None,
+        generation: Any = None,
+        label: Any = None,
+    ) -> Any:
+        """Build a pool and stamp each connection with its generation."""
+        generation = self.generation if generation is None else generation
+        label = self.generation_label if label is None else label
+        for connection, _ in connections:
+            try:
+                connection.generation = generation
+                connection.generation_label = label
+            except AttributeError:
+                # Bare objects used by custom pools/tests may not allow
+                # arbitrary attributes; generation semantics do not apply.
+                pass
+
+        kwargs = dict(pool_kwargs if pool_kwargs is not None else self.kwargs)
+        kwargs["generation"] = generation
+        kwargs["label"] = label
+
+        target_class = (
+            pool_class
+            if pool_class is not None
+            else DummyConnectionPool
+            if len(connections) == 1
+            else self.connection_pool_class
+        )
+        if not self._accepts_kwargs(target_class):
+            kwargs.pop("generation", None)
+            kwargs.pop("label", None)
+        # pass the hosts dicts to the connection pool to optionally extract parameters from
+        return target_class(connections, **kwargs)
+
+    @staticmethod
+    def _accepts_kwargs(target: Any) -> bool:
+        try:
+            parameters = inspect.signature(target.__init__).parameters.values()
+        except (TypeError, ValueError):  # pragma: no cover - builtins
+            return True
+        return any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
 
     def get_connection(self) -> Any:
         """
         Retrieve a :class:`~opensearchpy.Connection` instance from the
         :class:`~opensearchpy.ConnectionPool` instance.
         """
+        self._maybe_sniff()
+        return self.connection_pool.get_connection()
+
+    def _maybe_sniff(self) -> None:
         if self.sniffer_timeout:
             if time.time() >= self.last_sniff + self.sniffer_timeout:
                 self.sniff_hosts()
-        return self.connection_pool.get_connection()
 
     def _get_sniff_data(self, initial: bool = False) -> Any:
         """
@@ -370,10 +450,185 @@ class Transport:
 
         :arg connection: instance of :class:`~opensearchpy.Connection` that failed
         """
+        self._mark_dead_on(self.connection_pool, connection)
+
+    def _mark_dead_on(self, pool: Any, connection: Connection) -> None:
         # mark as dead even when sniffing to avoid hitting this host during the sniff process
-        self.connection_pool.mark_dead(connection)
+        pool.mark_dead(connection)
         if self.sniff_on_connection_fail:
             self.sniff_hosts()
+
+    def _acquire_pool(self) -> Any:
+        """Pin the current pool for the duration of a request.
+
+        Requests that were delegated before a policy reload keep using the
+        pool they started with, and keep it from being closed until they
+        finish.
+        """
+        with self._pool_lock:
+            pool = self.connection_pool
+            key = id(pool)
+            self._pool_refcounts[key] = self._pool_refcounts.get(key, 0) + 1
+            return pool
+
+    def _release_pool(self, pool: Any) -> Any:
+        """Release a pinned pool.
+
+        Returns the pool when it had already been superseded by a reload and
+        this was its last in-flight request, so the caller can close it.
+        """
+        with self._pool_lock:
+            key = id(pool)
+            count = self._pool_refcounts.get(key, 1) - 1
+            if count > 0:
+                self._pool_refcounts[key] = count
+                return None
+            self._pool_refcounts.pop(key, None)
+            return self._retired_pools.pop(key, None)
+
+    def _retire_pool_locked(self, pool: Any) -> Any:
+        """Return a pool to close now, or stash it until in-flight requests end."""
+        key = id(pool)
+        if self._pool_refcounts.get(key, 0) > 0:
+            self._retired_pools[key] = pool
+            return None
+        return pool
+
+    def _close_pool(self, pool: Any) -> None:
+        if pool is None:
+            return
+        try:
+            pool.close()
+        except Exception:  # pragma: no cover - closing is best effort
+            logger.exception("Error while closing a superseded connection pool.")
+
+    def _resolve_connection_policy(self, policy: Any) -> ConnectionPolicy:
+        # A loader callback lets an application read the new CA material at
+        # reload time. If it raises, nothing is swapped.
+        if callable(policy) and not isinstance(policy, type):
+            policy = policy()
+
+        if isinstance(policy, ConnectionPolicy):
+            resolved = policy
+        elif isinstance(policy, Mapping):
+            resolved = ConnectionPolicy.from_mapping(policy)
+        else:
+            raise ConnectionPolicyError(
+                "A connection policy must be a ConnectionPolicy, a mapping or a "
+                f"callable returning one; got {type(policy).__name__}."
+            )
+
+        if resolved.generation is None:
+            with self._pool_lock:
+                self._generation_counter += 1
+                resolved = resolved.with_generation(self._generation_counter)
+        elif isinstance(resolved.generation, int):
+            with self._pool_lock:
+                self._generation_counter = max(
+                    self._generation_counter, resolved.generation
+                )
+
+        if resolved.label is None:
+            resolved = ConnectionPolicy(
+                hosts=resolved.hosts,
+                generation=resolved.generation,
+                connection_class=resolved.connection_class,
+                connection_pool_class=resolved.connection_pool_class,
+                label=str(resolved.generation),
+                options=resolved.options,
+            )
+
+        resolved.validate(base=self._base_kwargs)
+        return resolved
+
+    def _build_policy_pool(self, policy: ConnectionPolicy) -> Any:
+        # Merged view of client-wide options and the new policy. Paths that
+        # do not exist are rejected by ``validate`` before anything is built.
+        effective = policy.connection_kwargs(self._base_kwargs)
+        connection_class = policy.connection_class or self.connection_class
+        pool_class = policy.connection_pool_class
+
+        connections = []
+        try:
+            for host in policy.hosts or ():
+                kwargs = dict(effective)
+                kwargs.update(host)
+                if self.pool_maxsize and isinstance(self.pool_maxsize, int):
+                    kwargs["pool_maxsize"] = self.pool_maxsize
+                connections.append(
+                    (connection_class(metrics=self.metrics, **kwargs), host)
+                )
+        except Exception:
+            # Do not leak partially constructed (and possibly TLS) sockets.
+            for connection, _ in connections:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            raise
+
+        try:
+            return self._make_pool(
+                connections,
+                pool_class=pool_class,
+                pool_kwargs=effective,
+                generation=policy.generation,
+                label=policy.label,
+            )
+        except Exception:
+            for connection, _ in connections:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            raise
+
+    def reload_connection_policy(self, policy: Any) -> Any:
+        """Atomically switch the transport to a new connection policy.
+
+        ``policy`` may be a :class:`~opensearchpy.ConnectionPolicy`, a mapping
+        with the same fields, or a zero-argument callable that loads one (for
+        example by reading a rotated CA bundle). The replacement pool and all
+        of its connections are built and validated *before* the swap. If the
+        loader, validation or connection construction fails,
+        :class:`~opensearchpy.ConnectionPolicyError` is raised and the current
+        pool remains fully usable.
+
+        Requests that were already delegated to the previous pool keep using
+        it and complete normally; the previous pool is closed only after the
+        last such request returns.
+
+        Returns the newly activated pool. Its ``generation`` (and the
+        ``generation`` of every connection in it) identifies the policy.
+        """
+        try:
+            resolved = self._resolve_connection_policy(policy)
+            new_pool = self._build_policy_pool(resolved)
+        except ConnectionPolicyError:
+            raise
+        except Exception as e:
+            raise ConnectionPolicyError(
+                f"Unable to load connection policy: {e}"
+            ) from e
+
+        to_close = self._install_policy(resolved, new_pool)
+        self._close_pool(to_close)
+        return new_pool
+
+    def _install_policy(self, policy: ConnectionPolicy, new_pool: Any) -> Any:
+        """Swap the pool and publish the matching generation metadata."""
+        with self._pool_lock:
+            old_pool = self.connection_pool
+            self.connection_pool = new_pool
+            self.connection_policy = policy
+            self.generation = policy.generation
+            self.generation_label = policy.label
+            self.hosts = list(policy.hosts or ())
+            # Sniffing must fall back to connections built with the new policy.
+            self.seed_connections = list(new_pool.connections)
+            # Keep new TLS/connection options for future sniff-driven rebuilds.
+            self.kwargs = policy.connection_kwargs(self._base_kwargs)
+            return self._retire_pool_locked(old_pool)
 
     def perform_request(
         self,
@@ -411,69 +666,85 @@ class Transport:
             method, params, body, ignore, timeout
         )
 
-        for attempt in range(self.max_retries + 1):
-            connection = self.get_connection()
+        self._maybe_sniff()
+        # Pin one pool for the entire request (including retries) so that a
+        # concurrent policy reload cannot split a request across generations.
+        pool = self._acquire_pool()
+        try:
+            for attempt in range(self.max_retries + 1):
+                connection = pool.get_connection()
 
-            try:
-                status, headers_response, data = connection.perform_request(
-                    method,
-                    url,
-                    params,
-                    body,
-                    headers=headers,
-                    ignore=ignore,
-                    timeout=timeout,
-                )
-
-                # Lowercase all the header names for consistency in accessing them.
-                headers_response = {
-                    header.lower(): value for header, value in headers_response.items()
-                }
-
-            except TransportError as e:
-                if method == "HEAD" and e.status_code == 404:
-                    return False
-
-                retry = False
-                if isinstance(e, ConnectionTimeout):
-                    retry = self.retry_on_timeout
-                elif isinstance(e, ConnectionError):
-                    retry = True
-                elif e.status_code in self.retry_on_status:
-                    retry = True
-
-                if retry:
-                    try:
-                        # only mark as dead if we are retrying
-                        self.mark_dead(connection)
-                    except TransportError:
-                        # If sniffing on failure, it could fail too. Catch the
-                        # exception not to interrupt the retries.
-                        pass
-                    # raise exception on last retry
-                    if attempt == self.max_retries:
-                        raise e
-                else:
-                    raise e
-
-            else:
-                # connection didn't fail, confirm its live status
-                self.connection_pool.mark_live(connection)
-
-                if method == "HEAD":
-                    return 200 <= status < 300
-
-                if data:
-                    data = self.deserializer.loads(
-                        data, headers_response.get("content-type")
+                try:
+                    status, headers_response, data = connection.perform_request(
+                        method,
+                        url,
+                        params,
+                        body,
+                        headers=headers,
+                        ignore=ignore,
+                        timeout=timeout,
                     )
-                return data
+
+                    # Lowercase all the header names for consistency in accessing them.
+                    headers_response = {
+                        header.lower(): value
+                        for header, value in headers_response.items()
+                    }
+
+                except TransportError as e:
+                    if method == "HEAD" and e.status_code == 404:
+                        return False
+
+                    retry = False
+                    if isinstance(e, ConnectionTimeout):
+                        retry = self.retry_on_timeout
+                    elif isinstance(e, ConnectionError):
+                        retry = True
+                    elif e.status_code in self.retry_on_status:
+                        retry = True
+
+                    if retry:
+                        try:
+                            # only mark as dead if we are retrying
+                            self._mark_dead_on(pool, connection)
+                        except TransportError:
+                            # If sniffing on failure, it could fail too. Catch the
+                            # exception not to interrupt the retries.
+                            pass
+                        # raise exception on last retry
+                        if attempt == self.max_retries:
+                            raise e
+                    else:
+                        raise e
+
+                else:
+                    # connection didn't fail, confirm its live status
+                    pool.mark_live(connection)
+
+                    if method == "HEAD":
+                        return 200 <= status < 300
+
+                    if data:
+                        data = self.deserializer.loads(
+                            data, headers_response.get("content-type")
+                        )
+                    return data
+        finally:
+            retired = self._release_pool(pool)
+            if retired is not None:
+                self._close_pool(retired)
 
     def close(self) -> Any:
         """
         Explicitly closes connections
         """
-        return self.connection_pool.close()
+        with self._pool_lock:
+            pools = [self.connection_pool]
+            pools.extend(self._retired_pools.values())
+            self._retired_pools.clear()
+            self._pool_refcounts.clear()
+        for pool in pools:
+            self._close_pool(pool)
 
     def _resolve_request_args(
         self,

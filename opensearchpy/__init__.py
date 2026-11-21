@@ -50,6 +50,7 @@ from .connection import (
     Urllib3HttpConnection,
     connections,
 )
+from .connection_policy import ConnectionPolicy
 from .connection_pool import ConnectionPool, ConnectionSelector, RoundRobinSelector
 from .exceptions import (
     AuthenticationException,
@@ -58,6 +59,7 @@ from .exceptions import (
     ConnectionError,
     ConnectionTimeout,
     IllegalOperation,
+    ConnectionPolicyError,
     ImproperlyConfigured,
     NotFoundError,
     OpenSearchDeprecationWarning,
@@ -145,6 +147,7 @@ __all__ = [
     "OpenSearch",
     "OpenSearchGrpc",
     "Transport",
+    "ConnectionPolicy",
     "ConnectionPool",
     "ConnectionSelector",
     "RoundRobinSelector",
@@ -153,6 +156,7 @@ __all__ = [
     "RequestsHttpConnection",
     "Urllib3HttpConnection",
     "ImproperlyConfigured",
+    "ConnectionPolicyError",
     "OpenSearchException",
     "SerializationError",
     "TransportError",
