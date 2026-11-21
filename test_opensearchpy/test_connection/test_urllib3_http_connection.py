@@ -399,6 +399,82 @@ class TestUrllib3HttpConnection(TestCase):
             conn.perform_request("GET", "/")
         self.assertEqual(str(e.value), "Wasn't modified!")
 
+    def test_debug_trace_records_sanitized_success(self) -> None:
+        con = self._get_mock_connection(
+            {"http_auth": ("user", "pass")}, response_body=b'{"hits": []}'
+        )
+        recorder = con.enable_debug_trace(redact_body_fields=["message"])
+
+        status, _, data = con.perform_request(
+            "POST",
+            "/index/_search",
+            params={"size": 1},
+            body=b'{"query": {"match": {"message": "secret-keyword"}}, "size": 1}',
+        )
+
+        # the business result is untouched
+        self.assertEqual(200, status)
+        self.assertEqual('{"hits": []}', data)
+        # and the actual request went out unmodified
+        (method, url, req_body), _ = con.pool.urlopen.call_args
+        self.assertEqual("POST", method)
+        self.assertEqual("/index/_search?size=1", url)
+        self.assertIn(b"secret-keyword", req_body)
+
+        self.assertEqual(1, len(recorder.records))
+        entry = recorder.records[0]
+        self.assertEqual("POST", entry["method"])
+        self.assertEqual({"size": 1}, entry["params"])
+        self.assertEqual(
+            "<redacted>", entry["request"]["headers"]["authorization"]
+        )
+        body = entry["request"]["body"]
+        self.assertEqual("<redacted>", body["query"]["match"]["message"])
+        self.assertEqual(1, body["size"])
+        self.assertTrue(entry["trace"].startswith("curl"))
+        self.assertNotIn("secret-keyword", entry["trace"])
+        self.assertNotIn("pass", recorder.to_json())
+        self.assertEqual(200, entry["response"]["status"])
+        self.assertEqual('{"hits": []}', entry["response"]["body"])
+        self.assertIsNone(entry["error"])
+
+    def test_debug_trace_records_sanitized_failure(self) -> None:
+        con = self._get_mock_connection(
+            {"http_auth": ("user", "pass")},
+            response_body=b'{"error": "index_not_found_exception"}',
+            response_code=404,
+        )
+        recorder = con.enable_debug_trace(redact_body_fields=["message"])
+
+        with pytest.raises(NotFoundError):
+            con.perform_request(
+                "POST",
+                "/missing/_search",
+                params={"size": 1},
+                body=b'{"query": {"match": {"message": "secret-keyword"}}}',
+            )
+
+        self.assertEqual(1, len(recorder.records))
+        entry = recorder.records[0]
+        self.assertEqual("POST", entry["method"])
+        self.assertEqual({"size": 1}, entry["params"])
+        self.assertEqual(
+            "<redacted>", entry["request"]["headers"]["authorization"]
+        )
+        self.assertEqual(
+            "<redacted>", entry["request"]["body"]["query"]["match"]["message"]
+        )
+        self.assertEqual(404, entry["response"]["status"])
+        self.assertEqual(
+            '{"error": "index_not_found_exception"}', entry["response"]["body"]
+        )
+        self.assertNotIn("secret-keyword", recorder.to_json())
+
+    def test_debug_trace_disabled_by_default(self) -> None:
+        con = self._get_mock_connection()
+        con.perform_request("GET", "/")
+        self.assertIsNone(con.debug_recorder)
+
 
 class TestSignerWithFrozenCredentials(TestUrllib3HttpConnection):
     def mock_session(self) -> Any:

@@ -31,7 +31,8 @@ import os
 import re
 import warnings
 from platform import python_version
-from typing import Any, Collection, Dict, Mapping, Optional, Union
+from typing import Any, Collection, Dict, List, Mapping, Optional, Union
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import simplejson as json
@@ -51,6 +52,159 @@ if not TRACER_ALREADY_CONFIGURED:
     tracer.propagate = False
 
 _WARNING_RE = re.compile(r"\"([^\"]*)\"")
+
+
+class DebugTraceRecorder:
+    """
+    Collects sanitized request/response records that are safe to share with
+    support when debugging search issues.
+
+    Each record preserves the method and the structure of parameters and the
+    query body, while authentication material (credentials in headers or in
+    the URL) and caller-specified query body fields are replaced with a
+    placeholder. Recording never mutates the live request or the data
+    returned to the caller; only sanitized copies are kept.
+
+    :arg redact_body_fields: names of JSON body fields whose values must be
+        redacted (matched case-insensitively, at any nesting level)
+    :arg extra_sensitive_headers: additional header names to redact on top
+        of the built-in authentication headers
+    """
+
+    REDACTED = "<redacted>"
+
+    DEFAULT_SENSITIVE_HEADERS = frozenset(
+        {
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "x-amz-security-token",
+            "x-amz-credential",
+            "cookie",
+            "set-cookie",
+        }
+    )
+
+    def __init__(
+        self,
+        redact_body_fields: Collection[str] = (),
+        extra_sensitive_headers: Collection[str] = (),
+    ) -> None:
+        self.redact_body_fields = frozenset(
+            field.lower() for field in redact_body_fields
+        )
+        self.sensitive_headers = self.DEFAULT_SENSITIVE_HEADERS | frozenset(
+            header.lower() for header in extra_sensitive_headers
+        )
+        self.records: List[Dict[str, Any]] = []
+
+    def record(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+        body: Optional[Union[str, bytes]] = None,
+        status_code: Optional[int] = None,
+        response: Optional[str] = None,
+        duration: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Capture one sanitized trace + actual request/response pair."""
+        entry = {
+            "method": method,
+            "url": self._sanitize_url(url),
+            "params": dict(params) if params else {},
+            "request": {
+                "headers": self._sanitize_headers(headers),
+                "body": self._sanitize_body(body),
+            },
+            "trace": self._build_trace(method, url, body),
+            "response": {
+                "status": status_code,
+                "duration": duration,
+                "body": response,
+            },
+            "error": error,
+        }
+        self.records.append(entry)
+        return entry
+
+    def clear(self) -> None:
+        self.records[:] = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export the shareable record; everything in it is sanitized."""
+        return {"records": json.loads(json.dumps(self.records, default=str))}
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
+
+    def _sanitize_headers(
+        self, headers: Optional[Mapping[str, str]]
+    ) -> Dict[str, str]:
+        sanitized = {}
+        for key, value in (headers or {}).items():
+            if key.lower() in self.sensitive_headers:
+                sanitized[key] = self.REDACTED
+            else:
+                sanitized[key] = value
+        return sanitized
+
+    def _sanitize_url(self, url: str) -> str:
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return url
+        if parts.username is None and parts.password is None:
+            return url
+        host = parts.hostname or ""
+        if parts.port is not None:
+            host = f"{host}:{parts.port}"
+        return urlunsplit(parts._replace(netloc=host))
+
+    def _sanitize_body(self, body: Optional[Union[str, bytes]]) -> Any:
+        if body is None:
+            return None
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", "ignore")
+        try:
+            parsed = json.loads(body)
+        except (ValueError, TypeError):
+            # non-JSON payloads (e.g. bulk NDJSON) are kept as-is
+            return body
+        return self._redact_fields(parsed)
+
+    def _redact_fields(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {
+                key: (
+                    self.REDACTED
+                    if key.lower() in self.redact_body_fields
+                    else self._redact_fields(value)
+                )
+                for key, value in data.items()
+            }
+        if isinstance(data, list):
+            return [self._redact_fields(item) for item in data]
+        return data
+
+    def _build_trace(
+        self, method: str, url: str, body: Optional[Union[str, bytes]]
+    ) -> str:
+        url = self._sanitize_url(url)
+        url = url.replace("?", "?pretty&", 1) if "?" in url else url + "?pretty"
+        sanitized_body = self._sanitize_body(body)
+        if sanitized_body is not None and not isinstance(sanitized_body, str):
+            sanitized_body = json.dumps(
+                sanitized_body, sort_keys=True, indent=2, separators=(",", ": ")
+            ).replace("'", r"\u0027")
+        return "curl %s-X%s '%s' -d '%s'" % (
+            "-H 'Content-Type: application/json' " if body else "",
+            method,
+            url,
+            sanitized_body or "",
+        )
 
 
 class Connection:
@@ -128,6 +282,58 @@ class Connection:
             url_prefix = "/" + url_prefix.strip("/")
         self.url_prefix = url_prefix
         self.timeout = timeout
+        self.debug_recorder: Optional[DebugTraceRecorder] = None
+
+    def enable_debug_trace(
+        self,
+        redact_body_fields: Collection[str] = (),
+        extra_sensitive_headers: Collection[str] = (),
+    ) -> DebugTraceRecorder:
+        """
+        Start recording sanitized, shareable debug traces for every request
+        made through this connection. Returns the recorder holding the
+        records; call :meth:`disable_debug_trace` to stop recording.
+        """
+        self.debug_recorder = DebugTraceRecorder(
+            redact_body_fields=redact_body_fields,
+            extra_sensitive_headers=extra_sensitive_headers,
+        )
+        return self.debug_recorder
+
+    def disable_debug_trace(self) -> None:
+        """Stop recording debug traces; kept records stay on the recorder."""
+        self.debug_recorder = None
+
+    def _record_debug_trace(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+        body: Optional[Union[str, bytes]] = None,
+        status_code: Optional[int] = None,
+        response: Optional[str] = None,
+        duration: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        recorder = self.debug_recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record(
+                method,
+                url,
+                params=params,
+                headers=headers,
+                body=body,
+                status_code=status_code,
+                response=response,
+                duration=duration,
+                error=error,
+            )
+        except Exception:
+            # recording must never break the actual request
+            logger.warning("Failed to record debug trace", exc_info=True)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}: {self.host}>"

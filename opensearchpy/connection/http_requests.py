@@ -211,6 +211,15 @@ class RequestsHttpConnection(Connection):
                 time.time() - start,
                 exception=e,
             )
+            self._record_debug_trace(
+                method,
+                url,
+                params=params,
+                headers=prepared_request.headers,
+                body=orig_body,
+                duration=time.time() - start,
+                error=str(e),
+            )
             if isinstance(e, requests.exceptions.SSLError):
                 raise SSLError("N/A", str(e), e)
             if isinstance(e, requests.Timeout):
@@ -239,6 +248,16 @@ class RequestsHttpConnection(Connection):
                 response.status_code,
                 raw_data,
             )
+            self._record_debug_trace(
+                method,
+                url,
+                params=params,
+                headers=prepared_request.headers,
+                body=orig_body,
+                status_code=response.status_code,
+                response=raw_data,
+                duration=duration,
+            )
             self._raise_error(
                 response.status_code,
                 raw_data,
@@ -253,6 +272,16 @@ class RequestsHttpConnection(Connection):
             response.status_code,
             raw_data,
             duration,
+        )
+        self._record_debug_trace(
+            method,
+            url,
+            params=params,
+            headers=prepared_request.headers,
+            body=orig_body,
+            status_code=response.status_code,
+            response=raw_data,
+            duration=duration,
         )
 
         return response.status_code, response.headers, raw_data

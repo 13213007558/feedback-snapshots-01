@@ -25,12 +25,13 @@
 #  under the License.
 
 
-from .base import Connection
+from .base import Connection, DebugTraceRecorder
 from .http_requests import RequestsHttpConnection
 from .http_urllib3 import Urllib3HttpConnection, create_ssl_context
 
 __all__ = [
     "Connection",
+    "DebugTraceRecorder",
     "RequestsHttpConnection",
     "Urllib3HttpConnection",
     "create_ssl_context",

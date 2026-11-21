@@ -251,6 +251,7 @@ class Urllib3HttpConnection(Connection):
 
         start = time.time()
         orig_body = body
+        request_headers: Any = None
         try:
             kw = {}
             if timeout:
@@ -288,6 +289,15 @@ class Urllib3HttpConnection(Connection):
             self.log_request_fail(
                 method, full_url, url, orig_body, time.time() - start, exception=e
             )
+            self._record_debug_trace(
+                method,
+                full_url,
+                params=params,
+                headers=request_headers,
+                body=orig_body,
+                duration=time.time() - start,
+                error=str(e),
+            )
             if isinstance(e, UrllibSSLError):
                 raise SSLError("N/A", str(e), e)
             if isinstance(e, ReadTimeoutError):
@@ -305,6 +315,16 @@ class Urllib3HttpConnection(Connection):
             self.log_request_fail(
                 method, full_url, url, orig_body, duration, response.status, raw_data
             )
+            self._record_debug_trace(
+                method,
+                full_url,
+                params=params,
+                headers=request_headers,
+                body=orig_body,
+                status_code=response.status,
+                response=raw_data,
+                duration=duration,
+            )
             self._raise_error(
                 response.status,
                 raw_data,
@@ -313,6 +333,16 @@ class Urllib3HttpConnection(Connection):
 
         self.log_request_success(
             method, full_url, url, orig_body, response.status, raw_data, duration
+        )
+        self._record_debug_trace(
+            method,
+            full_url,
+            params=params,
+            headers=request_headers,
+            body=orig_body,
+            status_code=response.status,
+            response=raw_data,
+            duration=duration,
         )
 
         return response.status, response.headers, raw_data

@@ -25,11 +25,13 @@
 #  under the License.
 
 
+import json
 import os
 import sys
 import warnings
+from unittest import mock
 
-from opensearchpy.connection import Connection
+from opensearchpy.connection import Connection, DebugTraceRecorder
 
 from ..test_cases import TestCase
 
@@ -211,3 +213,100 @@ class TestBaseConnection(TestCase):
         c.create_connection("testing", hosts=["opensearch.com"])
 
         assert c.get_connection("testing").transport.serializer is serializer.serializer
+
+
+class TestDebugTraceRecorder(TestCase):
+    def test_redacts_default_sensitive_headers(self) -> None:
+        recorder = DebugTraceRecorder()
+        entry = recorder.record(
+            "GET",
+            "http://localhost:9200/index/_search",
+            headers={
+                "authorization": "Basic dXNlcjpwYXNz",
+                "x-api-key": "secret-key",
+                "content-type": "application/json",
+            },
+        )
+        headers = entry["request"]["headers"]
+        self.assertEqual(headers["authorization"], DebugTraceRecorder.REDACTED)
+        self.assertEqual(headers["x-api-key"], DebugTraceRecorder.REDACTED)
+        self.assertEqual(headers["content-type"], "application/json")
+
+    def test_redacts_extra_sensitive_headers_case_insensitively(self) -> None:
+        recorder = DebugTraceRecorder(extra_sensitive_headers=["X-Custom-Auth"])
+        entry = recorder.record(
+            "GET",
+            "http://localhost:9200/",
+            headers={"x-custom-auth": "token", "other": "kept"},
+        )
+        self.assertEqual(
+            entry["request"]["headers"]["x-custom-auth"], DebugTraceRecorder.REDACTED
+        )
+        self.assertEqual(entry["request"]["headers"]["other"], "kept")
+
+    def test_redacts_url_credentials(self) -> None:
+        recorder = DebugTraceRecorder()
+        entry = recorder.record(
+            "GET", "http://user:pass@localhost:9200/index/_search"
+        )
+        self.assertEqual(entry["url"], "http://localhost:9200/index/_search")
+        self.assertNotIn("pass", entry["trace"])
+
+    def test_redacts_specified_body_fields_and_preserves_structure(self) -> None:
+        recorder = DebugTraceRecorder(redact_body_fields=["message"])
+        body = b'{"query": {"match": {"message": "secret-keyword"}}, "size": 3}'
+        entry = recorder.record(
+            "POST", "http://localhost:9200/index/_search", body=body
+        )
+        recorded = entry["request"]["body"]
+        self.assertEqual(
+            recorded["query"]["match"]["message"], DebugTraceRecorder.REDACTED
+        )
+        self.assertEqual(recorded["size"], 3)
+        # the trace is sanitized the same way
+        self.assertNotIn("secret-keyword", entry["trace"])
+        self.assertIn("?pretty", entry["trace"])
+
+    def test_keeps_non_json_body_as_is(self) -> None:
+        recorder = DebugTraceRecorder(redact_body_fields=["message"])
+        bulk_body = b'{"index": {}}\n{"message": "secret-keyword"}\n'
+        entry = recorder.record(
+            "POST", "http://localhost:9200/_bulk", body=bulk_body
+        )
+        self.assertEqual(entry["request"]["body"], bulk_body.decode("utf-8"))
+
+    def test_export_contains_only_sanitized_content(self) -> None:
+        recorder = DebugTraceRecorder(redact_body_fields=["message"])
+        recorder.record(
+            "POST",
+            "http://localhost:9200/index/_search",
+            params={"size": 1},
+            headers={"authorization": "Basic dXNlcjpwYXNz"},
+            body=b'{"query": {"match": {"message": "secret-keyword"}}}',
+            status_code=200,
+            response='{"hits": {"total": 0}}',
+            duration=0.01,
+        )
+        exported = recorder.to_json()
+        self.assertNotIn("dXNlcjpwYXNz", exported)
+        self.assertNotIn("secret-keyword", exported)
+        parsed = json.loads(exported)
+        self.assertEqual(parsed["records"][0]["params"], {"size": 1})
+        self.assertEqual(parsed["records"][0]["response"]["status"], 200)
+
+    def test_enable_and_disable_debug_trace_on_connection(self) -> None:
+        con = Connection()
+        self.assertIsNone(con.debug_recorder)
+        recorder = con.enable_debug_trace(redact_body_fields=["message"])
+        self.assertIs(con.debug_recorder, recorder)
+        con.disable_debug_trace()
+        self.assertIsNone(con.debug_recorder)
+        self.assertEqual(recorder.records, [])
+
+    def test_record_failure_never_propagates(self) -> None:
+        con = Connection()
+        recorder = con.enable_debug_trace()
+        with mock.patch.object(
+            recorder, "record", side_effect=ValueError("boom")
+        ):
+            con._record_debug_trace("GET", "http://localhost:9200/")
