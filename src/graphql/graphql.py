@@ -6,7 +6,7 @@ from inspect import iscoroutine
 from typing import TYPE_CHECKING, Any, cast
 
 from .error import GraphQLError
-from .execution import ExecutionResult, Executor, Middleware
+from .execution import ExecutionResult, Executor, Middleware, OperationAuthorizer
 from .execution.execute import assume_not_async_iterable, assume_not_awaitable
 from .harness import GraphQLHarness, default_harness
 from .pyutils.is_awaitable import is_awaitable as default_is_awaitable
@@ -52,6 +52,7 @@ async def graphql(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation asynchronously.
 
@@ -111,6 +112,10 @@ async def graphql(  # noqa: PLR0913, PLR0917
         to limit the memory used by comments in the token linked list.
     :param max_source_length: The maximum length of the source text in code points,
         checked before lexing.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: An execution result or validation errors.
 
     Execute a complete asynchronous request with variables:
@@ -225,6 +230,7 @@ async def graphql(  # noqa: PLR0913, PLR0917
         max_lexical_tokens,
         max_comments,
         max_source_length,
+        operation_authorizer,
     )
 
     if default_is_awaitable(result):
@@ -256,6 +262,7 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -307,6 +314,10 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
         to limit the memory used by comments in the token linked list.
     :param max_source_length: The maximum length of the source text in code points,
         checked before lexing.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: Completed execution output, or request errors if parsing or
         validation fails.
 
@@ -376,6 +387,7 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
         max_lexical_tokens,
         max_comments,
         max_source_length,
+        operation_authorizer,
     )
 
     # Assert that the execution was synchronous.
@@ -413,6 +425,7 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a query, return asynchronously only if necessary.
 
@@ -421,6 +434,14 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
     # Validate Schema
     if schema_validation_errors := validate_schema(schema):
         return ExecutionResult(data=None, errors=schema_validation_errors)
+
+    # Pass the authorizer only when set, so that a custom harness
+    # with an execute function that does not know it keeps working.
+    execute_options = (
+        {"operation_authorizer": operation_authorizer}
+        if operation_authorizer is not None
+        else {}
+    )
 
     def check_validation_and_execute(
         validation_errors: list[GraphQLError], document: DocumentNode
@@ -447,6 +468,7 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
             is_async_iterable,
             hide_suggestions=hide_suggestions,
             abort_signal=abort_signal,
+            **execute_options,
         )
 
     def validate_and_execute(

@@ -46,6 +46,7 @@ from .execute import (
     ExecutionHooks,
     Executor,
     Middleware,
+    OperationAuthorizer,
     RootSelectionSetExecutor,
 )
 
@@ -70,6 +71,7 @@ __all__ = [
     "InitialIncrementalExecutionResult",
     "Middleware",
     "MiddlewareManager",
+    "OperationAuthorizer",
     "PendingResult",
     "RootSelectionSetExecutor",
     "SubsequentIncrementalExecutionResult",

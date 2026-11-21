@@ -112,6 +112,7 @@ __all__ = [
     "ExecutionHooks",
     "Executor",
     "Middleware",
+    "OperationAuthorizer",
     "StreamUsage",
     "default_field_resolver",
     "default_type_resolver",
@@ -135,6 +136,19 @@ DEFER_NOT_SUPPORTED_ON_SUBSCRIPTIONS = (
 )
 
 Middleware: TypeAlias = tuple | list | MiddlewareManager | None
+
+OperationAuthorizer: TypeAlias = Callable[
+    [OperationDefinitionNode], bool | str | GraphQLError | None
+]
+"""Callback deciding whether the selected operation may be executed.
+
+The authorizer receives the operation definition that was actually selected
+for execution (via the operation name, if provided) and can inspect its name
+and its operation type (query, mutation, or subscription). It allows the
+operation by returning ``None`` or ``True`` and denies it by returning
+``False`` (denied with a standard message), a string (used as the error
+message), or a :class:`~graphql.GraphQLError` (returned as is).
+"""
 
 
 class StreamUsage(NamedTuple):
@@ -427,6 +441,7 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        operation_authorizer: OperationAuthorizer | None = None,
         **custom_args: Any,
     ) -> list[GraphQLError] | Executor:
         """Build an executor.
@@ -466,6 +481,10 @@ class Executor(Generic[TContext]):
             request errors.
         :param abort_signal: AbortSignal used to cancel execution.
         :param hooks: Execution hooks invoked during this operation.
+        :param operation_authorizer: Optional callback invoked with the selected
+            operation definition before its variables are coerced; return
+            ``False``, a message, or a :class:`~graphql.GraphQLError` to deny
+            execution of the operation.
         :returns: The executor for the validated execution arguments, or a list of
             validation errors.
 
@@ -563,6 +582,21 @@ class Executor(Generic[TContext]):
             if operation_name is not None:
                 return [GraphQLError(f"Unknown operation named '{operation_name}'.")]
             return [GraphQLError("Must provide an operation.")]
+
+        if operation_authorizer is not None:
+            verdict = operation_authorizer(operation)
+            if verdict is not None and verdict is not True:
+                if isinstance(verdict, GraphQLError):
+                    return [verdict]
+                if isinstance(verdict, str):
+                    return [GraphQLError(verdict)]
+                selected_name = operation.name.value if operation.name else None
+                message = (
+                    f"Operation '{selected_name}' is not authorized."
+                    if selected_name
+                    else "Anonymous operation is not authorized."
+                )
+                return [GraphQLError(message)]
 
         if fragment_variable_signature_errors:
             return fragment_variable_signature_errors

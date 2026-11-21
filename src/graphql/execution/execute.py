@@ -31,6 +31,7 @@ from .executor import (
     ExecutionHooks,
     Executor,
     Middleware,
+    OperationAuthorizer,
     default_field_resolver,
     default_type_resolver,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "ExecutionHooks",
     "Executor",
     "Middleware",
+    "OperationAuthorizer",
     "RootSelectionSetExecutor",
     "create_source_event_stream",
     "default_field_resolver",
@@ -116,6 +118,7 @@ def execute(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a GraphQL operation.
@@ -168,6 +171,10 @@ def execute(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: A completed execution result, or an awaitable resolving to one when
         execution is asynchronous.
 
@@ -303,6 +310,7 @@ def execute(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        operation_authorizer=operation_authorizer,
         **custom_context_args,
     )
     if isinstance(result, ExecutionResult):
@@ -338,6 +346,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult | ExperimentalIncrementalExecutionResults]:
     """Execute a GraphQL operation incrementally.
@@ -385,6 +394,10 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: A single execution result or incremental execution results.
 
     >>> from graphql import build_schema, parse
@@ -448,6 +461,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        operation_authorizer=operation_authorizer,
         **custom_context_args,
     )
 
@@ -490,6 +504,7 @@ def execute_sync(
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    operation_authorizer: OperationAuthorizer | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -518,6 +533,10 @@ def execute_sync(
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: The completed execution result for a synchronous operation.
 
     Execute an operation synchronously when all resolvers are synchronous:
@@ -579,6 +598,7 @@ def execute_sync(
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        operation_authorizer=operation_authorizer,
     )
 
     # Assert that the execution was synchronous.
@@ -609,6 +629,7 @@ def subscribe(
     executor_class: type[Executor] | None = None,
     middleware: MiddlewareManager | None = None,
     hide_suggestions: bool = False,
+    operation_authorizer: OperationAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[AsyncIterator[ExecutionResult] | ExecutionResult]:
     """Create a GraphQL subscription.
@@ -668,6 +689,10 @@ def subscribe(
     :param middleware: The middleware to wrap the resolvers with.
     :param hide_suggestions: Whether suggestion text should be omitted from request
         errors.
+    :param operation_authorizer: Optional callback invoked with the selected
+        operation definition before its variables are coerced; return ``False``,
+        a message, or a :class:`~graphql.GraphQLError` to deny execution of the
+        operation.
     :returns: A response stream for a valid subscription, or an execution result
         containing errors.
 
@@ -761,6 +786,7 @@ def subscribe(
         enable_early_execution,
         middleware=middleware,
         hide_suggestions=hide_suggestions,
+        operation_authorizer=operation_authorizer,
         **custom_context_args,
     )
 

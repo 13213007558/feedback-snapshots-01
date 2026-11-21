@@ -127,3 +127,31 @@ resolver in the ``errors`` attribute of the result::
                 locations=[SourceLocation(line=5, column=9)],
                 path=['hero', 'secretBackstory'])])
 
+
+If you expose a GraphQL endpoint publicly, you may want to restrict which operations
+a client is allowed to run. To support this, all entry points accept an optional
+``operation_authorizer`` callback. It is invoked with the operation definition that
+was actually selected (via the operation name when the document contains multiple
+operations), before any variable is coerced and before any resolver is called. The
+callback can inspect the name and the operation type (query, mutation or
+subscription) of the operation to decide whether to allow it. Return ``False`` or a
+custom error message to deny the operation::
+
+    def authorize(operation):
+        if operation.name and operation.name.value == "FetchHero":
+            return True
+        return "This operation is not allowed."
+
+    result = graphql_sync(schema, """
+        query FetchHero { hero { name } }
+        query FetchDroid { droid(id: "2001") { name } }
+        """, operation_name="FetchDroid",
+        operation_authorizer=authorize)
+    print(result)
+
+Since the client selected the ``FetchDroid`` operation, which the authorizer does
+not allow, the operation is not executed and the result contains only the
+authorization error::
+
+    ExecutionResult(data=None,
+        errors=[GraphQLError('This operation is not allowed.')])

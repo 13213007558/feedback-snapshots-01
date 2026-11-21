@@ -198,6 +198,14 @@ def describe_usage():
         assert "secretBackstory" in out
         assert out == expected_result(queries)
 
+        authorizer_query = queries.pop(0)
+        assert "operation_authorizer" in authorizer_query
+        exec(authorizer_query, scope)
+        out, err = capsys.readouterr()
+        assert not err
+        assert "not allowed" in out
+        assert out == expected_result(queries)
+
     def using_the_sdl(capsys):
         use_sdl = get_snippets("usage/sdl")
         build_schema = use_sdl.pop(0)

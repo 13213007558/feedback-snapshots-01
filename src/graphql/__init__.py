@@ -526,6 +526,8 @@ from .execution import (
     # Middleware
     Middleware,
     MiddlewareManager,
+    # Operation authorization
+    OperationAuthorizer,
 )
 
 # The primary entry point into fulfilling a GraphQL request.
@@ -737,6 +739,7 @@ __all__ = [
     "ObjectTypeDefinitionNode",
     "ObjectTypeExtensionNode",
     "ObjectValueNode",
+    "OperationAuthorizer",
     "OperationDefinitionNode",
     "OperationType",
     "OperationTypeDefinitionNode",
