@@ -199,3 +199,98 @@ def test_flask_restx_resource(extension_factory):
             timeline.forward(1)
             assert 200 == cli.get("/test/a").status_code
             assert 200 == cli.post("/test/a").status_code
+
+
+def _shared_write_resource_app(extension_factory):
+    app, limiter = extension_factory(
+        key_func=lambda: request.headers.get("X-Identity", "anonymous"),
+        headers_enabled=True,
+    )
+    # ``scope`` pins the limit to a shared bucket named after the business
+    # resource instead of the default per-endpoint bucket, so both routes
+    # drawing on "resource-write" consume the same quota.
+    shared_write_limit = limiter.shared_limit(
+        "2/minute", scope="resource-write", methods=["post", "put"]
+    )
+
+    class ResourceView(MethodView):
+        # reads keep the default scoping (the endpoint), so each route counts
+        # independently of the other and of the shared write scope.
+        decorators = [shared_write_limit, limiter.limit("1/minute", methods=["get"])]
+
+        def get(self):
+            return "read"
+
+        def post(self):
+            return "write"
+
+        def put(self):
+            return "write"
+
+    app.add_url_rule(
+        "/resource/primary", view_func=ResourceView.as_view("resource_primary")
+    )
+    app.add_url_rule(
+        "/resource/secondary", view_func=ResourceView.as_view("resource_secondary")
+    )
+
+    return app
+
+
+def test_method_view_shared_write_limit_alternating_same_identity(extension_factory):
+    """Writes from one identity alternate between two routes of the same
+    resource and must exhaust the single shared quota."""
+    app = _shared_write_resource_app(extension_factory)
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            identity = {"X-Identity": "writer-1"}
+            resp = cli.post("/resource/primary", headers=identity)
+            assert 200 == resp.status_code
+            assert "1" == resp.headers["X-RateLimit-Remaining"]
+            resp = cli.put("/resource/secondary", headers=identity)
+            assert 200 == resp.status_code
+            assert "0" == resp.headers["X-RateLimit-Remaining"]
+            # the decisive assertions: an implementation that only forges
+            # identical X-RateLimit-* headers without sharing the underlying
+            # storage key would still allow these writes through.
+            assert 429 == cli.post("/resource/secondary", headers=identity).status_code
+            assert 429 == cli.put("/resource/primary", headers=identity).status_code
+
+
+def test_method_view_shared_write_limit_is_scoped_per_identity(extension_factory):
+    """The shared scope is combined with the limiter key, so another identity
+    gets its own "resource-write" budget on the same two routes."""
+    app = _shared_write_resource_app(extension_factory)
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            first = {"X-Identity": "writer-1"}
+            second = {"X-Identity": "writer-2"}
+            assert 200 == cli.post("/resource/primary", headers=first).status_code
+            assert 200 == cli.put("/resource/secondary", headers=first).status_code
+            assert 429 == cli.post("/resource/primary", headers=first).status_code
+            # writer-2 shares the scope name but not writer-1's count
+            assert 200 == cli.post("/resource/secondary", headers=second).status_code
+            assert 200 == cli.put("/resource/primary", headers=second).status_code
+            assert 429 == cli.post("/resource/secondary", headers=second).status_code
+
+
+def test_method_view_read_limits_independent_of_shared_write_scope(extension_factory):
+    """Reads fall back to the default endpoint scope: they are not charged
+    against the shared write quota and are counted per route."""
+    app = _shared_write_resource_app(extension_factory)
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            identity = {"X-Identity": "writer-1"}
+            # exhaust the shared write budget first
+            assert 200 == cli.post("/resource/primary", headers=identity).status_code
+            assert 200 == cli.put("/resource/secondary", headers=identity).status_code
+            assert 429 == cli.post("/resource/primary", headers=identity).status_code
+            # reads draw from their own per-endpoint limit, not the shared scope
+            assert 200 == cli.get("/resource/primary", headers=identity).status_code
+            assert 200 == cli.get("/resource/secondary", headers=identity).status_code
+            # each endpoint counts reads independently of the other
+            assert 429 == cli.get("/resource/primary", headers=identity).status_code
+            assert 429 == cli.get("/resource/secondary", headers=identity).status_code
