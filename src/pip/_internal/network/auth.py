@@ -276,6 +276,34 @@ class MultiDomainBasicAuth(AuthBase):
         # user interaction
         return self.prompting or self._keyring_provider not in ["auto", "disabled"]
 
+    def _get_cache_key(self, original_url: str, netloc: str) -> str:
+        """Return the key under which credentials for this URL are cached.
+
+        When the URL belongs to one of the configured indexes, the matching
+        index URL is used as the key so that two indexes served from the same
+        host keep independent credentials. For any other URL we fall back to
+        the netloc, preserving the historical host-wide behaviour.
+        """
+        index_url = self._get_index_url(original_url)
+        if index_url is not None:
+            index_url, _, _ = split_auth_netloc_from_url(index_url)
+            return index_url
+        return netloc
+
+    def _get_keyring_service(self, original_url: str, netloc: str) -> str:
+        """Return the keyring service name to use for this URL.
+
+        Credentials saved after an interactive prompt are stored against the
+        matching index URL when one exists, so indexes sharing a host no longer
+        overwrite each other's entries. The netloc is used as a fallback, which
+        also keeps reading pre-existing host-wide entries working.
+        """
+        index_url = self._get_index_url(original_url)
+        if index_url is not None:
+            index_url, _, _ = split_auth_netloc_from_url(index_url)
+            return index_url
+        return netloc
+
     def _get_keyring_auth(
         self,
         url: str | None,
@@ -423,6 +451,10 @@ class MultiDomainBasicAuth(AuthBase):
         """
         url, netloc, _ = split_auth_netloc_from_url(original_url)
 
+        # Credentials are cached per index (or per netloc for non-index URLs)
+        # so that two indexes hosted on the same server stay isolated.
+        cache_key = self._get_cache_key(original_url, netloc)
+
         # Try to get credentials from original url
         username, password = self._get_new_credentials(original_url)
 
@@ -430,8 +462,8 @@ class MultiDomainBasicAuth(AuthBase):
         # Do this if either the username or the password is missing.
         # This accounts for the situation in which the user has specified
         # the username in the index url, but the password comes from keyring.
-        if (username is None or password is None) and netloc in self.passwords:
-            un, pw = self.passwords[netloc]
+        if (username is None or password is None) and cache_key in self.passwords:
+            un, pw = self.passwords[cache_key]
             # It is possible that the cached credentials are for a different username,
             # in which case the cache should be ignored.
             if username is None or username == un:
@@ -446,7 +478,7 @@ class MultiDomainBasicAuth(AuthBase):
             password = password or ""
 
             # Store any acquired credentials.
-            self.passwords[netloc] = (username, password)
+            self.passwords[cache_key] = (username, password)
 
         assert (
             # Credentials were found
@@ -475,11 +507,24 @@ class MultiDomainBasicAuth(AuthBase):
         return req
 
     # Factored out to allow for easy patching in tests
-    def _prompt_for_password(self, netloc: str) -> tuple[str | None, str | None, bool]:
+    def _prompt_for_password(
+        self, netloc: str, original_url: str | None = None
+    ) -> tuple[str | None, str | None, bool]:
         username = ask_input(f"User for {netloc}: ") if self.prompting else None
         if not username:
             return None, None, False
         if self.use_keyring:
+            # Prefer an entry stored against the matching index URL so that
+            # indexes sharing a host keep separate credentials, then fall back
+            # to the host-wide entry.
+            index_url = (
+                self._get_index_url(original_url) if original_url else None
+            )
+            if index_url is not None:
+                index_url, _, _ = split_auth_netloc_from_url(index_url)
+                auth = self._get_keyring_auth(index_url, username)
+                if auth and auth[0] is not None and auth[1] is not None:
+                    return auth[0], auth[1], False
             auth = self._get_keyring_auth(netloc, username)
             if auth and auth[0] is not None and auth[1] is not None:
                 return auth[0], auth[1], False
@@ -520,20 +565,29 @@ class MultiDomainBasicAuth(AuthBase):
 
         parsed = urllib.parse.urlparse(resp.url)
 
+        # Resolve which configured index this URL belongs to. Both the in
+        # memory cache and the keyring entry are keyed by the index URL (rather
+        # than the netloc) so that two indexes served from the same host use
+        # independent credentials; non-index URLs keep using the netloc.
+        cache_key = self._get_cache_key(resp.url, parsed.netloc)
+        keyring_service = self._get_keyring_service(resp.url, parsed.netloc)
+
         # Prompt the user for a new username and password
         save = False
         if not username and not password:
-            username, password, save = self._prompt_for_password(parsed.netloc)
+            username, password, save = self._prompt_for_password(
+                parsed.netloc, resp.url
+            )
 
         # Store the new username and password to use for future requests
         self._credentials_to_save = None
         if username is not None and password is not None:
-            self.passwords[parsed.netloc] = (username, password)
+            self.passwords[cache_key] = (username, password)
 
             # Prompt to save the password to keyring
             if save and self._should_save_password_to_keyring():
                 self._credentials_to_save = Credentials(
-                    url=parsed.netloc,
+                    url=keyring_service,
                     username=username,
                     password=password,
                 )

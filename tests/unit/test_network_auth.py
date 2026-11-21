@@ -798,3 +798,315 @@ def test_handle_401_extracts_credentials_embedded_in_url(
     scheme, _, encoded = sent_headers["Authorization"].partition(" ")
     assert scheme == "Basic"
     assert base64.b64decode(encoded).decode() == "user:pass"
+
+
+class _RecordingKeyring:
+    """Keyring stand-in that records every lookup and save it receives.
+
+    Two indexes hosted on the same server are the focus, so credentials are
+    stored keyed by service name, mirroring a real keyring backend.
+    """
+
+    def __init__(self) -> None:
+        self.credential_by_service: dict[str, dict[str, str]] = {}
+        self.get_credential_calls: list[tuple[str, str | None]] = []
+        self.set_password_calls: list[tuple[str, str, str]] = []
+
+    @dataclass
+    class _Credential:
+        username: str
+        password: str
+
+    def get_credential(
+        self, service: str, username: str | None
+    ) -> "_RecordingKeyring._Credential | None":
+        self.get_credential_calls.append((service, username))
+        users = self.credential_by_service.get(service, {})
+        if not users:
+            return None
+        if username is not None and username in users:
+            return self._Credential(username, users[username])
+        # Mirror keyring: with no username match, hand back the first entry.
+        found_user, found_password = next(iter(users.items()))
+        return self._Credential(found_user, found_password)
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.get_credential_calls.append((service, username))
+        return self.credential_by_service.get(service, {}).get(username)
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.set_password_calls.append((service, username, password))
+        self.credential_by_service.setdefault(service, {})[username] = password
+
+
+def _make_401_response(url: str) -> tuple[MockResponse, MockConnection, MockRequest]:
+    req = MockRequest(url)
+    resp = MockResponse(b"")
+    resp.url = url
+    resp.request = req
+    resp.status_code = 401
+    connection = MockConnection()
+    resp.connection = connection
+    return resp, connection, req
+
+
+def test_two_indexes_same_host_use_distinct_keyring_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two indexes on one host must authenticate with their own keyring entry.
+
+    Represents a build account and a deploy account owning separate indexes
+    served from the same server. The credentials each index puts on its
+    actual retried request are asserted independently.
+    """
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    build_index = "http://example.com/build/simple"
+    deploy_index = "http://example.com/deploy/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=False,
+        index_urls=[build_index, deploy_index],
+        keyring_provider="import",
+    )
+
+    keyring.set_password(build_index + "/", "build-user", "build-secret")
+    keyring.set_password(deploy_index + "/", "deploy-user", "deploy-secret")
+    keyring.get_credential_calls.clear()
+    keyring.set_password_calls.clear()
+
+    observed_auth: dict[str, str] = {}
+
+    def _send(sent_req: MockRequest, **kwargs: Any) -> MockResponse:
+        scheme, _, encoded = sent_req.headers["Authorization"].partition(" ")
+        assert scheme == "Basic"
+        observed_auth[sent_req.url] = base64.b64decode(encoded).decode()
+        response = MockResponse(b"")
+        response.status_code = 200
+        return response
+
+    for index_url in (build_index, deploy_index):
+        resp, connection, _ = _make_401_response(index_url + "/some-package/")
+        connection._send = _send  # type: ignore[assignment]
+        new_resp = auth.handle_401(resp)
+        assert new_resp.status_code == 200
+
+    # The actual outgoing requests carry the per-index credentials, never the
+    # other index's account.
+    assert observed_auth == {
+        build_index + "/some-package/": "build-user:build-secret",
+        deploy_index + "/some-package/": "deploy-user:deploy-secret",
+    }
+
+    # Keyring discovery was attempted against each index URL (its own service)
+    # rather than a single host-wide service.
+    looked_up_services = {service for service, _ in keyring.get_credential_calls}
+    assert build_index + "/" in looked_up_services
+    assert deploy_index + "/" in looked_up_services
+    assert "example.com" not in looked_up_services
+    # Nothing is saved here: the credentials already existed in the keyring and
+    # no interactive prompt happened under --no-input.
+    assert keyring.set_password_calls == []
+
+
+def test_saved_credentials_are_keyed_per_index_not_netloc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful interactive save must use the index URL as its service.
+
+    Previously the save used the netloc, so the second index on a shared host
+    would overwrite the first index's keyring entry.
+    """
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    build_index = "http://example.com/build/simple"
+    deploy_index = "http://example.com/deploy/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=True,
+        index_urls=[build_index, deploy_index],
+        keyring_provider="import",
+    )
+    monkeypatch.setattr(auth, "_get_url_and_credentials", lambda u: (u, None, None))
+    monkeypatch.setattr(
+        auth, "_should_save_password_to_keyring", lambda *a: True
+    )
+
+    scenarios = [
+        (build_index + "/pkg/", ("build-user", "build-secret", True)),
+        (deploy_index + "/pkg/", ("deploy-user", "deploy-secret", True)),
+    ]
+
+    for url, creds in scenarios:
+        monkeypatch.setattr(auth, "_prompt_for_password", lambda *a, c=creds: c)
+        resp, connection, _ = _make_401_response(url)
+
+        def _send(sent_req: MockRequest, **kwargs: Any) -> MockResponse:
+            assert "Authorization" in sent_req.headers
+            response = MockResponse(b"")
+            response.status_code = 200
+            return response
+
+        connection._send = _send  # type: ignore[assignment]
+        auth.handle_401(resp)
+
+    # Each index owns a distinct keyring service; neither is saved under the
+    # bare netloc and neither overwrites the other.
+    assert keyring.set_password_calls == [
+        (build_index + "/", "build-user", "build-secret"),
+        (deploy_index + "/", "deploy-user", "deploy-secret"),
+    ]
+    assert set(keyring.credential_by_service) == {
+        build_index + "/",
+        deploy_index + "/",
+    }
+
+
+def test_same_host_indexes_keep_independent_in_memory_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credentials cached for one index must not be reused by a sibling index."""
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    build_index = "http://example.com/build/simple"
+    deploy_index = "http://example.com/deploy/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=False,
+        index_urls=[build_index, deploy_index],
+        keyring_provider="import",
+    )
+    keyring.set_password(build_index + "/", "build-user", "build-secret")
+    keyring.set_password(deploy_index + "/", "deploy-user", "deploy-secret")
+
+    get = functools.partial(
+        auth._get_new_credentials, allow_netrc=False, allow_keyring=True
+    )
+
+    # Prime the cache through the build index.
+    assert get(build_index + "/pkg/") == ("build-user", "build-secret")
+    auth.passwords[
+        auth._get_cache_key(build_index + "/pkg/", "example.com")
+    ] = ("build-user", "build-secret")
+
+    # The deploy index must resolve its own credentials even though the build
+    # index already populated a same-netloc cache entry historically.
+    assert get(deploy_index + "/pkg/") == ("deploy-user", "deploy-secret")
+
+    # And the per-index cache keys never collapse onto the bare netloc.
+    assert auth._get_cache_key(build_index + "/pkg/", "example.com") == (
+        build_index + "/"
+    )
+    assert auth._get_cache_key(deploy_index + "/pkg/", "example.com") == (
+        deploy_index + "/"
+    )
+    assert "example.com" not in auth.passwords
+
+
+def test_prompt_prefers_index_scoped_keyring_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The interactive prompt consults the index service before the netloc."""
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    build_index = "http://example.com/build/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=True,
+        index_urls=[build_index],
+        keyring_provider="import",
+    )
+    # A host-wide entry exists, but the index-scoped entry wins.
+    keyring.set_password("example.com", "build-user", "host-secret")
+    keyring.set_password(build_index + "/", "build-user", "index-secret")
+
+    monkeypatch.setattr(
+        "pip._internal.network.auth.ask_input", lambda prompt: "build-user"
+    )
+
+    def _fail_password_prompt(_prompt: str) -> str:
+        pytest.fail("should use keyring password instead of prompting")
+
+    monkeypatch.setattr(
+        "pip._internal.network.auth.ask_password", _fail_password_prompt
+    )
+
+    username, password, save = auth._prompt_for_password(
+        "example.com", build_index + "/pkg/"
+    )
+    assert (username, password, save) == ("build-user", "index-secret", False)
+    looked_up = [service for service, _ in keyring.get_credential_calls]
+    assert looked_up[0] == build_index + "/"
+
+
+def test_public_index_without_credentials_remains_anonymous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index with no keyring/netrc credentials must not send an auth header.
+
+    This covers public downloads that have no credential configuration of
+    their own, sitting alongside the authenticated indexes on the same host.
+    """
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    public_index = "http://example.com/public/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=False,
+        index_urls=[public_index],
+        keyring_provider="import",
+    )
+
+    resp, connection, req = _make_401_response(public_index + "/pkg/")
+
+    def _send(sent_req: MockRequest, **kwargs: Any) -> MockResponse:
+        # No prompt under --no-input and no stored credentials, so the retry
+        # must not attach an Authorization header.
+        assert "Authorization" not in sent_req.headers
+        response = MockResponse(b"")
+        response.status_code = 401
+        return response
+
+    connection._send = _send  # type: ignore[assignment]
+    new_resp = auth.handle_401(resp)
+
+    assert new_resp.status_code == 401
+    assert auth.passwords == {}
+    assert keyring.set_password_calls == []
+
+
+def test_call_attaches_per_index_credentials_to_outgoing_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The full request path stamps each index with its own Authorization.
+
+    Seeds the per-index cache (as a successful 401 challenge would) and then
+    drives ``MultiDomainBasicAuth.__call__`` to confirm the headers placed on
+    the real outgoing requests differ between the two same-host indexes.
+    """
+    keyring = _RecordingKeyring()
+    monkeypatch.setitem(sys.modules, "keyring", keyring)
+
+    build_index = "http://example.com/build/simple"
+    deploy_index = "http://example.com/deploy/simple"
+    auth = MultiDomainBasicAuth(
+        prompting=False,
+        index_urls=[build_index, deploy_index],
+        keyring_provider="import",
+    )
+    # Simulate credentials learned and cached from earlier challenges.
+    auth.passwords[build_index + "/"] = ("build-user", "build-secret")
+    auth.passwords[deploy_index + "/"] = ("deploy-user", "deploy-secret")
+
+    stamped: dict[str, str] = {}
+    for index_url in (build_index, deploy_index):
+        prepared = MockRequest(index_url + "/pkg/")
+        result = auth(prepared)
+        scheme, _, encoded = result.headers["Authorization"].partition(" ")
+        assert scheme == "Basic"
+        stamped[result.url] = base64.b64decode(encoded).decode()
+
+    assert stamped == {
+        build_index + "/pkg/": "build-user:build-secret",
+        deploy_index + "/pkg/": "deploy-user:deploy-secret",
+    }

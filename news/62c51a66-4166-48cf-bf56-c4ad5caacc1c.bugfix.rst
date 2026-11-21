@@ -1,0 +1,5 @@
+Keep keyring credentials separate for multiple indexes served from the same
+host. Saved credentials and the in-memory cache are now keyed by the matching
+index URL instead of the bare netloc, so a build and a deploy account no longer
+overwrite each other, while indexes without their own credentials continue to
+fall back to host-wide entries or anonymous access.
