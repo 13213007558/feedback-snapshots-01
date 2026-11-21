@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- `Pundit::AuthorizationDeniedEvent` and `Pundit::NotAuthorizedError#denied_event` provide a serialization-safe representation of a denied authorization. The event only carries the policy class name, the query and a correlation id, so the restricted record and policy instance (and any custom model `#inspect`) never reach a public log. JSON and `Marshal` serialization of `NotAuthorizedError` now use this safe representation.
+
 - Add support for `params.expect` using `expected_parameters` and `expected_parameters_for`. [#855](https://github.com/varvet/pundit/pull/855)
 
 ### Deprecated

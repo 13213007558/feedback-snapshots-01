@@ -3,6 +3,7 @@
 require "active_support"
 
 require "pundit/version"
+require "pundit/authorization_denied_event"
 require "pundit/error"
 require "pundit/policy_finder"
 require "pundit/context"

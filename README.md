@@ -526,6 +526,50 @@ Alternatively, you can globally handle Pundit::NotAuthorizedError's by having ra
 
 ```config.action_dispatch.rescue_responses["Pundit::NotAuthorizedError"] = :forbidden```
 
+## Logging authorization denials safely
+
+`NotAuthorizedError` holds the restricted `record` and the `policy` instance, so
+serializing the exception itself into a public log or an external error tracker
+can leak sensitive data (and may call the model's custom `#inspect`). Use the
+dedicated, serialization-safe `Pundit::AuthorizationDeniedEvent` instead:
+
+```ruby
+class ApplicationController < ActionController::Base
+  include Pundit::Authorization
+
+  rescue_from Pundit::NotAuthorizedError, with: :user_not_authorized
+
+  private
+
+  def user_not_authorized(exception)
+    PUBLIC_LOGGER.info(exception.denied_event.to_json)
+    head :forbidden
+  end
+end
+```
+
+The event only contains public-safe fields:
+
+```json
+{
+  "event": "pundit.authorization_denied",
+  "policy_class": "PostPolicy",
+  "query": "update?",
+  "correlation_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+- `policy_class` is the name of the policy class, never the policy instance.
+- `query` is the predicate that was denied, e.g. `"update?"`.
+- `correlation_id` is shared with the original exception, so a public event can
+  be traced back to the locally captured error without exposing its record.
+
+The restricted `record` and `policy` are never part of the event, and building
+it never calls `#inspect` on the record. Serializing the exception directly
+(`exception.to_json` or `Marshal.dump(exception)`) goes through the same safe
+representation. The original exception can still be rescued locally with its
+full `query`, `record` and `policy` accessors for development debugging.
+
 ## Creating custom error messages
 
 `NotAuthorizedError`s provide information on what query (e.g. `:create?`), what
