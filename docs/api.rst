@@ -16,3 +16,6 @@ API Documentation
 .. autoclass:: flask_httpauth.MultiAuth
   :members:
   :inherited-members:
+
+.. autoclass:: flask_httpauth.AuthenticatedPrincipal
+  :members:

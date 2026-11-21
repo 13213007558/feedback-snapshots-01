@@ -172,6 +172,15 @@ Flask-HTTPAuth includes a simple role-based authentication system that can optio
     def get_user_roles(user):
         return user.get_roles()
 
+The user argument passed to this callback is the object returned by the ``verify_password`` or ``verify_token`` callbacks. When these callbacks do not return a user object, the callback receives an ``AuthenticatedPrincipal`` instance instead, which provides the ``username`` of the authenticated principal and the authentication ``scheme`` that was used in the request, without exposing the raw authentication data. This is useful when multiple authentication schemes are in use and the roles for each scheme are stored in different places::
+
+    @auth.get_user_roles
+    def get_user_roles(principal):
+        if principal.scheme == 'Basic':
+            return intranet_roles.get(principal.username)
+        else:
+            return service_roles.get(principal.username)
+
 To restrict access to a route to users having a given role, add the ``role`` argument to the ``login_required`` decorator::
 
     @app.route('/admin')

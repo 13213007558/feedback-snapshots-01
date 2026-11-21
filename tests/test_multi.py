@@ -29,8 +29,8 @@ class HTTPAuthTestCase(unittest.TestCase):
             return token == 'this-is-the-token!'
 
         @token_auth.get_user_roles
-        def get_token_role(auth):
-            if auth.token == 'this-is-the-token!':
+        def get_token_role(principal):
+            if principal.scheme == 'MyToken':
                 return 'foo'
             return
 
@@ -43,8 +43,8 @@ class HTTPAuthTestCase(unittest.TestCase):
             return token == 'this-is-the-custom-token!'
 
         @custom_token_auth.get_user_roles
-        def get_custom_token_role(auth):
-            if auth.token == 'this-is-the-custom-token!':
+        def get_custom_token_role(principal):
+            if principal.scheme == 'Bearer':
                 return 'foo'
             return
 

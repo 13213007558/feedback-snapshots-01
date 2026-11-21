@@ -14,6 +14,26 @@ from flask import request, make_response, session, g, Response, current_app
 from werkzeug.datastructures import Authorization
 
 
+class AuthenticatedPrincipal:
+    """The authenticated principal for a request.
+
+    An instance of this class is passed to the ``get_user_roles`` callback
+    when the verify callback authenticates the request without returning a
+    user object. The ``username`` attribute has the name of the principal,
+    or ``None`` when the authentication scheme in use does not have
+    usernames. The ``scheme`` attribute has the authentication scheme that
+    was used to authenticate the request, so that the application can load
+    the roles from the source that corresponds to it. The raw authentication
+    data provided by the client is not included in this object.
+    """
+    def __init__(self, scheme=None, username=None):
+        self.scheme = scheme
+        self.username = username
+
+    def __repr__(self):
+        return f'<AuthenticatedPrincipal {self.username} ({self.scheme})>'
+
+
 class HTTPAuth:
     """Base authentication class."""
     def __init__(self, scheme=None, realm=None, header=None):
@@ -62,8 +82,9 @@ class HTTPAuth:
         takes a single argument, the user for which roles are requested. The
         user object passed to this function will be the one returned by the
         "verify" callback. If the verify callback returned ``True`` instead of
-        a user object, then the ``Authorization`` object provided by Flask will
-        be passed to this function. The function should return the role or list
+        a user object, then an ``AuthenticatedPrincipal`` instance with the
+        username and the authentication scheme used in the request will be
+        passed to this function. The function should return the role or list
         of roles that belong to the user. Example::
 
             @auth.get_user_roles
@@ -153,7 +174,8 @@ class HTTPAuth:
         else:
             roles = [role]
         if user is True:
-            user = auth
+            user = AuthenticatedPrincipal(
+                scheme=self.scheme, username=auth.username if auth else None)
         if self.get_user_roles_callback is None:  # pragma: no cover
             raise ValueError('get_user_roles callback is not defined')
         user_roles = self.ensure_sync(self.get_user_roles_callback)(user)
