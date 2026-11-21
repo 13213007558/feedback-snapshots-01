@@ -526,6 +526,12 @@ from .execution import (
     # Middleware
     Middleware,
     MiddlewareManager,
+    # Field authorization
+    AllowListFieldAuthorizer,
+    FieldAuthorizationDecision,
+    FieldAuthorizationRule,
+    FieldAuthorizer,
+    RuleBasedFieldAuthorizer,
 )
 
 # The primary entry point into fulfilling a GraphQL request.
@@ -565,6 +571,7 @@ __all__ = [
     "AbortError",
     "AbortSignal",
     "AbortedGraphQLExecutionError",
+    "AllowListFieldAuthorizer",
     "ArgumentCoordinateNode",
     "ArgumentNode",
     "AsyncWorkFinishedInfo",
@@ -600,6 +607,9 @@ __all__ = [
     "ExecutionResult",
     "Executor",
     "ExperimentalIncrementalExecutionResults",
+    "FieldAuthorizationDecision",
+    "FieldAuthorizationRule",
+    "FieldAuthorizer",
     "FieldDefinitionNode",
     "FieldNode",
     "FieldsOnCorrectTypeRule",
@@ -755,6 +765,7 @@ __all__ = [
     "ResolvedSchemaElement",
     "ResponsePath",
     "RootSelectionSetExecutor",
+    "RuleBasedFieldAuthorizer",
     "SDLValidationRule",
     "SafeChange",
     "SafeChangeType",

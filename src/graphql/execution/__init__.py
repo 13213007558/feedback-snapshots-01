@@ -24,6 +24,13 @@ from .types import (
     PendingResult,
     SubsequentIncrementalExecutionResult,
 )
+from .field_authorizer import (
+    AllowListFieldAuthorizer,
+    FieldAuthorizationDecision,
+    FieldAuthorizationRule,
+    FieldAuthorizer,
+    RuleBasedFieldAuthorizer,
+)
 from .middleware import MiddlewareManager
 from .values import (
     get_argument_values,
@@ -51,12 +58,16 @@ from .execute import (
 
 __all__ = [
     "AbortedGraphQLExecutionError",
+    "AllowListFieldAuthorizer",
     "AsyncWorkFinishedInfo",
     "CompletedResult",
     "ExecutionHooks",
     "ExecutionResult",
     "Executor",
     "ExperimentalIncrementalExecutionResults",
+    "FieldAuthorizationDecision",
+    "FieldAuthorizationRule",
+    "FieldAuthorizer",
     "FormattedExecutionResult",
     "FormattedIncrementalDeferResult",
     "FormattedIncrementalResult",
@@ -72,6 +83,7 @@ __all__ = [
     "MiddlewareManager",
     "PendingResult",
     "RootSelectionSetExecutor",
+    "RuleBasedFieldAuthorizer",
     "SubsequentIncrementalExecutionResult",
     "VariableValues",
     "create_source_event_stream",

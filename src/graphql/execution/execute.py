@@ -30,6 +30,7 @@ from .executor import (
     AsyncWorkFinishedInfo,
     ExecutionHooks,
     Executor,
+    FieldAuthorizer,
     Middleware,
     default_field_resolver,
     default_type_resolver,
@@ -43,13 +44,16 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Awaitable
     from typing import TypeAlias, TypeGuard
 
-    from ..language import DocumentNode
+    from ..language import DocumentNode, FieldNode
     from ..pyutils import AbortSignal, AwaitableOrValue
     from ..type import (
+        GraphQLField,
         GraphQLFieldResolver,
+        GraphQLResolveInfo,
         GraphQLSchema,
         GraphQLTypeResolver,
     )
+    from .collect_fields import FieldDetailsList
     from .middleware import MiddlewareManager
 
 __all__ = [
@@ -116,6 +120,7 @@ def execute(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    field_authorizer: FieldAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a GraphQL operation.
@@ -168,6 +173,9 @@ def execute(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param field_authorizer: Optional authorizer consulted before each field
+        resolver. Fields it does not authorize are omitted without running their
+        resolvers.
     :returns: A completed execution result, or an awaitable resolving to one when
         execution is asynchronous.
 
@@ -303,6 +311,7 @@ def execute(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        field_authorizer=field_authorizer,
         **custom_context_args,
     )
     if isinstance(result, ExecutionResult):
@@ -338,6 +347,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    field_authorizer: FieldAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult | ExperimentalIncrementalExecutionResults]:
     """Execute a GraphQL operation incrementally.
@@ -385,6 +395,9 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param field_authorizer: Optional authorizer consulted before each field
+        resolver. Fields it does not authorize are omitted without running their
+        resolvers.
     :returns: A single execution result or incremental execution results.
 
     >>> from graphql import build_schema, parse
@@ -448,6 +461,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        field_authorizer=field_authorizer,
         **custom_context_args,
     )
 
@@ -490,6 +504,7 @@ def execute_sync(
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    field_authorizer: FieldAuthorizer | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -518,6 +533,9 @@ def execute_sync(
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param field_authorizer: Optional authorizer consulted before each field
+        resolver. Fields it does not authorize are omitted without running their
+        resolvers.
     :returns: The completed execution result for a synchronous operation.
 
     Execute an operation synchronously when all resolvers are synchronous:
@@ -579,6 +597,7 @@ def execute_sync(
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        field_authorizer=field_authorizer,
     )
 
     # Assert that the execution was synchronous.
@@ -609,6 +628,7 @@ def subscribe(
     executor_class: type[Executor] | None = None,
     middleware: MiddlewareManager | None = None,
     hide_suggestions: bool = False,
+    field_authorizer: FieldAuthorizer | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[AsyncIterator[ExecutionResult] | ExecutionResult]:
     """Create a GraphQL subscription.
@@ -668,6 +688,9 @@ def subscribe(
     :param middleware: The middleware to wrap the resolvers with.
     :param hide_suggestions: Whether suggestion text should be omitted from request
         errors.
+    :param field_authorizer: Optional authorizer consulted before the subscription
+        resolver. A subscription to a field it does not authorize is rejected
+        without running the resolver.
     :returns: A response stream for a valid subscription, or an execution result
         containing errors.
 
@@ -761,6 +784,7 @@ def subscribe(
         enable_early_execution,
         middleware=middleware,
         hide_suggestions=hide_suggestions,
+        field_authorizer=field_authorizer,
         **custom_context_args,
     )
 
@@ -1052,9 +1076,52 @@ def execute_subscription(
     path = Path(None, response_name, root_type.name)
     info = executor.build_resolve_info(field_def, field_nodes, root_type, path)
 
-    # Implements the "ResolveFieldEventStream" algorithm from GraphQL specification.
-    # It differs from "ResolveFieldValue" due to providing a different `resolveFn`.
+    # Enforce field authorization before creating the source event stream, so
+    # that a subscription to a non-authorized field is rejected like any other
+    # field and its subscribe resolver never runs.
+    field_authorizer = executor.field_authorizer
+    if field_authorizer is not None:
+        decision = field_authorizer.authorize_field(info)
+        if executor.is_awaitable(decision):
 
+            async def authorize_subscription() -> AsyncIterable[Any]:
+                if not await executor.with_abort_signal(decision):
+                    msg = (
+                        "Not authorized to access field"
+                        f" '{root_type.name}.{field_name}'."
+                    )
+                    raise GraphQLError(msg, field_nodes)
+                event_stream = resolve_subscription_event_stream(
+                    executor, field_def, field_details_list, field_nodes, info, path
+                )
+                if default_is_awaitable(event_stream):
+                    return await event_stream
+                return cast("AsyncIterable[Any]", event_stream)
+
+            return authorize_subscription()
+        if not decision:
+            msg = "Not authorized to access field" f" '{root_type.name}.{field_name}'."
+            raise GraphQLError(msg, field_nodes)
+
+    return resolve_subscription_event_stream(
+        executor, field_def, field_details_list, field_nodes, info, path
+    )
+
+
+def resolve_subscription_event_stream(
+    executor: Executor,
+    field_def: GraphQLField,
+    field_details_list: FieldDetailsList,
+    field_nodes: list[FieldNode],
+    info: GraphQLResolveInfo,
+    path: Path,
+) -> AwaitableOrValue[AsyncIterable[Any]]:
+    """Resolve the source event stream for an authorized subscription field.
+
+    Implements the "ResolveFieldEventStream" algorithm from the GraphQL
+    specification. It differs from "ResolveFieldValue" due to providing a
+    different ``resolveFn``.
+    """
     try:
         # Build a dictionary of arguments from the field.arguments AST, using the
         # variables scope to fulfill any variable references.

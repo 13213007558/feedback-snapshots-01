@@ -89,6 +89,7 @@ from .collect_fields import (
     collect_fields,
     collect_subfields,
 )
+from .field_authorizer import FieldAuthorizer
 from .get_variable_signature import get_variable_signature
 from .middleware import MiddlewareManager
 from .types import ExecutionResult, ExperimentalIncrementalExecutionResults
@@ -111,6 +112,7 @@ __all__ = [
     "CollectedErrors",
     "ExecutionHooks",
     "Executor",
+    "FieldAuthorizer",
     "Middleware",
     "StreamUsage",
     "default_field_resolver",
@@ -256,6 +258,9 @@ class Executor(Generic[TContext]):
         errors.
     :param abort_signal: External signal that may abort execution.
     :param hooks: Execution hooks supplied by the caller.
+    :param field_authorizer: Optional authorizer consulted before each field
+        resolver. Fields it does not authorize are omitted without running their
+        resolvers.
 
     >>> from graphql import Executor, build_schema, parse
     >>> schema = build_schema('type Query { greeting: String }')
@@ -338,6 +343,9 @@ class Executor(Generic[TContext]):
     middleware_manager: MiddlewareManager | None
     """The manager for the middleware that wraps the field resolvers, if any."""
 
+    field_authorizer: FieldAuthorizer | None
+    """The authorizer consulted before each field resolver, if any."""
+
     error_propagation: bool
     """Whether execution should use error propagation."""
 
@@ -370,6 +378,7 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        field_authorizer: FieldAuthorizer | None = None,
     ) -> None:
         self.schema = schema
         self.fragment_definitions = fragment_definitions
@@ -389,6 +398,7 @@ class Executor(Generic[TContext]):
             gather=self.gather_async_work, track=self.track_async_work
         )
         self.middleware_manager = middleware_manager
+        self.field_authorizer = field_authorizer
         self.error_propagation = not any(
             directive.name.value == GraphQLDisableErrorPropagationDirective.name
             for directive in operation.directives or ()
@@ -427,6 +437,7 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        field_authorizer: FieldAuthorizer | None = None,
         **custom_args: Any,
     ) -> list[GraphQLError] | Executor:
         """Build an executor.
@@ -596,6 +607,7 @@ class Executor(Generic[TContext]):
             hide_suggestions=hide_suggestions,
             abort_signal=abort_signal,
             hooks=hooks,
+            field_authorizer=field_authorizer,
             **custom_args,
         )
 
@@ -851,7 +863,9 @@ class Executor(Generic[TContext]):
             if is_awaitable(result):
 
                 async def set_result() -> dict[str, Any]:
-                    results[response_name] = await result
+                    value = await result
+                    if value is not Undefined:
+                        results[response_name] = value
                     return results
 
                 return set_result()
@@ -915,13 +929,22 @@ class Executor(Generic[TContext]):
             if len(awaitable_fields) == 1:
                 # If there is only one field, avoid the overhead of parallelization.
                 field = awaitable_fields[0]
-                results[field] = await results[field]
+                value = await results[field]
+                if value is Undefined:
+                    # The field was denied by an asynchronous field authorizer.
+                    del results[field]
+                else:
+                    results[field] = value
             else:
                 awaited_results = await gather_with_cancel(
                     *(results[field] for field in awaitable_fields)
                 )
-                results.update(zip(awaitable_fields, awaited_results, strict=True))
-
+                for field, value in zip(awaitable_fields, awaited_results, strict=True):
+                    if value is Undefined:
+                        # The field was denied by an asynchronous field authorizer.
+                        del results[field]
+                    else:
+                        results[field] = value
             return results
 
         return get_results()
@@ -942,6 +965,11 @@ class Executor(Generic[TContext]):
         calling its resolve function, then calls complete_value to await coroutine
         objects, coercing scalars, or execute the sub-selection-set for objects.
 
+        If a field authorizer is configured, it is consulted before the resolver
+        runs. A field that is not authorized is skipped without ever invoking its
+        resolver and reported as :data:`~graphql.pyutils.Undefined`, which omits it
+        from the result while leaving the normal nullability rules untouched.
+
         :meta private:
         """
         first_field_details = field_details_list[0]
@@ -961,6 +989,95 @@ class Executor(Generic[TContext]):
             field_def, to_nodes(field_details_list), parent_type, path
         )
 
+        field_authorizer = self.field_authorizer
+        if field_authorizer is not None:
+            try:
+                decision = field_authorizer.authorize_field(info)
+            except Exception as raw_error:
+                # Treat authorizer failures like resolver failures so the normal
+                # nullability and error-collection rules still apply.
+                self.handle_field_error(
+                    raw_error, return_type, field_details_list, path
+                )
+                return None
+            if self.is_awaitable(decision):
+                return self.authorize_and_execute_field(
+                    decision,
+                    resolve_fn,
+                    source,
+                    info,
+                    field_def,
+                    field_details_list,
+                    path,
+                    position_context,
+                )
+            if not decision:
+                # Do not run the resolver for fields that are not authorized.
+                # Returning Undefined omits the field from the response.
+                return Undefined
+
+        return self.resolve_field(
+            resolve_fn,
+            source,
+            info,
+            field_def,
+            field_details_list,
+            path,
+            position_context,
+        )
+
+    async def authorize_and_execute_field(  # noqa: PLR0913
+        self,
+        decision: Awaitable[bool],
+        resolve_fn: GraphQLFieldResolver,
+        source: Any,
+        info: GraphQLResolveInfo,
+        field_def: GraphQLField,
+        field_details_list: FieldDetailsList,
+        path: Path,
+        position_context: TContext | None,
+    ) -> Any:
+        """Await an authorization decision, then resolve only when allowed.
+
+        :meta private:
+        """
+        try:
+            authorized = await self.with_abort_signal(decision)
+        except Exception as raw_error:
+            self.handle_field_error(raw_error, field_def.type, field_details_list, path)
+            return None
+        if not authorized:
+            return Undefined
+        result = self.resolve_field(
+            resolve_fn,
+            source,
+            info,
+            field_def,
+            field_details_list,
+            path,
+            position_context,
+        )
+        if self.is_awaitable(result):
+            return await result
+        return result
+
+    def resolve_field(  # noqa: PLR0913
+        self,
+        resolve_fn: GraphQLFieldResolver,
+        source: Any,
+        info: GraphQLResolveInfo,
+        field_def: GraphQLField,
+        field_details_list: FieldDetailsList,
+        path: Path,
+        position_context: TContext | None,
+    ) -> AwaitableOrValue[Any]:
+        """Call the field resolver and complete its result.
+
+        :meta private:
+        """
+        return_type = field_def.type
+        first_field_details = field_details_list[0]
+        first_field_node = first_field_details.node
         # Get the resolve function, regardless of if its result is normal or abrupt
         # (error).
         try:

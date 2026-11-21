@@ -82,6 +82,12 @@ Execution
 
 .. autoclass:: MiddlewareManager
 
+.. autoclass:: FieldAuthorizer
+
+.. autoclass:: RuleBasedFieldAuthorizer
+
+.. autoclass:: AllowListFieldAuthorizer
+
 .. autofunction:: get_argument_values
 
 .. autofunction:: get_directive_values
