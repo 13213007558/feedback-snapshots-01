@@ -1435,6 +1435,7 @@ class ClientConstructor:
         trace_propagation_targets: "Optional[Sequence[str]]" = [MATCH_ALL],
         functions_to_trace: "Sequence[Dict[str, str]]" = [],
         event_scrubber: "Optional[sentry_sdk.scrubber.EventScrubber]" = None,
+        scrub_after_before_send: bool = False,
         max_value_length: "Optional[int]" = DEFAULT_MAX_VALUE_LENGTH,
         enable_backpressure_handling: bool = True,
         error_sampler: "Optional[Callable[[Event, Hint], Union[float, bool]]]" = None,
@@ -1577,6 +1578,13 @@ class ClientConstructor:
             It can additionally be used to scrub from another `pii_denylist` if `send_default_pii` is disabled.
 
             See how to `configure the scrubber here <https://docs.sentry.io/data-management/sensitive-data/#event-scrubber>`_.
+
+        :param scrub_after_before_send: When enabled, the `event_scrubber` is run once more on the event
+            returned by `before_send` (or `before_send_transaction`), right before the event is sent.
+
+            This ensures that data added by those callbacks is held to the same privacy policy as the rest
+            of the event. The scrubbing is applied to a copy of the event, so objects that the callback
+            kept a reference to are left unmodified. Disabled by default.
 
         :param include_source_context: When enabled, source context will be included in events sent to Sentry.
 

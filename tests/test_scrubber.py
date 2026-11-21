@@ -3,7 +3,13 @@ import sys
 
 import pytest
 
-from sentry_sdk import capture_event, capture_exception, start_span, start_transaction
+from sentry_sdk import (
+    capture_event,
+    capture_exception,
+    capture_message,
+    start_span,
+    start_transaction,
+)
 from sentry_sdk.scrubber import EventScrubber
 from sentry_sdk.utils import event_from_exception
 from tests.conftest import ApproxDict
@@ -378,3 +384,74 @@ def test_custom_denylist_matches_either_spelling(sentry_init, capture_events):
     (event,) = events
     assert event["extra"]["x_custom_token"] == "[Filtered]"
     assert event["extra"]["X-Custom-Token"] == "[Filtered]"
+
+
+def test_before_send_additions_not_scrubbed_by_default(sentry_init, capture_events):
+    def before_send(event, hint):
+        event.setdefault("extra", {})["password"] = "hunter2"
+        return event
+
+    sentry_init(before_send=before_send)
+    events = capture_events()
+
+    capture_message("hi")
+
+    (event,) = events
+    assert event["extra"]["password"] == "hunter2"
+
+
+def test_scrub_after_before_send_returning_same_event(sentry_init, capture_events):
+    retained = {}
+
+    def before_send(event, hint):
+        event.setdefault("extra", {})["password"] = "hunter2"
+        retained["event"] = event
+        return event
+
+    sentry_init(scrub_after_before_send=True, before_send=before_send)
+    events = capture_events()
+
+    capture_message("hi")
+
+    (event,) = events
+    assert event["extra"]["password"] == "[Filtered]"
+    assert event["_meta"]["extra"]["password"] == {"": {"rem": [["!config", "s"]]}}
+
+    # The object the callback kept a reference to must not be modified.
+    assert retained["event"]["extra"]["password"] == "hunter2"
+    assert "_meta" not in retained["event"]
+
+
+def test_scrub_after_before_send_returning_new_event(sentry_init, capture_events):
+    retained = {}
+
+    def before_send(event, hint):
+        new_event = dict(event)
+        new_event["extra"] = {"diagnostics": "keep-me", "token": "abc123"}
+        retained["event"] = new_event
+        return new_event
+
+    sentry_init(scrub_after_before_send=True, before_send=before_send)
+    events = capture_events()
+
+    capture_message("hi")
+
+    (event,) = events
+    assert event["extra"] == {"diagnostics": "keep-me", "token": "[Filtered]"}
+    assert event["_meta"]["extra"]["token"] == {"": {"rem": [["!config", "s"]]}}
+
+    # The dict the callback returned and kept must not be modified.
+    assert retained["event"]["extra"] == {
+        "diagnostics": "keep-me",
+        "token": "abc123",
+    }
+    assert "_meta" not in retained["event"]
+
+
+def test_scrub_after_before_send_dropped_event(sentry_init, capture_events):
+    sentry_init(scrub_after_before_send=True, before_send=lambda event, hint: None)
+    events = capture_events()
+
+    capture_message("dropped")
+
+    assert events == []

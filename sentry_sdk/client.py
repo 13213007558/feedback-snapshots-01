@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import platform
@@ -1020,6 +1021,23 @@ class _Client(BaseClient):
                     )
 
             event = new_event
+
+        if event is not None and self.options["scrub_after_before_send"]:
+            event_scrubber = self.options["event_scrubber"]
+            if event_scrubber:
+                # Scrub a copy so that objects the before_send callback kept
+                # a reference to are not modified.
+                event = cast("Event", copy.deepcopy(event))
+                event_scrubber.scrub_event(event)
+                event = cast(
+                    "Event",
+                    serialize(
+                        cast("Dict[str, Any]", event),
+                        max_request_body_size=self.options.get("max_request_body_size"),
+                        max_value_length=self.options.get("max_value_length"),
+                        custom_repr=self.options.get("custom_repr"),
+                    ),
+                )
 
         return event
 
