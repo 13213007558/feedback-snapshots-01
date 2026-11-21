@@ -1,0 +1,4 @@
+Add an approval-safe provenance summary of an installation plan. The summary
+records only the source type, package name and version, and content evidence
+(archive hashes or the resolved VCS commit), so access credentials embedded in
+package URLs and local machine paths never reach material stored for approval.
