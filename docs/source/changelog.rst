@@ -6,6 +6,9 @@ Dev
 
 Enhancements
 
+- Add ``path_display=`` to ``Callback`` so bulk and asynchronous transfers can
+  report children under approved names without changing the real paths.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 

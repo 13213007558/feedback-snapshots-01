@@ -1,3 +1,6 @@
+import os
+from collections.abc import Mapping
+from copy import copy
 from functools import wraps
 
 
@@ -20,13 +23,31 @@ class Callback:
     hooks: dict or None
         A dict of named functions to be called on each update. The signature
         of these must be ``f(size, value, **kwargs)``
+    path_display: mapping or callable, optional
+        Sanitize the paths of child transfers for progress reporting.
+
+        If a mapping, only paths present in it are shown, using the mapped
+        string; every other path is omitted from events. If callable, it is
+        applied to each path and must return the string to show, or ``None``
+        to omit the path. The real paths continue to be used for the transfer
+        itself; child events receive the approved names as the ``source`` and
+        ``destination`` keyword arguments.
     """
 
-    def __init__(self, size=None, value=0, hooks=None, **kwargs):
+    #: Default display policy; subclasses may override it.
+    path_display = None
+
+    def __init__(self, size=None, value=0, hooks=None, path_display=None, **kwargs):
         self.size = size
         self.value = value
         self.hooks = hooks or {}
         self.kw = kwargs
+        if path_display is not None:
+            if not (callable(path_display) or isinstance(path_display, Mapping)):
+                raise TypeError("path_display must be a mapping or callable")
+            self.path_display = path_display
+        # Set only on child callbacks; never contains the real paths.
+        self._display_kw = {}
 
     def __enter__(self):
         return self
@@ -68,7 +89,68 @@ class Callback:
         """
         self.branch(path_1, path_2, kwargs)
         # mutate kwargs so that we can force the caller to pass "callback=" explicitly
-        return kwargs.pop("callback", DEFAULT_CALLBACK)
+        child = kwargs.pop("callback", None)
+        if child is None:
+            child = DEFAULT_CALLBACK
+        return self._ensure_display(child, path_1, path_2)
+
+    def _ensure_display(self, child, path_1, path_2):
+        """Give ``child`` the approved names, copying it if needed."""
+        if (
+            self.path_display is not None
+            and child is not DEFAULT_CALLBACK
+            and isinstance(child, Callback)
+            and not child.__dict__.get("_display_kw")
+        ):
+            # Even an explicitly supplied child only gets the approved names:
+            # the real paths of the transfer stay with the filesystem calls.
+            child = self._display_child(child, path_1, path_2)
+        return child
+
+    def __copy__(self):
+        # ``__getattr__`` makes every missing attribute look present, which
+        # breaks copy.copy's state restoration; copy the state explicitly.
+        clone = object.__new__(type(self))
+        clone.__dict__ = self.__dict__.copy()
+        return clone
+
+    def display_path(self, path):
+        """Return the approved display name for ``path``.
+
+        ``None`` means the path is not approved for reporting and must be
+        omitted from public events.
+        """
+        if self.path_display is None:
+            return None
+        if isinstance(path, os.PathLike):
+            path = os.fspath(path)
+        if isinstance(self.path_display, Mapping):
+            name = self.path_display.get(path)
+        else:
+            name = self.path_display(path)
+        if name is None:
+            return None
+        if not isinstance(name, str):
+            raise TypeError("path_display values must be strings or None")
+        return name
+
+    def _display_child(self, child, path_1, path_2):
+        fields = {}
+        for key, path in (("source", path_1), ("destination", path_2)):
+            name = self.display_path(path)
+            if name is not None:
+                fields[key] = name
+        if not isinstance(child, Callback):
+            return child
+        child = copy(child)
+        if child.__dict__.get("path_display") is None and (
+            getattr(type(child), "path_display", None) is None
+        ):
+            # Keep sanitizing nested transfers of a child built by a
+            # subclass that does not know about path_display itself.
+            child.path_display = self.path_display
+        child._display_kw = fields
+        return child
 
     def branch_coro(self, fn):
         """
@@ -78,6 +160,8 @@ class Callback:
         @wraps(fn)
         async def func(path1, path2: str, **kwargs):
             with self.branched(path1, path2, **kwargs) as child:
+                # Covers callbacks that override ``branched`` themselves.
+                child = self._ensure_display(child, path1, path2)
                 return await fn(path1, path2, callback=child, **kwargs)
 
         return func
@@ -138,6 +222,12 @@ class Callback:
             return
         kw = self.kw.copy()
         kw.update(kwargs)
+        if self.path_display is not None:
+            # The approved names are the only path fields allowed to leave;
+            # drop any real path a backend passes in its own kwargs.
+            kw.pop("source", None)
+            kw.pop("destination", None)
+            kw.update(self.__dict__.get("_display_kw", {}))
         if hook_name:
             if hook_name not in self.hooks:
                 return
@@ -180,6 +270,15 @@ class Callback:
         -------
 
         """
+        if self.path_display is not None:
+            # Give each child its own callback object, counters and approved
+            # names. The child still receives the real paths as arguments.
+            child = kwargs.get("callback")
+            if not isinstance(child, Callback):
+                child = copy(self)
+                child.size = None
+                child.value = 0
+            kwargs["callback"] = self._display_child(child, path_1, path_2)
         return None
 
     def no_op(self, *_, **__):
@@ -316,6 +415,13 @@ class TqdmCallback(Callback):
         if self.tqdm is not None:
             self.tqdm.close()
             self.tqdm = None
+
+    def __copy__(self):
+        # A displayed child gets its own progress bar; sharing the parent's
+        # would make closing the child close the parent's bar too.
+        clone = super().__copy__()
+        clone.tqdm = None
+        return clone
 
     def __del__(self):
         return self.close()

@@ -18,6 +18,7 @@ import pytest
 import fsspec
 import fsspec.asyn
 from fsspec.asyn import _run_coros_in_chunks
+from fsspec.callbacks import Callback
 
 
 def test_get_lock_is_thread_safe(monkeypatch):
@@ -611,6 +612,190 @@ def test_pathlike_recursive_source(tmp_path, method):
     if method == "mv":
         # mv removes the source after copying it, which expands the path again
         assert not any(name.startswith("/source/") for name in fs.files)
+
+
+class AsyncTransferFS(fsspec.asyn.AsyncFileSystem):
+    """Async backend whose transfers finish in a caller-controlled order."""
+
+    cachable = False
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.files = {}
+        self.release = {}
+        self.started = []
+
+    async def _info(self, path, **kwargs):
+        if path in self.files:
+            return {"name": path, "size": len(self.files[path]), "type": "file"}
+        if any(f.startswith(path + "/") for f in self.files):
+            return {"name": path, "size": 0, "type": "directory"}
+        raise FileNotFoundError(path)
+
+    async def _ls(self, path, detail=True, **kwargs):
+        names = {
+            f"{path}/{f[len(path) + 1 :].split('/')[0]}"
+            for f in self.files
+            if f.startswith(path + "/")
+        }
+        out = [await self._info(name) for name in sorted(names)]
+        return out if detail else [info["name"] for info in out]
+
+    async def _makedirs(self, path, exist_ok=False):
+        pass
+
+    async def _get_file(self, rpath, lpath, callback=None, **kwargs):
+        self.started.append(rpath)
+        if rpath in self.release:
+            await self.release[rpath].wait()
+        if rpath not in self.files:
+            raise FileNotFoundError(rpath)
+        callback = Callback.as_callback(callback)
+        data = self.files[rpath]
+        callback.set_size(len(data))
+        for start in range(0, len(data), 5):
+            callback.relative_update(len(data[start : start + 5]))
+        Path(lpath).write_bytes(data)
+
+    async def _put_file(self, lpath, rpath, callback=None, **kwargs):
+        self.started.append(rpath)
+        if rpath in self.release:
+            await self.release[rpath].wait()
+        callback = Callback.as_callback(callback)
+        data = Path(lpath).read_bytes()
+        callback.set_size(len(data))
+        for start in range(0, len(data), 5):
+            callback.relative_update(len(data[start : start + 5]))
+        self.files[rpath] = data
+
+
+class PublicEvents:
+    """Records hook payloads restricted to the fields a public board may see."""
+
+    FIELDS = {"source", "destination"}
+
+    def __init__(self):
+        self.events = []
+        self._lock = threading.Lock()
+
+    def __call__(self, size, value, **kwargs):
+        with self._lock:
+            self.events.append(
+                {"size": size, "value": value}
+                | {k: v for k, v in kwargs.items() if k in self.FIELDS}
+            )
+
+    def named(self, source):
+        with self._lock:
+            return [e for e in self.events if e.get("source") == source]
+
+
+def _async_public_name(path):
+    return "job/" + os.path.basename(str(path))
+
+
+def test_async_get_public_names_and_progress(tmp_path):
+    fs = AsyncTransferFS()
+    payloads = {"bucket/reports/alpha.csv": b"a" * 10, "beta.csv": b"b" * 20}
+    fs.files = dict(payloads)
+    events = PublicEvents()
+    callback = Callback(
+        hooks={"progress": events},
+        path_display={k: _async_public_name(k) for k in payloads},
+    )
+    targets = [str(tmp_path / "alpha.csv"), str(tmp_path / "beta.csv")]
+
+    asyncio.run(
+        fs._get(list(payloads), targets, recursive=False, callback=callback)
+    )
+
+    assert events.named("job/alpha.csv")
+    assert events.named("job/beta.csv")
+    assert all("bucket" not in str(e) for e in events.events)
+    assert all(str(tmp_path) not in str(e) for e in events.events)
+    alpha = events.named("job/alpha.csv")
+    assert (alpha[0]["size"], alpha[0]["value"]) == (10, 0)
+    assert alpha[-1]["value"] == 10
+    assert events.named("job/beta.csv")[-1]["value"] == 20
+
+
+def test_async_get_concurrent_subtasks_keep_their_own_names(tmp_path):
+    fs = AsyncTransferFS()
+    fs.files = {"remote/a.dat": b"a" * 10, "remote/b.dat": b"b" * 10}
+    fs.release = {"remote/a.dat": asyncio.Event(), "remote/b.dat": asyncio.Event()}
+    events = PublicEvents()
+    callback = Callback(hooks={"progress": events}, path_display=_async_public_name)
+    targets = [str(tmp_path / "a.dat"), str(tmp_path / "b.dat")]
+
+    async def run():
+        task = asyncio.ensure_future(
+            fs._get(["remote/a.dat", "remote/b.dat"], targets, callback=callback)
+        )
+        while len(fs.started) < 2:
+            await asyncio.sleep(0)
+        fs.release["remote/b.dat"].set()
+        await asyncio.sleep(0)
+        fs.release["remote/a.dat"].set()
+        await task
+
+    asyncio.run(run())
+
+    # Both child callbacks were live at the same time; neither shows the
+    # other's name nor the remote paths.
+    assert events.named("job/a.dat")
+    assert events.named("job/b.dat")
+    for name, size in (("job/a.dat", 10), ("job/b.dat", 10)):
+        child = events.named(name)
+        assert {e.get("destination") for e in child} == {
+            "job/" + os.path.basename(name)
+        }
+        assert (child[0]["size"], child[0]["value"]) == (size, 0)
+        assert child[-1]["value"] == size
+    assert all("remote" not in str(e) for e in events.events)
+
+
+def test_async_get_failure_keeps_public_events_safe(tmp_path):
+    fs = AsyncTransferFS()
+    fs.files = {"remote/ok.dat": b"x" * 10}
+    events = PublicEvents()
+    callback = Callback(hooks={"progress": events}, path_display=_async_public_name)
+
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(
+            fs._get(
+                ["remote/ok.dat", "remote/missing-secret.dat"],
+                [str(tmp_path / "ok.dat"), str(tmp_path / "missing.dat")],
+                callback=callback,
+            )
+        )
+
+    assert all("remote" not in str(e) for e in events.events)
+    assert all("missing-secret" not in str(e) for e in events.events)
+    # The successful sibling still publishes its approved name and progress.
+    ok = events.named("job/ok.dat")
+    assert ok and ok[-1]["value"] == 10
+
+
+def test_async_put_public_names(tmp_path):
+    fs = AsyncTransferFS()
+    source = tmp_path / "internal-name.bin"
+    source.write_bytes(b"z" * 15)
+    events = PublicEvents()
+    callback = Callback(hooks={"progress": events}, path_display=_async_public_name)
+
+    asyncio.run(
+        fs._put(
+            [str(source)],
+            ["bucket/internal-name.bin"],
+            callback=callback,
+        )
+    )
+
+    child = events.named("job/internal-name.bin")
+    assert child
+    assert {e.get("destination") for e in child} == {"job/internal-name.bin"}
+    assert str(tmp_path) not in str(events.events)
+    assert child[0]["size"] == 15 and child[-1]["value"] == 15
 
 
 # ---------------------------------------------------------------------------

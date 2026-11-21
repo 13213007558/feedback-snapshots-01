@@ -446,6 +446,24 @@ See the docstrings in the callbacks module for further details.
 ``fsspec.callbacks.TqdmCallback`` can be used to display a progress bar using
 tqdm.
 
+Child transfers (each file in a bulk ``get``/``put``) can be reported under an
+approved name instead of the real path. Pass ``path_display=`` a mapping or a
+callable; the transfer itself keeps using the real paths:
+
+.. code-block:: python
+
+    callback = fsspec.Callback(
+        hooks={"progress": publish},
+        path_display={"/internal/secret.csv": "report.csv"},
+    )
+    fs.get("bucket/dir", "local/dir", recursive=True, callback=callback)
+
+Each child event now carries ``source`` and/or ``destination`` with the display
+names. A path that the mapping or callable does not resolve is left out of the
+event (``None`` from a callable does the same), so unapproved names are never
+published; the numeric ``size`` and ``value`` are unchanged. The same applies
+to the concurrently-built child callbacks of async backends.
+
 .. raw:: html
 
     <script data-goatcounter="https://fsspec.goatcounter.com/count"

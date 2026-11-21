@@ -5,6 +5,7 @@ import os
 import pickle
 import subprocess
 import sys
+import threading
 from collections import defaultdict
 from pathlib import Path
 
@@ -1891,6 +1892,120 @@ def test_dummy_callbacks_files_branched(tmpdir):
     fs.get(base, dest, callback=callback)
     check_events(base, dest)
     callback.events.clear()
+
+
+class PublicEventCollector:
+    """Records public progress events only; makes exposed fields explicit."""
+
+    def __init__(self, allowed=("source", "destination")):
+        self.allowed = frozenset(allowed)
+        self.events = []
+        self._lock = threading.Lock()
+
+    def __call__(self, size, value, **kwargs):
+        public = {k: v for k, v in kwargs.items() if k in self.allowed}
+        with self._lock:
+            self.events.append({"size": size, "value": value, **public})
+
+    def by_name(self, name):
+        with self._lock:
+            return [e for e in self.events if e.get("source") == name]
+
+
+def _public_name(path):
+    return "task-" + os.path.basename(str(path))
+
+
+def test_dummy_callbacks_public_names_for_bulk_transfers(tmpdir):
+    fs = DummyOpenFS()
+    src, dest, base = get_files(tmpdir, amount=2)
+    names = {str(path): _public_name(path) for path in src + dest + base}
+    events = PublicEventCollector()
+
+    callback = fsspec.Callback(hooks={"progress": events}, path_display=names)
+    fs.put(src, base, callback=callback)
+    fs.get(base, dest, callback=callback)
+
+    assert events.events, "no public progress events were reported"
+    for event in events.events:
+        assert set(event) <= {"size", "value", "source", "destination"}
+        for key in ("source", "destination"):
+            if key in event:
+                assert event[key] in names.values()
+                assert str(tmpdir) not in event[key]
+
+    # Each real file keeps its own counters, and the top-level aggregate is
+    # only "how many files finished" - both are preserved.
+    assert [e["value"] for e in events.by_name("task-src_0.txt")][:3] == [0, 10, 20]
+    assert [e["value"] for e in events.by_name("task-file_1.txt")][:3] == [0, 10, 20]
+    assert [e["value"] for e in events.by_name("task-file_1.txt")][-1] == 50
+    totals = [
+        e for e in events.events if "source" not in e and "destination" not in e
+    ]
+    assert [e["value"] for e in totals] == [0, 1, 2, 2, 3, 4]
+    assert totals[-1]["size"] == 2
+
+
+def test_dummy_callbacks_public_names_keep_real_transfer_paths(tmpdir):
+    fs = DummyOpenFS()
+    source = tmpdir / "secret-source.txt"
+    destination = tmpdir / "secret-destination.txt"
+    source.write_text("x" * 100, "utf-8")
+    events = PublicEventCollector()
+    callback = fsspec.Callback(
+        hooks={"progress": events},
+        path_display={
+            str(source): "approved-source.txt",
+            str(destination): "approved-destination.txt",
+        },
+    )
+
+    fs.put([str(source)], [str(destination)], callback=callback)
+
+    assert destination.read_text("utf-8") == "x" * 100
+    assert events.events
+    child_events = [
+        e for e in events.events if "source" in e or "destination" in e
+    ]
+    assert {e.get("source") for e in child_events} == {"approved-source.txt"}
+    assert {e.get("destination") for e in child_events} == {
+        "approved-destination.txt"
+    }
+    assert all("secret" not in str(e) for e in child_events)
+    # Progress values and the final size are the real transfer's, unchanged.
+    assert child_events[0] == {
+        "size": 100,
+        "value": 0,
+        "source": "approved-source.txt",
+        "destination": "approved-destination.txt",
+    }
+    assert child_events[-1]["value"] == 100
+    # The aggregate event carries progress only.
+    assert {
+        "size": 1,
+        "value": 1,
+    } in [{k: e[k] for k in ("size", "value")} for e in events.events]
+
+
+def test_dummy_callbacks_public_names_on_failed_transfer(tmpdir):
+    fs = DummyOpenFS()
+    src, dest, _ = get_files(tmpdir, amount=2)
+    missing = str(tmpdir / "absent.txt")
+    sources = [src[0], missing]
+    destinations = [dest[0], dest[1]]
+    events = PublicEventCollector()
+    callback = fsspec.Callback(
+        hooks={"progress": events}, path_display=_public_name
+    )
+
+    with pytest.raises(FileNotFoundError):
+        fs.get(sources, destinations, callback=callback)
+
+    # The successful sibling is still reported under its approved name.
+    assert events.by_name("task-" + os.path.basename(src[0]))
+    # A failing transfer never publishes the unapproved internal path.
+    assert all("absent" not in str(e) for e in events.events)
+    assert all("tmp" not in str(v) for e in events.events for v in e.values())
 
 
 def _clean_paths(paths, prefix=""):
