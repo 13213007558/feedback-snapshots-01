@@ -8,6 +8,14 @@ from werkzeug import exceptions
 from ._limits import RuntimeLimit
 
 
+class StorageUnavailable(exceptions.ServiceUnavailable):
+    """
+    Raised when rate limit storage is unavailable and the effective
+    :class:`~flask_limiter.StorageFailurePolicy` is
+    :attr:`~flask_limiter.StorageFailurePolicy.DENY`.
+    """
+
+
 class RateLimitExceeded(exceptions.TooManyRequests):
     """Exception raised when a rate limit is hit."""
 

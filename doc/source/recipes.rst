@@ -145,6 +145,41 @@ response from :paramref:`Limiter.limiter.on_breach` callback (if provided) will
 take priority over the response from the :paramref:`Limiter.on_breach` callback if
 there is one.
 
+Storage failure handling
+------------------------
+
+When the shared rate limit storage is briefly unavailable the extension can
+either reject affected requests or continue with the configured in-memory
+fallback. The right choice depends on the endpoint: an authentication or
+mutation endpoint should generally fail closed, while a public read-only page
+can continue with a reduced in-memory quota.
+
+Set the default on the extension and override it per endpoint::
+
+    limiter = Limiter(
+        key_func=get_remote_address,
+        storage_uri="redis://localhost:6379",
+        in_memory_fallback=["5/hour"],
+        storage_failure_policy=StorageFailurePolicy.DENY,
+    )
+
+    @app.route("/login")
+    @limiter.limit("10/minute", storage_failure_policy=StorageFailurePolicy.DENY)
+    def login():
+        ...
+
+    @app.route("/help")
+    @limiter.storage_failure_policy(StorageFailurePolicy.FALLBACK)
+    def help_page():
+        ...
+
+The policy is evaluated per request. A fallback taken by a public endpoint
+does not change how another endpoint behaves for the same storage outage, and
+all endpoints return to the shared storage once a recovery probe succeeds.
+When a policy denies requests, :class:`~flask_limiter.StorageUnavailable` is
+raised (and rendered as a ``503`` response by default) instead of silently
+allowing the request through.
+
 Meta limits
 -----------
 .. versionadded:: 3.5.0

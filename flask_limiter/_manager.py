@@ -3,17 +3,13 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 import flask
 from ordered_set import OrderedSet
 
-from ._limits import ApplicationLimit, RuntimeLimit
-from .constants import ExemptionScope
+from ._limits import ApplicationLimit, Limit, RuntimeLimit
+from .constants import ExemptionScope, StorageFailurePolicy
 from .util import get_qualified_name
-
-if TYPE_CHECKING:
-    from . import Limit
 
 
 class LimitManager:
@@ -25,6 +21,8 @@ class LimitManager:
         blueprint_limits: dict[str, OrderedSet[Limit]],
         route_exemptions: dict[str, ExemptionScope],
         blueprint_exemptions: dict[str, ExemptionScope],
+        route_storage_failure_policies: dict[str, StorageFailurePolicy | str] | None = None,
+        blueprint_storage_failure_policies: (dict[str, StorageFailurePolicy | str] | None) = None,
     ) -> None:
         self._application_limits = application_limits
         self._default_limits = default_limits
@@ -32,6 +30,8 @@ class LimitManager:
         self._blueprint_limits = blueprint_limits
         self._route_exemptions = route_exemptions
         self._blueprint_exemptions = blueprint_exemptions
+        self._route_storage_failure_policies = route_storage_failure_policies or {}
+        self._blueprint_storage_failure_policies = blueprint_storage_failure_policies or {}
         self._endpoint_hints: dict[str, OrderedSet[str]] = {}
         self._logger = logging.getLogger("flask-limiter")
 
@@ -65,6 +65,58 @@ class LimitManager:
 
     def add_blueprint_exemption(self, blueprint: str, scope: ExemptionScope) -> None:
         self._blueprint_exemptions[blueprint] = scope
+
+    def add_storage_failure_policy(self, route: str, policy: StorageFailurePolicy | str) -> None:
+        self._route_storage_failure_policies[route] = policy
+
+    def add_blueprint_storage_failure_policy(
+        self, blueprint: str, policy: StorageFailurePolicy | str
+    ) -> None:
+        self._blueprint_storage_failure_policies[blueprint] = policy
+
+    def storage_failure_policies(
+        self,
+        app: flask.Flask,
+        endpoint: str | None,
+        blueprint: str | None,
+        callable_name: str | None,
+    ) -> list[StorageFailurePolicy | str]:
+        """
+        Return the explicitly configured storage failure policies that apply to a
+        request, from the most specific route declaration to the broadest.
+        """
+        candidates: list[StorageFailurePolicy | str | None] = []
+        view_func = app.view_functions.get(endpoint or "", None)
+        name = callable_name or (get_qualified_name(view_func) if view_func else "")
+        names = [name] if name else []
+        names.extend(self._endpoint_hints.get(endpoint or "", ()))
+        for candidate in names:
+            if candidate in self._route_storage_failure_policies:
+                candidates.append(self._route_storage_failure_policies[candidate])
+        if endpoint and endpoint in self._route_storage_failure_policies:
+            candidates.append(self._route_storage_failure_policies[endpoint])
+        for blueprint_name in self._blueprint_keys(blueprint):
+            if blueprint_name in self._blueprint_storage_failure_policies:
+                candidates.append(self._blueprint_storage_failure_policies[blueprint_name])
+
+        for candidate in names:
+            for group in self._decorated_limits.get(candidate, ()):
+                candidates.append(group.storage_failure_policy)
+        if blueprint:
+            for blueprint_name in self._blueprint_keys(blueprint):
+                for group in self._blueprint_limits.get(blueprint_name, ()):
+                    candidates.append(group.storage_failure_policy)
+        for group in itertools.chain(self._default_limits, self._application_limits):
+            candidates.append(group.storage_failure_policy)
+
+        return [candidate for candidate in candidates if candidate is not None]
+
+    @staticmethod
+    def _blueprint_keys(blueprint: str | None) -> list[str]:
+        if not blueprint:
+            return []
+
+        return list(dict.fromkeys([blueprint, *blueprint.split(".")]))
 
     def add_endpoint_hint(self, endpoint: str, callable: str) -> None:
         self._endpoint_hints.setdefault(endpoint, OrderedSet()).add(callable)
@@ -215,6 +267,8 @@ class LimitManager:
                                         limit.on_breach,
                                         limit.cost,
                                         limit.shared,
+                                        None,
+                                        limit.storage_failure_policy,
                                     )
                                     for limit in limit_group
                                 ]

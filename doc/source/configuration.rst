@@ -188,6 +188,19 @@ take priority.
 
      - A comma (or some other delimiter) separated string
        that will be used when the configured storage is down.
+   * - .. data:: RATELIMIT_STORAGE_FAILURE_POLICY
+
+       Constructor argument: :paramref:`~flask_limiter.Limiter.storage_failure_policy`
+
+     - Default behavior when the configured storage is unavailable. One of
+       ``deny`` (reject affected requests with ``503``) or ``fallback``
+       (evaluate the request against the configured
+       :data:`RATELIMIT_IN_MEMORY_FALLBACK` limits). If unset, the legacy
+       behavior of :data:`RATELIMIT_IN_MEMORY_FALLBACK_ENABLED` is preserved.
+       Pick per endpoint with
+       :paramref:`~flask_limiter.Limiter.storage_failure_policy` or the
+       ``storage_failure_policy`` argument of
+       :meth:`~flask_limiter.Limiter.limit`.
    * - .. data:: RATELIMIT_FAIL_ON_FIRST_BREACH
 
        Constructor argument: :paramref:`~flask_limiter.Limiter.fail_on_first_breach`

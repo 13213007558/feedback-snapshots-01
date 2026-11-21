@@ -3,6 +3,17 @@
 Changelog
 =========
 
+Unreleased
+----------
+* Feature
+
+  * Add per endpoint storage failure handling via
+    ``storage_failure_policy``. Endpoints can choose between
+    ``StorageFailurePolicy.DENY`` (reject with a ``503``) and
+    ``StorageFailurePolicy.FALLBACK`` (use the configured in-memory limits)
+    while the shared storage is unavailable. The decision is made per request
+    so a degrading public endpoint does not relax authenticated endpoints.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

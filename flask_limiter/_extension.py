@@ -13,6 +13,7 @@ import time
 import warnings
 import weakref
 from collections import defaultdict
+from collections.abc import Mapping
 from functools import partial
 from typing import overload
 
@@ -41,8 +42,14 @@ from ._typing import (
     Sequence,
     cast,
 )
-from .constants import MAX_BACKEND_CHECKS, ConfigVars, ExemptionScope, HeaderNames
-from .errors import RateLimitExceeded
+from .constants import (
+    MAX_BACKEND_CHECKS,
+    ConfigVars,
+    ExemptionScope,
+    HeaderNames,
+    StorageFailurePolicy,
+)
+from .errors import RateLimitExceeded, StorageUnavailable
 from .util import get_qualified_name
 
 
@@ -109,12 +116,16 @@ class LimiterContext:
     view_rate_limits: list[RequestLimit] = dataclasses.field(default_factory=list)
     conditional_deductions: dict[RuntimeLimit, list[str]] = dataclasses.field(default_factory=dict)
     seen_limits: OrderedSet[RuntimeLimit] = dataclasses.field(default_factory=OrderedSet)
+    storage_failure_policy: StorageFailurePolicy | None = None
+    use_fallback_storage: bool = False
 
     def reset(self) -> None:
         self.view_rate_limit = None
         self.view_rate_limits.clear()
         self.conditional_deductions.clear()
         self.seen_limits.clear()
+        self.storage_failure_policy = None
+        self.use_fallback_storage = False
 
 
 class Limiter:
@@ -171,6 +182,14 @@ class Limiter:
      limits to apply when the storage is down.
     :param in_memory_fallback_enabled: fall back to in memory storage when the main storage is down
      and inherits the original limits. default ``False``
+    :param storage_failure_policy: the default behavior for requests when the configured storage
+     is unavailable. One of :attr:`~flask_limiter.StorageFailurePolicy.DENY` (reject requests),
+     :attr:`~flask_limiter.StorageFailurePolicy.FALLBACK` (use the configured in-memory limits) or
+     ``None`` to preserve the legacy :paramref:`in_memory_fallback_enabled` behavior. A mapping of
+     endpoint (or blueprint) names to policies or a callable receiving the endpoint name can be
+     used to select the behavior per request without decorating each view. Individual endpoints
+     can also override this with :meth:`storage_failure_policy` or the corresponding argument on
+     :meth:`limit` / :meth:`shared_limit`.
     :param retry_after: Allows configuration of how the value of the `Retry-After` header is
      rendered. One of `http-date` or `delta-seconds`.
     :param key_prefix: prefix prepended to rate limiter keys and app context global names.
@@ -206,6 +225,13 @@ class Limiter:
         on_meta_breach: Callable[[RequestLimit], flask.wrappers.Response | None] | None = None,
         in_memory_fallback: list[str] | None = None,
         in_memory_fallback_enabled: bool | None = None,
+        storage_failure_policy: (
+            StorageFailurePolicy
+            | str
+            | Mapping[str, StorageFailurePolicy | str]
+            | Callable[[str], StorageFailurePolicy | str | None]
+            | None
+        ) = None,
         retry_after: str | None = None,
         key_prefix: str = "",
         request_identifier: Callable[..., str] | None = None,
@@ -228,6 +254,8 @@ class Limiter:
         self._in_memory_fallback_enabled = in_memory_fallback_enabled or (
             in_memory_fallback and len(in_memory_fallback) > 0
         )
+        self._storage_failure_policy = storage_failure_policy
+        self.__validate_storage_failure_policy(storage_failure_policy)
         self._route_exemptions: dict[str, ExemptionScope] = {}
         self._blueprint_exemptions: dict[str, ExemptionScope] = {}
         self._request_filters: list[Callable[[], bool]] = []
@@ -303,6 +331,7 @@ class Limiter:
         self._storage: Storage | None = None
         self._limiter: RateLimiter | None = None
         self._storage_dead = False
+        self._fallback_storage: MemoryStorage | None = None
         self._fallback_limiter: RateLimiter | None = None
 
         self.__check_backend_count = 0
@@ -318,6 +347,8 @@ class Limiter:
             blueprint_limits={},
             route_exemptions=self._route_exemptions,
             blueprint_exemptions=self._blueprint_exemptions,
+            route_storage_failure_policies={},
+            blueprint_storage_failure_policies={},
         )
 
         if app:
@@ -349,6 +380,10 @@ class Limiter:
 
         if self._swallow_errors is None:
             self._swallow_errors = bool(config.get(ConfigVars.SWALLOW_ERRORS, False))
+
+        if self._storage_failure_policy is None:
+            self._storage_failure_policy = config.get(ConfigVars.STORAGE_FAILURE_POLICY)
+            self.__validate_storage_failure_policy(self._storage_failure_policy)
 
         if self._fail_on_first_breach is None:
             self._fail_on_first_breach = bool(config.get(ConfigVars.FAIL_ON_FIRST_BREACH, True))
@@ -529,6 +564,7 @@ class Limiter:
         cost: int | Callable[[], int] = 1,
         scope: str | Callable[[str], str] | None = None,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        storage_failure_policy: StorageFailurePolicy | str | None = None,
     ) -> RouteLimit:
         """
         Decorator to be used for rate limiting individual routes or blueprints.
@@ -558,6 +594,9 @@ class Limiter:
          as an integer (Default: ``1``).
         :param scope: a string or callable that returns a string for further categorizing the rate
          limiting scope. This scope is combined with the current endpoint of the request.
+        :param storage_failure_policy: how requests for this route should behave when the rate
+         limit storage is unavailable. ``None`` inherits the extension level policy. See
+         :class:`~flask_limiter.StorageFailurePolicy`.
 
 
         Changes
@@ -590,6 +629,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            storage_failure_policy=storage_failure_policy,
         )
 
     def shared_limit(
@@ -607,6 +647,7 @@ class Limiter:
         on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
         cost: int | Callable[[], int] = 1,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        storage_failure_policy: StorageFailurePolicy | str | None = None,
     ) -> RouteLimit:
         """
         decorator to be applied to multiple routes sharing the same rate limit.
@@ -634,6 +675,9 @@ class Limiter:
          embedded into the :exc:`RateLimitExceeded` exception raised.
         :param cost: The cost of a hit or a function that takes no parameters and returns the cost
          as an integer (default: ``1``).
+        :param storage_failure_policy: how requests for this route should behave when the rate
+         limit storage is unavailable. ``None`` inherits the extension level policy. See
+         :class:`~flask_limiter.StorageFailurePolicy`.
         """
 
         return RouteLimit(
@@ -651,6 +695,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            storage_failure_policy=storage_failure_policy,
         )
 
     @overload
@@ -755,6 +800,89 @@ class Limiter:
 
         return fn
 
+    @classmethod
+    def __validate_storage_failure_policy(cls, policy: object) -> None:
+        if policy is None or callable(policy):
+            return
+        if isinstance(policy, Mapping):
+            for value in policy.values():
+                cls.__normalize_storage_failure_policy(value)
+            return
+        cls.__normalize_storage_failure_policy(policy)
+
+    @classmethod
+    def __policy_for_endpoint(
+        cls,
+        policy: object,
+        endpoint: str | None,
+        blueprint: str | None,
+    ) -> StorageFailurePolicy | None:
+        if isinstance(policy, Mapping):
+            for key in (endpoint, blueprint, "*"):
+                if key is not None and key in policy:
+                    return cls.__normalize_storage_failure_policy(policy[key])
+            return None
+        if callable(policy):
+            return cls.__normalize_storage_failure_policy(policy(endpoint or ""))
+        return cls.__normalize_storage_failure_policy(policy)
+
+    @staticmethod
+    def __normalize_storage_failure_policy(
+        policy: object,
+    ) -> StorageFailurePolicy | None:
+        if policy is None or isinstance(policy, StorageFailurePolicy):
+            return policy
+        if isinstance(policy, str):
+            aliases = {
+                "deny": StorageFailurePolicy.DENY,
+                "fail_closed": StorageFailurePolicy.DENY,
+                "fallback": StorageFailurePolicy.FALLBACK,
+                "fail_open": StorageFailurePolicy.FALLBACK,
+            }
+            normalized = aliases.get(policy.strip().lower())
+            if normalized is not None:
+                return normalized
+        raise ConfigurationError(
+            "Invalid storage failure policy %r. Expected one of "
+            "'deny', 'fail_closed', 'fallback', 'fail_open'" % (policy,)
+        )
+
+    def storage_failure_policy(
+        self,
+        policy: StorageFailurePolicy | str,
+    ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+        """
+        Decorator to declare how requests to a route (or all routes in a
+        :class:`flask.Blueprint`) should behave when the rate limit storage is
+        unavailable.
+
+        This is useful when the policy can not be attached to a specific
+        :meth:`limit`::
+
+            @app.route("/help")
+            @limiter.storage_failure_policy(StorageFailurePolicy.FALLBACK)
+            def help_page():
+                ...
+
+        :param policy: :attr:`~flask_limiter.StorageFailurePolicy.DENY` to reject
+         requests while the storage is unavailable or
+         :attr:`~flask_limiter.StorageFailurePolicy.FALLBACK` to use the configured
+         in-memory limits.
+        """
+        normalized = self.__normalize_storage_failure_policy(policy)
+        assert normalized is not None
+
+        def decorator(obj: Callable[P, R] | flask.Blueprint) -> Callable[P, R]:
+            if isinstance(obj, flask.Blueprint):
+                self.limit_manager.add_blueprint_storage_failure_policy(obj.name, normalized)
+
+                return cast(Callable[P, R], obj)
+            self.limit_manager.add_storage_failure_policy(get_qualified_name(obj), normalized)
+
+            return obj
+
+        return decorator
+
     def __configure_fallbacks(self, app: flask.Flask, strategy: str) -> None:
         config = app.config
         fallback_enabled = config.get(ConfigVars.IN_MEMORY_FALLBACK_ENABLED, False)
@@ -775,8 +903,15 @@ class Limiter:
             self._in_memory_fallback_enabled = fallback_enabled or len(self._in_memory_fallback) > 0
 
         if self._in_memory_fallback_enabled:
+            self.__ensure_fallback_limiter(strategy)
+
+    def __ensure_fallback_limiter(self, strategy: str | None = None) -> RateLimiter:
+        if self._fallback_limiter is None:
             self._fallback_storage = MemoryStorage()
-            self._fallback_limiter = STRATEGIES[strategy](self._fallback_storage)
+            self._fallback_limiter = STRATEGIES[strategy or cast(str, self._strategy)](
+                self._fallback_storage
+            )
+        return self._fallback_limiter
 
     def __should_check_backend(self) -> bool:
         if self.__check_backend_count > MAX_BACKEND_CHECKS:
@@ -815,13 +950,20 @@ class Limiter:
         Instance of the rate limiting strategy used for performing rate limiting.
         """
 
-        if self._storage_dead and self._in_memory_fallback_enabled:
-            limiter = self._fallback_limiter
+        context = self.__current_context()
+        if context and context.use_fallback_storage:
+            limiter = self.__ensure_fallback_limiter()
         else:
             limiter = self._limiter
         assert limiter
 
         return limiter
+
+    def __current_context(self) -> LimiterContext | None:
+        try:
+            return self.context
+        except RuntimeError:
+            return None
 
     @property
     def current_limit(self) -> RequestLimit | None:
@@ -882,7 +1024,11 @@ class Limiter:
                 try:
                     self.limiter.hit(lim.limit, *args, cost=lim.deduction_amount)
                 except Exception as err:
-                    if self._swallow_errors:
+                    if isinstance(err, StorageUnavailable):
+                        raise err
+                    if self.__handle_storage_failure(err):
+                        self.limiter.hit(lim.limit, *args, cost=lim.deduction_amount)
+                    elif self._swallow_errors:
                         self.logger.exception("Failed to deduct rate limit. Swallowing error")
                     else:
                         raise err
@@ -933,21 +1079,113 @@ class Limiter:
                     ),
                 )
             except Exception as e:  # noqa: E722
-                if self._in_memory_fallback_enabled and not self._storage_dead:
-                    self.logger.warning(
-                        "Rate limit storage unreachable - falling back to in-memory storage"
-                    )
-                    self._storage_dead = True
+                if isinstance(e, StorageUnavailable):
+                    raise e
+                if self.__handle_storage_failure(e):
                     response = self.__inject_headers(response)
+                elif self._swallow_errors:
+                    self.logger.exception("Failed to update rate limit headers. Swallowing error")
                 else:
-                    if self._swallow_errors:
-                        self.logger.exception(
-                            "Failed to update rate limit headers. Swallowing error"
-                        )
-                    else:
-                        raise e
+                    raise e
 
         return response
+
+    def __handle_storage_failure(self, error: Exception) -> bool:
+        """
+        React to a storage failure outside of the limit evaluation path (header
+        rendering or conditional deduction).
+
+        :return: ``True`` if the caller should retry against the in-memory
+         fallback storage. Raises :class:`StorageUnavailable` when the current
+         endpoint is configured to fail closed.
+        """
+        if self._storage_dead:
+            if self.context.storage_failure_policy == StorageFailurePolicy.DENY:
+                raise StorageUnavailable("Rate limit storage is unavailable") from error
+            return self.context.use_fallback_storage
+
+        policy = self.context.storage_failure_policy
+        if policy is None:
+            policy = self._storage_failure_policy
+        if policy == StorageFailurePolicy.DENY:
+            self._storage_dead = True
+            raise StorageUnavailable("Rate limit storage is unavailable") from error
+        if policy != StorageFailurePolicy.FALLBACK and not self._in_memory_fallback_enabled:
+            return False
+
+        self.logger.warning("Rate limit storage unreachable - falling back to in-memory storage")
+        self._storage_dead = True
+        self.__ensure_fallback_limiter()
+        self.context.use_fallback_storage = True
+
+        return True
+
+    def __resolve_storage_failure_policy(
+        self,
+        endpoint: str | None,
+        blueprint: str | None,
+        callable_name: str | None,
+        limits: Sequence[RuntimeLimit] = (),
+    ) -> StorageFailurePolicy | None:
+        policies: list[StorageFailurePolicy] = []
+        for candidate in self.limit_manager.storage_failure_policies(
+            flask.current_app, endpoint, blueprint, callable_name
+        ):
+            normalized = self.__normalize_storage_failure_policy(candidate)
+            if normalized is not None:
+                policies.append(normalized)
+        for limit in limits:
+            normalized = self.__normalize_storage_failure_policy(limit.storage_failure_policy)
+            if normalized is not None:
+                policies.append(normalized)
+        if StorageFailurePolicy.DENY in policies:
+            return StorageFailurePolicy.DENY
+        if StorageFailurePolicy.FALLBACK in policies:
+            return StorageFailurePolicy.FALLBACK
+
+        default_policy = self.__policy_for_endpoint(
+            self._storage_failure_policy, endpoint, blueprint
+        )
+        if default_policy is not None:
+            return default_policy
+        if self._in_memory_fallback_enabled:
+            return StorageFailurePolicy.FALLBACK
+
+        return None
+
+    def __storage_recovered(self) -> bool:
+        if not self.__should_check_backend():
+            return False
+        try:
+            healthy = bool(self._storage and self._storage.check())
+        except Exception:
+            healthy = False
+        if not healthy:
+            return False
+        self.logger.info("Rate limit storage recovered")
+        self._storage_dead = False
+        self.__check_backend_count = 0
+        return True
+
+    def __use_fallback_for_request(self, policy: StorageFailurePolicy | None) -> bool:
+        """
+        Decide (and record) whether the current request should use the in-memory
+        fallback storage.
+
+        This only has an effect while the shared storage is marked as unhealthy.
+        The decision is per request: a fallback for a public endpoint must not
+        relax limits for other endpoints sharing the same process.
+        """
+        if policy != StorageFailurePolicy.FALLBACK:
+            return False
+        self.__ensure_fallback_limiter()
+
+        return True
+
+    def __fallback_limits(self, limits: Sequence[RuntimeLimit] = ()) -> list[RuntimeLimit]:
+        configured = list(itertools.chain(*[list(limit) for limit in self._in_memory_fallback]))
+
+        return configured or list(limits)
 
     def __check_all_limits_exempt(
         self,
@@ -979,21 +1217,6 @@ class Limiter:
         marked_for_limiting = name in self._marked_for_limiting or self.limit_manager.has_hints(
             endpoint or ""
         )
-        fallback_limits = []
-
-        if self._storage_dead and self._fallback_limiter:
-            if in_middleware and name in self._marked_for_limiting:
-                pass
-            else:
-                if self.__should_check_backend() and self._storage and self._storage.check():
-                    self.logger.info("Rate limit storage recovered")
-                    self._storage_dead = False
-                    self.__check_backend_count = 0
-                else:
-                    fallback_limits = list(itertools.chain(*self._in_memory_fallback))
-
-        if fallback_limits:
-            return fallback_limits
 
         defaults, decorated = self.limit_manager.resolve_limits(
             flask.current_app,
@@ -1003,10 +1226,22 @@ class Limiter:
             in_middleware,
             marked_for_limiting,
         )
-        limits = OrderedSet(defaults) - self.context.seen_limits
+        limits = list(OrderedSet(defaults) - self.context.seen_limits) + list(decorated)
         self.context.seen_limits.update(defaults)
+        policy = self.__resolve_storage_failure_policy(endpoint, blueprint, callable_name, limits)
+        self.context.storage_failure_policy = policy
 
-        return list(limits) + list(decorated)
+        if self._storage_dead:
+            if self.__storage_recovered():
+                self.context.use_fallback_storage = False
+            else:
+                self.context.use_fallback_storage = self.__use_fallback_for_request(policy)
+                if policy == StorageFailurePolicy.DENY:
+                    raise StorageUnavailable("Rate limit storage is unavailable")
+                if not (in_middleware and name in self._marked_for_limiting):
+                    return self.__fallback_limits(limits)
+
+        return limits
 
     def __evaluate_limits(self, endpoint: str, limits: list[RuntimeLimit]) -> None:
         failed_limits: list[tuple[RuntimeLimit, list[str]]] = []
@@ -1143,30 +1378,45 @@ class Limiter:
         self, callable_name: str | None = None, in_middleware: bool = True
     ) -> None:
         endpoint = self.identify_request()
+        blueprint = flask.request.blueprint
         try:
             all_limits = self.__filter_limits(
                 endpoint,
-                flask.request.blueprint,
+                blueprint,
                 callable_name,
                 in_middleware,
             )
             self.__evaluate_limits(endpoint, all_limits)
         except Exception as e:
-            if isinstance(e, RateLimitExceeded):
+            if isinstance(e, (RateLimitExceeded, StorageUnavailable)):
                 raise e
 
-            if self._in_memory_fallback_enabled and not self._storage_dead:
+            if self._storage_dead:
+                if self._swallow_errors:
+                    self.logger.exception("Failed to rate limit. Swallowing error")
+                    return
+                raise e
+
+            policy = self.__resolve_storage_failure_policy(endpoint, blueprint, callable_name)
+            self.context.storage_failure_policy = policy
+            self._storage_dead = True
+            self.context.seen_limits.clear()
+
+            if policy == StorageFailurePolicy.DENY:
+                raise StorageUnavailable("Rate limit storage is unavailable") from e
+            if policy == StorageFailurePolicy.FALLBACK or (
+                policy is None and self._in_memory_fallback_enabled
+            ):
                 self.logger.warning(
                     "Rate limit storage unreachable - falling back to in-memory storage"
                 )
-                self._storage_dead = True
-                self.context.seen_limits.clear()
+                self.context.use_fallback_storage = True
                 self._check_request_limit(callable_name=callable_name, in_middleware=in_middleware)
-            else:
-                if self._swallow_errors:
-                    self.logger.exception("Failed to rate limit. Swallowing error")
-                else:
-                    raise e
+                return
+            if self._swallow_errors:
+                self.logger.exception("Failed to rate limit. Swallowing error")
+                return
+            raise e
 
     def __release_context(self, _: BaseException | None = None) -> None:
         self.context.reset()

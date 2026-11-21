@@ -14,6 +14,7 @@ from flask.wrappers import Response
 from limits import RateLimitItem, parse_many
 
 from ._typing import Callable, Iterable, Iterator, P, R, Self, Sequence
+from .constants import StorageFailurePolicy
 from .util import get_qualified_name
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class RuntimeLimit:
     cost: Callable[[], int] | int = 1
     shared: bool = False
     meta_limits: tuple[RuntimeLimit, ...] | None = None
+    storage_failure_policy: StorageFailurePolicy | str | None = None
 
     def __post_init__(self) -> None:
         if self.methods:
@@ -154,6 +156,14 @@ class Limit:
     #: that will be the response embedded into the :exc:`RateLimitExceeded` exception
     #: raised.
     on_breach: Callable[[RequestLimit], Response | None] | None = None
+    #: How requests for this limit should behave when the rate limit storage
+    #: is unavailable. See :class:`~flask_limiter.StorageFailurePolicy`.
+    #:
+    #: - ``None``: inherit the policy configured on the extension.
+    #: - :attr:`~flask_limiter.StorageFailurePolicy.DENY`: reject the request.
+    #: - :attr:`~flask_limiter.StorageFailurePolicy.FALLBACK`: use the
+    #:   configured in-memory limits.
+    storage_failure_policy: StorageFailurePolicy | str | None = None
     #: Whether the decorated limit overrides
     #: the default limits (Default: ``True``).
     #:
@@ -213,6 +223,7 @@ class Limit:
                 cost=self.cost or 1,
                 shared=self.shared,
                 meta_limits=meta_limits,
+                storage_failure_policy=self.storage_failure_policy,
             )
 
     @property

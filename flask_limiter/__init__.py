@@ -10,8 +10,8 @@ from ._limits import (
     MetaLimit,
     RouteLimit,
 )
-from .constants import ExemptionScope, HeaderNames
-from .errors import RateLimitExceeded
+from .constants import ExemptionScope, HeaderNames, StorageFailurePolicy
+from .errors import RateLimitExceeded, StorageUnavailable
 
 __all__ = [
     "ExemptionScope",
@@ -23,6 +23,8 @@ __all__ = [
     "MetaLimit",
     "RateLimitExceeded",
     "RequestLimit",
+    "StorageFailurePolicy",
+    "StorageUnavailable",
 ]
 
 __version__ = _version.__version__

@@ -32,6 +32,7 @@ class ConfigVars:
     HEADER_RETRY_AFTER_VALUE = "RATELIMIT_HEADER_RETRY_AFTER_VALUE"
     IN_MEMORY_FALLBACK = "RATELIMIT_IN_MEMORY_FALLBACK"
     IN_MEMORY_FALLBACK_ENABLED = "RATELIMIT_IN_MEMORY_FALLBACK_ENABLED"
+    STORAGE_FAILURE_POLICY = "RATELIMIT_STORAGE_FAILURE_POLICY"
     META_LIMITS = "RATELIMIT_META"
     ON_META_BREACH = "RATELIMIT_ON_META_BREACH_CALLBACK"
 
@@ -74,3 +75,24 @@ class ExemptionScope(enum.Flag):
 
 
 MAX_BACKEND_CHECKS = 5
+
+
+class StorageFailurePolicy(enum.Enum):
+    """
+    Per endpoint behavior when the configured rate limit storage is unavailable.
+
+    - ``DENY``: reject the request instead of silently allowing it. This is the
+      safe choice for authentication and mutation endpoints.
+    - ``FALLBACK``: evaluate the request against the configured in-memory
+      fallback limits until the primary storage recovers.
+    """
+
+    #: Reject requests while the storage is unavailable.
+    DENY = "deny"
+    #: Use the configured in-memory fallback limits while the storage is unavailable.
+    FALLBACK = "fallback"
+
+    #: Alias for :attr:`DENY`
+    FAIL_CLOSED = "deny"
+    #: Alias for :attr:`FALLBACK`
+    FAIL_OPEN = "fallback"
