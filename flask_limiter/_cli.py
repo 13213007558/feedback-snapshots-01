@@ -82,6 +82,8 @@ def render_limit(limit: RuntimeLimit, simple: bool = True) -> str:
         options.append(f"deduct_when: {render_func(limit.deduct_when)}")
     if limit.exempt_when:
         options.append(f"exempt_when: {render_func(limit.exempt_when)}")
+    if limit.count_by:
+        options.append(f"count_by: {limit.count_by}")
     if options:
         render = f"{render} [option]{{{', '.join(options)}}}[/option]"
     return render

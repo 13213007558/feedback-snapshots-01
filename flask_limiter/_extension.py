@@ -27,11 +27,14 @@ from werkzeug.http import http_date, parse_date
 
 from ._compat import request_context
 from ._limits import (
+    COUNT_BY_REQUEST,
+    COUNT_BY_RULE,
     ApplicationLimit,
     Limit,
     MetaLimit,
     RouteLimit,
     RuntimeLimit,
+    validate_count_by,
 )
 from ._manager import LimitManager
 from ._typing import (
@@ -164,6 +167,11 @@ class Limiter:
      :class:`MetaLimit` that are used to control the upper limit of  a requesting client hitting
      any configured rate limit. Once a meta limit is exceeded all subsequent requests will
      raise a :class:`~flask_limiter.RateLimitExceeded` for the duration of the meta limit window.
+    :param meta_limits_count_by: how meta limits are charged when a single request breaches more
+     than one rate limit. ``"request"`` (default) charges each breached meta limit once per
+     breaching request; ``"rule"`` charges each breached meta limit once per distinct breached
+     rate limit rule. Can be overridden per :class:`MetaLimit` with
+     :paramref:`~flask_limiter.MetaLimit.count_by`.
     :param on_meta_breach: a function that will be called when a meta limit in this extension is
      breached. If the function returns an instance of :class:`flask.Response` that will be the
      response embedded into the :exc:`RateLimitExceeded` exception raised.
@@ -204,6 +212,7 @@ class Limiter:
         on_breach: Callable[[RequestLimit], flask.wrappers.Response | None] | None = None,
         meta_limits: list[str | Callable[[], str] | MetaLimit] | None = None,
         on_meta_breach: Callable[[RequestLimit], flask.wrappers.Response | None] | None = None,
+        meta_limits_count_by: str | None = None,
         in_memory_fallback: list[str] | None = None,
         in_memory_fallback_enabled: bool | None = None,
         retry_after: str | None = None,
@@ -242,6 +251,9 @@ class Limiter:
         self._fail_on_first_breach = fail_on_first_breach
         self._on_breach = on_breach
         self._on_meta_breach = on_meta_breach
+        self._meta_limits_count_by = (
+            validate_count_by(meta_limits_count_by) if meta_limits_count_by is not None else None
+        )
 
         self._key_func = key_func
         self._key_prefix = key_prefix
@@ -482,6 +494,12 @@ class Limiter:
                 if not isinstance(meta_limits, MetaLimit)
                 else meta_limits.bind(self)
             ]
+        if self._meta_limits_count_by is None:
+            configured_count_by = config.get(ConfigVars.META_LIMITS_COUNT_BY, None)
+
+            if configured_count_by is not None:
+                self._meta_limits_count_by = validate_count_by(configured_count_by)
+        self._meta_limits_count_by = self._meta_limits_count_by or COUNT_BY_REQUEST
 
         self._on_breach = self._on_breach or config.get(ConfigVars.ON_BREACH, None)
         self._on_meta_breach = self._on_meta_breach or config.get(ConfigVars.ON_META_BREACH, None)
@@ -1008,11 +1026,8 @@ class Limiter:
 
         return list(limits) + list(decorated)
 
-    def __evaluate_limits(self, endpoint: str, limits: list[RuntimeLimit]) -> None:
-        failed_limits: list[tuple[RuntimeLimit, list[str]]] = []
-        limit_for_header: RequestLimit | None = None
-        view_limits: list[RequestLimit] = []
-        meta_limits = [
+    def __meta_limits_for(self, limits: list[RuntimeLimit]) -> list[RuntimeLimit]:
+        return [
             meta_limit
             for meta_limit in itertools.chain(
                 *self._meta_limits,
@@ -1020,12 +1035,87 @@ class Limiter:
             )
             if not meta_limit.is_exempt
         ]
-        if not (
+
+    def __count_by_for(self, meta_limit: RuntimeLimit) -> str:
+        return meta_limit.count_by or self._meta_limits_count_by or COUNT_BY_REQUEST
+
+    def __meta_deduction_amount(
+        self,
+        meta_limit: RuntimeLimit,
+        failed_limits: list[tuple[RuntimeLimit, list[str], str]],
+    ) -> int:
+        """
+        Calculate how much to charge a meta limit for the limits breached in this request.
+
+        ``count_by="request"`` charges the meta limit once for the request regardless of how
+        many rules were breached. ``count_by="rule"`` charges once for each distinct breached
+        rule window (identified by the storage key, so the same shared window reached through
+        multiple routes is only charged once). Both strategies respect the meta limit's
+        configured ``cost``.
+        """
+        cost = meta_limit.deduction_amount
+
+        if self.__count_by_for(meta_limit) == COUNT_BY_RULE:
+            return cost * len({key for _, _, key in failed_limits})
+
+        return cost
+
+    def __evaluate_meta_limit(
+        self,
+        endpoint: str,
+        meta_limit: RuntimeLimit,
+        failed_limits: list[tuple[RuntimeLimit, list[str], str]],
+        seen: set[str],
+    ) -> None:
+        limit_scope = meta_limit.scope_for(endpoint, flask.request.method)
+        limit_key = meta_limit.key_func()
+        args = [limit_key, limit_scope]
+        meta_key = meta_limit.limit.key_for(*args)
+
+        if meta_key in seen:
+            return
+
+        seen.add(meta_key)
+        amount = self.__meta_deduction_amount(meta_limit, failed_limits)
+
+        if amount <= 0:
+            return
+
+        on_breach = meta_limit.on_breach or self._on_meta_breach
+        breached_meta_limit = RequestLimit(self, meta_limit.limit, args, True, meta_limit.shared)
+
+        if not self.limiter.test(meta_limit.limit, *args, cost=amount):
+            self.context.view_rate_limit = breached_meta_limit
+            self.context.view_rate_limits = [breached_meta_limit]
+            meta_breach_response = None
+
+            if on_breach:
+                try:
+                    cb_response = on_breach(breached_meta_limit)
+
+                    if isinstance(cb_response, flask.wrappers.Response):
+                        meta_breach_response = cb_response
+                except Exception as err:  # noqa
+                    if self._swallow_errors:
+                        self.logger.exception("on_meta_breach callback failed with error %s", err)
+                    else:
+                        raise err
+            raise RateLimitExceeded(meta_limit, response=meta_breach_response)
+
+        self.limiter.hit(meta_limit.limit, *args, cost=amount)
+
+    def __evaluate_limits(self, endpoint: str, limits: list[RuntimeLimit]) -> None:
+        failed_limits: list[tuple[RuntimeLimit, list[str], str]] = []
+        limit_for_header: RequestLimit | None = None
+        view_limits: list[RequestLimit] = []
+        meta_limits = self.__meta_limits_for(limits)
+        meta_exempt = bool(
             ExemptionScope.META
             & self.limit_manager.exemption_scope(
                 flask.current_app, endpoint, flask.request.blueprint
             )
-        ):
+        )
+        if not meta_exempt:
             for lim in meta_limits:
                 limit_key, scope = lim.key_func(), lim.scope_for(endpoint, None)
                 args = [limit_key, scope]
@@ -1051,7 +1141,10 @@ class Limiter:
                                 raise err
                     raise RateLimitExceeded(lim, response=meta_breach_response)
 
-        for lim in sorted(limits, key=lambda x: x.limit):
+        sorted_limits = sorted(limits, key=lambda x: x.limit)
+        stopped_at: int | None = None
+
+        for index, lim in enumerate(sorted_limits):
             if lim.is_exempt or lim.method_exempt:
                 continue
 
@@ -1085,12 +1178,40 @@ class Limiter:
                     limit_key,
                     limit_scope,
                 )
-                failed_limits.append((lim, args))
+                failed_limits.append((lim, args, lim.limit.key_for(*args)))
                 view_limits[-1].breached = True
                 limit_for_header = view_limits[-1]
 
                 if self._fail_on_first_breach:
+                    stopped_at = index
                     break
+
+        meta_breaches = list(failed_limits)
+        needs_rule_accounting = any(
+            self.__count_by_for(meta_limit) == COUNT_BY_RULE for meta_limit in meta_limits
+        )
+
+        if stopped_at is not None and needs_rule_accounting:
+            # The request is still expected to charge meta limits according to the selected
+            # ``count_by`` strategy even though evaluation stopped at the first breach. Inspect
+            # the remaining limits without deducting from them so that an already exhausted
+            # shared window or a second breached window is accounted for consistently.
+            for lim in sorted_limits[stopped_at + 1 :]:
+                if lim.is_exempt or lim.method_exempt:
+                    continue
+
+                limit_scope = lim.scope_for(endpoint, flask.request.method)
+                limit_key = lim.key_func()
+                args = [limit_key, limit_scope]
+
+                if not all(args):
+                    continue
+
+                if self._key_prefix:
+                    args = [self._key_prefix, *args]
+
+                if not self.limiter.test(lim.limit, *args, cost=lim.deduction_amount):
+                    meta_breaches.append((lim, args, lim.limit.key_for(*args)))
 
         if not limit_for_header and view_limits:
             # Pick a non shared limit over a shared one if possible
@@ -1121,19 +1242,11 @@ class Limiter:
                             raise err
 
         if failed_limits:
-            meta_limits = [
-                meta_limit
-                for meta_limit in itertools.chain(
-                    *self._meta_limits,
-                    *[list(lim[0].meta_limits) for lim in failed_limits if lim[0].meta_limits],
-                )
-                if not meta_limit.is_exempt
-            ]
-            for lim in meta_limits:
-                limit_scope = lim.scope_for(endpoint, flask.request.method)
-                limit_key = lim.key_func()
-                args = [limit_key, limit_scope]
-                self.limiter.hit(lim.limit, *args)
+            if not meta_exempt:
+                seen_meta_keys: set[str] = set()
+
+                for lim in self.__meta_limits_for([limit for limit, _, _ in meta_breaches]):
+                    self.__evaluate_meta_limit(endpoint, lim, meta_breaches, seen_meta_keys)
             raise RateLimitExceeded(
                 sorted(failed_limits, key=lambda x: x[0].limit)[0][0],
                 response=on_breach_response,

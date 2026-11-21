@@ -165,7 +165,6 @@ Consider the following application & limiter configuration::
         meta_limits=["2/hour", "4/day"],
         default_limits=["10/minute"],
     )
-
     @app.route("/fast")
     def fast():
         return "fast"
@@ -228,6 +227,45 @@ are rejected due to the ``2/hour`` meta limit.
     <title>429 Too Many Requests</title>
     <h1>Too Many Requests</h1>
     <p>2 per 1 hour</p>
+
+Counting a request that breaches multiple rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A single request can breach more than one rate limit (for example a per second
+limit and a per day limit that apply to the same route). By default a meta limit
+is charged **once per request** regardless of how many rules were breached. If
+the meta limit should instead reflect the number of distinct rules violated, set
+:paramref:`~flask_limiter.MetaLimit.count_by` to ``"rule"``::
+
+    limiter = Limiter(
+        key_func=get_remote_address,
+        meta_limits=[MetaLimit("10/day", count_by="rule")],
+    )
+
+The default can also be set for all meta limits through
+:paramref:`~flask_limiter.Limiter.meta_limits_count_by` (or
+:data:`RATELIMIT_META_COUNT_BY`)::
+
+    limiter = Limiter(
+        key_func=get_remote_address,
+        meta_limits=["2/hour", "4/day"],
+        meta_limits_count_by="rule",
+    )
+
+The two strategies differ only when a request breaches multiple distinct rule
+windows at once:
+
+- ``"request"`` deducts the meta limit's ``cost`` once for the request.
+- ``"rule"`` deducts the meta limit's ``cost`` once for each distinct breached
+  rule window. Breaching the same shared window through different routes in one
+  request still counts once.
+
+Routes exempted from meta limits (for example with
+``limiter.exempt(flags=ExemptionScope.META)``) are neither charged nor blocked by
+meta limits under either strategy. The strategy is applied consistently whether
+or not :paramref:`~flask_limiter.Limiter.fail_on_first_breach` is enabled: with
+early exit the remaining limits are inspected without being deducted, so the
+same set of breached windows is charged.
 
 Customizing the cost of a request
 ---------------------------------

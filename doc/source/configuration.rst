@@ -208,6 +208,15 @@ take priority.
        control the upper limit of a requesting client hitting any configured rate limit.
        Once a meta limit is exceeded all subsequent requests will raise a
        :class:`~flask_limiter.RateLimitExceeded` for the duration of the meta limit window.
+   * - .. data:: RATELIMIT_META_COUNT_BY
+
+       Constructor argument: :paramref:`~flask_limiter.Limiter.meta_limits_count_by`
+
+     - How meta limits are charged when a request breaches more than one rate
+       limit. ``"request"`` (default) charges once per breaching request;
+       ``"rule"`` charges once per distinct breached rate limit rule.
+       Individual :class:`~flask_limiter.MetaLimit` instances can override this
+       with :paramref:`~flask_limiter.MetaLimit.count_by`.
    * - .. data:: RATELIMIT_ON_META_BREACH_CALLBACK
 
        Constructor argument: :paramref:`~flask_limiter.Limiter.on_meta_breach`

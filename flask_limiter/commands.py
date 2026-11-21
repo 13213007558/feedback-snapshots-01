@@ -146,6 +146,11 @@ def config() -> None:
                         [render_limit(limit) for limit in itertools.chain(*limiter._meta_limits)]
                     ),
                 )
+                extension_details.add_row(
+                    None,
+                    ConfigVars.META_LIMITS_COUNT_BY,
+                    Pretty(limiter._meta_limits_count_by),
+                )
             if limiter._headers_enabled:
                 header_configs = Tree(ConfigVars.HEADERS_ENABLED)
                 header_configs.add(ConfigVars.HEADER_RESET)

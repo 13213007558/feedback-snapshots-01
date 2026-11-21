@@ -12,12 +12,51 @@ import flask
 from flask import request
 from flask.wrappers import Response
 from limits import RateLimitItem, parse_many
+from limits.errors import ConfigurationError
 
 from ._typing import Callable, Iterable, Iterator, P, R, Self, Sequence
 from .util import get_qualified_name
 
 if TYPE_CHECKING:
     from flask_limiter import Limiter, RequestLimit
+
+
+#: Count a meta limit once for each request that breaches one or more limits.
+COUNT_BY_REQUEST = "request"
+#: Count a meta limit once for each distinct rule window breached by a request.
+COUNT_BY_RULE = "rule"
+COUNT_BY_VALUES = (COUNT_BY_REQUEST, COUNT_BY_RULE)
+#: Default used when no ``count_by`` is configured.
+DEFAULT_META_LIMIT_COUNT_BY = COUNT_BY_REQUEST
+
+
+def validate_count_by(value: str) -> str:
+    """
+    Validate and normalize the ``count_by`` strategy used by meta limits.
+
+    ``"request"`` charges a meta limit once per breaching request while ``"rule"``
+    charges it once for every distinct limit window the request breaches.
+
+    :meta private:
+    """
+    normalized = value.strip().lower().replace("_", "-") if isinstance(value, str) else value
+
+    aliases = {
+        "request": COUNT_BY_REQUEST,
+        "per-request": COUNT_BY_REQUEST,
+        "rule": COUNT_BY_RULE,
+        "per-rule": COUNT_BY_RULE,
+        "breach": COUNT_BY_RULE,
+        "per-breach": COUNT_BY_RULE,
+    }
+
+    if normalized not in aliases:
+        raise ConfigurationError(
+            f"Invalid meta limit count_by strategy {value!r}. "
+            f"Expected one of: {', '.join(COUNT_BY_VALUES)}"
+        )
+
+    return aliases[normalized]
 
 
 @dataclasses.dataclass(eq=True, unsafe_hash=True)
@@ -39,6 +78,7 @@ class RuntimeLimit:
     cost: Callable[[], int] | int = 1
     shared: bool = False
     meta_limits: tuple[RuntimeLimit, ...] | None = None
+    count_by: str | None = None
 
     def __post_init__(self) -> None:
         if self.methods:
@@ -213,6 +253,7 @@ class Limit:
                 cost=self.cost or 1,
                 shared=self.shared,
                 meta_limits=meta_limits,
+                count_by=getattr(self, "count_by", None),
             )
 
     @property
@@ -386,6 +427,22 @@ class MetaLimit(Limit):
     #: - the key function for the :class:`Limiter` instance this meta limit
     #:   is eventually used with.
     key_function: Callable[[], str] | None = None
+    #: How a meta limit is charged when a request breaches more than one
+    #: rate limit at the same time.
+    #:
+    #: - ``"request"`` (default): the request is charged once to every
+    #:   breached meta limit, no matter how many underlying limits were breached.
+    #: - ``"rule"``: the request is charged once for each distinct breached
+    #:   rate limit rule to every breached meta limit.
+    #:
+    #: If not provided, the default configured on the :class:`Limiter`
+    #: (:paramref:`~flask_limiter.Limiter.meta_limits_count_by`) is used.
+    count_by: str | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.count_by is not None:
+            self.count_by = validate_count_by(self.count_by)
 
     @property
     def limit_by(self) -> Callable[[], str]:
