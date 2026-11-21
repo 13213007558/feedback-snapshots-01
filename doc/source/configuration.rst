@@ -31,6 +31,21 @@ take priority.
        global name. This can be useful when using a shared storage for multiple
        applications or rate limit domains. For multi-instance use cases, explicitly
        pass ``key_prefix`` keyword argument to :class:`~flask_limiter.Limiter` constructor instead.
+   * - .. data:: RATELIMIT_MISSING_IDENTITY_POLICY
+
+       Constructor argument: :paramref:`~flask_limiter.Limiter.missing_identity_policy`
+
+     - Default handling for limits whose key function returns a
+       :class:`~flask_limiter.MissingIdentity` value. One of ``skip``, ``track``
+       or ``reject``, or a mapping of missing reasons (``anonymous``,
+       ``unconfirmed``) to policies. Endpoint configuration takes precedence.
+       See :ref:`missing-identity`. Defaults to ``skip``.
+   * - .. data:: RATELIMIT_MISSING_IDENTITY_POLICIES
+
+       Constructor argument: :paramref:`~flask_limiter.Limiter.missing_identity_policy`
+
+     - Mapping form of ``RATELIMIT_MISSING_IDENTITY_POLICY``. Takes precedence
+       over it when both are set.
    * - .. data:: RATELIMIT_APPLICATION
 
        Constructor argument: :paramref:`~flask_limiter.Limiter.application_limits`

@@ -13,6 +13,12 @@ from flask import request
 from flask.wrappers import Response
 from limits import RateLimitItem, parse_many
 
+from ._identity import (
+    MissingIdentity,
+    MissingIdentityPolicy,
+    NormalizedPolicy,
+    normalize_policy,
+)
 from ._typing import Callable, Iterable, Iterator, P, R, Self, Sequence
 from .util import get_qualified_name
 
@@ -39,6 +45,7 @@ class RuntimeLimit:
     cost: Callable[[], int] | int = 1
     shared: bool = False
     meta_limits: tuple[RuntimeLimit, ...] | None = None
+    missing_identity_policy: NormalizedPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.methods:
@@ -163,6 +170,18 @@ class Limit:
     #:
     #: :meta private:
     override_defaults: bool | None = dataclasses.field(default=False, init=False)
+    #: How to handle a key function that returns one of the
+    #: :class:`~flask_limiter.MissingIdentity` values instead of a key.
+    #: Accepts a :class:`~flask_limiter.MissingIdentityPolicy`, a policy name
+    #: (``"skip"``, ``"track"`` or ``"reject"``) or a mapping of missing
+    #: reasons to policies. When not provided the extension default applies.
+    missing_identity_policy: (
+        MissingIdentityPolicy
+        | str
+        | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+        | NormalizedPolicy
+        | None
+    ) = None
     #: Weak reference to the limiter that this limit definition is bound to
     #:
     #: :meta private:
@@ -178,6 +197,8 @@ class Limit:
 
         if self.meta_limits:
             self.meta_limits = tuple(self.meta_limits)
+
+        self.missing_identity_policy = normalize_policy(self.missing_identity_policy)
 
     def __iter__(self) -> Iterator[RuntimeLimit]:
         limit_str = self.limit_provider() if callable(self.limit_provider) else self.limit_provider
@@ -213,6 +234,7 @@ class Limit:
                 cost=self.cost or 1,
                 shared=self.shared,
                 meta_limits=meta_limits,
+                missing_identity_policy=self.missing_identity_policy,
             )
 
     @property

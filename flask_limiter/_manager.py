@@ -8,12 +8,24 @@ from typing import TYPE_CHECKING
 import flask
 from ordered_set import OrderedSet
 
+from ._identity import NormalizedPolicy, normalize_policy
 from ._limits import ApplicationLimit, RuntimeLimit
 from .constants import ExemptionScope
 from .util import get_qualified_name
 
 if TYPE_CHECKING:
     from . import Limit
+
+
+def _blueprint_lineage(blueprint: str):
+    """
+    Yield the blueprint name and all of its ancestors, most specific first.
+    """
+
+    parts = blueprint.split(".")
+
+    for index in range(len(parts), 0, -1):
+        yield ".".join(parts[:index])
 
 
 class LimitManager:
@@ -33,6 +45,8 @@ class LimitManager:
         self._route_exemptions = route_exemptions
         self._blueprint_exemptions = blueprint_exemptions
         self._endpoint_hints: dict[str, OrderedSet[str]] = {}
+        self._route_identity_policies: dict[str, NormalizedPolicy] = {}
+        self._blueprint_identity_policies: dict[str, NormalizedPolicy] = {}
         self._logger = logging.getLogger("flask-limiter")
 
     @property
@@ -65,6 +79,56 @@ class LimitManager:
 
     def add_blueprint_exemption(self, blueprint: str, scope: ExemptionScope) -> None:
         self._blueprint_exemptions[blueprint] = scope
+
+    def add_route_identity_policy(self, route: str, policy: NormalizedPolicy | None) -> None:
+        normalized = normalize_policy(policy)
+
+        if normalized is not None:
+            self._route_identity_policies[route] = normalized
+
+    def add_blueprint_identity_policy(
+        self, blueprint: str, policy: NormalizedPolicy | None
+    ) -> None:
+        normalized = normalize_policy(policy)
+
+        if normalized is not None:
+            self._blueprint_identity_policies[blueprint] = normalized
+
+    def missing_identity_policies(
+        self, app: flask.Flask, endpoint: str | None, blueprint: str | None
+    ) -> list[NormalizedPolicy]:
+        """
+        Return the endpoint specific missing identity policies in priority order.
+
+        Blueprint policies are ordered from the most specific blueprint to the
+        least specific ancestor so that a nested blueprint can override a policy
+        configured on its parent.
+        """
+
+        view_func = app.view_functions.get(endpoint or "", None)
+        route_name = get_qualified_name(view_func) if view_func else ""
+        policies: list[NormalizedPolicy] = []
+
+        if route_name in self._route_identity_policies:
+            policies.append(self._route_identity_policies[route_name])
+
+        if blueprint:
+            for name in _blueprint_lineage(blueprint):
+                policy = self._blueprint_identity_policies.get(name)
+
+                if policy is None:
+                    # nested blueprints are registered under a qualified name
+                    # (``parent.child``) but policies are stored using the
+                    # blueprint's own name (``child``)
+                    blueprint_instance = app.blueprints.get(name)
+
+                    if blueprint_instance is not None:
+                        policy = self._blueprint_identity_policies.get(blueprint_instance.name)
+
+                if policy is not None:
+                    policies.append(policy)
+
+        return policies
 
     def add_endpoint_hint(self, endpoint: str, callable: str) -> None:
         self._endpoint_hints.setdefault(endpoint, OrderedSet()).add(callable)
@@ -215,6 +279,7 @@ class LimitManager:
                                         limit.on_breach,
                                         limit.cost,
                                         limit.shared,
+                                        limit.missing_identity_policy,
                                     )
                                     for limit in limit_group
                                 ]

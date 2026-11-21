@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import _version
 from ._extension import Limiter, RequestLimit
+from ._identity import MissingIdentity, MissingIdentityPolicy
 from ._limits import (
     ApplicationLimit,
     Limit,
@@ -11,7 +12,12 @@ from ._limits import (
     RouteLimit,
 )
 from .constants import ExemptionScope, HeaderNames
-from .errors import RateLimitExceeded
+from .errors import (
+    AnonymousIdentityRejected,
+    MissingIdentityError,
+    RateLimitExceeded,
+    UnconfirmedIdentityRejected,
+)
 
 __all__ = [
     "ExemptionScope",
@@ -21,8 +27,13 @@ __all__ = [
     "RouteLimit",
     "ApplicationLimit",
     "MetaLimit",
+    "MissingIdentity",
+    "MissingIdentityError",
+    "MissingIdentityPolicy",
+    "AnonymousIdentityRejected",
     "RateLimitExceeded",
     "RequestLimit",
+    "UnconfirmedIdentityRejected",
 ]
 
 __version__ = _version.__version__

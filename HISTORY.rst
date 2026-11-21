@@ -3,6 +3,20 @@
 Changelog
 =========
 
+Unreleased
+----------
+* Feature
+
+  * Allow key functions to report *why* an identity is missing by returning
+    ``MissingIdentity.ANONYMOUS`` or ``MissingIdentity.UNCONFIRMED``. Endpoints
+    can then decide how each case is handled (``skip``, ``track`` in a reserved
+    bucket, or ``reject`` with ``401``/``503``) via
+    ``Limiter.missing_identity_policy``, with the policy also governing the
+    default limits inherited by the endpoint.
+  * Evaluate the key function once per request and cache missing identity
+    results so a single external lookup drives every limit and an unconfirmed
+    request is never charged to another identity's bucket.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

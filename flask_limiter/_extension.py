@@ -26,6 +26,16 @@ from ordered_set import OrderedSet
 from werkzeug.http import http_date, parse_date
 
 from ._compat import request_context
+from ._identity import (
+    MissingIdentity,
+    MissingIdentityPolicy,
+    NormalizedPolicy,
+    is_missing_identity,
+    is_policy_spec,
+    missing_identity_key,
+    normalize_policy,
+    resolve_policy,
+)
 from ._limits import (
     ApplicationLimit,
     Limit,
@@ -42,7 +52,7 @@ from ._typing import (
     cast,
 )
 from .constants import MAX_BACKEND_CHECKS, ConfigVars, ExemptionScope, HeaderNames
-from .errors import RateLimitExceeded
+from .errors import MissingIdentityError, RateLimitExceeded, missing_identity_error
 from .util import get_qualified_name
 
 
@@ -109,12 +119,14 @@ class LimiterContext:
     view_rate_limits: list[RequestLimit] = dataclasses.field(default_factory=list)
     conditional_deductions: dict[RuntimeLimit, list[str]] = dataclasses.field(default_factory=dict)
     seen_limits: OrderedSet[RuntimeLimit] = dataclasses.field(default_factory=OrderedSet)
+    identity_cache: dict[object, object] = dataclasses.field(default_factory=dict)
 
     def reset(self) -> None:
         self.view_rate_limit = None
         self.view_rate_limits.clear()
         self.conditional_deductions.clear()
         self.seen_limits.clear()
+        self.identity_cache.clear()
 
 
 class Limiter:
@@ -176,6 +188,13 @@ class Limiter:
     :param key_prefix: prefix prepended to rate limiter keys and app context global names.
     :param request_identifier: a callable that returns the unique identity the current request.
      Defaults to :attr:`flask.Request.endpoint`
+    :param missing_identity_policy: how a limit is handled when its key function
+     returns a :class:`~flask_limiter.MissingIdentity` value. Can be a
+     :class:`~flask_limiter.MissingIdentityPolicy`, a policy name
+     (``"skip"``, ``"track"`` or ``"reject"``) or a mapping of missing reasons
+     to policies. Endpoint configuration (see
+     :meth:`~flask_limiter.Limiter.missing_identity_policy`) takes precedence.
+     Defaults to ``"skip"`` for backward compatibility.
     :param enabled: Whether the extension is enabled or not
     """
 
@@ -209,6 +228,13 @@ class Limiter:
         retry_after: str | None = None,
         key_prefix: str = "",
         request_identifier: Callable[..., str] | None = None,
+        missing_identity_policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ) = None,
         enabled: bool = True,
     ) -> None:
         self.app = app
@@ -246,6 +272,7 @@ class Limiter:
         self._key_func = key_func
         self._key_prefix = key_prefix
         self._request_identifier = request_identifier
+        self._missing_identity_policy = normalize_policy(missing_identity_policy)
 
         _default_limits = (
             [
@@ -400,6 +427,14 @@ class Limiter:
         }
         self._retry_after = self._retry_after or config.get(ConfigVars.HEADER_RETRY_AFTER_VALUE)
 
+        configured_policy = config.get(ConfigVars.MISSING_IDENTITY_POLICY, None)
+        configured_policies = config.get(ConfigVars.MISSING_IDENTITY_POLICIES, None)
+
+        if self._missing_identity_policy is None:
+            self._missing_identity_policy = normalize_policy(
+                configured_policies if configured_policies is not None else configured_policy
+            )
+
         self._key_prefix = self._key_prefix or config.get(ConfigVars.KEY_PREFIX, "")
         self._request_identifier = self._request_identifier or config.get(
             ConfigVars.REQUEST_IDENTIFIER, lambda: flask.request.endpoint or ""
@@ -529,6 +564,13 @@ class Limiter:
         cost: int | Callable[[], int] = 1,
         scope: str | Callable[[str], str] | None = None,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        missing_identity_policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ) = None,
     ) -> RouteLimit:
         """
         Decorator to be used for rate limiting individual routes or blueprints.
@@ -558,6 +600,12 @@ class Limiter:
          as an integer (Default: ``1``).
         :param scope: a string or callable that returns a string for further categorizing the rate
          limiting scope. This scope is combined with the current endpoint of the request.
+        :param missing_identity_policy: how this limit (and the default limits inherited by this
+         endpoint) is handled when the key function returns a
+         :class:`~flask_limiter.MissingIdentity` value. Endpoint configuration set with
+         :meth:`~flask_limiter.Limiter.missing_identity_policy` takes precedence; this value then
+         overrides the extension level policy.
+         See :meth:`~flask_limiter.Limiter.missing_identity_policy`.
 
 
         Changes
@@ -590,6 +638,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            missing_identity_policy=missing_identity_policy,
         )
 
     def shared_limit(
@@ -607,6 +656,13 @@ class Limiter:
         on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
         cost: int | Callable[[], int] = 1,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        missing_identity_policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ) = None,
     ) -> RouteLimit:
         """
         decorator to be applied to multiple routes sharing the same rate limit.
@@ -634,6 +690,12 @@ class Limiter:
          embedded into the :exc:`RateLimitExceeded` exception raised.
         :param cost: The cost of a hit or a function that takes no parameters and returns the cost
          as an integer (default: ``1``).
+        :param missing_identity_policy: how this limit (and the default limits inherited by this
+         endpoint) is handled when the key function returns a
+         :class:`~flask_limiter.MissingIdentity` value. Endpoint configuration set with
+         :meth:`~flask_limiter.Limiter.missing_identity_policy` takes precedence; this value then
+         overrides the extension level policy.
+         See :meth:`~flask_limiter.Limiter.missing_identity_policy`.
         """
 
         return RouteLimit(
@@ -651,6 +713,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            missing_identity_policy=missing_identity_policy,
         )
 
     @overload
@@ -742,6 +805,113 @@ class Limiter:
             return functools.partial(self.exempt, flags=flags)
 
         return obj
+
+    @overload
+    def missing_identity_policy(
+        self,
+        obj: flask.Blueprint,
+        policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ),
+    ) -> flask.Blueprint: ...
+
+    @overload
+    def missing_identity_policy(
+        self,
+        obj: Callable[P, R],
+        policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ),
+    ) -> Callable[P, R]: ...
+
+    @overload
+    def missing_identity_policy(
+        self,
+        policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ),
+    ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+    def missing_identity_policy(
+        self,
+        obj: Callable[P, R] | flask.Blueprint | None = None,
+        policy: (
+            MissingIdentityPolicy
+            | str
+            | dict[MissingIdentity | str, MissingIdentityPolicy | str]
+            | NormalizedPolicy
+            | None
+        ) = None,
+    ) -> (
+        Callable[P, R]
+        | flask.Blueprint
+        | Callable[[Callable[P, R]], Callable[P, R]]
+    ):
+        """
+        Configure how the limits that apply to an endpoint are handled when its
+        key function reports a missing identity.
+
+        The configuration applies to every limit evaluated for the endpoint,
+        including the default limits inherited from the extension - so an
+        endpoint without a decorated limit can still reject unconfirmed
+        identities.
+
+        It can be used as a decorator on a view function or applied to a
+        :class:`~flask.Blueprint` for all of its routes::
+
+            @app.route("/profile")
+            @limiter.missing_identity_policy("reject")
+            def profile():
+                ...
+
+        Or with different behavior per missing reason::
+
+            @app.route("/public")
+            @limiter.missing_identity_policy(
+                {MissingIdentity.ANONYMOUS: "track", MissingIdentity.UNCONFIRMED: "reject"}
+            )
+            def public():
+                ...
+
+        If the callable is omitted the policy is used as a decorator factory::
+
+            @limiter.missing_identity_policy("reject")
+            def profile():
+                ...
+
+        :param obj: view function or blueprint to configure.
+        :param policy: A :class:`~flask_limiter.MissingIdentityPolicy`, a policy name
+         (``"skip"``, ``"track"`` or ``"reject"``) or a mapping of
+         :class:`~flask_limiter.MissingIdentity` reasons to policies.
+        """
+        if isinstance(obj, flask.Blueprint):
+            self.limit_manager.add_blueprint_identity_policy(obj.name, policy)
+
+            return obj
+
+        if obj is not None and not is_policy_spec(obj):
+            self.limit_manager.add_route_identity_policy(get_qualified_name(obj), policy)
+
+            return obj
+
+        if is_policy_spec(obj):
+            # validate eagerly so configuration mistakes surface at import time
+            normalize_policy(obj)  # type: ignore[arg-type]
+            policy = cast(object, obj)  # type: ignore[assignment]
+
+        return functools.partial(self.missing_identity_policy, policy=policy)
 
     def request_filter(self, fn: Callable[[], bool]) -> Callable[[], bool]:
         """
@@ -1008,6 +1178,95 @@ class Limiter:
 
         return list(limits) + list(decorated)
 
+    def __identity_policies(self, endpoint: str, lim: RuntimeLimit) -> list[NormalizedPolicy]:
+        """
+        Endpoint configuration takes precedence over the extension default.
+
+        The policies are returned in priority order: view function, then nested
+        blueprints from the innermost out, then the limit's own policy, then the
+        extension default.
+        """
+
+        policies: list[NormalizedPolicy] = list(
+            self.limit_manager.missing_identity_policies(
+                flask.current_app, endpoint, flask.request.blueprint
+            )
+        )
+
+        if lim.missing_identity_policy is not None:
+            policies.append(lim.missing_identity_policy)
+
+        return policies
+
+    def __identity_for(self, lim: RuntimeLimit) -> object:
+        """
+        Evaluate ``lim``'s key function at most once per request.
+
+        The lookup is cached per key function so that a single request only
+        performs one external identity lookup, even when several limits (for
+        example default limits and decorated limits) are evaluated. The raw
+        result is cached - including :class:`~flask_limiter.MissingIdentity`
+        values - so that a temporary identity service failure cannot be
+        retried into a different result within the same request and cannot be
+        attributed to another account.
+        """
+
+        key_func = lim.key_func
+        cache = self.context.identity_cache
+
+        try:
+            cached = key_func in cache
+        except TypeError:
+            # an unusual unhashable callable - fall back to a single evaluation
+            # without caching rather than failing the request
+            return key_func()
+
+        if cached:
+            return cache[key_func]
+
+        identity = cache[key_func] = key_func()
+
+        return identity
+
+    def __limit_key(self, endpoint: str, lim: RuntimeLimit) -> tuple[str, MissingIdentity | None]:
+        """
+        Resolve the key for a limit, applying the missing identity policy.
+
+        Returns the key to use (an empty string means the limit should be
+        skipped) and the missing identity reason, if any.
+        """
+
+        identity = self.__identity_for(lim)
+
+        if not is_missing_identity(identity):
+            if not identity:
+                self.logger.error(
+                    f"Skipping limit: {lim.limit}. Empty value found in parameters."
+                )
+
+            return cast(str, identity or ""), None
+
+        reason = cast(MissingIdentity, identity)
+        action = resolve_policy(
+            reason,
+            *self.__identity_policies(endpoint, lim),
+            self._missing_identity_policy,
+        )
+
+        if action is MissingIdentityPolicy.REJECT:
+            raise missing_identity_error(reason, lim)
+
+        if action is MissingIdentityPolicy.TRACK:
+            return missing_identity_key(reason), reason
+
+        self.logger.info(
+            "Skipping limit: %s. Key function reported a missing identity (%s).",
+            lim.limit,
+            reason.value,
+        )
+
+        return "", reason
+
     def __evaluate_limits(self, endpoint: str, limits: list[RuntimeLimit]) -> None:
         failed_limits: list[tuple[RuntimeLimit, list[str]]] = []
         limit_for_header: RequestLimit | None = None
@@ -1027,7 +1286,12 @@ class Limiter:
             )
         ):
             for lim in meta_limits:
-                limit_key, scope = lim.key_func(), lim.scope_for(endpoint, None)
+                limit_key, _ = self.__limit_key(endpoint, lim)
+
+                if not limit_key:
+                    continue
+
+                scope = lim.scope_for(endpoint, None)
                 args = [limit_key, scope]
                 on_breach = lim.on_breach or self._on_meta_breach
                 if not self.limiter.test(lim.limit, *args, cost=lim.deduction_amount):
@@ -1056,12 +1320,15 @@ class Limiter:
                 continue
 
             limit_scope = lim.scope_for(endpoint, flask.request.method)
-            limit_key = lim.key_func()
+            limit_key, _ = self.__limit_key(endpoint, lim)
             args = [limit_key, limit_scope]
             kwargs = {}
 
             if not all(args):
-                self.logger.error(f"Skipping limit: {lim.limit}. Empty value found in parameters.")
+                if not limit_scope:
+                    self.logger.error(
+                        f"Skipping limit: {lim.limit}. Empty value found in parameters."
+                    )
 
                 continue
 
@@ -1131,7 +1398,11 @@ class Limiter:
             ]
             for lim in meta_limits:
                 limit_scope = lim.scope_for(endpoint, flask.request.method)
-                limit_key = lim.key_func()
+                limit_key, _ = self.__limit_key(endpoint, lim)
+
+                if not limit_key:
+                    continue
+
                 args = [limit_key, limit_scope]
                 self.limiter.hit(lim.limit, *args)
             raise RateLimitExceeded(
@@ -1152,7 +1423,7 @@ class Limiter:
             )
             self.__evaluate_limits(endpoint, all_limits)
         except Exception as e:
-            if isinstance(e, RateLimitExceeded):
+            if isinstance(e, (RateLimitExceeded, MissingIdentityError)):
                 raise e
 
             if self._in_memory_fallback_enabled and not self._storage_dead:

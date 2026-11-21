@@ -36,6 +36,75 @@ Rate limiting all requests by country::
     limiter = Limiter(get_request_country, app=app, default_limits=["10/hour"])
 
 
+.. _missing-identity:
+
+Missing identities (anonymous vs. unconfirmed)
+-----------------------------------------------
+When the rate limit key is derived from an external identity lookup, the key
+function can fail for two very different reasons:
+
+- the request is legitimately anonymous (no credentials were presented), or
+- the identity could not be confirmed (the identity service is unavailable,
+  a credential is ambiguous or expired, etc.).
+
+Returning ``None`` or ``""`` cannot express the difference and, depending on the
+storage backend, may end up attributing the request to another identity. Instead
+a ``key_func`` can return one of the :class:`~flask_limiter.MissingIdentity`
+values to report *why* no key is available::
+
+    from flask import request
+    from flask_limiter import MissingIdentity
+
+    def key_func():
+        if request.headers.get("X-Outage"):
+            return MissingIdentity.UNCONFIRMED
+        return request.headers.get("X-User") or MissingIdentity.ANONYMOUS
+
+The key function is evaluated at most once per request even when several limits
+(default, decorated and meta limits) apply, so a single external lookup is
+performed.
+
+For every limit the extension then applies the endpoint's
+:meth:`~flask_limiter.Limiter.missing_identity_policy`. The endpoint configuration
+also governs the default limits inherited from the extension, which means a route
+without a decorated limit can still require a confirmed identity::
+
+    @app.route("/feed")
+    @limiter.missing_identity_policy(
+        {MissingIdentity.ANONYMOUS: "skip", MissingIdentity.UNCONFIRMED: "reject"}
+    )
+    def feed():
+        return "feed"
+
+    @app.route("/profile")
+    @limiter.missing_identity_policy("reject")
+    def profile():
+        return "profile"
+
+The available policies are:
+
+- ``"skip"`` - do not evaluate the limit for this request (the default).
+- ``"track"`` - evaluate the limit against a reserved bucket derived from the
+  missing reason (``anonymous`` or ``unconfirmed``) and the client address.
+  This bucket can never collide with a confirmed identity, so an unconfirmed
+  request is never charged to an account.
+- ``"reject"`` - reject the request: anonymous requests get ``401`` and
+  unconfirmed identities get ``503`` (see
+  :class:`~flask_limiter.AnonymousIdentityRejected` and
+  :class:`~flask_limiter.UnconfirmedIdentityRejected`).
+
+A policy can be set for the whole extension (constructor argument
+``missing_identity_policy`` or ``RATELIMIT_MISSING_IDENTITY_POLICY``), on a
+blueprint (``limiter.missing_identity_policy(bp, "reject")``) or on the
+:meth:`~flask_limiter.Limiter.limit` decorator itself. Endpoint configuration
+(the view function, then nested blueprints from the innermost out) takes
+precedence over a per-limit policy, which in turn takes precedence over the
+extension default. Resolution happens per missing reason, so an endpoint can
+override anonymous handling while inheriting the extension's handling of
+unconfirmed identities. The extension default is ``"skip"``. A policy can be
+either a single policy name or a mapping of missing reasons to policy names.
+
+
 
 Custom Rate limit exceeded responses
 ------------------------------------
