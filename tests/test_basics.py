@@ -34,6 +34,7 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 from sentry_sdk.scope import add_global_event_processor
 from sentry_sdk.tracing_utils import has_tracing_enabled
+from sentry_sdk.transport import Transport
 from sentry_sdk.utils import datetime_from_isoformat, get_sdk_name, reraise
 
 
@@ -567,6 +568,146 @@ def test_attachments_bytes_callable_payload(sentry_init):
     item = attachment.to_envelope_item()
 
     assert item.payload.bytes == b""
+
+
+class InMemoryTransport(Transport):
+    """Transport that keeps every envelope it captures in process memory."""
+
+    def __init__(self):
+        Transport.__init__(self)
+        self.envelopes = []
+
+    def capture_envelope(self, envelope):
+        self.envelopes.append(envelope)
+
+
+def _attachment_filenames(envelope):
+    return [
+        item.headers["filename"] for item in envelope.items if item.type == "attachment"
+    ]
+
+
+def test_allow_attachment_records_origin_at_capture_time(
+    sentry_init, tmp_path, monkeypatch
+):
+    internal_dir = tmp_path / "internal"
+    public_dir = tmp_path / "public"
+    internal_dir.mkdir()
+    public_dir.mkdir()
+
+    internal_file = internal_dir / "crash.txt"
+    public_file = public_dir / "notes.txt"
+    internal_file.write_bytes(b"internal crash dump")
+    public_file.write_bytes(b"public notes")
+
+    seen = []
+
+    def allow_attachment(attachment):
+        seen.append((attachment.filename, attachment.origin))
+        return attachment.origin == "internal"
+
+    transport = InMemoryTransport()
+    sentry_init(transport=transport, allow_attachment=allow_attachment)
+
+    scope = sentry_sdk.get_isolation_scope()
+    scope.add_attachment(path=str(internal_file), origin="internal")
+    scope.add_attachment(path=str(public_file), origin="public")
+
+    capture_exception(ValueError())
+
+    (envelope,) = transport.envelopes
+    assert _attachment_filenames(envelope) == ["crash.txt"]
+    assert seen == [
+        ("crash.txt", "internal"),
+        ("notes.txt", "public"),
+    ]
+
+
+def test_allow_attachment_rejected_file_is_never_opened(
+    sentry_init, tmp_path, monkeypatch
+):
+    internal_dir = tmp_path / "internal"
+    public_dir = tmp_path / "public"
+    internal_dir.mkdir()
+    public_dir.mkdir()
+
+    allowed_file = internal_dir / "crash.txt"
+    rejected_file = public_dir / "secret.txt"
+    allowed_file.write_bytes(b"internal crash dump")
+    rejected_file.write_bytes(b"secret contents")
+
+    opened_paths = []
+    real_open = open
+
+    def tracking_open(file, mode="r", *args, **kwargs):
+        opened_paths.append(os.fspath(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+
+    def allow_attachment(attachment):
+        return attachment.origin == "internal"
+
+    transport = InMemoryTransport()
+    sentry_init(transport=transport, allow_attachment=allow_attachment)
+
+    scope = sentry_sdk.get_isolation_scope()
+    scope.add_attachment(path=str(allowed_file), origin="internal")
+    scope.add_attachment(path=str(rejected_file), origin="public")
+
+    capture_exception(ValueError())
+
+    (envelope,) = transport.envelopes
+    assert _attachment_filenames(envelope) == ["crash.txt"]
+    assert str(rejected_file) not in opened_paths
+
+    envelope.serialize()
+    assert str(allowed_file) in opened_paths
+    assert str(rejected_file) not in opened_paths
+
+
+def test_allow_attachment_without_hook_sends_everything(sentry_init, tmp_path):
+    internal_dir = tmp_path / "internal"
+    public_dir = tmp_path / "public"
+    internal_dir.mkdir()
+    public_dir.mkdir()
+
+    internal_file = internal_dir / "crash.txt"
+    public_file = public_dir / "notes.txt"
+    internal_file.write_bytes(b"internal crash dump")
+    public_file.write_bytes(b"public notes")
+
+    transport = InMemoryTransport()
+    sentry_init(transport=transport)
+
+    scope = sentry_sdk.get_isolation_scope()
+    scope.add_attachment(path=str(internal_file), origin="internal")
+    scope.add_attachment(path=str(public_file), origin="public")
+
+    capture_exception(ValueError())
+
+    (envelope,) = transport.envelopes
+    assert _attachment_filenames(envelope) == ["crash.txt", "notes.txt"]
+    assert scope._attachments[0].origin == "internal"
+    assert scope._attachments[1].origin == "public"
+
+
+@pytest.mark.tests_internal_exceptions
+def test_allow_attachment_exception_fails_open(sentry_init):
+    transport = InMemoryTransport()
+
+    def allow_attachment(attachment):
+        raise RuntimeError("admission check unavailable")
+
+    sentry_init(transport=transport, allow_attachment=allow_attachment)
+
+    sentry_sdk.get_isolation_scope().add_attachment(
+        bytes=b"Hello World!", filename="message.txt"
+    )
+    capture_exception(ValueError())
+
+    (envelope,) = transport.envelopes
+    assert _attachment_filenames(envelope) == ["message.txt"]
 
 
 def test_integration_scoping(sentry_init, capture_events):
@@ -1344,6 +1485,6 @@ def test_stacktrace_big_recursion(sentry_init, capture_events):
 
     # On my machine, it takes about 100-200ms to capture the exception,
     # so this limit should be generous enough.
-    assert capture_end_time - capture_start_time < 10**9 * 2, (
-        "stacktrace capture took too long, check that frame limit is set correctly"
-    )
+    assert (
+        capture_end_time - capture_start_time < 10**9 * 2
+    ), "stacktrace capture took too long, check that frame limit is set correctly"

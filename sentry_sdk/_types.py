@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     from typing_extensions import Literal, TypedDict
 
     import sentry_sdk
+    from sentry_sdk.attachments import Attachment
 
     class SDKInfo(TypedDict):
         name: str
@@ -403,6 +404,11 @@ if TYPE_CHECKING:
     BreadcrumbProcessor = Callable[[Breadcrumb, BreadcrumbHint], Optional[Breadcrumb]]
     TransactionProcessor = Callable[[Event, Hint], Optional[Event]]
     LogProcessor = Callable[[Log, Hint], Optional[Log]]
+
+    # Called with an attachment right before it is added to an envelope. Return
+    # False to keep the attachment out of the envelope (and out of any file
+    # reads).
+    AttachmentAdmissionHook = Callable[["Attachment"], bool]
 
     TracesSampler = Callable[[SamplingContext], Union[float, int, bool]]
 

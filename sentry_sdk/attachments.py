@@ -26,6 +26,9 @@ class Attachment:
     :param content_type: The content type of the attachment. If not provided, it will be guessed from the ``filename``
                          parameter, if available, or the ``path`` parameter if ``filename`` is ``None``.
     :param add_to_transactions: Whether to add this attachment to transactions. Defaults to ``False``.
+    :param origin: Free-form description of where the attachment came from. Recorded when the attachment is
+                   captured so it can be inspected by the ``allow_attachment`` option when an envelope is
+                   assembled. Defaults to ``"user"``.
     """
 
     def __init__(
@@ -35,6 +38,7 @@ class Attachment:
         path: "Optional[str]" = None,
         content_type: "Optional[str]" = None,
         add_to_transactions: bool = False,
+        origin: str = "user",
     ) -> None:
         if bytes is None and path is None:
             raise TypeError("path or raw bytes required for attachment")
@@ -49,6 +53,7 @@ class Attachment:
         self.path = path
         self.content_type = content_type
         self.add_to_transactions = add_to_transactions
+        self.origin = origin
 
     def to_envelope_item(self) -> "Item":
         """Returns an envelope item for this attachment."""

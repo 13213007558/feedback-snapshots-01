@@ -84,6 +84,7 @@ if TYPE_CHECKING:
         SDKInfo,
         SerializedAttributeValue,
     )
+    from sentry_sdk.attachments import Attachment
     from sentry_sdk.integrations import Integration
     from sentry_sdk.scope import Scope
     from sentry_sdk.session import Session
@@ -1255,6 +1256,9 @@ class _Client(BaseClient):
             envelope.add_event(event_opt)
 
         for attachment in attachments or ():
+            if not self._is_attachment_allowed(attachment):
+                continue
+
             envelope.add_item(attachment.to_envelope_item())
 
         return_value = None
@@ -1267,6 +1271,24 @@ class _Client(BaseClient):
             return_value = event_id
 
         return return_value
+
+    def _is_attachment_allowed(self, attachment: "Attachment") -> bool:
+        """Runs the configured ``allow_attachment`` admission check.
+
+        This is the final decision, taken right before an attachment is
+        assembled into an envelope. When no hook is configured every
+        attachment is allowed. A hook that raises must not drop the event, so
+        the attachment is allowed in that case too.
+        """
+        allow_attachment = self.options.get("allow_attachment")
+        if allow_attachment is None:
+            return True
+
+        allowed = True
+        with capture_internal_exceptions():
+            allowed = bool(allow_attachment(attachment))
+
+        return allowed
 
     def _record_lost_telemetry(
         self, reason: str, ty: str, telemetry: "Union[Log, Metric]"

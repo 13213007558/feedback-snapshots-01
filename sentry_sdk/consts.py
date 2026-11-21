@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     import sentry_sdk
     from sentry_sdk._types import (
+        AttachmentAdmissionHook,
         BreadcrumbProcessor,
         ContinuousProfilerMode,
         DataCollectionUserOptions,
@@ -1454,6 +1455,7 @@ class ClientConstructor:
         enable_metrics: bool = True,
         before_send_metric: "Optional[Callable[[Metric, Hint], Optional[Metric]]]" = None,
         before_send_span: "Optional[Callable[[SpanJSON, Hint], Optional[SpanJSON]]]" = None,
+        allow_attachment: "Optional[AttachmentAdmissionHook]" = None,
         org_id: "Optional[str]" = None,
         strict_trace_continuation: bool = False,
         stream_gen_ai_spans: bool = True,
@@ -1683,6 +1685,14 @@ class ClientConstructor:
 
             By the time `before_send` is executed, all scope data has already been applied to the event. Further
             modification of the scope won't have any effect.
+
+        :param allow_attachment: This function is called with each :py:class:`sentry_sdk.attachments.Attachment`
+            right before it is added to the envelope of an event. Return ``False`` (or any falsy value) to drop
+            the attachment, any truthy value to send it. If the option is not set, every attachment is sent.
+
+            The check only runs when an envelope is assembled, so information recorded when the attachment was
+            captured (such as its ``origin``) is available to the callback. Rejected attachments are never
+            opened: file-backed attachments are skipped before their path is read.
 
         :param before_send_transaction: This function is called with an SDK-specific transaction event object, and can
             return a modified transaction event object, or `null` to skip reporting the event.
