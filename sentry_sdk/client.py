@@ -509,6 +509,12 @@ class BaseClient:
     def flush(self, *args: "Any", **kwargs: "Any") -> None:
         return None
 
+    def set_detailed_diagnostics_enabled(self, *args: "Any", **kwargs: "Any") -> None:
+        return None
+
+    def set_on_diagnostic_state_change(self, *args: "Any", **kwargs: "Any") -> None:
+        return None
+
     async def close_async(self, *args: "Any", **kwargs: "Any") -> None:
         return None
 
@@ -1511,6 +1517,30 @@ class _Client(BaseClient):
             self._flush_components()
 
             self.transport.flush(timeout=timeout, callback=callback)
+
+    def set_detailed_diagnostics_enabled(self, enabled: bool) -> None:
+        """
+        Notify the SDK that the backend changed the detailed diagnostics
+        permission.
+
+        When disabled, detailed diagnostic data is blocked: items already
+        queued in the transport worker are purged and newly captured diagnostic
+        items are dropped. Ordinary error events and client reports continue to
+        be sent normally.
+        """
+        if self.transport is not None:
+            self.transport.set_detailed_diagnostics_enabled(enabled)
+
+    def set_on_diagnostic_state_change(
+        self, callback: "Optional[Callable[[bool], None]]"
+    ) -> None:
+        """
+        Register a hook invoked with the new state (``True`` when detailed
+        diagnostics are enabled, ``False`` otherwise) whenever the permission
+        changes via :meth:`set_detailed_diagnostics_enabled`.
+        """
+        if self.transport is not None:
+            self.transport.set_on_diagnostic_state_change(callback)
 
     async def flush_async(
         self,

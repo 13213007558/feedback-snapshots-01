@@ -3,6 +3,7 @@ import json
 import mimetypes
 from typing import TYPE_CHECKING
 
+from sentry_sdk.consts import DIAGNOSTIC_ITEM_HEADER
 from sentry_sdk.session import Session
 from sentry_sdk.utils import capture_internal_exceptions, json_dumps
 
@@ -241,6 +242,25 @@ class Item:
         return self.headers.get("type")
 
     @property
+    def is_diagnostic(self) -> bool:
+        """Whether this item carries detailed diagnostic data.
+
+        Diagnostic items may only leave the SDK while detailed diagnostics are
+        enabled; see :func:`sentry_sdk.transport.HttpTransportCore`.
+        """
+        return bool(self.headers.get(DIAGNOSTIC_ITEM_HEADER))
+
+    def mark_diagnostic(self) -> "Item":
+        """Mark this item as detailed diagnostic data.
+
+        Diagnostic items are held back (and purged from the queue if already
+        queued) once detailed diagnostics are disabled. The marker is internal
+        and stripped before serialization, so it is never sent to Sentry.
+        """
+        self.headers[DIAGNOSTIC_ITEM_HEADER] = True
+        return self
+
+    @property
     def data_category(self) -> "EventDataCategory":
         ty = self.headers.get("type")
         if ty == "session" or ty == "sessions":
@@ -289,6 +309,9 @@ class Item:
         f: "Any",
     ) -> None:
         headers = dict(self.headers)
+        # The diagnostic marker is internal SDK bookkeeping and must never
+        # be transmitted to Sentry.
+        headers.pop(DIAGNOSTIC_ITEM_HEADER, None)
         bytes = self.get_bytes()
         headers["length"] = len(bytes)
         f.write(json_dumps(headers))

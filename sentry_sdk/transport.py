@@ -99,6 +99,29 @@ def _get_httpcore_header_value(response: "Any", header: str) -> "Optional[str]":
     )
 
 
+class _EnvelopeJob:
+    """A queued worker job that remembers which envelope it sends.
+
+    Keeping the envelope reference lets the transport purge still-queued
+    diagnostic jobs when detailed diagnostics are disabled.
+    """
+
+    def __init__(
+        self,
+        envelope: "Envelope",
+        send: "Callable[[], Any]",
+    ) -> None:
+        self._envelope = envelope
+        self._send = send
+
+    @property
+    def envelope(self) -> "Envelope":
+        return self._envelope
+
+    def __call__(self) -> "Any":
+        return self._send()
+
+
 class Transport(ABC):
     """Baseclass for all transports.
 
@@ -113,6 +136,46 @@ class Transport(ABC):
             self.parsed_dsn = Dsn(options["dsn"], options.get("org_id"))
         else:
             self.parsed_dsn = None
+        # Detailed diagnostics are enabled by default so opt-in diagnostic data
+        # collected before the backend revokes permission is still delivered.
+        self._detailed_diagnostics_enabled = True
+        self._on_diagnostic_state_change: "Optional[Callable[[bool], None]]" = None
+
+    def set_detailed_diagnostics_enabled(self: "Self", enabled: bool) -> None:
+        """
+        Notify the transport that the detailed diagnostics permission changed.
+
+        When disabled, detailed diagnostic data is blocked: items already
+        waiting in the worker queue are purged and any new diagnostic items are
+        dropped at capture time. Ordinary telemetry (error counts, client
+        reports and other permitted event categories) keeps flowing unchanged.
+
+        Subclasses override this to implement the actual queue handling; the
+        base implementation only tracks the state and fires the callback.
+        """
+        enabled = bool(enabled)
+        if enabled == self._detailed_diagnostics_enabled:
+            return
+
+        self._detailed_diagnostics_enabled = enabled
+        callback = self._on_diagnostic_state_change
+        if callback is not None:
+            with capture_internal_exceptions():
+                callback(enabled)
+
+    @property
+    def detailed_diagnostics_enabled(self: "Self") -> bool:
+        """Whether detailed diagnostic data is currently allowed to leave the SDK."""
+        return self._detailed_diagnostics_enabled
+
+    def set_on_diagnostic_state_change(
+        self: "Self", callback: "Optional[Callable[[bool], None]]"
+    ) -> None:
+        """
+        Register a hook invoked with the new state (``True`` enabled,
+        ``False`` disabled) whenever detailed diagnostics are toggled.
+        """
+        self._on_diagnostic_state_change = callback
 
     def capture_event(self: "Self", event: "Event") -> None:
         """
@@ -276,6 +339,56 @@ class HttpTransportCore(Transport):
 
     def _create_worker(self: "Self", options: "Dict[str, Any]") -> "Worker":
         raise NotImplementedError()
+
+    def set_detailed_diagnostics_enabled(self: "Self", enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._detailed_diagnostics_enabled:
+            return
+
+        super().set_detailed_diagnostics_enabled(enabled)
+
+        if not enabled:
+            # Purge diagnostic envelopes that were queued but have not been
+            # sent yet. Non-diagnostic jobs (errors, client reports, ...) stay
+            # queued and are delivered normally.
+            self._worker.drain_filter(self._job_sends_diagnostic_data)
+
+    @staticmethod
+    def _envelope_has_diagnostic_data(envelope: "Envelope") -> bool:
+        return any(item.is_diagnostic for item in envelope.items)
+
+    def _filter_diagnostic_items(
+        self: "Self", envelope: "Envelope"
+    ) -> "Optional[Envelope]":
+        """Remove diagnostic items from ``envelope`` while diagnostics are off.
+
+        Returns the envelope to actually queue/send (a copy when something was
+        removed), or ``None`` if every item was diagnostic. Permitted items and
+        their error counts are preserved.
+        """
+        if self._detailed_diagnostics_enabled or not self._envelope_has_diagnostic_data(
+            envelope
+        ):
+            return envelope
+
+        allowed_items = []
+        for item in envelope.items:
+            if item.is_diagnostic:
+                self.on_dropped_event("diagnostics_disabled")
+                self.record_lost_event("ratelimit_backoff", item=item)
+            else:
+                allowed_items.append(item)
+
+        if not allowed_items:
+            return None
+
+        return Envelope(headers=envelope.headers, items=allowed_items)
+
+    def _job_sends_diagnostic_data(self: "Self", callback: "Any") -> bool:
+        envelope = getattr(callback, "envelope", None)
+        return isinstance(envelope, Envelope) and self._envelope_has_diagnostic_data(
+            envelope
+        )
 
     def record_lost_event(
         self,
@@ -703,12 +816,18 @@ class BaseHttpTransport(HttpTransportCore):
         self,
         envelope: "Envelope",
     ) -> None:
+        envelope = self._filter_diagnostic_items(envelope)
+        if envelope is None:
+            return
+
         def send_envelope_wrapper() -> None:
             with capture_internal_exceptions():
                 self._send_envelope(envelope)
                 self._flush_client_reports()
 
-        if not self._worker.submit(send_envelope_wrapper):
+        job = _EnvelopeJob(envelope, send_envelope_wrapper)
+
+        if not self._worker.submit(job):
             self.on_dropped_event("full_queue")
             for item in envelope.items:
                 self.record_lost_event("queue_overflow", item=item)
@@ -922,12 +1041,18 @@ class AsyncHttpTransport(HttpTransportCore):
             self.capture_envelope(Envelope(items=[client_report]))
 
     def _capture_envelope(self: "Self", envelope: "Envelope") -> None:
+        envelope = self._filter_diagnostic_items(envelope)
+        if envelope is None:
+            return
+
         async def send_envelope_wrapper() -> None:
             with capture_internal_exceptions():
                 await self._send_envelope(envelope)
                 await self._flush_client_reports()
 
-        if not self._worker.submit(send_envelope_wrapper):
+        job = _EnvelopeJob(envelope, send_envelope_wrapper)
+
+        if not self._worker.submit(job):
             self.on_dropped_event("full_queue")
             for item in envelope.items:
                 self.record_lost_event("queue_overflow", item=item)

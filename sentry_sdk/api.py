@@ -78,9 +78,11 @@ __all__ = [
     "set_attribute",
     "set_attributes",
     "set_context",
+    "set_detailed_diagnostics_enabled",
     "set_extra",
     "set_level",
     "set_measurement",
+    "set_on_diagnostic_state_change",
     "set_tag",
     "set_tags",
     "set_user",
@@ -371,6 +373,34 @@ async def flush_async(
     callback: "Optional[Callable[[int, float], None]]" = None,
 ) -> None:
     return await get_client().flush_async(timeout=timeout, callback=callback)
+
+
+@clientmethod
+def set_detailed_diagnostics_enabled(enabled: bool) -> None:
+    """
+    Notify the SDK that the backend changed the detailed diagnostics
+    permission.
+
+    Pass ``False`` when the user (or backend) turns detailed diagnostics off.
+    Detailed diagnostic data already waiting in the transport queue is purged
+    and new diagnostic items are dropped, while ordinary error events and
+    client reports continue to be sent. Pass ``True`` to allow diagnostic data
+    again.
+    """
+    return get_client().set_detailed_diagnostics_enabled(enabled)
+
+
+@clientmethod
+def set_on_diagnostic_state_change(
+    callback: "Optional[Callable[[bool], None]]",
+) -> None:
+    """
+    Register a hook called with the new state whenever detailed diagnostics are
+    toggled via :func:`sentry_sdk.set_detailed_diagnostics_enabled`. The
+    callback receives ``True`` when diagnostics are enabled and ``False`` when
+    disabled. Pass ``None`` to remove a previously registered hook.
+    """
+    return get_client().set_on_diagnostic_state_change(callback)
 
 
 @scopemethod

@@ -36,6 +36,16 @@ class Worker(ABC):
         """Flush the worker, blocking until done or timeout is reached."""
         return None
 
+    def drain_filter(self, should_drain: "Callable[[Callable[[], Any]], bool]") -> int:
+        """Remove and discard queued callbacks selected by ``should_drain``.
+
+        ``should_drain`` is called with each queued callback and must return
+        ``True`` for callbacks that should be removed. Callbacks that are
+        currently being executed by the worker are not affected. Returns the
+        number of callbacks removed.
+        """
+        return 0
+
     @abstractmethod
     def full(self) -> bool:
         """Whether the worker's queue is full."""
@@ -125,6 +135,9 @@ class BackgroundWorker(Worker):
     def full(self) -> bool:
         return self._queue.full()
 
+    def drain_filter(self, should_drain: "Callable[[Callable[[], Any]], bool]") -> int:
+        return self._queue.drain_filter(should_drain)
+
     def _wait_flush(self, timeout: float, callback: "Optional[Any]") -> None:
         initial_timeout = min(0.1, timeout)
         if not self._timed_queue_join(initial_timeout):
@@ -213,6 +226,30 @@ class AsyncWorker(Worker):
         if self._queue is None:
             return True
         return self._queue.full()
+
+    def drain_filter(self, should_drain: "Callable[[Callable[[], Any]], bool]") -> int:
+        queue = self._queue
+        if queue is None:
+            return 0
+
+        drained = 0
+        remaining = []
+        while True:
+            try:
+                callback = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if callback is not _TERMINATOR and should_drain(callback):
+                queue.task_done()
+                drained += 1
+            else:
+                remaining.append(callback)
+
+        for callback in remaining:
+            queue.put_nowait(callback)
+
+        return drained
 
     def _ensure_task(self) -> None:
         if not self.is_alive:

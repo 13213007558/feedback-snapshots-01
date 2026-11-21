@@ -259,6 +259,29 @@ class Queue:
         """
         return self.put(item, block=False)
 
+    def drain_filter(self, should_drain):
+        """Remove every queued item for which ``should_drain(item)`` is true.
+
+        The ``unfinished_tasks`` counter is adjusted for every removed item so
+        that a later ``join()`` does not wait on work that no longer exists.
+        Items already fetched by a consumer (in-flight) are untouched. Returns
+        the number of items removed.
+        """
+        with self.mutex:
+            remaining = deque(item for item in self.queue if not should_drain(item))
+            drained = len(self.queue) - len(remaining)
+
+            if drained:
+                self.queue.clear()
+                self.queue.extend(remaining)
+                self.unfinished_tasks -= drained
+                # Wake producers waiting for a free slot ...
+                self.not_full.notify_all()
+                # ... and threads blocked in join() waiting for the remaining
+                # work to reach zero.
+                self.all_tasks_done.notify_all()
+            return drained
+
     def get_nowait(self):
         """Remove and return an item from the queue without blocking.
 

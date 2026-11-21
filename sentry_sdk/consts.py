@@ -99,6 +99,13 @@ DEFAULT_QUEUE_SIZE = 100
 DEFAULT_MAX_BREADCRUMBS = 100
 MATCH_ALL = r".*"
 
+# Internal envelope item header marking an item as detailed diagnostic data.
+# Such items are only allowed to leave the SDK while detailed diagnostics are
+# enabled and are purged from the queue (and dropped at capture) once disabled.
+# The header is stripped before an envelope is serialized, so it never reaches
+# Sentry.
+DIAGNOSTIC_ITEM_HEADER = "x-sentry-diagnostic"
+
 FALSE_VALUES = [
     "false",
     "no",
