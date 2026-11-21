@@ -5,6 +5,10 @@ require 'pp' # This require is necessary for Hash#pretty_inspect to work, do not
 module Faraday
   module Logging
     # Serves as an integration point to customize logging
+    #
+    # A {Faraday::DisclosureOptions} policy configured on the connection narrows
+    # what `request` and `exception` may write to the shared logger. When no
+    # policy is configured, logging keeps its historical behavior.
     class Formatter
       extend Forwardable
 
@@ -23,12 +27,17 @@ module Faraday
       def_delegators :@logger, :debug, :info, :warn, :error, :fatal
 
       def request(env)
-        public_send(log_level) do
-          "request: #{env.method.upcase} #{apply_filters(env.url.to_s)}"
-        end
+        policy = disclosure_for(env)
+        if policy
+          log_disclosed_request(env, policy)
+        else
+          public_send(log_level) do
+            "request: #{env.method.upcase} #{apply_filters(env.url.to_s)}"
+          end
 
-        log_headers('request', env.request_headers) if log_headers?(:request)
-        log_body('request', env[:body]) if env[:body] && log_body?(:request)
+          log_headers('request', env.request_headers) if log_headers?(:request)
+          log_body('request', env[:body]) if env[:body] && log_body?(:request)
+        end
       end
 
       def response(env)
@@ -38,8 +47,12 @@ module Faraday
         log_body('response', env[:body]) if env[:body] && log_body?(:response)
       end
 
-      def exception(exc)
+      def exception(exc, env = nil)
         return unless log_errors?
+
+        policy = disclosure_for(env)
+        policy ||= disclosure_for(exc.response) if exc.respond_to?(:response)
+        return log_disclosed_exception(exc, policy) if policy
 
         public_send(log_level) { "error: #{apply_filters(exc.full_message)}" }
 
@@ -112,6 +125,66 @@ module Faraday
 
       def log_body(type, body)
         public_send(log_level) { "#{type}: #{apply_filters(dump_body(body))}" }
+      end
+
+      def disclosure_for(source)
+        Faraday::Disclosure.policy_for(source)
+      end
+
+      # Logs a request using only the request attributes selected by the
+      # connection's disclosure policy. Header and body logging still require
+      # the matching header/body option, so the policy only narrows output.
+      def log_disclosed_request(env, policy)
+        method = policy.request_attribute?(:method) ? env.method : nil
+        url = Faraday::Disclosure.request_url(env, policy)
+        public_send(log_level) do
+          parts = ['request:']
+          parts << method.to_s.upcase if method
+          parts << apply_filters(url.to_s) if url
+          apply_filters(parts.join(' '))
+        end
+
+        if policy.request_attribute?(:headers) && log_headers?(:request)
+          headers = env.request_headers
+          log_headers('request', headers) if headers
+        end
+
+        if policy.request_attribute?(:body) && env[:body] && log_body?(:request)
+          log_body('request', env[:body])
+        end
+      end
+
+      # Logs an error using only the error details selected by the connection's
+      # disclosure policy. The error class and the response status are always
+      # kept so a failure stays identifiable.
+      def log_disclosed_exception(exc, policy)
+        public_send(log_level) { "error: #{apply_filters(error_summary(exc, policy))}" }
+
+        if policy.error_detail?(:response_headers) && log_headers?(:error) &&
+           exc.respond_to?(:response_headers) && exc.response_headers
+          log_headers('error', exc.response_headers)
+        end
+
+        return unless policy.error_detail?(:response_body) && log_body?(:error) &&
+                      exc.respond_to?(:response_body) && exc.response_body
+
+        log_body('error', exc.response_body)
+      end
+
+      def error_summary(exc, policy)
+        summary = +exc.class.name.to_s
+        status = exc.response_status if exc.respond_to?(:response_status)
+        summary << " (status #{status})" unless status.nil?
+        summary << ": #{exc.message}" if policy.error_detail?(:message)
+
+        if policy.error_detail?(:wrapped_exception) && exc.is_a?(Faraday::Error) &&
+           exc.wrapped_exception
+          wrapped = "#{exc.wrapped_exception.class}: #{exc.wrapped_exception.message}"
+          summary << " (#{wrapped})"
+        end
+
+        summary << "\n#{exc.backtrace.join("\n")}" if policy.error_detail?(:backtrace) && exc.backtrace
+        summary
       end
     end
   end

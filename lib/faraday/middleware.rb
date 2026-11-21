@@ -57,7 +57,7 @@ module Faraday
         on_complete(environment) if respond_to?(:on_complete)
       end
     rescue StandardError => e
-      on_error(e) if respond_to?(:on_error)
+      notify_error(e, env)
       raise
     end
 
@@ -67,6 +67,29 @@ module Faraday
       else
         warn "#{app} does not implement #close!"
       end
+    end
+
+    private
+
+    # Calls the error hook, passing the request Env when the hook accepts it.
+    # Hooks written as `on_error(error)` keep working unchanged.
+    def notify_error(error, env)
+      return unless respond_to?(:on_error)
+
+      if error_hook_accepts_env?(method(:on_error))
+        on_error(error, env)
+      else
+        on_error(error)
+      end
+    end
+
+    # A hook receives the Env when it declares a second positional argument
+    # (`def on_error(error, env)`) or an optional one
+    # (`def on_error(error, env = nil)`). Variadic and one-argument hooks keep
+    # the historical single-argument call.
+    def error_hook_accepts_env?(handler)
+      arity = handler.arity
+      arity == 2 || arity <= -2
     end
   end
 end

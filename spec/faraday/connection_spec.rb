@@ -964,4 +964,36 @@ RSpec.describe Faraday::Connection do
       end
     end
   end
+
+  describe '#disclosure' do
+    let(:policy) { { request: %i[method], error: %i[message] } }
+
+    it 'exposes the configured policy as options' do
+      conn = Faraday.new(disclosure: policy)
+
+      expect(conn.disclosure).to be_a(Faraday::DisclosureOptions)
+      expect(conn.disclosure.request).to eq(%i[method])
+    end
+
+    it 'is nil when not configured' do
+      expect(Faraday::Connection.new.disclosure).to be_nil
+    end
+
+    it 'can be changed after initialization' do
+      conn = Faraday::Connection.new
+      conn.disclosure = policy
+
+      expect(conn.disclosure.request).to eq(%i[method])
+      expect(conn.build_request(:get).options.disclosure).to eq(conn.disclosure)
+    end
+
+    it 'is copied but not shared with a duplicated connection' do
+      conn = Faraday.new(disclosure: policy)
+      copy = conn.dup
+      copy.disclosure = { request: %i[url_path] }
+
+      expect(conn.disclosure.request).to eq(%i[method])
+      expect(copy.disclosure.request).to eq(%i[url_path])
+    end
+  end
 end

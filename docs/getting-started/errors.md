@@ -15,3 +15,6 @@ Below is a list of errors that Faraday may raise, and that you should be prepare
 
 If you add the `raise_error` middleware, Faraday will also raise additional errors for 4xx and 5xx responses.
 You can find the full list of errors in the [raise_error middleware](/middleware/included/raising-errors) page.
+
+To control which request attributes and error details are shared with the Logger middleware and the raised errors,
+configure a [disclosure policy](/getting-started/disclosure).

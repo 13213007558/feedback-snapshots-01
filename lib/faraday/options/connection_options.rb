@@ -31,11 +31,16 @@ module Faraday
   #   #
   #   # @!attribute builder_class
   #   #   @return [Class] the class used to build the middleware stack
+  #   #
+  #   # @!attribute disclosure
+  #   #   @return [DisclosureOptions, nil] policy controlling which request and
+  #   #           error details are shared with logs and exceptions
   #   class ConnectionOptions < Options; end
   ConnectionOptions = Options.new(:request, :proxy, :ssl, :builder, :url,
                                   :parallel_manager, :params, :headers,
-                                  :builder_class) do
-    options request: RequestOptions, ssl: SSLOptions
+                                  :builder_class, :disclosure) do
+    options request: RequestOptions, ssl: SSLOptions,
+            disclosure: DisclosureOptions
 
     memoized(:request) { self.class.options_for(:request).new }
 
@@ -45,6 +50,11 @@ module Faraday
 
     def new_builder(block)
       builder_class.new(&block)
+    end
+
+    # The policy is copied to request options so it reaches every request env.
+    def disclosure=(value)
+      self[:disclosure] = value ? DisclosureOptions.from(value) : nil
     end
   end
 end

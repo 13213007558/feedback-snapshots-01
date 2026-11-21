@@ -42,6 +42,18 @@ module Faraday
     # @return [Hash] proxy options.
     attr_reader :proxy
 
+    # @return [Faraday::DisclosureOptions, nil] policy shared by the Logger
+    #   middleware and the errors raised by RaiseError.
+    def disclosure
+      @options.disclosure
+    end
+
+    # Sets the disclosure policy for all requests made through this connection.
+    # @param value [Hash, Faraday::DisclosureOptions, nil]
+    def disclosure=(value)
+      @options.disclosure = value
+    end
+
     # Initializes a new Faraday::Connection.
     #
     # @param url [URI, String] URI or String base URL to use as a prefix for all
@@ -80,6 +92,10 @@ module Faraday
         # pass an empty block to Builder so it doesn't assume default middleware
         options.new_builder(block_given? ? proc { |b| } : nil)
       end
+
+      # Carry the connection's disclosure policy with the request defaults so
+      # every request enforces the same rule, including copied connections.
+      @options.disclosure = options.disclosure if options.disclosure
 
       self.url_prefix = url || 'http:/'
 
@@ -506,7 +522,10 @@ module Faraday
                      params: params.dup,
                      builder: builder.dup,
                      ssl: ssl.dup,
-                     request: options.dup).tap { |copy| copy.proxy = proxy if @manual_proxy }
+                     request: options.dup).tap do |copy|
+        copy.proxy = proxy if @manual_proxy
+        copy.disclosure = disclosure if disclosure
+      end
     end
 
     # Yields username and password extracted from a URI if they both exist.

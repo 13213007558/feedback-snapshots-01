@@ -89,13 +89,44 @@ end
 In this example, a `Faraday::UnauthorizedError` exception is raised for the `/protected-url` request, while the
 `/wrong-url` request does not raise an error because the status code `404` is in the `allowed_statuses` array.
 
+### Selecting what errors disclose
+
+A [disclosure policy] configured on the connection selects the response and
+request details attached to raised errors (and written by the logger):
+
+```ruby
+conn = Faraday.new(url: 'http://httpbingo.org', disclosure: {
+  request: %i[method url_path],
+  error: %i[message response_body]
+}) do |faraday|
+  faraday.response :raise_error
+end
+
+begin
+  conn.get('/wrong-url')
+rescue Faraday::ResourceNotFound => error
+  error.response_status           # => 404
+  error.response_body             # => "..." (selected)
+  error.response_headers          # => nil   (not selected)
+  error.response[:request]        # => { method: :get, url_path: "/wrong-url" }
+end
+```
+
+The exception class and the response status are always kept. An omitted
+dimension keeps the historical behavior; an explicit empty array selects
+nothing; `disclosure: true` is the strict policy. See [disclosure policy] for
+the full list of attributes and aliases.
+
 ### Excluding request information from exceptions
 
 When `include_request` is set to `false`, request information is omitted not only from the errors raised by this
 middleware, but also from errors raised for the same request by other middlewares (such as `Faraday::ParsingError`
 from the `json` middleware) and from errors initialized with the request's `Faraday::Env`. Response information
-(status, headers, body) is still included, and logging middlewares are not affected by this option.
+(status, headers, body) is still included, and logging middlewares are not affected by this option. When a disclosure
+policy is also configured, `include_request: false` remains the stricter of the two: it wins for errors.
 
 When sanitizing errors initialized with a `Faraday::Response` or `Faraday::Env`, `Faraday::Error#response` is a new
 `Faraday::Response`. Its Env contains only the response status, headers, and body, so APIs such as `on_complete` remain
 available without retaining request fields or custom members from the original Env.
+
+[disclosure policy]: getting-started/disclosure.md

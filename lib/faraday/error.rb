@@ -70,7 +70,7 @@ module Faraday
     # to `super`. See NilStatusError.
     def exc_msg_and_response!(exc, response = nil)
       if @response.nil? && @wrapped_exception.nil?
-        @wrapped_exception, msg, @response = exc_msg_and_response(exc, omit_request_data(response))
+        @wrapped_exception, msg, @response = exc_msg_and_response(exc, sanitize(response))
         return msg
       end
 
@@ -83,22 +83,52 @@ module Faraday
       when Exception
         [exc, exc.message, response]
       when Hash
+        # Hash responses are already an explicit, caller-built projection.
         [nil, build_error_message_from_hash(exc), exc]
       when Faraday::Env
-        sanitized = omit_request_data(exc)
-        message =
-          if sanitized.equal?(exc)
-            build_error_message_from_env(exc)
-          else
-            fallback_error_message(exc.status)
-          end
-        [nil, message, sanitized]
+        policy = disclosure_policy(exc)
+        if policy
+          sanitized = Faraday::Disclosure.sanitize_response(exc, policy)
+          [nil, disclosure_message(exc, policy), sanitized]
+        else
+          sanitized = omit_request_data(exc)
+          message =
+            if sanitized.equal?(exc)
+              build_error_message_from_env(exc)
+            else
+              fallback_error_message(exc.status)
+            end
+          [nil, message, sanitized]
+        end
       else
         [nil, exc.to_s, response]
       end
     end
 
     private
+
+    # Applies the connection's disclosure policy, when present, and falls back
+    # to the legacy `include_request: false` marker otherwise.
+    def sanitize(response)
+      policy = disclosure_policy(response)
+      return Faraday::Disclosure.sanitize_response(response, policy) if policy
+
+      omit_request_data(response)
+    end
+
+    def disclosure_policy(source)
+      Faraday::Disclosure.policy_for(source)
+    end
+
+    def disclosure_message(env, policy)
+      unless Faraday::Disclosure.request_disclosable?(env, policy)
+        return Faraday::Disclosure.status_message(env.status, nil, nil)
+      end
+
+      method = policy.request_attribute?(:method) ? env.method : nil
+      url = Faraday::Disclosure.request_url(env, policy)
+      Faraday::Disclosure.status_message(env.status, method, url)
+    end
 
     # When the RaiseError middleware opted this request out of request data
     # (`include_request: false`), it marks the Env. Build a fresh Response from

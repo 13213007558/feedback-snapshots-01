@@ -38,17 +38,29 @@ module Faraday
   #   #
   #   # @!attribute on_data
   #   #   @return [Proc] callback invoked with each chunk when streaming the response
+  #   #
+  #   # @!attribute disclosure
+  #   #   @return [DisclosureOptions, nil] policy controlling which request and
+  #   #           error details are shared with logs and exceptions
   #   class RequestOptions < Options; end
   RequestOptions = Options.new(:params_encoder, :proxy, :bind,
                                :timeout, :open_timeout, :read_timeout,
                                :write_timeout, :boundary, :oauth,
-                               :context, :on_data) do
+                               :context, :on_data, :disclosure) do
+    options disclosure: DisclosureOptions
+
     def []=(key, value)
       if key && key.to_sym == :proxy
         super(key, value ? ProxyOptions.from(value) : nil)
+      elsif key && key.to_sym == :disclosure
+        super(key, value ? DisclosureOptions.from(value) : nil)
       else
         super
       end
+    end
+
+    def disclosure=(value)
+      self[:disclosure] = value ? DisclosureOptions.from(value) : nil
     end
 
     def stream_response?

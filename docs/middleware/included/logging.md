@@ -80,6 +80,27 @@ conn = Faraday.new(url: 'http://httpbingo.org') do |faraday|
 end
 ```
 
+### Restrict what is logged
+
+A logger can be governed by a connection-wide [disclosure policy], which selects
+the request attributes and error details the logger may write. When a policy is
+configured, the request line only contains the selected attributes and error
+output only contains the selected details (the exception class and the response
+status are always kept).
+
+```ruby
+conn = Faraday.new(url: 'https://api.example.com', disclosure: {
+  request: %i[method url_path],
+  error: %i[message]
+}) do |faraday|
+  faraday.response :logger, nil, { errors: true }
+end
+```
+
+The policy never changes what the request sends or what the response object
+returns; it only narrows what reaches the shared logger. See
+[Disclosure Policy] for the full list of selectable attributes.
+
 ### Customize the formatter
 
 You can also provide a custom formatter to control how requests, responses and errors are logged.
@@ -87,6 +108,8 @@ Any custom formatter MUST implement the `request` and `response` method, with on
 will be passed being the Faraday environment.
 Any custom formatter CAN implement the `exception` method,
 with one argument which will be passed being the exception (StandardError).
+The bundled formatter also accepts the request environment as an optional second argument to
+`exception`; custom formatters keep the one-argument contract.
 If you make your formatter inheriting from `Faraday::Logging::Formatter`,
 then the methods `debug`, `info`, `warn`, `error` and `fatal` are automatically delegated to the logger.
 
@@ -112,3 +135,6 @@ conn = Faraday.new(url: 'http://httpbingo.org/api_key=s3cr3t') do |faraday|
   faraday.response :logger, nil, formatter: MyFormatter
 end
 ```
+
+[disclosure policy]: getting-started/disclosure.md
+[Disclosure Policy]: getting-started/disclosure.md

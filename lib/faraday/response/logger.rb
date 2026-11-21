@@ -29,8 +29,25 @@ module Faraday
         @formatter.response(env)
       end
 
-      def on_error(exc)
-        @formatter.exception(exc) if @formatter.respond_to?(:exception)
+      def on_error(exc, env = nil)
+        return unless @formatter.respond_to?(:exception)
+
+        # The Env is only passed when a disclosure policy applies, so the
+        # historical one-argument formatter contract is preserved otherwise.
+        if env && Faraday::Disclosure.policy_for(env) && accepts_env?(@formatter)
+          @formatter.exception(exc, env)
+        else
+          @formatter.exception(exc)
+        end
+      end
+
+      private
+
+      # Formatters may keep the historical `exception(exc)` signature; the
+      # bundled formatter accepts the optional Env as a second argument.
+      def accepts_env?(formatter)
+        arity = formatter.method(:exception).arity
+        arity == 2 || arity <= -2
       end
     end
   end
