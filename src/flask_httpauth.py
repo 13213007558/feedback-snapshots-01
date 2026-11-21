@@ -103,6 +103,15 @@ class HTTPAuth:
         return decorated
 
     def authenticate_header(self):
+        return self.challenge()
+
+    def challenge(self):
+        """Return the ``WWW-Authenticate`` challenge advertised by this
+        authentication object. The value is derived exclusively from the
+        object's static configuration (scheme and realm, plus nonce data for
+        digest authentication) and never from values sent by the client, so it
+        cannot be influenced by the incoming request.
+        """
         return f'{self.scheme} realm="{self.realm}"'
 
     def get_auth(self):
@@ -225,6 +234,7 @@ class HTTPAuth:
                     elif not self.authorize(role, user, auth):
                         status = 403
                     if not optional and status:
+                        g.flask_httpauth_error_status = status
                         try:
                             return self.auth_error_callback(status)
                         except TypeError:
@@ -537,7 +547,7 @@ class HTTPDigestAuth(HTTPAuth):
         a1 = a1.encode('utf-8')
         return md5(a1).hexdigest()
 
-    def authenticate_header(self):
+    def challenge(self):
         nonce = self.get_nonce()
         opaque = self.get_opaque()
         if self.qop:
@@ -638,10 +648,64 @@ class MultiAuth:
     ``HTTPDigestAuth`` or ``HTTPTokenAuth``. A route protected with this
     authentication method will try all the given authentication objects until
     one succeeds.
+
+    The optional ``challenges`` argument declares which authentication objects
+    advertise a ``WWW-Authenticate`` challenge when an authentication error is
+    returned. It can be a single authentication object or a list of them. Each
+    object must be one of the authentication objects given to this
+    ``MultiAuth`` instance. When omitted, every configured authentication
+    object publishes a challenge.
+
+    The published challenges are rendered as one ``WWW-Authenticate`` header
+    per authentication object, in the same order in which the objects were
+    registered. Because the challenge list is taken from this static
+    configuration, it is entirely independent of the request, including the
+    scheme or credentials sent by the client. This lets clients select any of
+    the advertised schemes while preventing unconfigured schemes from leaking
+    into the response through crafted request headers.
     """
-    def __init__(self, main_auth, *additional_auths):
+    def __init__(self, main_auth, *additional_auths, challenges=None):
         self.main_auth = main_auth
         self.additional_auths = additional_auths
+        self.auth_objects = (main_auth,) + additional_auths
+
+        if challenges is None:
+            challenge_auths = list(self.auth_objects)
+        elif isinstance(challenges, (list, tuple)):
+            challenge_auths = list(challenges)
+        else:
+            challenge_auths = [challenges]
+
+        seen = set()
+        self.challenge_auths = []
+        for auth in challenge_auths:
+            if auth not in self.auth_objects:
+                raise ValueError(
+                    'challenge authentication objects must be among the '
+                    'authentication objects of this MultiAuth instance')
+            if id(auth) not in seen:
+                seen.add(id(auth))
+                self.challenge_auths.append(auth)
+
+    def authenticate_header(self):
+        """The challenge of the main authentication object, kept for
+        compatibility with the single-auth ``HTTPAuth`` interface."""
+        return self.main_auth.challenge()
+
+    def challenge_headers(self):
+        """The ordered list of statically configured ``WWW-Authenticate``
+        challenges. This list does not depend on the incoming request."""
+        return [auth.challenge() for auth in self.challenge_auths]
+
+    def _apply_challenges(self, response):
+        if not g.get('flask_httpauth_error_status'):
+            # only framework-generated authentication errors are rewritten;
+            # errors raised directly by the application are left untouched
+            return response
+        response.headers.pop('WWW-Authenticate', None)
+        for header in self.challenge_headers():
+            response.headers.add('WWW-Authenticate', header)
+        return response
 
     def login_required(self, f=None, role=None, optional=None):
         """Decorator for a function that will be called when authentication is
@@ -661,8 +725,9 @@ class MultiAuth:
                         if auth.is_compatible_auth(request.headers):
                             selected_auth = auth
                             break
-                return selected_auth.login_required(
+                response = selected_auth.login_required(
                     role=role, optional=optional)(f)(*args, **kwargs)
+                return self._apply_challenges(make_response(response))
             return decorated
 
         if f:

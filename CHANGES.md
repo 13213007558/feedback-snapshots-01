@@ -1,5 +1,9 @@
 # Flask-HTTPAuth change log
 
+**Unreleased**
+
+- `MultiAuth` publishes one `WWW-Authenticate` header per configured authentication object on authentication and permission errors, and accepts an optional `challenges` argument to explicitly select which challenges are advertised. The challenge set is derived solely from static configuration and cannot be influenced by the request. Add the `HTTPAuth.challenge()` and `MultiAuth.challenge_headers()` methods.
+
 **Release 4.8.1** - 2026-03-28
 
 - Do not accept empty or missing tokens ([commit](https://github.com/miguelgrinberg/flask-httpauth/commit/b15ffe9e50e110d7174ccd944f642079e1dcf9ee))

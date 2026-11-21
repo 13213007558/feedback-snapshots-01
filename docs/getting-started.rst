@@ -163,6 +163,42 @@ party API clients use a JWS or JWT bearer token. The `MultiAuth` class allows yo
 
 In the examples directory you can find a complete example that uses basic and token authentication.
 
+Authentication Challenges
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When an authentication error occurs, each registered authentication object
+normally advertises its own ``WWW-Authenticate`` challenge. With
+``MultiAuth`` these challenges are published together, as one
+``WWW-Authenticate`` header per authentication object, in the same order in
+which the objects were given to the ``MultiAuth`` constructor. A client can
+then pick any of the advertised schemes::
+
+    HTTP/1.1 401 Unauthorized
+    WWW-Authenticate: Basic realm="Web Console"
+    WWW-Authenticate: Bearer realm="API Tokens"
+
+Use the optional ``challenges`` argument to explicitly decide which
+challenges are published side by side. It accepts a single authentication
+object or a list of them, each of which must also be passed to the
+``MultiAuth`` constructor::
+
+    multi_auth = MultiAuth(basic_auth, token_auth,
+                           challenges=[token_auth])
+
+The challenge list is taken from this static configuration only. It never
+depends on the scheme, credentials or any other value carried by the incoming
+request, so a crafted ``Authorization`` header cannot introduce an
+unconfigured challenge into the response. When ``challenges`` is omitted,
+every configured authentication object publishes its challenge.
+
+The body of the error response is entirely controlled by the
+``error_handler`` callbacks, so these can return JSON produced by a shared
+error layer. ``MultiAuth`` only replaces the ``WWW-Authenticate`` headers on
+authentication failures (401) and insufficient-permission failures (403).
+Errors raised directly by the application, such as those generated with
+``flask.abort``, are left untouched and do not acquire authentication
+challenges.
+
 User Roles
 ----------
 

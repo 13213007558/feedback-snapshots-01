@@ -72,8 +72,11 @@ class HTTPAuthTestCase(unittest.TestCase):
         response = self.client.get('/protected')
         self.assertEqual(response.status_code, 401)
         self.assertTrue('WWW-Authenticate' in response.headers)
-        self.assertEqual(response.headers['WWW-Authenticate'],
-                         'Basic realm="Authentication Required"')
+        self.assertEqual(
+            response.headers.getlist('WWW-Authenticate'),
+            ['Basic realm="Authentication Required"',
+             'MyToken realm="Authentication Required"',
+             'Bearer realm="Authentication Required"'])
 
     def test_multi_auth_login_valid_basic(self):
         creds = base64.b64encode(b'john:hello').decode('utf-8')
@@ -87,8 +90,11 @@ class HTTPAuthTestCase(unittest.TestCase):
             '/protected', headers={'Authorization': 'Basic ' + creds})
         self.assertEqual(response.status_code, 401)
         self.assertTrue('WWW-Authenticate' in response.headers)
-        self.assertEqual(response.headers['WWW-Authenticate'],
-                         'Basic realm="Authentication Required"')
+        self.assertEqual(
+            response.headers.getlist('WWW-Authenticate'),
+            ['Basic realm="Authentication Required"',
+             'MyToken realm="Authentication Required"',
+             'Bearer realm="Authentication Required"'])
 
     def test_multi_auth_login_valid_token(self):
         response = self.client.get(
@@ -102,8 +108,11 @@ class HTTPAuthTestCase(unittest.TestCase):
                                    'MyToken this-is-not-the-token!'})
         self.assertEqual(response.status_code, 401)
         self.assertTrue('WWW-Authenticate' in response.headers)
-        self.assertEqual(response.headers['WWW-Authenticate'],
-                         'MyToken realm="Foo"')
+        self.assertEqual(
+            response.headers.getlist('WWW-Authenticate'),
+            ['Basic realm="Authentication Required"',
+             'MyToken realm="Authentication Required"',
+             'Bearer realm="Authentication Required"'])
 
     def test_multi_auth_login_valid_custom_token(self):
         response = self.client.get(
@@ -115,16 +124,22 @@ class HTTPAuthTestCase(unittest.TestCase):
             '/protected', headers={'X-Token': 'this-is-not-the-token!'})
         self.assertEqual(response.status_code, 401)
         self.assertTrue('WWW-Authenticate' in response.headers)
-        self.assertEqual(response.headers['WWW-Authenticate'],
-                         'Bearer realm="Authentication Required"')
+        self.assertEqual(
+            response.headers.getlist('WWW-Authenticate'),
+            ['Basic realm="Authentication Required"',
+             'MyToken realm="Authentication Required"',
+             'Bearer realm="Authentication Required"'])
 
     def test_multi_auth_login_invalid_scheme(self):
         response = self.client.get(
             '/protected', headers={'Authorization': 'Foo this-is-the-token!'})
         self.assertEqual(response.status_code, 401)
         self.assertTrue('WWW-Authenticate' in response.headers)
-        self.assertEqual(response.headers['WWW-Authenticate'],
-                         'Basic realm="Authentication Required"')
+        self.assertEqual(
+            response.headers.getlist('WWW-Authenticate'),
+            ['Basic realm="Authentication Required"',
+             'MyToken realm="Authentication Required"',
+             'Bearer realm="Authentication Required"'])
 
     def test_multi_malformed_header(self):
         response = self.client.get(
