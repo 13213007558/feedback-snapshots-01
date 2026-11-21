@@ -75,8 +75,10 @@ __all__ = [
     "new_scope",
     "push_scope",
     "remove_attribute",
+    "remove_baggage",
     "set_attribute",
     "set_attributes",
+    "set_baggage",
     "set_context",
     "set_extra",
     "set_level",
@@ -325,6 +327,30 @@ def remove_attribute(attribute: str) -> None:
     it will also not raise an exception.
     """
     return get_isolation_scope().remove_attribute(attribute)
+
+
+def set_baggage(key: str, value: str) -> None:
+    """
+    Set a baggage item explicitly from this application.
+
+    Caller-set items are tracked separately from items inherited from incoming
+    ``baggage`` headers. With ``baggage_propagation_targets``, they can be
+    handed to registered downstream services while other destinations only get
+    the dynamic sampling context needed to continue the trace.
+
+    Dynamic sampling context keys are managed by the SDK and cannot be
+    overridden here.
+    """
+    return get_isolation_scope().set_baggage(key, value)
+
+
+def remove_baggage(key: str) -> None:
+    """
+    Remove a caller-set baggage item.
+
+    If the item doesn't exist, this function will not have any effect.
+    """
+    return get_isolation_scope().remove_baggage(key)
 
 
 @scopemethod

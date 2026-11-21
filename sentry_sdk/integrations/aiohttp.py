@@ -37,6 +37,7 @@ from sentry_sdk.tracing_utils import (
     Baggage,
     add_http_breadcrumb,
     add_http_request_source,
+    get_baggage_categories_for_target,
     has_span_streaming_enabled,
     should_propagate_trace,
 )
@@ -530,7 +531,8 @@ def create_trace_config() -> "TraceConfig":
                 key,
                 value,
             ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
-                span=span
+                span=span,
+                categories=get_baggage_categories_for_target(str(params.url), client),
             ):
                 # skip signed headers and an existing `sentry-trace`.
                 if key.lower() in headers_to_skip:

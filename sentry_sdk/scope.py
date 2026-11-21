@@ -43,7 +43,9 @@ from sentry_sdk.tracing import (
 from sentry_sdk.tracing_utils import (
     Baggage,
     PropagationContext,
+    _iter_baggage_headers_for_span,
     _make_sampling_decision,
+    _normalize_baggage_categories,
     has_span_streaming_enabled,
     has_tracing_enabled,
     is_ignored_span,
@@ -686,6 +688,11 @@ class Scope:
 
         If a span is given, the trace data will taken from the span.
         If no span is given, the trace data is taken from the scope.
+
+        If ``categories`` is given, only the baggage items belonging to those
+        categories are serialized into the ``baggage`` header. This is used to
+        restrict what is handed to a specific destination, while ``sentry-trace``
+        is always propagated so the trace can be continued.
         """
         client = self.get_client()
         if not client.options.get("propagate_traces"):
@@ -695,6 +702,12 @@ class Scope:
                 stacklevel=2,
             )
             return
+
+        categories = kwargs.pop("categories", None)
+        if categories is not None:
+            # The dynamic sampling context is always propagated so the trace
+            # can be continued by the receiving service.
+            categories = _normalize_baggage_categories(categories)
 
         span = kwargs.pop("span", None)
         if not span:
@@ -706,15 +719,28 @@ class Scope:
             and span is not None
             and not isinstance(span, NoOpSpan)
         ):
-            for header in span._iter_headers():
-                yield header
+            if categories is None:
+                for header in span._iter_headers():
+                    yield header
+            else:
+                yield from _iter_baggage_headers_for_span(span, categories)
         elif has_external_propagation_context():
             # when we have an external_propagation_context (otlp)
             # we leave outgoing propagation to the propagator
             return
         else:
-            for header in self.get_active_propagation_context().iter_headers():
-                yield header
+            propagation_context = self.get_active_propagation_context()
+            if categories is None:
+                for header in propagation_context.iter_headers():
+                    yield header
+            else:
+                yield SENTRY_TRACE_HEADER_NAME, propagation_context.to_traceparent()
+
+                baggage = propagation_context.get_baggage().serialize_for_categories(
+                    categories
+                )
+                if baggage:
+                    yield BAGGAGE_HEADER_NAME, baggage
 
     def get_active_propagation_context(self) -> "PropagationContext":
         if self._propagation_context is not None:
@@ -2075,6 +2101,62 @@ class Scope:
             del self._attributes[attribute]
         except KeyError:
             pass
+
+    def set_baggage(self, key: str, value: "str") -> None:
+        """
+        Set a baggage item explicitly from this application.
+
+        Caller-set items are remembered separately from items inherited through
+        incoming ``baggage`` headers. This lets ``baggage_propagation_targets``
+        hand business data to registered downstream services while only
+        propagating the dynamic sampling context to everyone else.
+
+        Keys that belong to the dynamic sampling context are ignored, since the
+        SDK manages those itself.
+        """
+        for baggage in self._all_baggages():
+            baggage.set_caller_item(key, str(value))
+
+    def remove_baggage(self, key: str) -> None:
+        """Remove a caller-set baggage item. No-op if it is not set."""
+        for baggage in self._all_baggages():
+            if key not in baggage.caller_items:
+                continue
+
+            baggage.caller_items.pop(key, None)
+            if key not in baggage.incoming_items:
+                baggage.sentry_items.pop(key, None)
+
+    def _all_baggages(self) -> "List[Baggage]":
+        """Return distinct Baggage objects visible from this scope.
+
+        The active span may hold its own baggage while the propagation context
+        holds another, and both the current and isolation scopes can carry a
+        propagation context. Caller-set items have to land in all of them so
+        that outgoing header generation sees them regardless of which lookup
+        path it takes.
+        """
+        baggages: "List[Baggage]" = []
+
+        scopes: "List[Scope]" = [self]
+        for scope in (
+            Scope.get_current_scope(),
+            Scope.get_isolation_scope(),
+        ):
+            if all(scope is not seen for seen in scopes):
+                scopes.append(scope)
+
+        for scope in scopes:
+            span_baggage = scope.get_baggage()
+            propagation_baggage = scope.get_active_propagation_context().get_baggage()
+
+            for baggage in (span_baggage, propagation_baggage):
+                if baggage is not None and all(
+                    baggage is not seen for seen in baggages
+                ):
+                    baggages.append(baggage)
+
+        return baggages
 
 
 @contextmanager

@@ -4,7 +4,10 @@ import sentry_sdk
 from sentry_sdk.consts import OP, SPANDATA
 from sentry_sdk.integrations import DidNotEnable
 from sentry_sdk.integrations.grpc.consts import SPAN_ORIGIN
-from sentry_sdk.tracing_utils import has_span_streaming_enabled
+from sentry_sdk.tracing_utils import (
+    get_baggage_categories_for_target,
+    has_span_streaming_enabled,
+)
 
 if TYPE_CHECKING:
     from typing import Any, Callable, Iterable, Iterator, Union
@@ -148,7 +151,11 @@ class ClientInterceptor(
         for (
             key,
             value,
-        ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers():
+        ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
+            categories=get_baggage_categories_for_target(
+                client_call_details.method, sentry_sdk.get_client()
+            )
+        ):
             metadata.append((key, value))
 
         client_call_details = grpc._interceptor._ClientCallDetails(

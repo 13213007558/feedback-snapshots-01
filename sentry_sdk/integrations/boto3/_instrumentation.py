@@ -15,6 +15,7 @@ from sentry_sdk.tracing import BAGGAGE_HEADER_NAME, Span
 from sentry_sdk.tracing_utils import (
     add_http_breadcrumb,
     add_sentry_baggage_to_headers,
+    get_baggage_categories_for_target,
     get_url_attributes,
     has_span_streaming_enabled,
     should_propagate_trace,
@@ -475,7 +476,8 @@ def _sentry_before_sign(
         # use span associated with this botocore request
         span = request.context.get("_sentrysdk_span")
         headers = sentry_sdk.get_current_scope().iter_trace_propagation_headers(
-            span=span
+            span=span,
+            categories=get_baggage_categories_for_target(request.url, client),
         )
         for header_name, header_value in headers:
             if header_name != BAGGAGE_HEADER_NAME:

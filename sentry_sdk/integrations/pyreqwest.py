@@ -11,6 +11,7 @@ from sentry_sdk.tracing_utils import (
     add_http_breadcrumb,
     add_http_request_source,
     add_sentry_baggage_to_headers,
+    get_baggage_categories_for_target,
     get_url_attributes,
     has_span_streaming_enabled,
     propagate_trace_headers,
@@ -162,7 +163,11 @@ def _sentry_pyreqwest_span(
             for (
                 key,
                 value,
-            ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers():
+            ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
+                categories=get_baggage_categories_for_target(
+                    str(request.url), sentry_sdk.get_client()
+                )
+            ):
                 logger.debug(
                     "[Tracing] Adding `{key}` header {value} to outgoing request to {url}.".format(
                         key=key, value=value, url=request.url

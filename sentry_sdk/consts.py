@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     import sentry_sdk
     from sentry_sdk._types import (
+        BaggagePropagationTarget,
         BreadcrumbProcessor,
         ContinuousProfilerMode,
         DataCollectionUserOptions,
@@ -1433,6 +1434,7 @@ class ClientConstructor:
         include_local_variables: "Optional[bool]" = True,
         include_source_context: "Optional[bool]" = True,
         trace_propagation_targets: "Optional[Sequence[str]]" = [MATCH_ALL],
+        baggage_propagation_targets: "Optional[Sequence[BaggagePropagationTarget]]" = None,
         functions_to_trace: "Sequence[Dict[str, str]]" = [],
         event_scrubber: "Optional[sentry_sdk.scrubber.EventScrubber]" = None,
         max_value_length: "Optional[int]" = DEFAULT_MAX_VALUE_LENGTH,
@@ -1790,6 +1792,33 @@ class ClientConstructor:
 
             If `trace_propagation_targets` is not provided, trace data is attached to every outgoing request from the
             instrumented client.
+
+        :param baggage_propagation_targets: An optional per-destination policy controlling which categories of
+            baggage items are attached to outgoing requests. URLs are matched with the same substring/regex rules
+            as `trace_propagation_targets`; the first matching entry wins. Targets omitted from the list,
+            and entries without `"propagate"`, only receive the dynamic sampling context (`["dsc"]`).
+
+            Supported categories are:
+
+            - `"dsc"`: the dynamic sampling context (`sentry-trace_id`, `sentry-public_key`, `sentry-sample_rate`
+              and similar). Always attached, so the trace can be continued.
+            - `"caller"`: business items the application set explicitly with :py:func:`sentry_sdk.set_baggage`.
+            - `"incoming"`: Sentry baggage items inherited from an incoming `baggage` header.
+            - `"third_party"`: non-Sentry W3C baggage items that came in with the request.
+
+            Example::
+
+                sentry_sdk.init(
+                    dsn="...",
+                    baggage_propagation_targets=[
+                        {"url": "internal.example.com", "propagate": ["caller", "incoming"]},
+                        {"url": ".*", "propagate": ["dsc"]},
+                    ],
+                )
+
+            The `sentry-trace` header itself is unaffected by this option and is still governed by
+            `trace_propagation_targets`. If `baggage_propagation_targets` is not provided, all Sentry baggage items
+            are propagated as before.
 
         :param functions_to_trace: An optional list of functions that should be set up for tracing.
 

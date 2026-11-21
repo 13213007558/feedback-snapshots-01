@@ -16,6 +16,7 @@ from sentry_sdk.tracing_utils import (
     EnvironHeaders,
     add_http_breadcrumb,
     add_http_request_source,
+    get_baggage_categories_for_target,
     get_url_attributes,
     has_span_streaming_enabled,
     should_propagate_trace,
@@ -177,7 +178,10 @@ def _get_wrapped_endheaders(
                             header_name,
                             header_value,
                         ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
-                            span=span
+                            span=span,
+                            categories=get_baggage_categories_for_target(
+                                real_url, sentry_sdk.get_client()
+                            ),
                         ):
                             # skip signed headers and an existing `sentry-trace`.
                             if header_name.lower() in headers_to_skip:
@@ -384,7 +388,8 @@ def _install_httplib() -> None:
                 key,
                 value,
             ) in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
-                span=span
+                span=span,
+                categories=get_baggage_categories_for_target(real_url, client),
             ):
                 logger.debug(
                     "[Tracing] Adding `{key}` header {value} to outgoing request to {real_url}.".format(

@@ -527,3 +527,9 @@ if TYPE_CHECKING:
         total=False,
     )
     IgnoreSpansConfig = list[Union[IgnoreSpansName, IgnoreSpansContext]]
+
+    BaggageCategory = Literal["dsc", "caller", "incoming", "third_party"]
+
+    class BaggagePropagationTarget(TypedDict, total=False):
+        url: str
+        propagate: "list[BaggageCategory]"

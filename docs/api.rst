@@ -49,6 +49,8 @@ Distributed Tracing
 ===================
 
 .. autofunction:: sentry_sdk.api.get_baggage
+.. autofunction:: sentry_sdk.api.set_baggage
+.. autofunction:: sentry_sdk.api.remove_baggage
 .. autofunction:: sentry_sdk.api.get_traceparent
 
 

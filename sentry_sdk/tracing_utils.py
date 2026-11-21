@@ -45,11 +45,13 @@ if TYPE_CHECKING:
     from types import FrameType
     from typing import (
         Any,
+        Container,
         Dict,
         Generator,
         Iterator,
         Literal,
         Optional,
+        Sequence,
         Tuple,
         Union,
     )
@@ -65,6 +67,52 @@ SENTRY_TRACE_REGEX = re.compile(
     "-?([01])?"  # sampled
     "[ \t]*$"  # whitespace
 )
+
+# Baggage categories that can be enabled per propagation target. The dynamic
+# sampling context ("dsc") is always propagated so that a trace can be
+# continued. "caller" items are set explicitly by the local application,
+# "incoming" items are inherited from an upstream service, and "third_party"
+# items are non-Sentry W3C baggage entries.
+BAGGAGE_CATEGORY_DSC = "dsc"
+BAGGAGE_CATEGORY_CALLER = "caller"
+BAGGAGE_CATEGORY_INCOMING = "incoming"
+BAGGAGE_CATEGORY_THIRD_PARTY = "third_party"
+
+DEFAULT_BAGGAGE_CATEGORIES = frozenset(
+    (
+        BAGGAGE_CATEGORY_DSC,
+        BAGGAGE_CATEGORY_CALLER,
+        BAGGAGE_CATEGORY_INCOMING,
+    )
+)
+"""Full set of Sentry business categories, used for explicit target entries.
+
+Entries that omit ``propagate`` are treated as ``MINIMAL_BAGGAGE_CATEGORIES``;
+when the option is not configured at all, the historical behavior is kept.
+"""
+
+MINIMAL_BAGGAGE_CATEGORIES = frozenset((BAGGAGE_CATEGORY_DSC,))
+"""Only the dynamic sampling context needed to continue the trace."""
+
+ALL_BAGGAGE_CATEGORIES = DEFAULT_BAGGAGE_CATEGORIES | frozenset(
+    (BAGGAGE_CATEGORY_THIRD_PARTY,)
+)
+
+# Items that make up the dynamic sampling context. They are always part of the
+# `dsc` category and therefore never filtered by the per-target baggage policy.
+CORE_DSC_KEYS = frozenset(
+    (
+        "trace_id",
+        "public_key",
+        "org_id",
+        "sample_rate",
+        "sample_rand",
+        "sampled",
+    )
+)
+
+# Human-readable DSC items (environment, release, transaction name).
+DSC_KEYS = CORE_DSC_KEYS | frozenset(("environment", "release", "transaction"))
 
 
 class EnvironHeaders(Mapping):  # type: ignore
@@ -749,7 +797,13 @@ class Baggage:
     it is the caller's responsibility to enforce this restriction.
     """
 
-    __slots__ = ("sentry_items", "third_party_items", "mutable")
+    __slots__ = (
+        "sentry_items",
+        "third_party_items",
+        "mutable",
+        "caller_items",
+        "incoming_items",
+    )
 
     SENTRY_PREFIX = "sentry-"
     SENTRY_PREFIX_REGEX = re.compile("^sentry-")
@@ -759,10 +813,17 @@ class Baggage:
         sentry_items: "Dict[str, str]",
         third_party_items: str = "",
         mutable: bool = True,
+        caller_items: "Optional[Dict[str, str]]" = None,
+        incoming_items: "Optional[Dict[str, str]]" = None,
     ):
         self.sentry_items = sentry_items
         self.third_party_items = third_party_items
         self.mutable = mutable
+        # Items the local caller explicitly attached, as opposed to items
+        # inherited from an upstream service through incoming headers. The
+        # distinction is what lets a propagation policy treat both differently.
+        self.caller_items = caller_items if caller_items is not None else {}
+        self.incoming_items = incoming_items if incoming_items is not None else {}
 
     @classmethod
     def from_incoming_header(
@@ -798,7 +859,12 @@ class Baggage:
             sentry_items["sample_rand"] = str(_sample_rand)
             mutable = False
 
-        return Baggage(sentry_items, third_party_items, mutable)
+        return Baggage(
+            sentry_items,
+            third_party_items,
+            mutable,
+            incoming_items=dict(sentry_items),
+        )
 
     @classmethod
     def from_options(cls, scope: "sentry_sdk.scope.Scope") -> "Optional[Baggage]":
@@ -888,10 +954,33 @@ class Baggage:
         # there's an existing baggage but it was mutable,
         # which is why we are creating this new baggage.
         # However, if by chance the user put some sentry items in there, give them precedence.
+        caller_items: "Dict[str, str]" = {}
+        incoming_items: "Dict[str, str]" = {}
         if transaction._baggage and transaction._baggage.sentry_items:
             sentry_items.update(transaction._baggage.sentry_items)
+            caller_items.update(transaction._baggage.caller_items)
+            incoming_items.update(transaction._baggage.incoming_items)
+        else:
+            # The transaction may not hold baggage yet (the SDK populates it
+            # lazily). Preserve caller-set and inherited business items that
+            # live on the scope's propagation context instead of dropping them
+            # when this transaction becomes the head of the trace.
+            propagation_baggage = _get_scope_propagation_baggage()
+            if propagation_baggage is not None:
+                for key, value in propagation_baggage.caller_items.items():
+                    sentry_items.setdefault(key, value)
+                    caller_items[key] = value
 
-        return Baggage(sentry_items, mutable=False)
+                for key, value in propagation_baggage.incoming_items.items():
+                    sentry_items.setdefault(key, value)
+                    incoming_items[key] = value
+
+        return Baggage(
+            sentry_items,
+            mutable=False,
+            caller_items=caller_items,
+            incoming_items=incoming_items,
+        )
 
     @classmethod
     def populate_from_segment(cls, segment: "StreamedSpan") -> "Baggage":
@@ -938,10 +1027,31 @@ class Baggage:
         # creating this new baggage.
         # However, if by chance the user put some sentry items in there, give
         # them precedence.
+        caller_items: "Dict[str, str]" = {}
+        incoming_items: "Dict[str, str]" = {}
         if segment._baggage and segment._baggage.sentry_items:
             sentry_items.update(segment._baggage.sentry_items)
+            caller_items.update(segment._baggage.caller_items)
+            incoming_items.update(segment._baggage.incoming_items)
+        else:
+            # See Baggage.populate_from_transaction: keep business items that
+            # were attached before the segment's baggage was populated.
+            propagation_baggage = _get_scope_propagation_baggage()
+            if propagation_baggage is not None:
+                for key, value in propagation_baggage.caller_items.items():
+                    sentry_items.setdefault(key, value)
+                    caller_items[key] = value
 
-        return Baggage(sentry_items, mutable=False)
+                for key, value in propagation_baggage.incoming_items.items():
+                    sentry_items.setdefault(key, value)
+                    incoming_items[key] = value
+
+        return Baggage(
+            sentry_items,
+            mutable=False,
+            caller_items=caller_items,
+            incoming_items=incoming_items,
+        )
 
     def freeze(self) -> None:
         self.mutable = False
@@ -954,6 +1064,40 @@ class Baggage:
 
         return header
 
+    def set_caller_item(self, key: str, value: "str") -> None:
+        """Attach a business baggage item explicitly set by the local caller.
+
+        Caller items are tracked separately from items inherited through
+        incoming headers, so a propagation policy can hand one set to trusted
+        downstream services and only the other to the public internet.
+        Dynamic sampling context keys are managed by the SDK and ignored here.
+        """
+        if key in DSC_KEYS:
+            return
+
+        self.sentry_items[key] = value
+        self.caller_items[key] = value
+        self.incoming_items.pop(key, None)
+
+    def item_categories(self) -> "Dict[str, str]":
+        """Return the propagation category of each Sentry baggage item.
+
+        Any DSC key counts as ``dsc``. Business items the caller did not set
+        explicitly are classified as ``incoming``: they are not authorized by
+        the local application for arbitrary destinations.
+        """
+        categories = {}
+
+        for key in self.sentry_items:
+            if key in DSC_KEYS:
+                categories[key] = BAGGAGE_CATEGORY_DSC
+            elif key in self.caller_items:
+                categories[key] = BAGGAGE_CATEGORY_CALLER
+            else:
+                categories[key] = BAGGAGE_CATEGORY_INCOMING
+
+        return categories
+
     def serialize(self, include_third_party: bool = False) -> str:
         items = []
 
@@ -963,6 +1107,36 @@ class Baggage:
                 items.append(item)
 
         if include_third_party and self.third_party_items:
+            items.append(self.third_party_items)
+
+        return ",".join(items)
+
+    def serialize_for_categories(
+        self,
+        categories: "Optional[Container[str]]" = None,
+    ) -> str:
+        """Serialize only the baggage items allowed by ``categories``.
+
+        ``categories`` is a set of baggage categories. ``None`` keeps the
+        historical behavior of serializing all Sentry items and no third-party
+        items. Otherwise, third-party items are included when the
+        ``third_party`` category is allowed.
+        """
+        if categories is None:
+            return self.serialize()
+
+        item_categories = self.item_categories()
+        items = []
+
+        for key, val in self.sentry_items.items():
+            if item_categories[key] not in categories:
+                continue
+
+            with capture_internal_exceptions():
+                item = Baggage.SENTRY_PREFIX + quote(key) + "=" + quote(str(val))
+                items.append(item)
+
+        if BAGGAGE_CATEGORY_THIRD_PARTY in categories and self.third_party_items:
             items.append(self.third_party_items)
 
         return ",".join(items)
@@ -998,6 +1172,81 @@ class Baggage:
         return f'<Baggage "{self.serialize(include_third_party=True)}", mutable={self.mutable}>'
 
 
+def _get_scope_propagation_baggage() -> "Optional[Baggage]":
+    """Return the baggage of the active propagation context without creating it."""
+    for scope in (sentry_sdk.get_current_scope(), sentry_sdk.get_isolation_scope()):
+        propagation_context = scope._propagation_context
+        if propagation_context is not None and propagation_context.baggage is not None:
+            return propagation_context.baggage
+
+    return None
+
+
+def get_baggage_categories(
+    client: "sentry_sdk.client.BaseClient", url: str
+) -> "Optional[frozenset[str]]":
+    """
+    Resolve which baggage categories may be propagated to ``url``.
+
+    ``baggage_propagation_targets`` is a list of ``{"url": <pattern>,
+    "propagate": [<category>, ...]}`` entries. The first entry whose URL
+    pattern matches ``url`` selects the categories for that destination. URLs
+    that no entry matches only receive the dynamic sampling context.
+
+    An empty list only propagates the dynamic sampling context everywhere.
+    Returns ``None`` when the option is not configured at all, which keeps the
+    historical serialization behavior.
+    """
+    targets = client.options.get("baggage_propagation_targets")
+
+    if targets is None:
+        return None
+
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+
+        pattern = target.get("url")
+        if not isinstance(pattern, str) or not match_regex_list(
+            url, [pattern], substring_matching=True
+        ):
+            continue
+
+        return _normalize_baggage_categories(target.get("propagate"))
+
+    return MINIMAL_BAGGAGE_CATEGORIES
+
+
+def get_baggage_categories_for_target(
+    url: str, client: "Optional[sentry_sdk.client.BaseClient]" = None
+) -> "Optional[frozenset[str]]":
+    """
+    Like :py:func:`get_baggage_categories`, but looks up the current client.
+
+    This is the entry point instrumentation uses when it propagates headers to
+    an outgoing request.
+    """
+    if client is None:
+        client = sentry_sdk.get_client()
+
+    return get_baggage_categories(client, url)
+
+
+def _normalize_baggage_categories(
+    categories: "Optional[Sequence[str]]",
+) -> "frozenset[str]":
+    """Normalize a user-provided category list, always allowing the DSC."""
+    if categories is None:
+        return MINIMAL_BAGGAGE_CATEGORIES
+
+    return (
+        frozenset(
+            category for category in categories if category in ALL_BAGGAGE_CATEGORIES
+        )
+        | MINIMAL_BAGGAGE_CATEGORIES
+    )
+
+
 def should_propagate_trace(client: "sentry_sdk.client.BaseClient", url: str) -> bool:
     """
     Returns True if url matches trace_propagation_targets configured in the given client. Otherwise, returns False.
@@ -1030,7 +1279,11 @@ def propagate_trace_headers(
     if not should_propagate_trace(client, str(request.url)):
         return
 
-    for key, value in sentry_sdk.get_current_scope().iter_trace_propagation_headers():
+    categories = get_baggage_categories_for_target(str(request.url), client)
+
+    for key, value in sentry_sdk.get_current_scope().iter_trace_propagation_headers(
+        categories=categories
+    ):
         logger.debug(
             f"[Tracing] Adding `{key}` header {value} to outgoing request to {request.url}."
         )
@@ -1807,6 +2060,30 @@ def is_ignored_span(name: str, attributes: "Optional[Attributes]") -> bool:
                 return True
 
     return False
+
+
+def _iter_baggage_headers_for_span(
+    span: "Any", categories: "Container[str]"
+) -> "Iterator[Tuple[str, str]]":
+    """Yield propagation headers for a span, filtered by baggage categories."""
+    containing_transaction = getattr(span, "containing_transaction", None)
+
+    if containing_transaction is not None:
+        baggage = containing_transaction.get_baggage()
+    elif hasattr(span, "_segment"):
+        # Span-streaming spans keep the baggage on the segment.
+        segment = span._segment
+        if segment is None:
+            return
+        baggage = segment._get_baggage()
+    else:
+        return
+
+    yield SENTRY_TRACE_HEADER_NAME, span._to_traceparent()
+
+    serialized = baggage.serialize_for_categories(categories)
+    if serialized:
+        yield BAGGAGE_HEADER_NAME, serialized
 
 
 # Circular imports
