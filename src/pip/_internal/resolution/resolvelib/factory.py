@@ -695,6 +695,7 @@ class Factory:
         req_disp = req_str if parent is None else f"{req_str} (from {parent.name})"
         cands = self._finder.find_all_candidates(req.project_name)
         skipped_by_requires_python = self._finder.requires_python_skipped_reasons()
+        skipped_by_source_policy = self._finder.source_policy_skipped_reasons()
 
         versions_set: set[Version] = set()
         yanked_versions_set: set[Version] = set()
@@ -720,6 +721,12 @@ class Factory:
                 "Ignored the following versions that require a different python "
                 "version: %s",
                 "; ".join(skipped_by_requires_python) or "none",
+            )
+        if skipped_by_source_policy:
+            logger.critical(
+                "Ignored the following links that are not from an approved "
+                "source: %s",
+                "; ".join(skipped_by_source_policy),
             )
 
         # Check if only final releases are allowed for this package

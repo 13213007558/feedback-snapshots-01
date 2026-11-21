@@ -530,6 +530,36 @@ def uploaded_prior_to() -> Option:
     )
 
 
+def approved_source() -> Option:
+    return Option(
+        "--approved-source",
+        dest="approved_sources",
+        action="append",
+        default=[],
+        metavar="url|path",
+        help="Only install packages obtained from the given URL or local "
+        "path. Links located below an approved source are accepted. "
+        "This option can be used multiple times; when supplied at least "
+        "once, packages from any other source are rejected. The rules "
+        "also apply to build dependencies installed in the isolated "
+        "build environment.",
+    )
+
+
+def approved_build_tool() -> Option:
+    return Option(
+        "--approved-build-tool",
+        dest="approved_build_tools",
+        action="append",
+        default=[],
+        metavar="package",
+        help="Exempt the named package from --approved-source "
+        "restrictions. Intended for vetted build tools that administrators "
+        "allow to be fetched from outside the approved sources. "
+        "This option can be used multiple times.",
+    )
+
+
 def trusted_host() -> Option:
     return Option(
         "--trusted-host",
@@ -1382,6 +1412,8 @@ index_group: dict[str, Any] = {
         refresh_package,
         find_links,
         uploaded_prior_to,
+        approved_source,
+        approved_build_tool,
     ],
 }
 

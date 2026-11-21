@@ -36,6 +36,7 @@ from pip._internal.exceptions import (
 from pip._internal.index.collector import LinkCollector
 from pip._internal.index.package_finder import PackageFinder
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.models.target_python import TargetPython
 from pip._internal.network.session import PipSession
 from pip._internal.operations.build.build_tracker import BuildTracker
@@ -573,10 +574,15 @@ class RequirementCommand(IndexGroupCommand):
             prefer_binary=options.prefer_binary,
             ignore_requires_python=ignore_requires_python,
         )
+        source_policy = SourcePolicy(
+            approved_sources=getattr(options, "approved_sources", None) or (),
+            approved_build_tools=getattr(options, "approved_build_tools", None) or (),
+        )
 
         return PackageFinder.create(
             link_collector=link_collector,
             selection_prefs=selection_prefs,
             target_python=target_python,
             uploaded_prior_to=options.uploaded_prior_to,
+            source_policy=source_policy,
         )

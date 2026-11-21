@@ -35,6 +35,7 @@ from pip._internal.models.link import Link
 from pip._internal.models.release_control import ReleaseControl
 from pip._internal.models.search_scope import SearchScope
 from pip._internal.models.selection_prefs import SelectionPreferences
+from pip._internal.models.source_policy import SourcePolicy
 from pip._internal.models.target_python import TargetPython
 from pip._internal.models.wheel import Wheel
 from pip._internal.req import InstallRequirement
@@ -625,6 +626,7 @@ class PackageFinder:
         candidate_prefs: CandidatePreferences | None = None,
         ignore_requires_python: bool = False,
         uploaded_prior_to: datetime.datetime | None = None,
+        source_policy: SourcePolicy | None = None,
     ) -> None:
         """
         This constructor is primarily meant to be used by the create() class
@@ -635,6 +637,8 @@ class PackageFinder:
             the index and links.
         :param candidate_prefs: Options to use when creating a
             CandidateEvaluator object.
+        :param source_policy: Rules restricting which sources packages may
+            be obtained from. Defaults to no restriction.
         """
         if candidate_prefs is None:
             candidate_prefs = CandidatePreferences()
@@ -647,6 +651,7 @@ class PackageFinder:
         self._link_collector = link_collector
         self._target_python = target_python
         self._uploaded_prior_to = uploaded_prior_to
+        self._source_policy = source_policy or SourcePolicy()
 
         self.format_control = format_control
 
@@ -654,6 +659,11 @@ class PackageFinder:
         # incompatibility.  Used by requires_python_skipped_reasons() to build
         # the error message when resolution fails.
         self._requires_python_skipped: set[str] = set()
+
+        # Collects the links skipped because the source policy does not
+        # approve of their origin. Used to build the error message when
+        # resolution fails.
+        self._source_policy_skipped: set[str] = set()
 
         # Cache of the result of finding candidates
         self._all_candidates: dict[str, list[InstallationCandidate]] = {}
@@ -676,6 +686,7 @@ class PackageFinder:
         selection_prefs: SelectionPreferences,
         target_python: TargetPython | None = None,
         uploaded_prior_to: datetime.datetime | None = None,
+        source_policy: SourcePolicy | None = None,
     ) -> PackageFinder:
         """Create a PackageFinder.
 
@@ -686,6 +697,8 @@ class PackageFinder:
             object will be constructed from the running Python.
         :param uploaded_prior_to: If set, only find links uploaded prior
             to the given datetime.
+        :param source_policy: If set, only use links allowed by the given
+            source policy.
         """
         if target_python is None:
             target_python = TargetPython()
@@ -703,6 +716,7 @@ class PackageFinder:
             format_control=selection_prefs.format_control,
             ignore_requires_python=selection_prefs.ignore_requires_python,
             uploaded_prior_to=uploaded_prior_to,
+            source_policy=source_policy,
         )
 
     @property
@@ -774,8 +788,15 @@ class PackageFinder:
     def uploaded_prior_to(self) -> datetime.datetime | None:
         return self._uploaded_prior_to
 
+    @property
+    def source_policy(self) -> SourcePolicy:
+        return self._source_policy
+
     def requires_python_skipped_reasons(self) -> list[str]:
         return sorted(self._requires_python_skipped)
+
+    def source_policy_skipped_reasons(self) -> list[str]:
+        return sorted(self._source_policy_skipped)
 
     def make_link_evaluator(self, project_name: str) -> LinkEvaluator:
         canonical_name = canonicalize_name(project_name)
@@ -847,6 +868,11 @@ class PackageFinder:
         """
         candidates = []
         for link in self._sort_links(links):
+            if not self._source_policy.allows(link_evaluator.project_name, link.url):
+                detail = "not from an approved source"
+                logger.debug("Skipping link: %s: %s", detail, link)
+                self._source_policy_skipped.add(f"{link.url} ({detail})")
+                continue
             candidate = self.get_install_candidate(link_evaluator, link)
             if candidate is not None:
                 candidates.append(candidate)
@@ -1053,6 +1079,12 @@ class PackageFinder:
                 req_disp,
                 _format_versions(best_candidate_result.all_candidates),
             )
+            if self._source_policy_skipped:
+                logger.critical(
+                    "The following links were skipped because they are not "
+                    "from an approved source: %s",
+                    ", ".join(self.source_policy_skipped_reasons()),
+                )
 
             raise DistributionNotFound(f"No matching distribution found for {req_disp}")
 

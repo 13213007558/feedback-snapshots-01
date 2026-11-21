@@ -111,6 +111,13 @@ class SubprocessBuildEnvironmentInstaller:
         for link in finder.find_links:
             args.extend(["--find-links", link])
 
+        # The source rules of the outer command also constrain where build
+        # dependencies may be obtained from.
+        for source in finder.source_policy.approved_sources:
+            args.extend(["--approved-source", source])
+        for build_tool in sorted(finder.source_policy.approved_build_tools):
+            args.extend(["--approved-build-tool", build_tool])
+
         # is not None: forward an empty --proxy "" (disable proxying) too.
         if finder.proxy is not None:
             args.extend(["--proxy", finder.proxy])
