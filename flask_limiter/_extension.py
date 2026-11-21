@@ -732,6 +732,17 @@ class Limiter:
                 flags=ExemptionScope.DEFAULT|ExemptionScope.APPLICATION|ExemptionScope.ANCESTORS
             )
 
+        Adding :attr:`~flask_limiter.ExemptionScope.LOCAL` restricts the exemption to the
+        blueprint it is declared on. The blueprint will then ignore exemptions propagated by
+        any of its ancestor blueprints (including those marked with
+        :attr:`~flask_limiter.ExemptionScope.DESCENDENTS`) and the exemption is not altered by
+        blueprints nested under it::
+
+            limiter.exempt(
+                child_bp,
+                flags=ExemptionScope.LOCAL | ExemptionScope.DEFAULT
+            )
+
         """
 
         if isinstance(obj, flask.Blueprint):

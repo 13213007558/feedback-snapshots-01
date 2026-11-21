@@ -462,6 +462,52 @@ Effectively this means:
 .. note:: Only calls to `/health` will be exempt from the application wide global
    limit of `100/minute`.
 
+=====================================
+Restricting an exemption to one layer
+=====================================
+
+.. versionadded:: 4.2.0
+
+By default an exemption declared on a Blueprint applies to that Blueprint and
+-- when :attr:`~flask_limiter.ExemptionScope.DESCENDENTS` is added to the
+``flags`` -- every Blueprint nested under it. The
+:attr:`~flask_limiter.ExemptionScope.LOCAL` flag reverses this for the layer it
+is declared on: a Blueprint marked ``LOCAL`` keeps its own exemption but does
+not inherit any exemptions propagated by its ancestor Blueprints. Other
+descendants of those ancestors are unaffected, so the exemption is confined to
+the layer an administrator explicitly selected::
+
+    limiter.exempt(
+        parent,
+        flags=ExemptionScope.APPLICATION | ExemptionScope.DESCENDENTS
+    )
+    # the child opts out of the default limits only and deliberately
+    # does not receive the parent's APPLICATION exemption
+    limiter.exempt(child, flags=ExemptionScope.LOCAL | ExemptionScope.DEFAULT)
+
+A common use case is a health check endpoint nested inside an internal group.
+The health check should skip the site wide default and application limits while
+the whole internal group still shares one explicit quota. Because
+:meth:`~Limiter.limit` tracks each endpoint in its own bucket, use
+:meth:`~Limiter.shared_limit` on the group so that every route under the group
+draws from the same quota::
+
+    internal = Blueprint("internal", __name__, url_prefix="/internal")
+    health = Blueprint("health", __name__, url_prefix="/health")
+
+    # one quota shared by every route in the internal group
+    limiter.shared_limit("3/minute", scope="internal-group")(internal)
+    # health checks skip default & application limits but keep the group quota
+    limiter.exempt(health, flags=ExemptionScope.DEFAULT | ExemptionScope.APPLICATION)
+
+    internal.register_blueprint(health)
+    app.register_blueprint(internal)
+
+The resolved limits depend only on the Blueprint hierarchy and the declared
+flags, so the very first request to ``/internal/health/`` is governed by the
+same rules as any subsequent request, regardless of the order in which the
+public and internal branches are visited.
+
 .. _logging:
 
 Logging

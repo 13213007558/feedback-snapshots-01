@@ -7,7 +7,7 @@ import hiro
 from flask import Blueprint, Flask, current_app
 
 from flask_limiter import ExemptionScope, Limiter
-from flask_limiter.util import get_remote_address
+from flask_limiter.util import get_qualified_name, get_remote_address
 
 
 def test_blueprint(extension_factory):
@@ -309,6 +309,204 @@ def test_nested_blueprint_exemption_ridiculous(extension_factory):
             # but doesn't spare the ones that didn't opt out.
             assert cli.get("/").status_code == 429
             assert cli.get("/n2/").status_code == 429
+
+
+def test_nested_blueprint_exemption_local(extension_factory):
+    """
+    A LOCAL exemption only affects the layer it is declared on: it neither
+    inherits exemptions propagated by an ancestor nor changes what the
+    ancestor's other descendants receive.
+    """
+    app, limiter = extension_factory(
+        default_limits=["1/minute"], application_limits=["20/day"], meta_limits=["10/day"]
+    )
+    parent_bp = Blueprint("parent", __name__, url_prefix="/parent")
+    child_bp = Blueprint("child", __name__, url_prefix="/child")
+    sibling_bp = Blueprint("sibling", __name__, url_prefix="/sibling")
+
+    # parent opts itself and every descendant out of application & meta limits
+    limiter.exempt(
+        parent_bp,
+        flags=ExemptionScope.APPLICATION | ExemptionScope.META | ExemptionScope.DESCENDENTS,
+    )
+    # child only wants to opt out of the default limit and explicitly refuses
+    # the exemptions propagated by its parent.
+    limiter.exempt(child_bp, flags=ExemptionScope.LOCAL | ExemptionScope.DEFAULT)
+
+    @parent_bp.route("/")
+    def parent():
+        return "parent"
+
+    @child_bp.route("/")
+    def child():
+        return "child"
+
+    @sibling_bp.route("/")
+    def sibling():
+        return "sibling"
+
+    parent_bp.register_blueprint(child_bp)
+    parent_bp.register_blueprint(sibling_bp)
+    app.register_blueprint(parent_bp)
+
+    # the child keeps only its own exemption and refuses inherited bits...
+    assert (
+        limiter.limit_manager.exemption_scope(app, "parent.child.child", "parent.child")
+        == ExemptionScope.DEFAULT
+    )
+    # ...while another descendant still receives the parent's exemptions.
+    assert (
+        limiter.limit_manager.exemption_scope(app, "parent.sibling.sibling", "parent.sibling")
+        == ExemptionScope.APPLICATION | ExemptionScope.META | ExemptionScope.DESCENDENTS
+    )
+
+    with app.test_client() as cli:
+        # the child is exempt from the 1/minute default, so repeated calls
+        # within the same window are allowed by the default limit.
+        assert cli.get("/parent/child/").status_code == 200
+        assert cli.get("/parent/child/").status_code == 200
+
+    # the LOCAL flag does not opt the child out of the application limit.
+    app, limiter = extension_factory(default_limits=["1/minute"], application_limits=["1/day"])
+    parent_bp = Blueprint("parent", __name__, url_prefix="/parent")
+    child_bp = Blueprint("child", __name__, url_prefix="/child")
+    limiter.exempt(
+        parent_bp,
+        flags=ExemptionScope.APPLICATION | ExemptionScope.DESCENDENTS,
+    )
+    limiter.exempt(child_bp, flags=ExemptionScope.LOCAL | ExemptionScope.DEFAULT)
+
+    @parent_bp.route("/")
+    def parent_view():
+        return "parent"
+
+    @child_bp.route("/")
+    def child_view():
+        return "child"
+
+    parent_bp.register_blueprint(child_bp)
+    app.register_blueprint(parent_bp)
+
+    with app.test_client() as cli:
+        assert cli.get("/parent/child/").status_code == 200
+        assert cli.get("/parent/child/").status_code == 429
+
+
+def test_nested_blueprint_health_check_shared_group_quota(extension_factory):
+    """
+    A nested health check blueprint skips the site default and application
+    wide limits while remaining subject to the explicit shared quota of the
+    internal group it is nested under. The rule must hold on the very first
+    request to the endpoint, regardless of which branch is visited first.
+    """
+
+    def build_app():
+        app, limiter = extension_factory(default_limits=["1/minute"], application_limits=["20/day"])
+        internal_bp = Blueprint("internal", __name__, url_prefix="/internal")
+        health_bp = Blueprint("health", __name__, url_prefix="/health")
+
+        # every route in the internal group draws from one shared quota.
+        limiter.shared_limit("3/minute", scope="internal-group")(internal_bp)
+        # the health check only opts out of the site default and global limits.
+        limiter.exempt(
+            health_bp,
+            flags=ExemptionScope.DEFAULT | ExemptionScope.APPLICATION,
+        )
+
+        @app.route("/public")
+        def public():
+            return "public"
+
+        @internal_bp.route("/data")
+        def data():
+            return "data"
+
+        @health_bp.route("/")
+        def health():
+            return "ok"
+
+        internal_bp.register_blueprint(health_bp)
+        app.register_blueprint(internal_bp)
+        return app, limiter
+
+    def health_responses(prelude):
+        app, limiter = build_app()
+        with app.test_client() as cli:
+            internal_prelude = 0
+            for path in prelude:
+                assert cli.get(path).status_code == 200
+                if path.startswith("/internal"):
+                    internal_prelude += 1
+            remaining = 3 - internal_prelude
+            expected = [200] * remaining + [429] * (4 - remaining)
+            assert [cli.get("/internal/health/").status_code for _ in range(4)] == expected
+
+    # default limit still applies on the public branch.
+    app, limiter = build_app()
+    with app.test_client() as cli:
+        assert cli.get("/public").status_code == 200
+        assert cli.get("/public").status_code == 429
+
+    # the shared group quota is the only limit governing the health check and
+    # is counted across the whole internal group, independent of request order.
+    health_responses([])
+    health_responses(["/internal/data"])
+    health_responses(["/public", "/internal/data", "/internal/data"])
+
+
+def test_nested_blueprint_health_check_exemption_order_independent(extension_factory):
+    """
+    The limits resolved for an exempt nested blueprint must be identical on
+    its first request and after sibling endpoints have been exercised.
+    """
+
+    def build_app():
+        app, limiter = extension_factory(default_limits=["1/minute"], application_limits=["20/day"])
+        internal_bp = Blueprint("internal", __name__, url_prefix="/internal")
+        health_bp = Blueprint("health", __name__, url_prefix="/health")
+
+        limiter.shared_limit("3/minute", scope="internal-group")(internal_bp)
+        limiter.exempt(
+            health_bp,
+            flags=ExemptionScope.DEFAULT | ExemptionScope.APPLICATION,
+        )
+
+        @app.route("/public")
+        def public():
+            return "public"
+
+        @internal_bp.route("/data")
+        def data():
+            return "data"
+
+        @health_bp.route("/")
+        def health():
+            return "ok"
+
+        internal_bp.register_blueprint(health_bp)
+        app.register_blueprint(internal_bp)
+        return app, limiter
+
+    def resolved_health_limits(prelude):
+        app, limiter = build_app()
+        with app.test_client() as cli:
+            for path in prelude:
+                cli.get(path)
+            view_func = app.view_functions["internal.health.health"]
+            callable_name = get_qualified_name(view_func)
+            defaults, decorated = limiter.limit_manager.resolve_limits(
+                app,
+                "internal.health.health",
+                "internal.health",
+                callable_name=callable_name,
+            )
+            return (
+                sorted(str(limit.limit) for limit in defaults),
+                sorted(str(limit.limit) for limit in decorated),
+            )
+
+    assert resolved_health_limits([]) == resolved_health_limits(["/internal/data"])
+    assert resolved_health_limits([]) == resolved_health_limits(["/public", "/internal/data"])
 
 
 def test_nested_blueprint_exemption_child_only(extension_factory):

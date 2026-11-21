@@ -3,6 +3,24 @@
 Changelog
 =========
 
+v4.2.0
+------
+
+* Feature
+
+  * Add :attr:`~flask_limiter.ExemptionScope.LOCAL` to confine a Blueprint
+    exemption to the layer it is declared on. A Blueprint marked ``LOCAL``
+    does not inherit exemptions propagated by its ancestor Blueprints and
+    the exemption is not altered by its descendants. See
+    :ref:`recipes:nested blueprints`.
+
+* Bug Fix
+
+  * Resolve ancestor Blueprint exemptions deterministically so that nested
+    Blueprint exemptions no longer depend on conditional merging of ancestor
+    scopes. The limits applicable to an endpoint are identical on its first
+    request regardless of the order in which sibling endpoints are visited.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

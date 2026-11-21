@@ -71,6 +71,11 @@ class ExemptionScope(enum.Flag):
     #: Exempt from any rate limits inherited from ancestor blueprints.
     #: See :ref:`recipes:nested blueprints`
     ANCESTORS = enum.auto()
+    #: Restricts the exemption to the layer it is declared on. The exemption
+    #: is neither inherited by nested blueprints nor does it change the
+    #: inherited exemptions of the blueprint it is applied to.
+    #: See :ref:`recipes:nested blueprints`
+    LOCAL = enum.auto()
 
 
 MAX_BACKEND_CHECKS = 5
