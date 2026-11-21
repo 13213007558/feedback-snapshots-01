@@ -40,6 +40,57 @@ The current list of available failver strategies is defined in kombu.connection 
 
 Failover during connection handle only failover during calling :attr:`~kombu.Connection.connect()` method of :class:`~kombu.Connection`.
 
+Per-node authentication and transport trust
+===========================================
+
+Each failover node is a separate trust boundary.  A node is configured
+with its own authentication and trust settings, and those settings are in
+force only while that node is in use:
+
+.. code-block:: python
+
+    >>> conn = Connection(
+    ...     'amqps://svc-a:secret-a@broker1.example.com:5671/vhost',
+    ...     alternates=['amqps://broker2.example.com:5671/vhost'],
+    ...     alternate_settings={
+    ...         'amqps://broker2.example.com:5671/vhost': {
+    ...             'userid': 'svc-b',
+    ...             'password': 'secret-b',
+    ...             'ssl': {
+    ...                 'ssl_check_hostname': True,
+    ...                 'ssl_cert_reqs': 'required',
+    ...                 'ssl_ca_certs': '/etc/ssl/broker2-ca.pem',
+    ...             },
+    ...         },
+    ...     },
+    ...     approved_alternates=[
+    ...         'amqps://broker2.example.com:5671/vhost',
+    ...     ],
+    ... )
+
+Settings are matched to a node by its URL, either through
+``alternate_settings`` or inline in the URL (``?ssl_cert_reqs=required``).
+A node never inherits credentials or transport trust from the primary
+node; a node that omits them fails closed instead of borrowing the
+primary node's configuration.
+
+``approved_alternates`` restricts failover to the listed URLs.  The node
+the connection was created with is always usable; the list only vets
+where failover may go.  If no approved node can be reached,
+:exc:`~kombu.exceptions.NodeNotApproved` is raised and the connection
+stays on its current node.
+
+A secure scheme (``amqps://``, ``rediss://``) must also state how the
+peer is verified.  A node whose configuration does not pin
+``ssl_cert_reqs`` (or sets it to ``CERT_NONE``) is refused with
+:exc:`~kombu.exceptions.NodeSecurityError` before any connection attempt
+is made, rather than connecting with the transport's defaults.  Set
+``require_node_security=False`` to opt out of that check.
+
+When a connection to a node has been verified, a later recoverable error
+from an operation on that still-open connection does not move the
+connection to another node: the verified result is kept until the
+connection itself is gone.
 
 Operation failover
 ==================

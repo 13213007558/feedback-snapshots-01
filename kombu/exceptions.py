@@ -18,7 +18,7 @@ __all__ = (
     'ChannelLimitExceeded', 'ConnectionError', 'ChannelError',
     'VersionMismatch', 'SerializerNotInstalled', 'ResourceError',
     'SerializationError', 'EncodeError', 'DecodeError', 'HttpError',
-    'InconsistencyError',
+    'InconsistencyError', 'NodeNotApproved', 'NodeSecurityError',
 )
 
 BaseExceptionType = TypeVar('BaseExceptionType', bound=BaseException)
@@ -41,6 +41,19 @@ class KombuError(Exception):
 
 class OperationalError(KombuError):
     """Recoverable message transport connection error."""
+
+
+class NodeNotApproved(KombuError):
+    """A failover node is not on the approved list."""
+
+
+class NodeSecurityError(KombuError):
+    """A failover node does not satisfy its own transport trust rules.
+
+    Raised instead of connecting when an approved node's configuration
+    cannot prove that the transport is trusted (for example, a secure
+    scheme with no certificate verification policy).
+    """
 
 
 class BatchPublishError(KombuError):

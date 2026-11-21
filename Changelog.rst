@@ -4,6 +4,22 @@
  Change history
 ================
 
+.. _version-5.7.1:
+
+5.7.1
+========
+:release-date: TBA
+:release-by: Asif Saif Uddin
+
+
+What's Changed
+~~~~~~~~~~~~~~
+
+- Connection: failover nodes carry their own authentication and
+  transport trust settings, can be restricted to an approved list, and
+  secure nodes must state their certificate verification policy.
+  A verified connection is no longer replaced by failover.
+
 
 .. _version-5.7.0:
 

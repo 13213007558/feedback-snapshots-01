@@ -8,8 +8,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from kombu import Connection, Consumer, Producer, parse_url
-from kombu.connection import Resource
-from kombu.exceptions import OperationalError
+from kombu.connection import FailoverNode, Resource
+from kombu.exceptions import (NodeNotApproved, NodeSecurityError,
+                              OperationalError)
 from kombu.utils.functional import lazy
 from t.mocks import TimeoutingTransport, Transport
 
@@ -1162,6 +1163,310 @@ class test_Connection_with_transport_options:
     def test_establish_connection(self):
         conn = self.conn
         assert conn.transport_options == self.transport_options
+
+
+class FakeNodeTransport(Transport):
+    """Transport whose connection attempts are scripted per node.
+
+    ``fail_hosts`` lists the hosts whose first attempt raises; every
+    later attempt on that host succeeds.  ``attempts`` records the host
+    of every connection attempt in order, and ``verified`` records the
+    hosts whose connections passed ``verify_connection``.
+
+    The transport instance is recreated when the connection switches
+    nodes, so the record is kept on the class.
+    """
+
+    recoverable_connection_errors = (TimeoutError,)
+
+    attempts = []
+    verified = []
+    fail_hosts = []
+
+    def establish_connection(self):
+        host = self.client.hostname
+        self.attempts.append(host)
+        if host in self.fail_hosts:
+            self.fail_hosts.remove(host)
+            raise TimeoutError(f'{host} is temporarily down')
+        return super().establish_connection()
+
+    def verify_connection(self, connection):
+        if connection is not None and connection.connected:
+            host = self.client.hostname
+            # ``connected`` polls verification, so record transitions
+            # between verified hosts rather than every poll.
+            if not self.verified or self.verified[-1] != host:
+                self.verified.append(host)
+            return True
+        return False
+
+
+def make_fake_connection(urls, alternate_settings=None, **kwargs):
+    # A failover URL selects its transport from its scheme, so the fake
+    # transport is named per node as well as for the primary node.
+    FakeNodeTransport.attempts = []
+    FakeNodeTransport.verified = []
+    FakeNodeTransport.fail_hosts = []
+    settings = {
+        str(url): dict(alternate_settings.get(str(url), {})
+                       if alternate_settings else {},
+                       transport=FakeNodeTransport)
+        for url in urls
+    }
+    return Connection(
+        urls,
+        transport=FakeNodeTransport,
+        alternate_settings=settings,
+        transport_options={'interval_start': 0, 'interval_step': 0},
+        **kwargs
+    )
+
+
+class test_Connection_failover_trust:
+    """Each failover node authenticates with its own settings.
+
+    The nodes are fake connections: the transport records which host was
+    attempted, which connection verified, and the credentials and trust
+    settings in force for that host.
+    """
+
+    def test_alternate_uses_own_credentials(self):
+        conn = make_fake_connection(
+            ['amqp://u1:p1@first', 'amqp://u2:p2@backup'],
+            approved_alternates=['amqp://u2:p2@backup'],
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert (conn.userid, conn.password) == ('u2', 'p2')
+
+    def test_alternate_settings_restore_authentication(self):
+        conn = make_fake_connection(
+            ['amqp://u1:p1@first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+            alternate_settings={
+                'amqp://backup': {'userid': 'svc', 'password': 'token'},
+            },
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert (conn.userid, conn.password) == ('svc', 'token')
+
+    def test_primary_trust_does_not_leak_to_alternate(self):
+        conn = Connection(
+            'amqps://u1:p1@first?ssl_cert_reqs=required&ssl_ca_certs=/ca1;'
+            'amqp://backup',
+            transport=FakeNodeTransport,
+        )
+        assert conn.ssl['ssl_ca_certs'] == '/ca1'
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert not conn.ssl
+        # ...and the primary keeps its own trust policy when we return.
+        conn.switch(conn.alt[0])
+        assert conn.ssl['ssl_ca_certs'] == '/ca1'
+
+    def test_alternate_uses_own_transport_trust(self):
+        conn = Connection(
+            'amqp://first;amqps://backup?ssl_cert_reqs=required'
+            '&ssl_ca_certs=/ca2',
+            approved_alternates=[
+                'amqps://backup?ssl_cert_reqs=required&ssl_ca_certs=/ca2',
+            ],
+            transport=FakeNodeTransport,
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert conn.ssl['ssl_ca_certs'] == '/ca2'
+
+    def test_unapproved_alternate_is_never_attempted(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://first'],
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'first'
+        # nothing was attempted, and the connection did not move
+        assert conn._active_node is None
+        assert FakeNodeTransport.attempts == []
+
+    def test_primary_is_always_usable_without_approval(self):
+        # The list vets failover destinations; the configured node is
+        # where the connection already is.
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+        )
+        assert conn.connect()
+        assert conn.hostname == 'first'
+        assert FakeNodeTransport.attempts == ['first']
+
+    def test_no_approved_alternate_keeps_current_node(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup', 'amqp://other'],
+            approved_alternates=['amqp://first'],
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'first'
+
+    def test_explicit_switch_to_unapproved_node_is_refused(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://first'],
+        )
+        with pytest.raises(NodeNotApproved):
+            conn.switch('amqp://backup')
+        assert conn.hostname == 'first'
+
+    @pytest.mark.parametrize('alternate', [
+        'amqps://backup',
+        'amqps://backup?ssl_check_hostname=false',
+        'amqps://backup?ssl_cert_reqs=none',
+    ])
+    def test_secure_alternate_without_trust_info_is_refused(self, alternate):
+        conn = make_fake_connection(
+            ['amqp://first', alternate], approved_alternates=[alternate],
+            connect_timeout=1,
+        )
+        with pytest.raises(NodeSecurityError):
+            conn.maybe_switch_next()
+        # nothing was switched to, and no connection attempt was made
+        assert conn.hostname == 'first'
+        assert FakeNodeTransport.attempts == []
+
+    def test_plain_alternate_does_not_need_ssl_policy(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+
+    def test_node_settings_survive_copy_and_pickle(self):
+        settings = {'amqp://backup': {'userid': 'svc', 'password': 'token'}}
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+            alternate_settings=settings,
+        )
+        for clone in (copy(conn), deepcopy(conn),
+                      pickle.loads(pickle.dumps(conn))):
+            assert clone.info() == conn.info()
+            assert clone.alt[1].approved
+            clone.maybe_switch_next()
+            assert (clone.userid, clone.password) == ('svc', 'token')
+
+    def test_failover_node_is_still_a_url_string(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+        )
+        assert conn.alt[1] == 'amqp://backup'
+        assert isinstance(conn.alt[1], str)
+        assert isinstance(conn.alt[1], FailoverNode)
+
+    def test_primary_url_credentials_do_not_fill_in_for_alternate(self):
+        # The primary URL's credentials are the primary node's, not a
+        # fallback for a node that declares its own.
+        conn = make_fake_connection(
+            ['amqp://u1:p1@first', 'amqp://backup'],
+            approved_alternates=['amqp://backup'],
+        )
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert conn.userid is None
+        assert conn.password is None
+
+    def test_verified_connection_is_not_replaced_by_failover(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://first', 'amqp://backup'],
+        )
+        conn.connect()
+        assert conn.connected
+        assert FakeNodeTransport.verified == ['first']
+
+        # The transport re-raises a recoverable error for an operation
+        # that already succeeded on the open, authenticated connection.
+        conn.maybe_switch_next()
+
+        assert conn.hostname == 'first'
+        assert conn.connected
+        assert not conn._switching_allowed
+
+    def test_lost_connection_still_fails_over(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://backup'],
+            approved_alternates=['amqp://first', 'amqp://backup'],
+        )
+        conn.connect()
+        conn._connection = None
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert conn.connect()
+        assert FakeNodeTransport.verified == ['first', 'backup']
+
+
+class test_Connection_failover_sequence:
+    """Observe the order of connection attempts and verified connections.
+
+    The fake transport scripts three nodes: the first temporarily fails,
+    the backup proves its identity, and a second backup is missing the
+    security information its URL scheme requires.
+    """
+
+    def test_first_fails_backup_verifies(self):
+        conn = make_fake_connection(
+            ['amqp://u1:p1@first', 'amqp://u2:p2@backup'],
+            approved_alternates=['amqp://u2:p2@backup'],
+            connect_timeout=1,
+        )
+        conn.transport.fail_hosts.append('first')
+
+        assert conn.connect()
+        assert conn.connected
+
+        assert FakeNodeTransport.attempts == ['first', 'backup']
+        assert FakeNodeTransport.verified == ['backup']
+        assert conn.hostname == 'backup'
+        assert (conn.userid, conn.password) == ('u2', 'p2')
+
+    def test_backup_missing_security_info_stops_before_attempt(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqps://backup'],
+            approved_alternates=['amqps://backup'],
+            connect_timeout=1,
+        )
+        conn.transport.fail_hosts.append('first')
+
+        with pytest.raises(NodeSecurityError):
+            conn.connect()
+
+        # The first node was attempted and failed; the backup was refused
+        # before the switch, so it was never attempted and the connection
+        # did not move onto a node whose trust rules are unmet.
+        assert FakeNodeTransport.attempts == ['first']
+        assert FakeNodeTransport.verified == []
+        assert conn.hostname == 'first'
+        assert conn._active_node is None
+        assert not conn.connected
+
+    def test_verified_backup_is_kept_even_if_primary_returns(self):
+        conn = make_fake_connection(
+            ['amqp://first', 'amqp://u2:p2@backup'],
+            approved_alternates=['amqp://u2:p2@backup'],
+            connect_timeout=1,
+        )
+        conn.transport.fail_hosts.append('first')
+        conn.connect()
+        assert conn.hostname == 'backup'
+
+        # A recoverable error arrives while the verified backup session
+        # is still open: the result must not be replaced by the primary.
+        conn.maybe_switch_next()
+        assert conn.hostname == 'backup'
+        assert conn.connected
+        assert FakeNodeTransport.attempts == ['first', 'backup']
 
 
 class xResource(Resource):

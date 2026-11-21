@@ -28,6 +28,9 @@
             .. autoattribute:: ssl
             .. autoattribute:: login_method
             .. autoattribute:: failover_strategy
+            .. autoattribute:: alternate_settings
+            .. autoattribute:: approved_alternates
+            .. autoattribute:: require_node_security
             .. autoattribute:: connect_timeout
             .. autoattribute:: heartbeat
 

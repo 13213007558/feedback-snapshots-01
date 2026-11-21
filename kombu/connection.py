@@ -59,6 +59,9 @@ failover_strategies = {
 _log_connection = os.environ.get('KOMBU_LOG_CONNECTION', False)
 _log_channel = os.environ.get('KOMBU_LOG_CHANNEL', False)
 
+#: URL schemes that require the transport to be trusted.
+_SECURE_SCHEMES = frozenset({'amqps', 'rediss'})
+
 
 def _check_url_transport(name: str) -> str:
     """Validate a transport name that was derived from a URL.
@@ -84,6 +87,26 @@ def _check_url_transport(name: str) -> str:
     if '.' in name or ':' in name:
         raise ValueError(f'Invalid transport scheme: {name!r}')
     return name
+
+
+class FailoverNode(str):
+    """A failover URL that carries the settings of that node.
+
+    A ``str`` subclass so every transport that reads
+    :attr:`Connection.alt` keeps receiving plain URL text, while
+    :meth:`Connection.switch` can still restore the authentication and
+    transport trust settings that belong to this node alone.
+    """
+
+    def __new__(cls, url, settings=None, approved=False):
+        node = super().__new__(cls, url)
+        node.url = str(url)
+        node.settings = dict(settings or {})
+        node.approved = approved
+        return node
+
+    def __reduce__(self):
+        return self.__class__, (self.url, self.settings, self.approved)
 
 
 class Connection:
@@ -130,6 +153,21 @@ class Connection:
             Note that if heartbeats are enabled then the
             :meth:`heartbeat_check` method must be called regularly,
             around once per second.
+        alternates (Sequence): Additional node URLs to fail over to.
+        alternate_settings (Dict): Authentication and transport trust
+            settings for a failover node, keyed by its URL, e.g.
+            ``{'amqps://backup:5671': {'userid': 'svc', 'ssl': {...}}}``.
+            These settings replace the connection's own settings while
+            that node is in use, so each node authenticates with its own
+            credentials and is verified by its own trust rules.
+        approved_alternates (Sequence): URLs that failover may switch to.
+            When given, only these nodes are eligible; the node the
+            connection was created on always stays usable.  If no other
+            approved node is available, the connection stays where it is.
+            ``True`` approves every configured alternate.
+        require_node_security (bool): If true, a failover node must
+            declare its transport trust policy (``ssl`` for a secure
+            scheme) before it is connected to.  Defaults to ``True``.
 
     Note:
     ----
@@ -199,6 +237,19 @@ class Connection:
     #: constantly yielding new URLs to try.
     failover_strategy = 'round-robin'
 
+    #: Authentication and transport trust settings for failover nodes,
+    #: keyed by node URL.  See :attr:`Connection.alternate_settings`.
+    alternate_settings = None
+
+    #: URLs that failover may switch to, or :const:`True` for every
+    #: configured alternate.  :const:`None` approves every alternate.
+    #: The node the connection is created on is always usable.
+    approved_alternates = None
+
+    #: Require a failover node to declare its own transport trust
+    #: policy before it is connected to.
+    require_node_security = True
+
     #: Heartbeat value, currently only supported by the py-amqp transport.
     heartbeat = None
 
@@ -212,7 +263,9 @@ class Connection:
                  ssl=False, transport=None, connect_timeout=5,
                  transport_options=None, login_method=None, uri_prefix=None,
                  heartbeat=0, failover_strategy='round-robin',
-                 alternates=None, credential_provider=None, **kwargs):
+                 alternates=None, credential_provider=None,
+                 alternate_settings=None, approved_alternates=None,
+                 require_node_security=True, **kwargs):
         alt = [] if alternates is None else alternates
         # have to spell the args out, just to get nice docstrings :(
         params = self._initial_params = {
@@ -223,6 +276,17 @@ class Connection:
             'login_method': login_method, 'heartbeat': heartbeat,
             'credential_provider': credential_provider
         }
+        # Values supplied as keyword arguments, before the primary URL is
+        # parsed into the same mapping.  Only these are defaults that a
+        # failover node may inherit; anything the primary URL declares
+        # (credentials, trust policy) belongs to the primary node alone.
+        self._fallback_params = dict(params)
+        self.alternate_settings = dict(alternate_settings or {})
+        self.approved_alternates = approved_alternates
+        self.require_node_security = require_node_security
+        # The node the connection is created on always stays usable; the
+        # approval list only vets where failover may go.
+        self._primary_node = None
 
         if hostname and not isinstance(hostname, str):
             alt.extend(hostname)
@@ -264,7 +328,11 @@ class Connection:
         for alt_url in alt:
             if isinstance(alt_url, str) and '://' in alt_url:
                 _check_url_transport(urlparse(alt_url).scheme)
-        self.alt = alt
+        self.alt = [self._failover_node(alt_url) for alt_url in alt]
+        if hostname:
+            self._primary_node = FailoverNode(str(hostname))
+            if self.alt and str(self.alt[0]) == str(hostname):
+                self.alt[0].approved = True
         # keep text representation for .info
         # only temporary solution as this won't work when
         # passing a custom object (Issue celery/celery#3320).
@@ -274,6 +342,8 @@ class Connection:
         if self.alt:
             self.cycle = self.failover_strategy(self.alt)
             next(self.cycle)  # skip first entry
+        self._active_node = None
+        self._verified = False
 
         if transport_options is None:
             transport_options = {}
@@ -290,6 +360,10 @@ class Connection:
     def switch(self, conn_str):
         """Switch connection parameters to use a new URL or hostname.
 
+        The target is validated before anything is changed: it must be an
+        approved failover node (when an approval list is configured) and
+        it must satisfy its own transport trust rules.
+
         Note:
         ----
             Does not reconnect!
@@ -298,22 +372,198 @@ class Connection:
         ---------
             conn_str (str): either a hostname or URL.
         """
+        node = (conn_str if isinstance(conn_str, FailoverNode)
+                else self._failover_node(conn_str))
+        self._validate_node(node)
+        self._switch_to_node(node)
+
+    def _validate_node(self, node):
+        """Refuse a node that may not be connected to.
+
+        Checked before the connection parameters are touched, so a
+        rejected node cannot leave the connection half-switched.
+        """
+        if (self.approved_alternates is not None
+                and not node.approved
+                and str(node) != str(self._primary_node)):
+            raise exceptions.NodeNotApproved(
+                f'Failover node {str(node)!r} is not on the approved list'
+            )
+        self._check_node_security(node, self._node_params(node))
+
+    def _switch_to_node(self, node):
         self.close()
         self.declared_entities.clear()
         self._closed = False
-        conn_params = (
-            parse_url(conn_str) if "://" in conn_str else {"hostname": conn_str}
-        )
+        self._init_params(**self._node_params(node))
+        self._active_node = node
+        # A new node is a new session: its verification has to be
+        # established again, never inherited from the previous node.
+        self._verified = False
+
+    def _node_params(self, node):
+        """Return the connection parameters for one node.
+
+        A node's settings and the values its own URL declares replace the
+        connection's defaults for as long as that node is in use.
+        """
+        params = self._node_base_params()
+        params.update(node.settings)
+        params.update(dictfilter(
+            parse_url(node) if '://' in node else {'hostname': node}
+        ))
         # parse_url() sets transport to the raw URL scheme, overriding any
-        # transport given at construction time.
-        if conn_params.get('transport'):
-            _check_url_transport(conn_params['transport'])
-        self._init_params(**dict(self._initial_params, **conn_params))
+        # transport given at construction time.  An explicit per-node
+        # transport class, like the constructor keyword, still wins.
+        if isinstance(node.settings.get('transport'), (str, type)):
+            params['transport'] = node.settings['transport']
+        transport = params.get('transport')
+        if isinstance(transport, str) and transport:
+            _check_url_transport(transport)
+        return params
+
+    def _node_base_params(self):
+        """Return the settings a node starts from.
+
+        Only explicit keyword arguments are inherited; credentials and
+        transport trust that the primary URL declares belong to the
+        primary node.  In approval mode nothing security relevant is
+        inherited either, so a node that omits it fails closed instead of
+        borrowing the primary node's settings.
+        """
+        if self.approved_alternates is not None:
+            return dict(self._initial_params, userid=None, password=None,
+                        login_method=None, credential_provider=None,
+                        ssl=False)
+        return dict(self._fallback_params)
 
     def maybe_switch_next(self):
-        """Switch to next URL given by the current failover strategy."""
-        if self.cycle:
-            self.switch(next(self.cycle))
+        """Switch to next URL given by the current failover strategy.
+
+        Only approved nodes are selected.  A node that is approved but
+        does not satisfy its own transport trust rules is rejected before
+        it is switched to.  When no other node is eligible the connection
+        stays on its current node.
+        """
+        if self.cycle and self._switching_allowed:
+            node = self._next_node()
+            if node is not None:
+                self.switch(node)
+
+    def _node_host_port(self, node):
+        """Return the ``(hostname, port)`` a node URL points at."""
+        if '://' in node:
+            params = parse_url(node)
+        else:
+            params = {'hostname': node}
+        params.update({
+            key: node.settings[key]
+            for key in ('hostname', 'port') if key in node.settings
+        })
+        port = params.get('port')
+        if port is None:
+            port = getattr(self.transport, 'default_port', None)
+        return params.get('hostname'), port
+
+    def _next_node(self):
+        """Return the next node that may be used for failover.
+
+        Without an approval list selection is exactly the historical
+        failover strategy.  With one, the node currently in use is
+        skipped, so a failover always lands somewhere else, and an
+        unapproved node is skipped without being switched to.  If no
+        other node is eligible, :const:`None` is returned and the
+        connection stays where it is.
+        """
+        if not self.alt:
+            return None
+        if self.approved_alternates is None:
+            return next(self.cycle)
+        current_port = self.port or getattr(
+            self.transport, 'default_port', None)
+        current = (self.hostname, current_port)
+        for _ in range(len(self.alt)):
+            node = next(self.cycle)
+            if not node.approved:
+                continue
+            if self._node_host_port(node) == current:
+                continue
+            return node
+        return None
+
+    @property
+    def _switching_allowed(self):
+        """Remain on a connection that was verified.
+
+        The transport may re-raise a recoverable error from an operation
+        that already succeeded on the open connection.  Moving to another
+        node then would discard a working authenticated session, so
+        failover waits until the connection is known to be gone.
+        """
+        return not (self._verified and self.connected)
+
+    def _failover_node(self, url):
+        """Attach this node's own settings to an alternate URL.
+
+        ``alternate_settings`` and ``approved_alternates`` are matched by
+        URL; an alternate without an entry inherits nothing from the
+        primary node, so missing security information stays missing.
+        Without an approval list the configured alternates keep working
+        as before.
+        """
+        if isinstance(url, FailoverNode):
+            return FailoverNode(url.url, url.settings, url.approved)
+        key = str(url)
+        approved = self.approved_alternates
+        if approved is None or approved is True:
+            is_approved = True
+        else:
+            is_approved = key in approved
+        return FailoverNode(
+            key,
+            settings=self.alternate_settings.get(key),
+            approved=is_approved,
+        )
+
+    def _check_node_security(self, node, params):
+        """Require a failover node to state its transport trust.
+
+        A secure scheme whose URL does not pin verification would be
+        connected to with the transport's own defaults, without evidence
+        that this node is the one that was approved.  The node is refused
+        before any connection attempt is made.
+        """
+        if not self.require_node_security or '://' not in node:
+            return
+        scheme = urlparse(node).scheme
+        if scheme not in _SECURE_SCHEMES:
+            return
+        ssl = params.get('ssl')
+        if not ssl or not isinstance(ssl, dict):
+            raise exceptions.NodeSecurityError(
+                f'Failover node {node!r} uses a secure scheme but does not '
+                f'specify its transport trust settings (ssl)'
+            )
+        cert_reqs = ssl.get('ssl_cert_reqs', ssl.get('cert_reqs'))
+        if cert_reqs is None or (
+                ssl_available and cert_reqs == CERT_NONE):
+            raise exceptions.NodeSecurityError(
+                f'Failover node {node!r} does not specify certificate '
+                f'verification (ssl_cert_reqs)'
+            )
+
+    def _check_active_node_security(self):
+        """Refuse to connect to an alternate that is not fit to use.
+
+        Applies to every attempt, including the one that follows a switch,
+        so a node cannot be reached by bypassing :meth:`switch`.  The
+        primary node is configured by the caller and keeps its existing
+        behaviour.
+        """
+        node = self._active_node
+        if node is None:
+            return
+        self._validate_node(node)
 
     def _init_params(self, hostname, userid, password, virtual_host, port,
                      insist, ssl, transport, connect_timeout,
@@ -500,6 +750,8 @@ class Connection:
         if self.connected:
             return self._connection
 
+        self._check_active_node_security()
+
         def on_error(exc, intervals, retries, interval=0):
             round = self.completes_cycle(retries)
             if round:
@@ -511,7 +763,8 @@ class Connection:
                 # Select next host after invoking errback so that the
                 # callback can inspect the failing host, but always
                 # switch even if errback raises.
-                self.maybe_switch_next()
+                if self._switching_allowed:
+                    self.maybe_switch_next()
 
             return interval if round else 0
 
@@ -784,6 +1037,9 @@ class Connection:
             ('failover_strategy', self._failover_strategy),
             ('alternates', self.alt),
             ('credential_provider', self.credential_provider),
+            ('alternate_settings', self.alternate_settings),
+            ('approved_alternates', self.approved_alternates),
+            ('require_node_security', self.require_node_security),
         )
         return info
 
@@ -1033,6 +1289,8 @@ class Connection:
         self._default_channel = None
         self._connection = self._establish_connection()
         self._closed = False
+        self._verified = (self._connection is not None
+                          and self.connected)
         return self._connection
 
     @property
