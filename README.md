@@ -753,6 +753,51 @@ end
 
 Pundit still support the old `params.require.permit()` style of permitting attributes, although `params.expect()` is preferred.
 
+With the `permitted_attributes` helper, the policy can expose a `permitted_attributes` method, plus `permitted_attributes_for_{action}` methods for actions that need a different set of writable attributes. Both `authorize` and `permitted_attributes` accept an explicit action, so you can tie the authorized action to the attributes fetched for it instead of relying on the controller action name:
+
+```ruby
+# app/policies/profile_policy.rb
+class ProfilePolicy < ApplicationPolicy
+  def show?
+    true # public profiles
+  end
+
+  def update?
+    user == record.owner
+  end
+
+  def update_protected?
+    user.admin?
+  end
+
+  def permitted_attributes
+    %i[name bio]
+  end
+
+  def permitted_attributes_for_update_protected
+    permitted_attributes + %i[role verified]
+  end
+end
+```
+
+```ruby
+# app/controllers/profiles_controller.rb
+class ProfilesController < ApplicationController
+  def update
+    @profile = authorize Profile.find(params[:id])
+    @profile.update(permitted_attributes(@profile))
+  end
+
+  def update_protected
+    @profile = Profile.find(params[:id])
+    authorize @profile, :update_protected?
+    @profile.update(permitted_attributes(@profile, :update_protected))
+  end
+end
+```
+
+If authorization fails, `Pundit::NotAuthorizedError` carries the `query`, `record` and `policy`, so a `rescue_from` handler can tell which authorization check did not pass.
+
 If you need to fetch parameters based on namespaces different from the suggested one, override the below method, in your controller, and return an instance of `ActionController::Parameters`.
 
 ```ruby

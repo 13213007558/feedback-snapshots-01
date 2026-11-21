@@ -329,6 +329,69 @@ RSpec.describe Pundit::Authorization do
     end
   end
 
+  describe "explicitly associating authorization with permitted attributes" do
+    let(:profile) { Profile.new(owner: user, name: "Jane", bio: "Hello", role: "member", verified: false) }
+    let(:admin) { double("admin", admin?: true) }
+
+    it "allows anyone to view a public profile" do
+      controller = Controller.new(double("visitor"), "show", to_params({}))
+
+      expect(controller.authorize(profile, :show?)).to eq profile
+    end
+
+    it "lets the owner update normal fields through the update action" do
+      params = to_params(profile: {name: "Janet", bio: "Updated", role: "admin"})
+      controller = Controller.new(user, "update", params)
+
+      controller.authorize(profile, :update?)
+      profile.update(controller.permitted_attributes(profile, :update).to_h)
+
+      expect(profile.name).to eq "Janet"
+      expect(profile.bio).to eq "Updated"
+      expect(profile.role).to eq "member"
+    end
+
+    it "identifies the failed authorization when a non-owner updates" do
+      controller = Controller.new(double("stranger"), "update", to_params(profile: {name: "Hacked"}))
+
+      expect { controller.authorize(profile, :update?) }.to raise_error(Pundit::NotAuthorizedError) { |error|
+        expect(error.query.to_s).to eq "update?"
+        expect(error.record).to eq profile
+        expect(error.policy).to be_a ProfilePolicy
+      }
+    end
+
+    it "lets an admin update protected fields without relying on the controller action name" do
+      params = to_params(profile: {name: "Janet", role: "moderator", verified: true})
+      controller = Controller.new(admin, "update", params)
+
+      controller.authorize(profile, :update_protected?)
+      profile.update(controller.permitted_attributes(profile, :update_protected).to_h)
+
+      expect(profile.name).to eq "Janet"
+      expect(profile.role).to eq "moderator"
+      expect(profile.verified).to eq true
+    end
+
+    it "identifies the failed authorization when a non-admin updates protected fields" do
+      params = to_params(profile: {role: "admin"})
+      controller = Controller.new(user, "update", params)
+
+      expect { controller.authorize(profile, :update_protected?) }.to raise_error(Pundit::NotAuthorizedError) { |error|
+        expect(error.query.to_s).to eq "update_protected?"
+        expect(error.record).to eq profile
+        expect(error.policy).to be_a ProfilePolicy
+      }
+    end
+
+    it "grants scopes that together cover every attribute the model accepts" do
+      granted = ProfilePolicy.new(user, profile).permitted_attributes |
+        ProfilePolicy.new(admin, profile).permitted_attributes_for_update_protected
+
+      expect(granted).to match_array(Profile::ASSIGNABLE_ATTRIBUTES)
+    end
+  end
+
   if ActionController::Parameters.method_defined?(:expect)
     describe "#expected_attributes" do
       it "checks policy for expected attributes" do
