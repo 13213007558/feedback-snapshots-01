@@ -1,5 +1,12 @@
 # Flask-HTTPAuth change log
 
+**Unreleased**
+
+- Add `allowed_schemes` argument to `MultiAuth.login_required` to restrict the
+  authentication schemes accepted by a route
+- Add `MultiAuth.current_scheme()` and `MultiAuth.current_auth()` to expose the
+  authentication method selected for the request
+
 **Release 4.8.1** - 2026-03-28
 
 - Do not accept empty or missing tokens ([commit](https://github.com/miguelgrinberg/flask-httpauth/commit/b15ffe9e50e110d7174ccd944f642079e1dcf9ee))

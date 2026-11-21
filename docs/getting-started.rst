@@ -163,6 +163,27 @@ party API clients use a JWS or JWT bearer token. The `MultiAuth` class allows yo
 
 In the examples directory you can find a complete example that uses basic and token authentication.
 
+By default a route protected with ``MultiAuth`` accepts every configured
+authentication method. A route can restrict the methods it accepts by passing
+a scheme name or a list of scheme names to the ``allowed_schemes`` argument::
+
+    @app.route('/web')
+    @multi_auth.login_required(allowed_schemes='Basic')
+    def web_page():
+        return "Hello, {}!".format(multi_auth.current_user())
+
+    @app.route('/api')
+    @multi_auth.login_required(allowed_schemes=['Bearer', 'Basic'])
+    def api():
+        return "Authenticated with {}.".format(multi_auth.current_scheme())
+
+When ``allowed_schemes`` is given, only the authentication objects configured
+with one of the listed schemes are consulted. A request that provides
+credentials for a different scheme is rejected without invoking that scheme's
+verifier. The ``current_scheme()`` method returns the scheme that was selected
+to authenticate the request, which is useful when a route accepts more than
+one method.
+
 User Roles
 ----------
 

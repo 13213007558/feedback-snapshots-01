@@ -7,6 +7,10 @@ This example demonstrates how to combine two authentication methods using the
 The root URL for this application can be accessed via basic auth, providing
 username and password, or via token auth, providing a bearer JWS token.
 
+The ``/web`` and ``/api`` URLs restrict the authentication method that is
+accepted. The ``/web`` URL only accepts basic authentication, while ``/api``
+accepts both methods.
+
 This example requires the PyJWT package to be installed.
 """
 from time import time
@@ -57,6 +61,20 @@ def verify_token(token):
 @multi_auth.login_required
 def index():
     return "Hello, %s!" % multi_auth.current_user()
+
+
+@app.route('/web')
+@multi_auth.login_required(allowed_schemes=['Basic'])
+def web():
+    return "Hello, %s! You used %s authentication." % (
+        multi_auth.current_user(), multi_auth.current_scheme())
+
+
+@app.route('/api')
+@multi_auth.login_required(allowed_schemes=['Basic', 'Bearer'])
+def api():
+    return "Hello, %s! You used %s authentication." % (
+        multi_auth.current_user(), multi_auth.current_scheme())
 
 
 if __name__ == '__main__':

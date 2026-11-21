@@ -643,24 +643,107 @@ class MultiAuth:
         self.main_auth = main_auth
         self.additional_auths = additional_auths
 
-    def login_required(self, f=None, role=None, optional=None):
+    def _all_auths(self):
+        return (self.main_auth,) + self.additional_auths
+
+    def _find_auth_by_scheme(self, scheme):
+        """Return the authentication object that uses the given scheme, or
+        ``None`` if no such authentication object is registered."""
+        for auth in self._all_auths():
+            if auth.scheme and auth.scheme.lower() == scheme.lower():
+                return auth
+
+    def _is_compatible_auth(self, auth, headers):
+        """Case-insensitive version of ``is_compatible_auth`` used when the
+        route declares the schemes it accepts."""
+        if auth.is_compatible_auth(headers):
+            return True
+        if auth.header is None or auth.header == 'Authorization':
+            try:
+                scheme, _ = headers.get('Authorization', '').split(None, 1)
+            except ValueError:
+                return False
+            return scheme.lower() == auth.scheme.lower()
+        return False
+
+    def _has_credentials(self, headers):
+        """Return ``True`` if the request includes credentials for any known
+        authentication scheme."""
+        if 'Authorization' in headers:
+            return True
+        return any(auth.header and auth.header in headers
+                   for auth in self._all_auths())
+
+    def _auth_error(self, auth, status):
+        try:
+            return auth.auth_error_callback(status)
+        except TypeError:  # pragma: no cover
+            return auth.auth_error_callback()
+
+    def login_required(self, f=None, role=None, optional=None,
+                       allowed_schemes=None):
         """Decorator for a function that will be called when authentication is
         successful. This will typically be a Flask view function.
+
+        An optional ``allowed_schemes`` argument can be given to restrict the
+        authentication schemes that are accepted on the route. It can be a
+        single scheme name or a list of scheme names, and only the
+        authentication objects configured with one of these schemes will be
+        considered. Requests that provide credentials for a scheme that is not
+        allowed are rejected directly, without invoking the verifier of that
+        scheme. When this argument is omitted, all the configured
+        authentication objects are accepted, as before.
         """
         if f is not None and \
-                (role is not None or optional is not None):  # pragma: no cover
+                (role is not None or optional is not None or
+                 allowed_schemes is not None):  # pragma: no cover
             raise ValueError(
-                'role and optional are the only supported arguments')
+                'role, optional and allowed_schemes are the only supported '
+                'arguments')
+
+        if allowed_schemes is not None:
+            if isinstance(allowed_schemes, str):
+                allowed_schemes = [allowed_schemes]
+            else:
+                allowed_schemes = list(allowed_schemes)
+            if not allowed_schemes:
+                raise ValueError('allowed_schemes cannot be empty')
+            auths = []
+            for scheme in allowed_schemes:
+                auth = self._find_auth_by_scheme(scheme)
+                if auth is None:
+                    raise ValueError(
+                        f'Authentication scheme {scheme} is not configured')
+                if auth not in auths:
+                    auths.append(auth)
+        else:
+            auths = None
 
         def login_required_internal(f):
             @wraps(f)
             def decorated(*args, **kwargs):
-                selected_auth = self.main_auth
-                if not self.main_auth.is_compatible_auth(request.headers):
-                    for auth in self.additional_auths:
-                        if auth.is_compatible_auth(request.headers):
+                if auths is None:
+                    selected_auth = self.main_auth
+                    if not self.main_auth.is_compatible_auth(
+                            request.headers):
+                        for auth in self.additional_auths:
+                            if auth.is_compatible_auth(request.headers):
+                                selected_auth = auth
+                                break
+                else:
+                    selected_auth = auths[0]
+                    for auth in auths:
+                        if self._is_compatible_auth(auth, request.headers):
                             selected_auth = auth
                             break
+                    else:
+                        if request.method != 'OPTIONS' and \
+                                self._has_credentials(request.headers):
+                            g.flask_httpauth_scheme = selected_auth.scheme
+                            g.flask_httpauth_auth = selected_auth
+                            return self._auth_error(selected_auth, 401)
+                g.flask_httpauth_scheme = selected_auth.scheme
+                g.flask_httpauth_auth = selected_auth
                 return selected_auth.login_required(
                     role=role, optional=optional)(f)(*args, **kwargs)
             return decorated
@@ -673,3 +756,16 @@ class MultiAuth:
         """The authenticated user."""
         if hasattr(g, 'flask_httpauth_user'):  # pragma: no cover
             return g.flask_httpauth_user
+
+    def current_auth(self):
+        """The authentication object that was selected for the request."""
+        return getattr(g, 'flask_httpauth_auth', None)
+
+    def current_scheme(self):
+        """The authentication scheme that was selected for the request.
+
+        This is the scheme of the authentication object that validated the
+        credentials, or the one that was selected to reject the request when
+        authentication failed or was not provided.
+        """
+        return getattr(g, 'flask_httpauth_scheme', None)
