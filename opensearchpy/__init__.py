@@ -74,7 +74,9 @@ from .exceptions import (
 from .helpers import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
 from .helpers.aggs import A
 from .helpers.analysis import analyzer, char_filter, normalizer, token_filter, tokenizer
+from .helpers.capability import ReindexCapability
 from .helpers.document import Document, InnerDoc, MetaField
+from .helpers.errors import ReindexCapabilityError
 from .helpers.faceted_search import (
     DateHistogramFacet,
     Facet,
@@ -169,6 +171,8 @@ __all__ = [
     "AWSV4SignerAuth",
     "Urllib3AWSV4SignerAuth",
     "RequestsAWSV4SignerAuth",
+    "ReindexCapability",
+    "ReindexCapabilityError",
     "A",
     "AttrDict",
     "AttrList",

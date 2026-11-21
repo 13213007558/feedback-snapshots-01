@@ -34,6 +34,7 @@ from opensearchpy import (
     ConnectionPool,
 )
 from opensearchpy.helpers import (
+    ReindexCapability,
     async_bulk,
     async_reindex,
     async_scan,
@@ -119,4 +120,24 @@ async def async_reindex_types() -> None:
         scroll="10m",
         scan_kwargs={"request_timeout": 10},
         bulk_kwargs={"request_timeout": 10},
+    )
+    capability = ReindexCapability(
+        source_client=client,
+        source_indices=["src-index"],
+        target_client=client,
+        target_index="target-index",
+    )
+    _, _ = await async_reindex(
+        client,
+        "src-index",
+        "target-index",
+        target_client=client,
+        capability=capability,
+    )
+    async for _ in async_scan(client, index="src-index", capability=capability):
+        pass
+    _, _ = await async_bulk(
+        client,
+        [{"_index": "target-index", "value": 1}],
+        capability=capability,
     )

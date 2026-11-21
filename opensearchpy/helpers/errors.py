@@ -43,3 +43,7 @@ class ScanError(OpenSearchException):
     def __init__(self, scroll_id: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.scroll_id = scroll_id
+
+
+class ReindexCapabilityError(PermissionError, OpenSearchException):
+    """Raised when a reindex operation exceeds its declared capability."""

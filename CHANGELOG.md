@@ -9,6 +9,7 @@ Inspired from [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 - Add TLS/mTLS and Basic authentication support for gRPC transport with `use_ssl`, `ca_certs`, `client_cert`, `client_key`, `ssl_context`, `ssl_assert_hostname`, and `http_auth` ([#1087](https://github.com/opensearch-project/opensearch-py/pull/1087))
 - Add gRPC ML streaming translation layer for ML Commons `PredictModelStream` / `ExecuteAgentStream` APIs ([#1096](https://github.com/opensearch-project/opensearch-py/pull/1096))
 - Added support for `trust_env` to `AsyncHttpConnection` ([886](https://github.com/opensearch-project/opensearch-py/pull/886)) 
+- Add `helpers.ReindexCapability` to restrict reindex reads and bulk writes to selected clients and indices, ignoring source-provided `_index` metadata
 ### Updated APIs
 ### Changed
 - Updated API spec download URL to `https://api-spec.opensearch.org` ([#1104](https://github.com/opensearch-project/opensearch-py/pull/1104))

@@ -32,9 +32,57 @@ from typing import Any, Optional
 
 from ..compat import Mapping, Queue, map, string_types
 from ..exceptions import TransportError
+from .capability import ReindexCapability
 from .errors import BulkIndexError, ScanError
 
 logger = logging.getLogger("opensearchpy.helpers")
+
+
+def _coerce_capability(capability: Any) -> Any:
+    if capability is None or isinstance(capability, ReindexCapability):
+        return capability
+    if isinstance(capability, Mapping):
+        return ReindexCapability(**capability)
+    raise TypeError("capability must be a ReindexCapability instance")
+
+
+def _resolve_capability_args(capability: Any, kwargs: Any) -> Any:
+    """Pop a capability (or its alias) from ``kwargs``."""
+    alias = kwargs.pop("reindex_capability", None)
+    if capability is None:
+        capability = kwargs.pop("capability", None)
+    else:
+        kwargs.pop("capability", None)
+    if alias is not None:
+        if capability is not None and capability is not alias:
+            raise TypeError("specify only one of capability and reindex_capability")
+        capability = alias
+    return _coerce_capability(capability)
+
+
+def _capability_reader(capability: Any, client: Any, source_index: Any) -> Any:
+    if not isinstance(capability, ReindexCapability):
+        raise TypeError("capability must be a ReindexCapability instance")
+    capability.authorize_source(client, source_index)
+    return capability
+
+
+def _capability_writer(capability: Any, client: Any) -> Any:
+    if not isinstance(capability, ReindexCapability):
+        raise TypeError("capability must be a ReindexCapability instance")
+    capability.authorize_writer(client)
+    return capability
+
+
+def _check_bulk_capability(
+    capability: Any, client: Any, bulk_data: Any, kwargs: Any
+) -> None:
+    """Fail closed before a bulk chunk reaches the transport."""
+    if capability is None:
+        return
+    _capability_writer(capability, client)
+    capability.authorize_bulk_kwargs(kwargs)
+    capability.authorize_chunk(bulk_data, request_index=kwargs.get("index"))
 
 
 def expand_action(data: Any) -> Any:
@@ -287,6 +335,7 @@ def streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    capability: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -321,12 +370,22 @@ def streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`.
+        When set, actions are validated against the declared write identity
+        and target before each bulk request. A disallowed action cancels the
+        operation before any request for that chunk is sent.
     """
+    capability = _resolve_capability_args(capability, kwargs)
+    if capability is not None:
+        _capability_writer(capability, client)
+        capability.authorize_bulk_kwargs(kwargs)
+
     actions = map(expand_action_callback, actions)
 
     for bulk_data, bulk_actions in _chunk_actions(
         actions, chunk_size, max_chunk_bytes, client.transport.serializer
     ):
+        _check_bulk_capability(capability, client, bulk_data, kwargs)
         for attempt in range(max_retries + 1):
             to_retry: Any = []
             to_retry_data: Any = []
@@ -384,6 +443,7 @@ def bulk(
     stats_only: bool = False,
     ignore_status: Any = (),
     *args: Any,
+    capability: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -408,6 +468,8 @@ def bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`
+        applied to every action before its chunk is sent.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.streaming_bulk` which is used to execute
@@ -421,6 +483,8 @@ def bulk(
 
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
+    if capability is not None:
+        kwargs["capability"] = capability
     for ok, item in streaming_bulk(client, actions, ignore_status=ignore_status, *args, **kwargs):  # type: ignore
         # go through request-response pairs and detect failures
         if not ok:
@@ -444,6 +508,7 @@ def parallel_bulk(
     raise_on_exception: bool = True,
     raise_on_error: bool = True,
     ignore_status: Any = (),
+    capability: Any = None,
     *args: Any,
     **kwargs: Any,
 ) -> Any:
@@ -465,10 +530,17 @@ def parallel_bulk(
     :arg queue_size: size of the task queue between the main thread (producing
         chunks to send) and the processing threads.
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`
+        applied to every action before its chunk is dispatched.
     """
     # Avoid importing multiprocessing unless parallel_bulk is used
     # to avoid exceptions on restricted environments like App Engine
     from multiprocessing.pool import ThreadPool
+
+    capability = _resolve_capability_args(capability, kwargs)
+    if capability is not None:
+        _capability_writer(capability, client)
+        capability.authorize_bulk_kwargs(kwargs)
 
     actions = map(expand_action_callback, actions)
 
@@ -481,6 +553,13 @@ def parallel_bulk(
             self._quick_put = self._inqueue.put
 
     pool = BlockingPool(thread_count)
+
+    def _authorized_chunks() -> Any:
+        for chunk in _chunk_actions(
+            actions, chunk_size, max_chunk_bytes, client.transport.serializer
+        ):
+            _check_bulk_capability(capability, client, chunk[0], kwargs)
+            yield chunk
 
     try:
         for result in pool.imap(
@@ -496,9 +575,7 @@ def parallel_bulk(
                     **kwargs,
                 )
             ),
-            _chunk_actions(
-                actions, chunk_size, max_chunk_bytes, client.transport.serializer
-            ),
+            _authorized_chunks(),
         ):
             yield from result
 
@@ -517,6 +594,7 @@ def scan(
     request_timeout: Optional[float] = None,
     clear_scroll: Optional[bool] = True,
     scroll_kwargs: Any = None,
+    capability: Any = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -547,6 +625,9 @@ def scan(
         to true.
     :arg scroll_kwargs: additional kwargs to be passed to
         :meth:`~opensearchpy.OpenSearch.scroll`
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`.
+        When set, ``client`` and ``index`` must match the declared read
+        identity and source scope.
 
     Any additional keyword arguments will be passed to the initial
     :meth:`~opensearchpy.OpenSearch.search` call::
@@ -559,6 +640,12 @@ def scan(
 
     """
     scroll_kwargs = scroll_kwargs or {}
+    capability = _resolve_capability_args(capability, kwargs)
+    if capability is not None:
+        source_index = kwargs.get("index")
+        if source_index is None:
+            raise TypeError("scan() requires index when capability is set")
+        _capability_reader(capability, client, source_index)
 
     if not preserve_order:
         query = query.copy() if query else {}
@@ -631,13 +718,14 @@ def scan(
 def reindex(
     client: Any,
     source_index: Any,
-    target_index: Any,
+    target_index: Any = None,
     query: Any = None,
     target_client: Any = None,
     chunk_size: int = 500,
     scroll: str = "5m",
     scan_kwargs: Any = {},
     bulk_kwargs: Any = {},
+    capability: Any = None,
 ) -> Any:
     """
     Reindex all documents from one index that satisfy a given query
@@ -657,7 +745,8 @@ def reindex(
     :arg client: instance of :class:`~opensearchpy.OpenSearch` to use (for
         read if `target_client` is specified as well)
     :arg source_index: index (or list of indices) to read documents from
-    :arg target_index: name of the index in the target cluster to populate
+    :arg target_index: name of the index in the target cluster to populate.
+        May be omitted when ``capability`` supplies it.
     :arg query: body for the :meth:`~opensearchpy.OpenSearch.search` api
     :arg target_client: optional, is specified will be used for writing (thus
         enabling reindex between clusters)
@@ -668,22 +757,68 @@ def reindex(
         :func:`~opensearchpy.helpers.scan`
     :arg bulk_kwargs: additional kwargs to be passed to
         :func:`~opensearchpy.helpers.bulk`
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`.
+        When set, ``client``, ``target_client``, ``source_index`` and
+        ``target_index`` must all agree with the declared identities and
+        scope. Source hits cannot change the write target: the target index
+        is fixed by the capability, and any ``_index`` metadata returned by
+        the source is replaced before the document is handed to bulk. The
+        capability is also passed to :func:`bulk
+        <opensearchpy.helpers.bulk>` so every action is revalidated before
+        its chunk is sent.
     """
     target_client = client if target_client is None else target_client
-    docs = scan(client, query=query, index=source_index, scroll=scroll, **scan_kwargs)
+    capability = _coerce_capability(capability)
+    if capability is not None:
+        source_index = capability.authorize_source(client, source_index)
+        if target_index is None:
+            target_index = capability.target_index
+        target_index = capability.authorize_target(target_client, target_index)
+        if len(source_index) == 1:
+            source_index = source_index[0]
+
+    scan_kwargs = dict(scan_kwargs)
+    scan_kwargs.pop("capability", None)
+    scan_kwargs.pop("reindex_capability", None)
+    docs = scan(
+        client,
+        query=query,
+        index=source_index,
+        scroll=scroll,
+        capability=capability,
+        **scan_kwargs,
+    )
 
     def _change_doc_index(hits: Any, index: Any) -> Any:
         for h in hits:
-            h["_index"] = index
-            if "fields" in h:
-                h.update(h.pop("fields"))
-            yield h
+            if not isinstance(h, dict):
+                raise TypeError("reindex scan hits must be dictionaries")
+            # Take a copy so source metadata cannot affect the object the
+            # scan/scroll machinery still holds.
+            hit = dict(h)
+            if "fields" in hit:
+                hit.update(hit.pop("fields"))
+            # Assign last and ignore any source-provided _index value.
+            hit["_index"] = index
+            yield hit
 
     kwargs = {"stats_only": True}
     kwargs.update(bulk_kwargs)
-    return bulk(
-        target_client,
-        _change_doc_index(docs, target_index),
-        chunk_size=chunk_size,
-        **kwargs,
-    )
+    if capability is not None:
+        kwargs["capability"] = capability
+
+    changed = _change_doc_index(docs, target_index)
+    try:
+        return bulk(
+            target_client,
+            changed,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
+    finally:
+        # Close the scan generator so its finally block clears the scroll
+        # even when a later action is rejected by the capability.
+        if hasattr(changed, "close"):
+            changed.close()
+        if hasattr(docs, "close"):
+            docs.close()

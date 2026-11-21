@@ -73,6 +73,34 @@ response = helpers.bulk(client, docs, max_retries=3)
 print(response)
 ```
 
+## Reindex Capability
+
+When a migration job is allowed to read a specific set of source indices and write to exactly one target index, declare that boundary with `helpers.ReindexCapability`. The capability binds the exact source and target client objects (the selected identities) and the allowed index names. Every bulk action is checked before its chunk is sent.
+
+```python
+from opensearchpy import OpenSearch, helpers
+
+source_client = OpenSearch(...)
+target_client = OpenSearch(...)
+
+capability = helpers.ReindexCapability(
+    source_client=source_client,
+    source_indices=["legacy-orders-2025", "legacy-orders-2026"],
+    target_client=target_client,
+    target_index="orders-migrated",
+)
+
+helpers.reindex(
+    source_client,
+    "legacy-orders-2025",
+    "orders-migrated",
+    target_client=target_client,
+    capability=capability,
+)
+```
+
+Source metadata cannot change the write scope: any `_index` value returned by the source, including one under `fields`, is replaced with the capability's target before the document reaches bulk. Actions whose resolved target differs from `target_index` raise `helpers.ReindexCapabilityError` before that chunk is sent, and an open scroll is cleared on cancellation.
+
 ## Parallel Bulk
 
 Bulk helpers support `parallel_bulk` which has options to turn off exceptions, chunk size, etc.

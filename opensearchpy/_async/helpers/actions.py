@@ -48,8 +48,13 @@ from ...compat import map
 from ...exceptions import TransportError
 from ...helpers.actions import (
     _ActionChunker,
+    _capability_reader,
+    _capability_writer,
+    _check_bulk_capability,
+    _coerce_capability,
     _process_bulk_chunk_error,
     _process_bulk_chunk_success,
+    _resolve_capability_args,
     expand_action,
 )
 from ...helpers.errors import ScanError
@@ -159,6 +164,7 @@ async def async_streaming_bulk(
     yield_ok: bool = True,
     ignore_status: Any = (),
     *args: Any,
+    capability: Any = None,
     **kwargs: Any
 ) -> AsyncGenerator[Tuple[bool, Any], None]:
     """
@@ -193,7 +199,13 @@ async def async_streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`
+        applied to every action before its chunk is sent.
     """
+    capability = _resolve_capability_args(capability, kwargs)
+    if capability is not None:
+        _capability_writer(capability, client)
+        capability.authorize_bulk_kwargs(kwargs)
 
     async def map_actions() -> Any:
         async for item in aiter(actions):
@@ -202,6 +214,7 @@ async def async_streaming_bulk(
     async for bulk_data, bulk_actions in _chunk_actions(
         map_actions(), chunk_size, max_chunk_bytes, client.transport.serializer
     ):
+        _check_bulk_capability(capability, client, bulk_data, kwargs)
         for attempt in range(max_retries + 1):
             to_retry: Any = []
             to_retry_data: Any = []
@@ -261,6 +274,7 @@ async def async_bulk(
     stats_only: bool = False,
     ignore_status: Optional[Union[int, Collection[int]]] = (),
     *args: Any,
+    capability: Any = None,
     **kwargs: Any
 ) -> Tuple[int, Union[int, List[Any]]]:
     """
@@ -285,6 +299,8 @@ async def async_bulk(
     :arg stats_only: if `True` only report number of successful/failed
         operations instead of just number of successful and a list of error responses
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`
+        applied to every action before its chunk is sent.
 
     Any additional keyword arguments will be passed to
     :func:`~opensearchpy.helpers.async_streaming_bulk` which is used to execute
@@ -298,6 +314,8 @@ async def async_bulk(
 
     # make streaming_bulk yield successful results so we can count them
     kwargs["yield_ok"] = True
+    if capability is not None:
+        kwargs["capability"] = capability
     async for ok, item in async_streaming_bulk(  # type: ignore
         client, actions, ignore_status=ignore_status, *args, **kwargs
     ):
@@ -322,6 +340,7 @@ async def async_scan(
     request_timeout: Any = None,
     clear_scroll: bool = True,
     scroll_kwargs: Any = None,
+    capability: Any = None,
     **kwargs: Any
 ) -> Any:
     """
@@ -352,6 +371,9 @@ async def async_scan(
         to true.
     :arg scroll_kwargs: additional kwargs to be passed to
         :meth:`~opensearchpy.AsyncOpenSearch.scroll`
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`.
+        When set, ``client`` and ``index`` must match the declared read
+        identity and source scope.
 
     Any additional keyword arguments will be passed to the initial
     :meth:`~opensearchpy.AsyncOpenSearch.search` call::
@@ -364,6 +386,12 @@ async def async_scan(
 
     """
     scroll_kwargs = scroll_kwargs or {}
+    capability = _resolve_capability_args(capability, kwargs)
+    if capability is not None:
+        source_index = kwargs.get("index")
+        if source_index is None:
+            raise TypeError("async_scan() requires index when capability is set")
+        _capability_reader(capability, client, source_index)
 
     if not preserve_order:
         query = query.copy() if query else {}
@@ -438,13 +466,14 @@ async def async_scan(
 async def async_reindex(
     client: Any,
     source_index: Union[str, Collection[str]],
-    target_index: str,
+    target_index: Any = None,
     query: Any = None,
     target_client: Any = None,
     chunk_size: int = 500,
     scroll: str = "5m",
     scan_kwargs: Any = {},
     bulk_kwargs: Any = {},
+    capability: Any = None,
 ) -> Tuple[int, Union[int, List[Any]]]:
     """
     Reindex all documents from one index that satisfy a given query
@@ -464,7 +493,8 @@ async def async_reindex(
     :arg client: instance of :class:`~opensearchpy.AsyncOpenSearch` to use (for
         read if `target_client` is specified as well)
     :arg source_index: index (or list of indices) to read documents from
-    :arg target_index: name of the index in the target cluster to populate
+    :arg target_index: name of the index in the target cluster to populate.
+        May be omitted when ``capability`` supplies it.
     :arg query: body for the :meth:`~opensearchpy.AsyncOpenSearch.search` api
     :arg target_client: optional, is specified will be used for writing (thus
         enabling reindex between clusters)
@@ -475,24 +505,59 @@ async def async_reindex(
         :func:`~opensearchpy.helpers.async_scan`
     :arg bulk_kwargs: additional kwargs to be passed to
         :func:`~opensearchpy.helpers.async_bulk`
+    :arg capability: optional :class:`~opensearchpy.helpers.ReindexCapability`.
+        When set, ``client``, ``target_client``, ``source_index`` and
+        ``target_index`` must all agree with the declared identities and
+        scope. Source hits cannot change the write target, and every bulk
+        action is revalidated before its chunk is sent.
     """
     target_client = client if target_client is None else target_client
+    capability = _coerce_capability(capability)
+    if capability is not None:
+        source_index = capability.authorize_source(client, source_index)
+        if target_index is None:
+            target_index = capability.target_index
+        target_index = capability.authorize_target(target_client, target_index)
+        if len(source_index) == 1:
+            source_index = source_index[0]
+
+    scan_kwargs = dict(scan_kwargs)
+    scan_kwargs.pop("capability", None)
+    scan_kwargs.pop("reindex_capability", None)
     docs = async_scan(
-        client, query=query, index=source_index, scroll=scroll, **scan_kwargs
+        client,
+        query=query,
+        index=source_index,
+        scroll=scroll,
+        capability=capability,
+        **scan_kwargs,
     )
 
     async def _change_doc_index(hits: Any, index: Any) -> Any:
-        async for h in hits:
-            h["_index"] = index
-            if "fields" in h:
-                h.update(h.pop("fields"))
-            yield h
+        try:
+            async for h in hits:
+                if not isinstance(h, dict):
+                    raise TypeError("reindex scan hits must be dictionaries")
+                hit = dict(h)
+                if "fields" in hit:
+                    hit.update(hit.pop("fields"))
+                hit["_index"] = index
+                yield hit
+        finally:
+            await hits.aclose()
 
     kwargs = {"stats_only": True}
     kwargs.update(bulk_kwargs)
-    return await async_bulk(
-        target_client,
-        _change_doc_index(docs, target_index),
-        chunk_size=chunk_size,
-        **kwargs,
-    )
+    if capability is not None:
+        kwargs["capability"] = capability
+
+    changed = _change_doc_index(docs, target_index)
+    try:
+        return await async_bulk(
+            target_client,
+            changed,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
+    finally:
+        await changed.aclose()

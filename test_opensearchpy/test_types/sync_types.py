@@ -28,7 +28,7 @@
 from typing import Any, Dict, Generator
 
 from opensearchpy import ConnectionPool, OpenSearch, RequestsHttpConnection, Transport
-from opensearchpy.helpers import bulk, reindex, scan, streaming_bulk
+from opensearchpy.helpers import ReindexCapability, bulk, reindex, scan, streaming_bulk
 
 client = OpenSearch(
     [{"host": "localhost", "port": 9443}],
@@ -109,4 +109,24 @@ def reindex_types() -> None:
         scroll="10m",
         scan_kwargs={"request_timeout": 10},
         bulk_kwargs={"request_timeout": 10},
+    )
+    capability = ReindexCapability(
+        source_client=client,
+        source_indices=["src-index"],
+        target_client=client,
+        target_index="target-index",
+    )
+    _, _ = reindex(
+        client,
+        "src-index",
+        "target-index",
+        target_client=client,
+        capability=capability,
+    )
+    for _ in scan(client, index="src-index", capability=capability):
+        pass
+    _, _ = bulk(
+        client,
+        [{"_index": "target-index", "value": 1}],
+        capability=capability,
     )

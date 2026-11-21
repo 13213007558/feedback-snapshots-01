@@ -42,11 +42,14 @@ from .actions import (
     streaming_bulk,
 )
 from .asyncsigner import AWSV4SignerAsyncAuth
-from .errors import BulkIndexError, ScanError
+from .capability import ReindexCapability
+from .errors import BulkIndexError, ReindexCapabilityError, ScanError
 from .signer import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
 
 __all__ = [
     "BulkIndexError",
+    "ReindexCapability",
+    "ReindexCapabilityError",
     "ScanError",
     "expand_action",
     "streaming_bulk",

@@ -8,6 +8,7 @@ maxdepth: 1
 ---
 
 helpers/aggs
+helpers/capability
 helpers/analysis
 helpers/document
 helpers/faceted_search
