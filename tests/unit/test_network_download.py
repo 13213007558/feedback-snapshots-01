@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from pip._vendor.urllib3.exceptions import ProtocolError, ProxyError, ReadTimeou
 from pip._internal.exceptions import (
     ConnectionFailedError,
     ConnectionTimeoutError,
+    HashMismatch,
     IncompleteDownloadError,
     ProxyConnectionError,
     SSLMissingError,
@@ -29,6 +31,8 @@ from pip._internal.network.download import (
 )
 from pip._internal.network.session import PipSession
 from pip._internal.network.utils import HEADERS
+from pip._internal.operations.prepare import get_http_url
+from pip._internal.utils.hashes import Hashes
 
 from tests.lib.requests_mocks import BrokenStream, MockResponse
 from tests.lib.server import Body, MockServer
@@ -694,3 +698,213 @@ def test_resumed_download_caching(tmpdir: Path) -> None:
         cache_files = list(cache_dir.rglob("*"))
         # Should have cache files (both metadata and body files)
         assert len([f for f in cache_files if f.is_file()]) == 2
+
+
+def _sha256_hashes(body: bytes) -> Hashes:
+    return Hashes({"sha256": [hashlib.sha256(body).hexdigest()]})
+
+
+def _cache_files(cache_dir: Path) -> list[Path]:
+    if not cache_dir.exists():
+        return []
+    return [f for f in cache_dir.rglob("*") if f.is_file()]
+
+
+def test_resumed_download_cached_when_hashes_match(tmpdir: Path) -> None:
+    """A resumed download whose final bytes match the approved hashes is
+    published to the cache, and the installer sees the complete file."""
+    cache_dir = tmpdir / "cache"
+    session = PipSession(cache=str(cache_dir), resume_retries=5)
+    link = Link("https://example.com/foo.tgz")
+    downloader = Downloader(session, "on")
+    body = b"0cfa7e9d-1868-4dd7-9fb3-f2561d5dfd89"
+
+    incomplete_resp = MockResponse(body[:24])
+    incomplete_resp.headers.update({"content-length": "36"})
+    incomplete_resp.status_code = 200
+
+    resume_resp = MockResponse(body[24:])
+    resume_resp.headers.update({"content-length": "12"})
+    resume_resp.status_code = 206
+
+    _http_get_mock = MagicMock(side_effect=[incomplete_resp, resume_resp])
+    with patch.object(Downloader, "_http_get", _http_get_mock):
+        file = get_http_url(link, downloader, hashes=_sha256_hashes(body))
+
+    with open(file.path, "rb") as downloaded_file:
+        assert downloaded_file.read() == body
+    # Metadata and body cache entries were published.
+    assert len(_cache_files(cache_dir)) == 2
+
+
+def test_resumed_download_not_cached_on_hash_mismatch(tmpdir: Path) -> None:
+    """If the server switched files between the initial download and the
+    resume, the final bytes don't match the originally approved hashes: the
+    installer sees a hash mismatch and nothing is published to the cache."""
+    cache_dir = tmpdir / "cache"
+    session = PipSession(cache=str(cache_dir), resume_retries=5)
+    link = Link("https://example.com/foo.tgz")
+    downloader = Downloader(session, "on")
+    approved = b"0cfa7e9d-1868-4dd7-9fb3-f2561d5dfd89"
+
+    incomplete_resp = MockResponse(approved[:24])
+    incomplete_resp.headers.update({"content-length": "36"})
+    incomplete_resp.status_code = 200
+
+    # The remainder now comes from a different file.
+    resume_resp = MockResponse(b"W" * 12)
+    resume_resp.headers.update({"content-length": "12"})
+    resume_resp.status_code = 206
+
+    _http_get_mock = MagicMock(side_effect=[incomplete_resp, resume_resp])
+    with (
+        patch.object(Downloader, "_http_get", _http_get_mock),
+        pytest.raises(HashMismatch),
+    ):
+        get_http_url(link, downloader, hashes=_sha256_hashes(approved))
+
+    # The mismatched bytes were not published to the cache.
+    assert _cache_files(cache_dir) == []
+
+
+def test_server_resumed_download_cached_when_hashes_match(
+    mock_server: MockServer, tmpdir: Path
+) -> None:
+    """A half response followed by a same-version resume produces the full
+    file, which is published to the cache once the approved hashes match."""
+    body = b"0cfa7e9d-1868-4dd7-9fb3-f2561d5dfd89"
+    etag = '"v1"'
+
+    def truncated(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        # Advertise the full length but send only part of the body.
+        start_response(
+            "200 OK", [("Content-Length", str(len(body))), ("ETag", etag)]
+        )
+        return [body[:10]]
+
+    def resumed(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        # The same file is still being served, so the range request is honored.
+        assert environ.get("HTTP_IF_RANGE") == etag
+        start = int(environ["HTTP_RANGE"].split("=", 1)[1].split("-", 1)[0])
+        start_response(
+            "206 Partial Content",
+            [
+                ("Content-Length", str(len(body) - start)),
+                ("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}"),
+                ("ETag", etag),
+            ],
+        )
+        return [body[start:]]
+
+    mock_server.set_responses([truncated, resumed])
+    mock_server.start()
+    url = f"http://{mock_server.host}:{mock_server.port}/foo.tgz"
+
+    cache_dir = tmpdir / "cache"
+    session = PipSession(cache=str(cache_dir), resume_retries=3)
+    # Trust the local stand-in index so its responses are cacheable, like an
+    # internal index fetched over plain HTTP with --trusted-host.
+    session.add_trusted_host(f"{mock_server.host}:{mock_server.port}")
+    downloader = Downloader(session, "on")
+
+    file = get_http_url(Link(url), downloader, hashes=_sha256_hashes(body))
+
+    # The installer sees the complete file...
+    with open(file.path, "rb") as f:
+        assert f.read() == body
+    # ...and the resumed download is published to the cache (metadata + body).
+    assert len(_cache_files(cache_dir)) == 2
+
+
+def test_server_resumed_download_not_cached_when_file_switches(
+    mock_server: MockServer, tmpdir: Path
+) -> None:
+    """The index switched to a new file between the two downloads but still
+    answers 206, so the resumed bytes belong to a different file. The result
+    must not be published to the cache, and the installer must see a hash
+    mismatch instead of the spliced bytes."""
+    original = b"0cfa7e9d-1868-4dd7-9fb3-f2561d5dfd89"
+    switched = b"W" * len(original)
+
+    def truncated(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        start_response(
+            "200 OK",
+            [("Content-Length", str(len(original))), ("ETag", '"v1"')],
+        )
+        return [original[:10]]
+
+    def switched_file(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        # The server ignores If-Range and serves the remainder of the new file.
+        start = int(environ["HTTP_RANGE"].split("=", 1)[1].split("-", 1)[0])
+        start_response(
+            "206 Partial Content",
+            [
+                ("Content-Length", str(len(switched) - start)),
+                (
+                    "Content-Range",
+                    f"bytes {start}-{len(switched) - 1}/{len(switched)}",
+                ),
+                ("ETag", '"v2"'),
+            ],
+        )
+        return [switched[start:]]
+
+    mock_server.set_responses([truncated, switched_file])
+    mock_server.start()
+    url = f"http://{mock_server.host}:{mock_server.port}/foo.tgz"
+
+    cache_dir = tmpdir / "cache"
+    session = PipSession(cache=str(cache_dir), resume_retries=3)
+    # Trust the local stand-in index so its responses are cacheable, like an
+    # internal index fetched over plain HTTP with --trusted-host.
+    session.add_trusted_host(f"{mock_server.host}:{mock_server.port}")
+    downloader = Downloader(session, "on")
+
+    with pytest.raises(HashMismatch):
+        get_http_url(Link(url), downloader, hashes=_sha256_hashes(original))
+
+    # The spliced bytes were not published to the cache.
+    assert _cache_files(cache_dir) == []
+
+
+def test_server_restarted_download_not_cached_when_file_switches(
+    mock_server: MockServer, tmpdir: Path
+) -> None:
+    """The index switched to a new file and answers the conditional range
+    request with a full 200 response, so the download restarts. The new bytes
+    don't match the originally approved hashes, so nothing may be published
+    to the cache and the installer must see a hash mismatch."""
+    original = b"0cfa7e9d-1868-4dd7-9fb3-f2561d5dfd89"
+    switched = b"new-0cfa7e9d-1868-4dd7-9fb3-f2561d5d"
+
+    def truncated(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        start_response(
+            "200 OK",
+            [("Content-Length", str(len(original))), ("ETag", '"v1"')],
+        )
+        return [original[:10]]
+
+    def switched_file(environ: WSGIEnvironment, start_response: StartResponse) -> Body:
+        # The file changed, so the If-Range condition fails and the server
+        # responds with the full new file. No cacheable headers are sent, so
+        # only the downloader's own cache publishing is exercised here.
+        assert environ.get("HTTP_IF_RANGE") == '"v1"'
+        start_response("200 OK", [("Content-Length", str(len(switched)))])
+        return [switched]
+
+    mock_server.set_responses([truncated, switched_file])
+    mock_server.start()
+    url = f"http://{mock_server.host}:{mock_server.port}/foo.tgz"
+
+    cache_dir = tmpdir / "cache"
+    session = PipSession(cache=str(cache_dir), resume_retries=3)
+    # Trust the local stand-in index so its responses are cacheable, like an
+    # internal index fetched over plain HTTP with --trusted-host.
+    session.add_trusted_host(f"{mock_server.host}:{mock_server.port}")
+    downloader = Downloader(session, "on")
+
+    with pytest.raises(HashMismatch):
+        get_http_url(Link(url), downloader, hashes=_sha256_hashes(original))
+
+    # The replacement bytes were not published to the cache.
+    assert _cache_files(cache_dir) == []

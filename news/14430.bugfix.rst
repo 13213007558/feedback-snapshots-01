@@ -1,0 +1,4 @@
+Do not publish a cache entry for a download completed via resume retries when
+the final bytes do not match the known-good hashes, so a file swapped on the
+server between the initial request and the resume cannot poison the HTTP
+cache.

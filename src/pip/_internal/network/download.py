@@ -22,6 +22,7 @@ from pip._internal.cli.progress_bars import BarType, get_download_progress_rende
 from pip._internal.exceptions import (
     ConnectionFailedError,
     ConnectionTimeoutError,
+    HashError,
     IncompleteDownloadError,
     NetworkConnectionError,
     ProxyConnectionError,
@@ -36,6 +37,7 @@ from pip._internal.models.link import (
 from pip._internal.network.cache import SafeFileCache, is_from_cache
 from pip._internal.network.session import CacheControlAdapter, PipSession
 from pip._internal.network.utils import HEADERS, raise_for_status, response_chunks
+from pip._internal.utils.hashes import Hashes
 from pip._internal.utils.misc import format_size, redact_auth_from_url, splitext
 
 logger = logging.getLogger(__name__)
@@ -203,8 +205,15 @@ class Downloader:
             filepath, content_type = self(link, location)
             yield link, (filepath, content_type)
 
-    def __call__(self, link: Link, location: str) -> tuple[str, str]:
-        """Download a link and save it under location."""
+    def __call__(
+        self, link: Link, location: str, hashes: Hashes | None = None
+    ) -> tuple[str, str]:
+        """Download a link and save it under location.
+
+        :param hashes: Known-good hashes for the link's content. When given,
+            a download completed via resume retries is only published to the
+            HTTP cache if the bytes actually obtained match them.
+        """
         resp = self._http_get(link)
         download_size = _get_http_response_size(resp)
 
@@ -216,7 +225,7 @@ class Downloader:
                 download = _FileDownload(link, content_file, download_size)
                 self._process_response(download, resp)
                 if download.is_incomplete():
-                    self._attempt_resumes_or_redownloads(download, resp)
+                    self._attempt_resumes_or_redownloads(download, resp, hashes)
         except IncompleteDownloadError:
             with contextlib.suppress(OSError):
                 os.remove(filepath)
@@ -245,7 +254,10 @@ class Downloader:
             logger.warning("Connection interrupted while downloading.")
 
     def _attempt_resumes_or_redownloads(
-        self, download: _FileDownload, first_resp: Response
+        self,
+        download: _FileDownload,
+        first_resp: Response,
+        hashes: Hashes | None = None,
     ) -> None:
         """Attempt to resume/restart the download if connection was dropped."""
 
@@ -306,10 +318,13 @@ class Downloader:
         # If we successfully completed the download via resume, manually cache it
         # as a complete response to enable future caching
         if download.reattempts > 0:
-            self._cache_resumed_download(download, first_resp)
+            self._cache_resumed_download(download, first_resp, hashes)
 
     def _cache_resumed_download(
-        self, download: _FileDownload, original_response: Response
+        self,
+        download: _FileDownload,
+        original_response: Response,
+        hashes: Hashes | None = None,
     ) -> None:
         """
         Manually cache a file that was successfully downloaded via resume retries.
@@ -320,6 +335,26 @@ class Downloader:
         requests can use the cache.
         """
         url = download.link.url_without_fragment
+
+        # The remote file may have changed between the initial request and the
+        # resume (e.g. the index switched versions in-between), so the bytes we
+        # ended up with are not necessarily the ones that were approved when
+        # the download started. Only publish a cache entry if the final bytes
+        # match the known-good hashes; otherwise the mismatch would be cached
+        # and served again on future runs. The caller checks the hashes again
+        # after download and reports any mismatch to the user.
+        if hashes:
+            download.output_file.flush()
+            try:
+                hashes.check_against_path(download.output_file.name)
+            except HashError:
+                logger.warning(
+                    "Not caching resumed download of %s: the downloaded bytes "
+                    "do not match the expected hashes.",
+                    redact_auth_from_url(url),
+                )
+                return
+
         adapter = self._session.get_adapter(url)
 
         # Check if the adapter is the CacheControlAdapter (i.e. caching is enabled)

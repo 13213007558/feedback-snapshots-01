@@ -135,7 +135,7 @@ def get_http_url(
         content_type = None
     else:
         # let's download to a tmp dir
-        from_path, content_type = download(link, temp_dir.path)
+        from_path, content_type = download(link, temp_dir.path, hashes=hashes)
         if hashes:
             hashes.check_against_path(from_path)
 
