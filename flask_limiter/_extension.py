@@ -104,10 +104,38 @@ class RequestLimit:
 
 
 @dataclasses.dataclass
+class ConditionalDeduction:
+    """
+    A single, final deduction decision for a rate limit whose consumption is
+    deferred until the response is available (i.e. a limit configured with
+    ``deduct_when``).
+
+    The decision of whether the rule should be deducted is evaluated exactly
+    once for a request and then reused - even if header generation has to fall
+    back to the in-memory storage, or Flask re-runs the response processing
+    while handling an error. This keeps the deduction and the response headers
+    consistent and guarantees that a rule is never deducted twice for the same
+    request.
+    """
+
+    #: The runtime limit this decision applies to
+    limit: RuntimeLimit
+    #: The storage identifiers (args) the limit is keyed on
+    args: list[str]
+    #: Whether ``deduct_when`` decided the rule should be consumed this request
+    decided: bool = False
+    #: Whether the consumption (``hit``) has already been attempted, regardless
+    #: of whether it succeeded. Guards against ever attempting it twice.
+    attempted: bool = False
+
+
+@dataclasses.dataclass
 class LimiterContext:
     view_rate_limit: RequestLimit | None = None
     view_rate_limits: list[RequestLimit] = dataclasses.field(default_factory=list)
-    conditional_deductions: dict[RuntimeLimit, list[str]] = dataclasses.field(default_factory=dict)
+    conditional_deductions: dict[RuntimeLimit, ConditionalDeduction] = dataclasses.field(
+        default_factory=dict
+    )
     seen_limits: OrderedSet[RuntimeLimit] = dataclasses.field(default_factory=OrderedSet)
 
     def reset(self) -> None:
@@ -877,18 +905,43 @@ class Limiter:
         return ""
 
     def __check_conditional_deductions(self, response: flask.wrappers.Response) -> None:
-        for lim, args in self.context.conditional_deductions.items():
-            if lim.deduct_when and lim.deduct_when(response):
-                try:
-                    self.limiter.hit(lim.limit, *args, cost=lim.deduction_amount)
-                except Exception as err:
-                    if self._swallow_errors:
-                        self.logger.exception("Failed to deduct rate limit. Swallowing error")
-                    else:
-                        raise err
+        for deduction in self.context.conditional_deductions.values():
+            # The final deduct/no-deduct decision is taken once and reused on
+            # any re-entry (e.g. when header generation falls back to the
+            # in-memory storage), so a rule is never deducted twice.
+            if not deduction.decided:
+                deduction.decided = (
+                    bool(deduction.limit.deduct_when(response))
+                    if deduction.limit.deduct_when
+                    else False
+                )
 
-    def __inject_headers(self, response: flask.wrappers.Response) -> flask.wrappers.Response:
-        self.__check_conditional_deductions(response)
+            if not (deduction.decided and not deduction.attempted):
+                continue
+
+            # Mark the attempt before calling ``hit`` so a re-entry caused by a
+            # storage failure, the in-memory fallback or Flask's error
+            # finalization never attempts the same deduction a second time.
+            deduction.attempted = True
+            try:
+                self.limiter.hit(
+                    deduction.limit.limit, *deduction.args, cost=deduction.limit.deduction_amount
+                )
+            except Exception as err:
+                if self._swallow_errors:
+                    self.logger.exception("Failed to deduct rate limit. Swallowing error")
+                else:
+                    raise err
+
+    def __inject_headers(
+        self, response: flask.wrappers.Response, _is_fallback: bool = False
+    ) -> flask.wrappers.Response:
+        # Conditional deductions hold a single, final decision per rule. On a
+        # fallback re-entry the decision (and any consumption already made) is
+        # simply reused, so switching to the in-memory storage never deducts a
+        # rule a second time.
+        if not _is_fallback:
+            self.__check_conditional_deductions(response)
         header_limit = self.current_limit
 
         if self.enabled and self._headers_enabled and header_limit and self._header_mapping:
@@ -938,7 +991,7 @@ class Limiter:
                         "Rate limit storage unreachable - falling back to in-memory storage"
                     )
                     self._storage_dead = True
-                    response = self.__inject_headers(response)
+                    response = self.__inject_headers(response, _is_fallback=True)
                 else:
                     if self._swallow_errors:
                         self.logger.exception(
@@ -1069,7 +1122,7 @@ class Limiter:
                 args = [self._key_prefix, *args]
 
             if lim.deduct_when:
-                self.context.conditional_deductions[lim] = args
+                self.context.conditional_deductions[lim] = ConditionalDeduction(lim, args)
                 method = self.limiter.test
             else:
                 method = self.limiter.hit

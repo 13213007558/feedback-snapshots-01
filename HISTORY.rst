@@ -3,6 +3,17 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Bug Fix
+
+  * Evaluate ``deduct_when`` conditional rate limit deductions once per
+    request and reuse that final decision when generating response headers.
+    Falling back to the in-memory storage while writing headers (or Flask
+    re-running response processing during error handling) no longer deducts a
+    rate limit a second time, keeping the deduction and headers consistent.
+
 v4.1.1
 ------
 Release Date: 2025-12-06
