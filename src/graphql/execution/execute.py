@@ -609,6 +609,7 @@ def subscribe(
     executor_class: type[Executor] | None = None,
     middleware: MiddlewareManager | None = None,
     hide_suggestions: bool = False,
+    root_selection_set_executor: RootSelectionSetExecutor | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[AsyncIterator[ExecutionResult] | ExecutionResult]:
     """Create a GraphQL subscription.
@@ -637,12 +638,15 @@ def subscribe(
     this function, a field error will be raised at the location of the ``@defer`` or
     ``@stream`` directive.
 
-    To customize how each subscription event is executed, compose the subscription
-    pipeline directly instead of calling this function: build an executor with
-    :meth:`Executor.build`, resolve the source event stream with
-    :func:`~graphql.execution.create_source_event_stream`, and map it to the response
-    stream with :func:`~graphql.execution.map_source_to_response_event`, passing a
-    custom ``root_selection_set_executor``.
+    To re-confirm access scope or otherwise customize how each subscription event
+    is executed, pass a custom ``root_selection_set_executor``. It is invoked with
+    a per-event executor (see :meth:`Executor.build_per_event_executor`) while
+    preparing the GraphQL result of every source event; raising an error stops the
+    response stream and closes the source event stream. For deeper customization,
+    compose the subscription pipeline directly instead of calling this function:
+    build an executor with :meth:`Executor.build`, resolve the source event stream
+    with :func:`~graphql.execution.create_source_event_stream`, and map it to the
+    response stream with :func:`~graphql.execution.map_source_to_response_event`.
 
     Additional keyword arguments are passed on to the constructor of the executor
     class.
@@ -668,6 +672,9 @@ def subscribe(
     :param middleware: The middleware to wrap the resolvers with.
     :param hide_suggestions: Whether suggestion text should be omitted from request
         errors.
+    :param root_selection_set_executor: Function used to execute each source event,
+        for instance to re-confirm access scope per event; defaults to
+        :func:`~graphql.execution.execute_subscription_event`.
     :returns: A response stream for a valid subscription, or an execution result
         containing errors.
 
@@ -774,12 +781,17 @@ def subscribe(
 
     result_or_stream = create_source_event_stream(executor)
 
+    if root_selection_set_executor is None:
+        root_selection_set_executor = execute_subscription_event
+
     if executor.is_awaitable(result_or_stream):
 
         async def await_result() -> Any:
             awaited_result_or_stream = await result_or_stream
             return (
-                map_source_to_response_event(executor, awaited_result_or_stream)
+                map_source_to_response_event(
+                    executor, awaited_result_or_stream, root_selection_set_executor
+                )
                 if executor.is_async_iterable(awaited_result_or_stream)
                 else awaited_result_or_stream
             )
@@ -787,7 +799,11 @@ def subscribe(
         return await_result()
 
     return (
-        map_source_to_response_event(executor, result_or_stream)  # type: ignore
+        map_source_to_response_event(
+            executor,
+            result_or_stream,  # type: ignore
+            root_selection_set_executor,
+        )
         if executor.is_async_iterable(result_or_stream)
         else result_or_stream
     )

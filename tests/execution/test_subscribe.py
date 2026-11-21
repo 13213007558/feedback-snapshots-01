@@ -695,6 +695,123 @@ def describe_subscription_publish_phase():
         with pytest.raises(StopAsyncIteration):
             assert await anext(subscription)
 
+    async def rechecks_access_scope_per_event_and_reclaims_revoked_source():
+        """Re-confirm access scope while preparing each event result.
+
+        Two customer service clients subscribe to ticket changes over a locally
+        mocked event source. Once the ticket access of one client is revoked, its
+        subscription must stop resolving restricted data and its async source must
+        be reclaimed, while the other client keeps receiving events.
+        """
+        pubsub: SimplePubSub = SimplePubSub()
+        resolved_restricted: list[str] = []
+
+        class TicketAccess:
+            """Mock access scope of a customer service client."""
+
+            def __init__(self, agent: str, tickets: set[str]) -> None:
+                self.agent = agent
+                self.tickets = tickets
+
+        def resolve_subject(ticket: Any, info: GraphQLResolveInfo) -> str:
+            # restricted data, only resolved after the access re-check passed
+            resolved_restricted.append(info.context.agent)
+            return ticket["subject"]
+
+        ticket_schema = GraphQLSchema(
+            query=DummyQueryType,
+            subscription=GraphQLObjectType(
+                "Subscription",
+                {
+                    "ticketChanged": GraphQLField(
+                        GraphQLObjectType(
+                            "Ticket",
+                            {
+                                "id": GraphQLField(GraphQLString),
+                                "subject": GraphQLField(
+                                    GraphQLString, resolve=resolve_subject
+                                ),
+                            },
+                        )
+                    )
+                },
+            ),
+        )
+
+        def subscribe_tickets(_root: Any, _info: GraphQLResolveInfo) -> Any:
+            return pubsub.get_subscriber()
+
+        def access_rechecking_executor(executor: Executor) -> Any:
+            access = executor.context_value
+            ticket = executor.root_value["ticketChanged"]
+            if ticket["id"] not in access.tickets:
+                msg = (
+                    f"Access to ticket '{ticket['id']}'"
+                    f" was revoked for agent '{access.agent}'."
+                )
+                raise GraphQLError(msg)
+            return execute_subscription_event(executor)
+
+        def subscribe_agent(access: TicketAccess) -> Any:
+            subscription = subscribe(
+                ticket_schema,
+                parse("subscription { ticketChanged { id subject } }"),
+                context_value=access,
+                subscribe_field_resolver=subscribe_tickets,
+                root_selection_set_executor=access_rechecking_executor,
+            )
+            assert isinstance(subscription, AsyncIterator)
+            return subscription
+
+        alice_access = TicketAccess("alice", {"T-1"})
+        alice = subscribe_agent(alice_access)
+        bob = subscribe_agent(TicketAccess("bob", {"T-1"}))
+        assert len(pubsub.subscribers) == 2
+
+        # Both clients receive the first event for ticket T-1.
+        alice_payload = anext(alice)
+        bob_payload = anext(bob)
+        assert pubsub.emit(
+            {"ticketChanged": {"id": "T-1", "subject": "Printer on fire"}}
+        ) is True
+        assert await alice_payload == (
+            {"ticketChanged": {"id": "T-1", "subject": "Printer on fire"}},
+            None,
+        )
+        assert await bob_payload == (
+            {"ticketChanged": {"id": "T-1", "subject": "Printer on fire"}},
+            None,
+        )
+        assert resolved_restricted == ["alice", "bob"]
+
+        # Alice loses her access to the ticket.
+        alice_access.tickets.clear()
+
+        # The next event is still delivered to Bob...
+        alice_payload = anext(alice)
+        bob_payload = anext(bob)
+        assert pubsub.emit(
+            {"ticketChanged": {"id": "T-1", "subject": "Secret replacement"}}
+        ) is True
+        assert await bob_payload == (
+            {"ticketChanged": {"id": "T-1", "subject": "Secret replacement"}},
+            None,
+        )
+
+        # ...while Alice's subscription stops without resolving restricted data.
+        with pytest.raises(GraphQLError, match="revoked for agent 'alice'"):
+            await alice_payload
+        assert resolved_restricted == ["alice", "bob", "bob"]
+
+        # The revoked subscription's async source has been reclaimed.
+        assert len(pubsub.subscribers) == 1
+        with pytest.raises(StopAsyncIteration):
+            await anext(alice)
+
+        # Bob's subscription is unaffected and can be closed cleanly.
+        await bob.aclose()
+        assert len(pubsub.subscribers) == 0
+
     async def subscribe_function_returns_errors_with_defer():
         pubsub = SimplePubSub()
         subscription = create_subscription(pubsub, {"shouldDefer": True})
