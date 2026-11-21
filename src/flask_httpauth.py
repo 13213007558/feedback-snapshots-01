@@ -7,11 +7,15 @@ routes.
 """
 import hmac
 from base64 import b64decode
+from contextlib import contextmanager
 from functools import wraps
 from hashlib import md5
 from random import Random, SystemRandom
 from flask import request, make_response, session, g, Response, current_app
 from werkzeug.datastructures import Authorization
+
+# sentinel used to detect that no user is stored in the application context
+_NO_USER = object()
 
 
 class HTTPAuth:
@@ -208,6 +212,15 @@ class HTTPAuth:
         def login_required_internal(f):
             @wraps(f)
             def decorated(*args, **kwargs):
+                internal_user = getattr(g, 'flask_httpauth_internal_user',
+                                        _NO_USER)
+                if internal_user is not _NO_USER:
+                    # an internal authentication context is active, so the
+                    # user it provides is used without authenticating the
+                    # request
+                    g.flask_httpauth_user = internal_user
+                    return self.ensure_sync(f)(*args, **kwargs)
+
                 auth = self.get_auth()
 
                 # Flask normally handles OPTIONS requests on its own, but in
@@ -266,6 +279,46 @@ class HTTPAuth:
         """
         if hasattr(g, 'flask_httpauth_user'):
             return g.flask_httpauth_user
+
+    @contextmanager
+    def internal_auth_context(self, user):
+        """Context manager that provides a minimal authentication context for
+        internal calls made within the application, for example when a view
+        function needs to directly call a view function from another
+        blueprint to render a preview.
+
+        Inside the ``with`` block, routes decorated with ``login_required``
+        skip request authentication and use the given user, which is also
+        returned by ``current_user()``. When the block exits, even when it is
+        exited due to an exception, the previous authentication state is
+        restored, so the user of the outer request is never replaced.
+        Example::
+
+            @app.route('/preview')
+            @auth.login_required
+            def preview():
+                with auth.internal_auth_context(preview_user):
+                    return other_blueprint_view()
+
+        Note that the given user is not verified in any way, so this should
+        only be used for trusted internal calls and never with user-provided
+        data.
+        """
+        previous_user = getattr(g, 'flask_httpauth_user', _NO_USER)
+        previous_internal = getattr(g, 'flask_httpauth_internal_user',
+                                    _NO_USER)
+        g.flask_httpauth_internal_user = user
+        try:
+            yield
+        finally:
+            if previous_internal is _NO_USER:
+                g.pop('flask_httpauth_internal_user', None)
+            else:
+                g.flask_httpauth_internal_user = previous_internal
+            if previous_user is _NO_USER:
+                g.pop('flask_httpauth_user', None)
+            else:
+                g.flask_httpauth_user = previous_user
 
     def ensure_sync(self, f):
         try:
@@ -673,3 +726,10 @@ class MultiAuth:
         """The authenticated user."""
         if hasattr(g, 'flask_httpauth_user'):  # pragma: no cover
             return g.flask_httpauth_user
+
+    def internal_auth_context(self, user):
+        """Context manager that provides a minimal authentication context
+        for internal calls. See ``HTTPAuth.internal_auth_context`` for
+        details.
+        """
+        return self.main_auth.internal_auth_context(user)
