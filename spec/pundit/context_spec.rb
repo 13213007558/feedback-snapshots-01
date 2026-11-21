@@ -90,4 +90,33 @@ RSpec.describe Pundit::Context do
       expect(store).to eq({post => policy})
     end
   end
+
+  describe "restricted policy finder" do
+    let(:finder_class) do
+      Pundit::RestrictedPolicyFinder.with_allowed([PostPolicy])
+    end
+    let(:restricted_context) do
+      described_class.new(user: user, policy_finder_class: finder_class)
+    end
+
+    it "defaults to the unrestricted PolicyFinder" do
+      expect(context.policy_finder_class).to eq(Pundit::PolicyFinder)
+    end
+
+    it "uses the configured finder for authorize" do
+      expect(restricted_context.authorize(post, query: :show?, policy_class: nil)).to be(post)
+      expect { restricted_context.authorize(comment, query: :update?, policy_class: nil) }
+        .to raise_error(Pundit::NotApprovedError)
+    end
+
+    it "uses the configured finder for policy_scope" do
+      expect(restricted_context.policy_scope(Post)).to eq(:published)
+      expect { restricted_context.policy_scope!(Comment) }
+        .to raise_error(Pundit::NotApprovedError)
+    end
+
+    it "still reports a genuinely missing policy as NotDefinedError" do
+      expect { restricted_context.policy!(article) }.to raise_error(Pundit::NotDefinedError)
+    end
+  end
 end

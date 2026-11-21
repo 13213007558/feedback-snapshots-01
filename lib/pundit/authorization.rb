@@ -31,12 +31,31 @@ module Pundit
     # @return [Pundit::Context]
     # @see #pundit_user
     # @see #pundit_policies
+    # @see #pundit_policy_finder_class
     # @since v2.3.2
     def pundit
       @pundit ||= Pundit::Context.new(
         user: pundit_user,
-        policy_cache: Pundit::CacheStore::LegacyStore.new(pundit_policies)
+        policy_cache: Pundit::CacheStore::LegacyStore.new(pundit_policies),
+        policy_finder_class: pundit_policy_finder_class
       )
+    end
+
+    # Hook method which selects the {Pundit::PolicyFinder} subclass used to
+    # locate policies and policy scopes.
+    #
+    # Override this to restrict a controller (and the views it renders) to an
+    # allowlisted set of policies, for example an external partner API that may
+    # only use the policies it has registered. Return a
+    # {Pundit::RestrictedPolicyFinder} subclass built with
+    # {Pundit::RestrictedPolicyFinder.with_allowed}.
+    #
+    # @note Make sure to call `pundit_reset!` if this changes during a request.
+    # @return [Class<Pundit::PolicyFinder>]
+    # @see Pundit::Context#initialize
+    # @since v2.6.0
+    def pundit_policy_finder_class
+      Pundit::PolicyFinder
     end
 
     # Hook method which allows customizing which user is passed to policies and

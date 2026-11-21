@@ -666,6 +666,73 @@ class Admin::PostController < AdminController
 end
 ```
 
+## Restricting policy lookup (allowlisting)
+
+Sometimes the same models are served through more than one entry point. For
+example, an internal gateway and an external partner API may share the same
+policies, but partners must only be able to use the policy classes they have
+registered. Pundit supports this with `Pundit::RestrictedPolicyFinder`, a
+subclass of `Pundit::PolicyFinder` that layers an allowlist on top of the
+normal lookup.
+
+Namespace handling and model level `policy_class` overrides work exactly as
+usual; the restriction only decides whether the resolved policy may be used.
+
+The two failure modes stay distinguishable:
+
+- the policy cannot be located at all raises `Pundit::NotDefinedError`
+- the policy exists, but is not on the allowlist raises
+  `Pundit::NotApprovedError` (which is a subclass of `NotDefinedError`, so
+  existing `rescue Pundit::NotDefinedError` handlers keep working)
+
+Build a configured finder with `with_allowed`, then either pass it to a
+context or expose it through a controller hook:
+
+```ruby
+# A context restricted to the registered policies
+finder_class = Pundit::RestrictedPolicyFinder.with_allowed(
+  [Partner::PostPolicy, AgreementPolicy]
+)
+context = Pundit::Context.new(user: partner, policy_finder_class: finder_class)
+```
+
+In a controller, override `pundit_policy_finder_class`. Every `authorize`,
+`policy`, `policy_scope` and strong-parameter call in that controller (and its
+views) then goes through the restricted finder:
+
+```ruby
+class Partner::BaseController < ActionController::Base
+  include Pundit::Authorization
+
+  ALLOWED_POLICIES = [
+    Partner::PostPolicy,
+    AgreementPolicy
+  ].freeze
+
+  private
+
+  def pundit_policy_finder_class
+    Pundit::RestrictedPolicyFinder.with_allowed(ALLOWED_POLICIES)
+  end
+end
+```
+
+With that in place, an allowlisted policy resolves normally while an
+unregistered one is refused, even though it exists in the application:
+
+```ruby
+# Partner::PostPolicy is registered
+authorize(Partner::Post.new, :show?)   # => ok, uses Partner::PostPolicy
+policy_scope(Partner::Post)            # => ok, uses Partner::PostPolicy::Scope
+
+# Internal::PostPolicy exists but is not registered for partners
+authorize(Internal::Post, :show?)      # => raises Pundit::NotApprovedError
+policy_scope(Internal::Post)           # => raises Pundit::NotApprovedError
+
+# A policy that does not exist at all
+authorize(Foo, :show?)                 # => raises Pundit::NotDefinedError
+```
+
 ## Additional context
 
 Pundit strongly encourages you to model your application in such a way that the

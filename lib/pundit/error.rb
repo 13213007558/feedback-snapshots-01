@@ -68,4 +68,17 @@ module Pundit
   # Error that will be raised if a policy or policy scope is not defined.
   # @since v0.1.0
   class NotDefinedError < Error; end
+
+  # Error that will be raised when a policy was found, but is not on the
+  # allowlist of a {Pundit::RestrictedPolicyFinder}.
+  #
+  # This is distinct from {NotDefinedError}: the policy exists in the
+  # application, the caller is simply not approved to use it.
+  #
+  # Subclassing {NotDefinedError} keeps existing `rescue Pundit::NotDefinedError`
+  # handlers working, while still allowing the two situations to be told apart.
+  #
+  # @see Pundit::RestrictedPolicyFinder
+  # @since v2.6.0
+  class NotApprovedError < NotDefinedError; end
 end

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add support for `params.expect` using `expected_parameters` and `expected_parameters_for`. [#855](https://github.com/varvet/pundit/pull/855)
+- Add `Pundit::RestrictedPolicyFinder`, an allowlisting policy finder for entry points (e.g. an external partner API) that may only use the policy classes they have registered. It keeps the existing namespace and custom `policy_class` lookup, and distinguishes a policy that cannot be found (`Pundit::NotDefinedError`) from one that is not approved (`Pundit::NotApprovedError`). Wire it in with `Pundit::Context.new(policy_finder_class: ...)` or by overriding `Pundit::Authorization#pundit_policy_finder_class`.
 
 ### Deprecated
 - Rename `Pundit::Authorization#policies` to `#pundit_policies` to avoid clashing with controller actions named `policies`. The old `#policies` method is now deprecated. [#878](https://github.com/varvet/pundit/issues/878)

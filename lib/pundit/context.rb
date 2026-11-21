@@ -31,10 +31,14 @@ module Pundit
     # @see Pundit::Authorization#pundit
     # @param user later passed to policies and scopes
     # @param policy_cache [#fetch] cache store for policies (see e.g. {CacheStore::NullStore})
+    # @param policy_finder_class [Class] the class used to locate policies and
+    #   scopes. Defaults to {PolicyFinder}. Pass a {RestrictedPolicyFinder}
+    #   subclass to limit lookups to an allowlisted set of policies.
     # @since v2.3.2
-    def initialize(user:, policy_cache: CacheStore::NullStore.instance)
+    def initialize(user:, policy_cache: CacheStore::NullStore.instance, policy_finder_class: PolicyFinder)
       @user = user
       @policy_cache = policy_cache
+      @policy_finder_class = policy_finder_class
     end
 
     # @api public
@@ -46,6 +50,11 @@ module Pundit
     # @see #initialize
     # @since v2.3.2
     attr_reader :policy_cache
+
+    # @api private
+    # @see #initialize
+    # @since v2.6.0
+    attr_reader :policy_finder_class
 
     # @!group Policies
 
@@ -176,7 +185,7 @@ module Pundit
     # @return [PolicyFinder]
     # @since v2.3.2
     def policy_finder(record)
-      PolicyFinder.new(record)
+      policy_finder_class.new(record)
     end
 
     # Given a possibly namespaced record, return the actual record.
