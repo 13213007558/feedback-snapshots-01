@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import os
 from unittest import mock
@@ -20,6 +21,7 @@ from sentry_sdk.scope import (
     use_isolation_scope,
     use_scope,
 )
+from sentry_sdk.transport import Transport
 
 
 def test_copying():
@@ -1110,3 +1112,120 @@ def test_conversation_id_clear():
 
     scope.clear()
     assert scope.get_conversation_id() is None
+
+
+@pytest.mark.asyncio
+async def test_privacy_rules_follow_capturing_task_with_delayed_send(sentry_init):
+    """
+    Queue-style tasks each run in their own isolation scope and declare their
+    own privacy rules (which extra fields may be disclosed). The transport
+    delays sending until after the tasks have ended. Scope data is applied to
+    the event at capture time (Client.capture_event -> _prepare_event ->
+    Scope.apply_to_event), so the privacy rules of the task that captured an
+    event decide its final payload, no matter when the event is sent or
+    whether the other task has already exited.
+    """
+
+    class DelayedTransport(Transport):
+        def __init__(self):
+            Transport.__init__(self)
+            self.pending_envelopes = []
+
+        def capture_envelope(self, envelope):
+            # Delay sending, like a background worker that flushes later.
+            self.pending_envelopes.append(envelope)
+
+        def send_pending(self):
+            sent = []
+            for envelope in self.pending_envelopes:
+                for item in envelope:
+                    if item.headers.get("type") == "event":
+                        sent.append(item.payload.json)
+            self.pending_envelopes = []
+            return sent
+
+    transport = DelayedTransport()
+    sentry_init(transport=transport)
+
+    def privacy_processor(disclosable_fields):
+        def strip_undisclosed_extras(event, hint):
+            extra = event.get("extra", {})
+            event["extra"] = {
+                key: value
+                for key, value in extra.items()
+                if key in disclosable_fields
+            }
+            return event
+
+        return strip_undisclosed_extras
+
+    async def queue_task(name, disclosable_fields, rounds, may_exit):
+        with isolation_scope() as scope:
+            scope.set_tag("queue-task", name)
+            scope.set_extra("worker", name)  # disclosable by both tasks
+            scope.set_extra("api_token", "secret-%s" % name)  # task-b only
+            scope.add_event_processor(privacy_processor(disclosable_fields))
+
+            for may_capture, captured in rounds:
+                await may_capture.wait()
+                try:
+                    raise RuntimeError("boom-%s" % name)
+                except RuntimeError:
+                    capture_exception()
+                captured.set()
+
+            await may_exit.wait()
+
+    def capture_round():
+        return asyncio.Event(), asyncio.Event()
+
+    a_rounds = [capture_round()]
+    b_rounds = [capture_round(), capture_round()]
+    a_may_exit = asyncio.Event()
+    b_may_exit = asyncio.Event()
+
+    task_a = asyncio.create_task(queue_task("task-a", {"worker"}, a_rounds, a_may_exit))
+    task_b = asyncio.create_task(
+        queue_task("task-b", {"worker", "api_token"}, b_rounds, b_may_exit)
+    )
+
+    # Round 1: both tasks capture while both scopes are active.
+    a_rounds[0][0].set()
+    await a_rounds[0][1].wait()
+    b_rounds[0][0].set()
+    await b_rounds[0][1].wait()
+
+    # Nothing has been sent yet; the envelopes are still queued.
+    assert len(transport.pending_envelopes) == 2
+
+    # task-a ends first; its scope is popped.
+    a_may_exit.set()
+    await task_a
+
+    # task-b keeps working and captures another error after task-a's scope
+    # is gone. task-a's exit must not change task-b's privacy rules.
+    b_rounds[1][0].set()
+    await b_rounds[1][1].wait()
+    b_may_exit.set()
+    await task_b
+
+    # Only now, after both tasks have ended, are the queued envelopes sent.
+    events = transport.send_pending()
+
+    assert len(events) == 3
+    events_by_task = {}
+    for event in events:
+        events_by_task.setdefault(event["tags"]["queue-task"], []).append(event)
+
+    # task-a's privacy rule stripped its api_token.
+    assert len(events_by_task["task-a"]) == 1
+    assert events_by_task["task-a"][0]["extra"] == {"worker": "task-a"}
+
+    # task-b's rule allowed its own api_token through, identically before and
+    # after task-a exited.
+    assert len(events_by_task["task-b"]) == 2
+    for event in events_by_task["task-b"]:
+        assert event["extra"] == {
+            "worker": "task-b",
+            "api_token": "secret-task-b",
+        }
