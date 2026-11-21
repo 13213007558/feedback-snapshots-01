@@ -1019,3 +1019,119 @@ def test_inner_function_decoration(extension_factory):
                 assert 200 == cli.get("/t1").status_code
             assert 429 == cli.get("/t1").status_code
             assert 429 == cli.get("/t2").status_code
+
+
+def test_budget_keeps_usage_when_limit_shrinks(extension_factory):
+    app, limiter = extension_factory(headers_enabled=True, storage_uri="memory://")
+    app.config["RATE"] = "10/minute"
+
+    @app.route("/api")
+    @limiter.limit(lambda: app.config["RATE"], budget="tenant-api")
+    def api():
+        return "ok"
+
+    with hiro.Timeline().freeze() as timeline:
+        with app.test_client() as cli:
+            for _ in range(6):
+                response = cli.get("/api")
+                assert response.status_code == 200
+            assert response.headers["X-RateLimit-Remaining"] == "4"
+
+            app.config["RATE"] = "3/minute"
+            response = cli.get("/api")
+            assert response.status_code == 429
+            assert response.headers["X-RateLimit-Remaining"] == "0"
+
+            timeline.forward(59)
+            assert cli.get("/api").status_code == 429
+
+            timeline.forward(2)
+            response = cli.get("/api")
+            assert response.status_code == 200
+            assert response.headers["X-RateLimit-Remaining"] == "2"
+
+
+def test_budget_restart_starts_new_usage(extension_factory):
+    app, limiter = extension_factory(headers_enabled=True, storage_uri="memory://")
+    app.config["RATE"] = "10/minute"
+
+    @app.route("/api")
+    @limiter.limit(lambda: app.config["RATE"], budget=lambda: app.config["BUDGET"])
+    def api():
+        return "ok"
+
+    app.config["BUDGET"] = "tenant-api:1"
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            for _ in range(3):
+                assert cli.get("/api").status_code == 200
+
+            app.config["RATE"] = "5/minute"
+            app.config["BUDGET"] = "tenant-api:2"
+
+            response = cli.get("/api")
+            assert response.status_code == 200
+            assert response.headers["X-RateLimit-Remaining"] == "4"
+
+
+def test_budget_is_isolated_per_shared_identity(extension_factory):
+    app, limiter = extension_factory(headers_enabled=True, storage_uri="memory://")
+    shared = limiter.shared_limit(
+        lambda: app.config["RATE"],
+        scope=lambda _: request.headers["X-Shared-Id"],
+        budget=lambda: request.headers["X-Policy"],
+    )
+
+    @app.route("/first")
+    @shared
+    def first():
+        return "first"
+
+    @app.route("/second")
+    @shared
+    def second():
+        return "second"
+
+    app.config["RATE"] = "5/minute"
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            tenant_a = {"X-Shared-Id": "tenant-a", "X-Policy": "policy-1"}
+            tenant_b = {"X-Shared-Id": "tenant-b", "X-Policy": "policy-1"}
+
+            assert cli.get("/first", headers=tenant_a).status_code == 200
+            assert cli.get("/second", headers=tenant_a).status_code == 200
+            assert cli.get("/second", headers=tenant_a).status_code == 200
+
+            app.config["RATE"] = "3/minute"
+
+            # The shared identity keeps the usage already charged in this window.
+            assert cli.get("/second", headers=tenant_a).status_code == 429
+
+            # A different shared identity still has its own fresh budget.
+            response = cli.get("/first", headers=tenant_b)
+            assert response.status_code == 200
+            assert response.headers["X-RateLimit-Remaining"] == "2"
+
+
+def test_budget_does_not_change_unique_usage_of_other_limits(extension_factory):
+    app, limiter = extension_factory(headers_enabled=True, storage_uri="memory://")
+
+    @app.route("/api")
+    @limiter.limit("10/minute", budget="tenant-api")
+    @limiter.limit("2/minute")
+    def api():
+        return "ok"
+
+    with hiro.Timeline().freeze() as timeline:
+        with app.test_client() as cli:
+            for _ in range(2):
+                assert cli.get("/api").status_code == 200
+            assert cli.get("/api").status_code == 429
+
+            timeline.forward(60)
+            for expected in range(2):
+                response = cli.get("/api")
+                assert response.status_code == 200
+                assert response.headers["X-RateLimit-Remaining"] == str(1 - expected)

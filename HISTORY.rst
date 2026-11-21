@@ -3,6 +3,18 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Feature
+
+  * Add an optional ``budget`` identity to ``Limiter.limit``,
+    ``Limiter.shared_limit`` and the ``Limit``/``RouteLimit`` description
+    classes. Keeping the same budget across publications of a dynamically
+    loaded limit preserves the usage already recorded in the current window
+    when the configured amount changes; a new budget intentionally starts
+    a new counter.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

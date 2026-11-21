@@ -6,7 +6,7 @@ import traceback
 import weakref
 from functools import wraps
 from types import TracebackType
-from typing import TYPE_CHECKING, cast, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 import flask
 from flask import request
@@ -18,6 +18,163 @@ from .util import get_qualified_name
 
 if TYPE_CHECKING:
     from flask_limiter import Limiter, RequestLimit
+
+
+def _stringify(value: bytes | str | int | float) -> str:
+    """
+    Normalize a rate limit key component to ``str`` (mirroring
+    :func:`limits.limits.safe_string`).
+
+    :meta private:
+    """
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def _budgeted_key_for(
+    self: RateLimitItem, *identifiers: bytes | str | int | float
+) -> str:
+    """
+    Build the storage key for a budgeted limit item.
+
+    Unlike :meth:`limits.RateLimitItem.key_for` the amount is not part of the
+    key: hits are recorded under the budget identity and the window only, so
+    that publishing a different amount keeps the counter.
+
+    :meta private:
+    """
+    return _budgeted_key(
+        self.namespace,
+        getattr(self, "budget", ""),
+        self.multiples,
+        self.GRANULARITY.name,
+        identifiers,
+    )
+
+
+def _budgeted_key(
+    namespace: str,
+    budget: str,
+    multiples: int,
+    granularity: str,
+    identifiers: Sequence[bytes | str | int | float],
+) -> str:
+    """
+    Build the key shared by every publication of a budget within a window.
+
+    :meta private:
+    """
+    remainder = "/".join(
+        [_stringify(k) for k in identifiers] + [str(multiples), granularity]
+    )
+
+    return f"{namespace}/budget={budget}/{remainder}"
+
+
+def _budgeted_eq(self: RateLimitItem, other: object) -> bool:
+    """
+    :meta private:
+    """
+    return (
+        isinstance(other, RateLimitItem)
+        and getattr(other, "budget", None) == getattr(self, "budget", None)
+        and RateLimitItem.__eq__(self, other)
+    )
+
+
+def _budgeted_hash(self: RateLimitItem) -> int:
+    """
+    :meta private:
+    """
+    return hash(
+        (
+            self.namespace,
+            getattr(self, "budget", None),
+            self.amount,
+            self.multiples,
+            self.GRANULARITY,
+        )
+    )
+
+
+_BUDGETED_ITEM_TYPES: dict[type[RateLimitItem], type[RateLimitItem]] = {}
+
+
+def _budgeted_item_type(item: RateLimitItem) -> type[RateLimitItem]:
+    """
+    Return a :class:`RateLimitItem` subclass that carries an explicit
+    ``budget`` identity for ``item``.
+
+    The subclass derives from the concrete granularity of ``item`` (so
+    ``GRANULARITY`` and ``isinstance`` checks are preserved) and is cached so
+    that instances remain usable with storage backends that inspect the
+    concrete type.
+
+    :meta private:
+    """
+    item_type = type(item)
+    budgeted_type = _BUDGETED_ITEM_TYPES.get(item_type)
+
+    if budgeted_type is None:
+        budgeted_type = type(
+            f"_Budgeted{item_type.__name__}",
+            (item_type,),
+            {
+                "__slots__": ("budget",),
+                "__module__": __name__,
+                "__doc__": "Rate limit item with a stable budget identity.",
+                "key_for": _budgeted_key_for,
+                "__eq__": _budgeted_eq,
+                "__hash__": _budgeted_hash,
+            },
+        )
+        _BUDGETED_ITEM_TYPES[item_type] = budgeted_type
+
+    return budgeted_type
+
+
+def _budgeted_item(item: RateLimitItem, budget: str) -> RateLimitItem:
+    """
+    Build a rate limit item equivalent to ``item`` that records hits under
+    ``budget`` rather than under the configured amount and window.
+
+    The amount and the window still describe how much is allowed and over
+    which period; only the storage key changes. This means that re-publishing
+    a limit with a lower amount under the same budget keeps the usage that is
+    already recorded for the current window.
+
+    :meta private:
+    """
+    budgeted_type = _budgeted_item_type(item)
+    budgeted = budgeted_type(item.amount, item.multiples, item.namespace)
+    cast(Any, budgeted).budget = budget
+
+    return budgeted
+
+
+def _resolve_budget(
+    limit: Limit, budget: str | Callable[[], str] | None
+) -> str | None:
+    """
+    Resolve the optional budget identity configured for ``limit``.
+
+    Returning ``None`` keeps the default behavior (one storage key per amount
+    and window), while a string keeps the counter shared across amounts that
+    are published under the same identity.
+
+    :meta private:
+    """
+    if budget is None:
+        return None
+
+    resolved = budget() if callable(budget) else budget
+
+    if not resolved:
+        raise ValueError(
+            f"Invalid budget identity for limit '{limit.limit_provider}': "
+            "expected a non-empty string or callable returning one."
+        )
+
+    return str(resolved)
 
 
 @dataclasses.dataclass(eq=True, unsafe_hash=True)
@@ -131,6 +288,17 @@ class Limit:
     cost: Callable[[], int] | int | None = None
     #: If this a shared limit (i.e. to be used by different endpoints)
     shared: bool = False
+    #: An optional stable identity for the usage window of this limit.
+    #:
+    #: By default, the storage key of a limit includes the configured amount,
+    #: so publishing a lower amount starts counting from zero. When ``budget``
+    #: is provided, the key is derived from this identity and the window
+    #: instead, and every publication that keeps the same ``budget`` continues
+    #: to use the usage already recorded for the current window. Use a new
+    #: identity to intentionally start a fresh budget.
+    #:
+    #: A callable is resolved for every request.
+    budget: str | Callable[[], str] | None = None
     #: If specified, only the methods in this list will
     #: be rate limited.
     methods: Sequence[str] | None = None
@@ -183,6 +351,7 @@ class Limit:
         limit_str = self.limit_provider() if callable(self.limit_provider) else self.limit_provider
         limit_items = parse_many(limit_str) if limit_str else []
         meta_limits: tuple[RuntimeLimit, ...] = ()
+        budget = _resolve_budget(self, self.budget) if limit_items else None
 
         if self.meta_limits:
             meta_limits = tuple(
@@ -200,7 +369,7 @@ class Limit:
 
         for limit in limit_items:
             yield RuntimeLimit(
-                limit,
+                _budgeted_item(limit, budget) if budget else limit,
                 self.limit_by,
                 scope=self.scope,
                 per_method=self.per_method,

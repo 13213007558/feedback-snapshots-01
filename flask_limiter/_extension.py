@@ -100,7 +100,7 @@ class RequestLimit:
     def remaining(self) -> int:
         """Quantity remaining for this rate limit"""
 
-        return self.window[1]
+        return max(0, self.window[1])
 
 
 @dataclasses.dataclass
@@ -529,6 +529,7 @@ class Limiter:
         cost: int | Callable[[], int] = 1,
         scope: str | Callable[[str], str] | None = None,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        budget: str | Callable[[], str] | None = None,
     ) -> RouteLimit:
         """
         Decorator to be used for rate limiting individual routes or blueprints.
@@ -558,6 +559,11 @@ class Limiter:
          as an integer (Default: ``1``).
         :param scope: a string or callable that returns a string for further categorizing the rate
          limiting scope. This scope is combined with the current endpoint of the request.
+        :param budget: an optional stable identity for the usage window of this limit.
+         By default the configured amount is part of the storage key, so publishing a
+         lower amount starts from zero. Providing a ``budget`` (or a callable returning
+         one) keeps the usage already recorded in the current window across publications
+         that reuse the same value. Use a new value to explicitly start a new budget.
 
 
         Changes
@@ -590,6 +596,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            budget=budget,
         )
 
     def shared_limit(
@@ -607,6 +614,7 @@ class Limiter:
         on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
         cost: int | Callable[[], int] = 1,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        budget: str | Callable[[], str] | None = None,
     ) -> RouteLimit:
         """
         decorator to be applied to multiple routes sharing the same rate limit.
@@ -634,6 +642,10 @@ class Limiter:
          embedded into the :exc:`RateLimitExceeded` exception raised.
         :param cost: The cost of a hit or a function that takes no parameters and returns the cost
          as an integer (default: ``1``).
+        :param budget: an optional stable identity for the usage window shared by the
+         decorated routes. Reusing the same value keeps the usage already recorded in
+         the current window when the configured amount changes; providing a new value
+         starts a fresh budget.
         """
 
         return RouteLimit(
@@ -651,6 +663,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            budget=budget,
         )
 
     @overload

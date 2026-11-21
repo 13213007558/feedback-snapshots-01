@@ -389,6 +389,53 @@ achieved by providing a callable to the decorator.
    `before_request` phase.
 
 
+.. _ratelimit-decorator-dynamic-budget:
+
+Keeping usage when a dynamic limit changes
+------------------------------------------
+
+By default the configured amount is part of the storage key used to track
+a rate limit. Lowering a limit that is loaded dynamically (for example from
+a configuration service) therefore starts counting from zero in the current
+window, which lets an identity that has already used its allowance start over.
+
+Pass ``budget`` to keep the usage that is already recorded in the current
+window across publications of the limit. The amount still describes how many
+requests are allowed; the ``budget`` value only identifies the counter::
+
+   def current_quota():
+       return current_app.config["API_QUOTA"]  # e.g. "10/minute" -> "3/minute"
+
+   @app.route("/api")
+   @limiter.limit(current_quota, budget="public-api")
+   def api():
+       ...
+
+With the example above, an identity that already made 6 requests in the
+current minute is immediately over the new ``3/minute`` allowance instead of
+getting 3 fresh requests. When the window ends, counting starts again
+normally.
+
+To intentionally start a new budget (for example when the platform wants to
+grant a clean allowance), change the budget identity instead::
+
+   @app.route("/api")
+   @limiter.limit(current_quota, budget=lambda: current_app.config["API_POLICY_VERSION"])
+   def api():
+       ...
+
+Both a fixed string and a callable (resolved per request) are accepted.
+``budget`` is also available on :meth:`~Limiter.shared_limit` and on the
+:class:`~flask_limiter.Limit`, :class:`~flask_limiter.ApplicationLimit` and
+:class:`~flask_limiter.RouteLimit` description classes. Limits that don't
+provide a ``budget`` keep the previous behavior.
+
+.. note:: Budget keys are namespace-prefixed (``budget=<value>``) so that they
+   cannot collide with the key of an unbudgeted limit. Use different budget
+   values when you really want separate counters; the same value shares one
+   counter even when the amount changes.
+
+
 --------------------
 Exemption conditions
 --------------------
