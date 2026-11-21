@@ -24,6 +24,11 @@ class RateLimitExceeded(exceptions.TooManyRequests):
             description = (
                 limit.error_message if not callable(limit.error_message) else limit.error_message()
             )
+        elif not limit.expose_headers:
+            # The limit is intentionally not disclosed to the client (for example an
+            # internal budget). Fall back to the generic 429 description instead of
+            # rendering the limit's amount and window.
+            description = exceptions.TooManyRequests.description
         else:
             description = str(limit.limit)
         super().__init__(description=description, response=response)

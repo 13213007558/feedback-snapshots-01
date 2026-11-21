@@ -215,6 +215,7 @@ class LimitManager:
                                         limit.on_breach,
                                         limit.cost,
                                         limit.shared,
+                                        limit.expose_headers,
                                     )
                                     for limit in limit_group
                                 ]

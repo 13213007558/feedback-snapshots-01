@@ -63,6 +63,9 @@ class RequestLimit:
     #: Whether the limit is a shared limit
     shared: bool
 
+    #: Whether the limit is allowed to be included in the response headers
+    expose_headers: bool
+
     def __init__(
         self,
         extension: Limiter,
@@ -70,6 +73,7 @@ class RequestLimit:
         request_args: list[str],
         breached: bool,
         shared: bool,
+        expose_headers: bool = True,
     ) -> None:
         self.extension: weakref.ProxyType[Limiter] = weakref.proxy(extension)
         self.limit = limit
@@ -77,6 +81,7 @@ class RequestLimit:
         self.key = limit.key_for(*request_args)
         self.breached = breached
         self.shared = shared
+        self.expose_headers = expose_headers
         self._window: WindowStats | None = None
 
     @property
@@ -529,6 +534,7 @@ class Limiter:
         cost: int | Callable[[], int] = 1,
         scope: str | Callable[[str], str] | None = None,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        expose_headers: bool = True,
     ) -> RouteLimit:
         """
         Decorator to be used for rate limiting individual routes or blueprints.
@@ -558,6 +564,10 @@ class Limiter:
          as an integer (Default: ``1``).
         :param scope: a string or callable that returns a string for further categorizing the rate
          limiting scope. This scope is combined with the current endpoint of the request.
+        :param expose_headers: whether this limit may be used to populate the
+         :ref:`rate limiting headers <ratelimit-headers>` (Default: ``True``). When set to
+         ``False`` the limit is still enforced (requests are counted and rejected) but its
+         window and quota are not disclosed in the response headers.
 
 
         Changes
@@ -590,6 +600,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            expose_headers=expose_headers,
         )
 
     def shared_limit(
@@ -607,6 +618,7 @@ class Limiter:
         on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
         cost: int | Callable[[], int] = 1,
         meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+        expose_headers: bool = True,
     ) -> RouteLimit:
         """
         decorator to be applied to multiple routes sharing the same rate limit.
@@ -634,6 +646,10 @@ class Limiter:
          embedded into the :exc:`RateLimitExceeded` exception raised.
         :param cost: The cost of a hit or a function that takes no parameters and returns the cost
          as an integer (default: ``1``).
+        :param expose_headers: whether this limit may be used to populate the
+         :ref:`rate limiting headers <ratelimit-headers>` (Default: ``True``). When set to
+         ``False`` the limit is still enforced (requests are counted and rejected) but its
+         window and quota are not disclosed in the response headers.
         """
 
         return RouteLimit(
@@ -651,6 +667,7 @@ class Limiter:
             on_breach=on_breach,
             cost=cost,
             meta_limits=meta_limits,
+            expose_headers=expose_headers,
         )
 
     @overload
@@ -846,6 +863,10 @@ class Limiter:
         - Request 1 at ``t=0`` (no breach): this will return the details for for ``1/second``
         - Request 2 at ``t=1`` (no breach): it will still return the details for ``1/second``
         - Request 3 at ``t=2`` (breach): it will return the details for ``2/day``
+
+        Limits declared with ``expose_headers=False`` are never returned here, even when they
+        are the limit that breached the request. They remain available through
+        :attr:`current_limits` and :attr:`RateLimitExceeded.limit`.
         """
 
         return self.context.view_rate_limit
@@ -891,7 +912,13 @@ class Limiter:
         self.__check_conditional_deductions(response)
         header_limit = self.current_limit
 
-        if self.enabled and self._headers_enabled and header_limit and self._header_mapping:
+        if (
+            self.enabled
+            and self._headers_enabled
+            and header_limit
+            and header_limit.expose_headers
+            and self._header_mapping
+        ):
             try:
                 reset_at = header_limit.reset_at
                 response.headers.add(
@@ -1031,9 +1058,12 @@ class Limiter:
                 args = [limit_key, scope]
                 on_breach = lim.on_breach or self._on_meta_breach
                 if not self.limiter.test(lim.limit, *args, cost=lim.deduction_amount):
-                    breached_meta_limit = RequestLimit(self, lim.limit, args, True, lim.shared)
-                    self.context.view_rate_limit = breached_meta_limit
+                    breached_meta_limit = RequestLimit(
+                        self, lim.limit, args, True, lim.shared, lim.expose_headers
+                    )
                     self.context.view_rate_limits = [breached_meta_limit]
+                    if lim.expose_headers:
+                        self.context.view_rate_limit = breached_meta_limit
                     meta_breach_response = None
 
                     if on_breach:
@@ -1075,7 +1105,9 @@ class Limiter:
                 method = self.limiter.hit
             kwargs["cost"] = lim.deduction_amount
 
-            request_limit = RequestLimit(self, lim.limit, args, False, lim.shared)
+            request_limit = RequestLimit(
+                self, lim.limit, args, False, lim.shared, lim.expose_headers
+            )
             view_limits.append(request_limit)
 
             if not method(lim.limit, *args, **kwargs):
@@ -1087,17 +1119,22 @@ class Limiter:
                 )
                 failed_limits.append((lim, args))
                 view_limits[-1].breached = True
-                limit_for_header = view_limits[-1]
+                if lim.expose_headers:
+                    limit_for_header = view_limits[-1]
 
                 if self._fail_on_first_breach:
                     break
 
         if not limit_for_header and view_limits:
-            # Pick a non shared limit over a shared one if possible
-            # when no rate limit has been hit. This should be the best hint
-            # for the client.
-            explicit = [limit for limit in view_limits if not limit.shared]
-            limit_for_header = explicit[0] if explicit else view_limits[0]
+            # Only limits that are allowed to be disclosed may be used to
+            # populate the response headers. Prefer an explicit (non shared)
+            # limit over a shared one when no rate limit has been hit. This
+            # should be the best hint for the client.
+            disclosed_limits = [limit for limit in view_limits if limit.expose_headers]
+            explicit = [limit for limit in disclosed_limits if not limit.shared]
+            limit_for_header = (
+                explicit[0] if explicit else disclosed_limits[0] if disclosed_limits else None
+            )
 
         self.context.view_rate_limit = limit_for_header or None
         self.context.view_rate_limits = view_limits
@@ -1105,7 +1142,9 @@ class Limiter:
         on_breach_response = None
 
         for limit in failed_limits:
-            request_limit = RequestLimit(self, limit[0].limit, limit[1], True, limit[0].shared)
+            request_limit = RequestLimit(
+                self, limit[0].limit, limit[1], True, limit[0].shared, limit[0].expose_headers
+            )
 
             for cb in dict.fromkeys([self._on_breach, limit[0].on_breach]):
                 if cb:

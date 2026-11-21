@@ -38,6 +38,7 @@ class RuntimeLimit:
     on_breach: Callable[[RequestLimit], Response | None] | None = None
     cost: Callable[[], int] | int = 1
     shared: bool = False
+    expose_headers: bool = True
     meta_limits: tuple[RuntimeLimit, ...] | None = None
 
     def __post_init__(self) -> None:
@@ -163,6 +164,12 @@ class Limit:
     #:
     #: :meta private:
     override_defaults: bool | None = dataclasses.field(default=False, init=False)
+    #: Whether this limit can be used to populate the
+    #: :ref:`rate limiting headers <ratelimit-headers>` (Default: ``True``).
+    #: Set to ``False`` for limits that should remain enforced (i.e. count
+    #: against the client and reject requests once exhausted) but whose
+    #: window and quota should not be disclosed to the client.
+    expose_headers: bool = True
     #: Weak reference to the limiter that this limit definition is bound to
     #:
     #: :meta private:
@@ -212,6 +219,7 @@ class Limit:
                 on_breach=self.on_breach,
                 cost=self.cost or 1,
                 shared=self.shared,
+                expose_headers=self.expose_headers,
                 meta_limits=meta_limits,
             )
 

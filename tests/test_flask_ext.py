@@ -8,6 +8,7 @@ import time
 from collections import Counter
 from unittest import mock
 
+import flask
 import hiro
 from flask import Flask, abort, make_response, request
 from werkzeug.exceptions import BadRequest
@@ -438,6 +439,115 @@ def test_headers_breach():
             assert resp.headers.get("X-RateLimit-Remaining") == "0"
             assert resp.headers.get("X-RateLimit-Reset") == str(int(time.time() + 50))
             assert resp.headers.get("Retry-After") == str(int(50))
+
+
+def test_headers_expose_headers_false_is_not_used_for_header():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+    )
+
+    @app.route("/t1")
+    @limiter.limit("3/minute")
+    @limiter.limit("2/second", expose_headers=False)
+    def t1():
+        return "test"
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            resp = cli.get("/t1")
+            assert resp.status_code == 200
+            assert resp.headers.get("X-RateLimit-Limit") == "3"
+            assert resp.headers.get("X-RateLimit-Remaining") == "2"
+            assert resp.headers.get("Retry-After") == "60"
+            # the hidden limit is still counted
+            resp = cli.get("/t1")
+            assert resp.status_code == 200
+            assert resp.headers.get("X-RateLimit-Remaining") == "1"
+
+
+def test_headers_expose_headers_false_breach_does_not_disclose_limit():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+        fail_on_first_breach=False,
+    )
+
+    @app.route("/t1")
+    @limiter.limit("5/minute")
+    @limiter.limit("2/second", expose_headers=False)
+    def t1():
+        return "test"
+
+    with hiro.Timeline().freeze() as timeline:
+        with app.test_client() as cli:
+            assert cli.get("/t1").status_code == 200
+            assert cli.get("/t1").status_code == 200
+            resp = cli.get("/t1")
+            assert resp.status_code == 429
+            # the hidden limit was breached but neither its amount nor its
+            # window is reflected in the headers or the response body
+            assert resp.headers.get("X-RateLimit-Limit") == "5"
+            assert resp.headers.get("X-RateLimit-Remaining") == "2"
+            assert resp.headers.get("Retry-After") == "60"
+            assert "2 per 1 second" not in resp.text
+            timeline.forward(1)
+            assert cli.get("/t1").status_code == 200
+            assert cli.get("/t1").status_code == 200
+
+
+def test_headers_expose_headers_false_only_limit():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+    )
+
+    @app.route("/t1")
+    @limiter.limit("1/minute", expose_headers=False)
+    def t1():
+        return "test"
+
+    with hiro.Timeline().freeze() as timeline:
+        with app.test_client() as cli:
+            resp = cli.get("/t1")
+            assert resp.status_code == 200
+            assert "X-RateLimit-Limit" not in resp.headers
+            assert "X-RateLimit-Remaining" not in resp.headers
+            assert "Retry-After" not in resp.headers
+            resp = cli.get("/t1")
+            assert resp.status_code == 429
+            assert "X-RateLimit-Limit" not in resp.headers
+            assert "X-RateLimit-Remaining" not in resp.headers
+            assert "Retry-After" not in resp.headers
+            assert "1 per 1 minute" not in resp.text
+            timeline.forward(60)
+            assert cli.get("/t1").status_code == 200
+
+
+def test_headers_expose_headers_false_descriptive_error_message():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+    )
+
+    @app.route("/t1")
+    @limiter.limit("1/minute", expose_headers=False, error_message="please slow down")
+    def t1():
+        return "test"
+
+    with app.test_client() as cli:
+        assert cli.get("/t1").status_code == 200
+        resp = cli.get("/t1")
+        assert resp.status_code == 429
+        assert "please slow down" in resp.text
 
 
 def test_retry_after():
@@ -1065,3 +1175,81 @@ def test_custom_meta_limits(extension_factory, check):
                 expected_body=b"meta: custom",
                 username="bob",
             )
+
+
+def test_headers_expose_headers_false_on_default_limit():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+    )
+
+    @app.route("/t1")
+    @limiter.limit("1/minute")
+    def t1():
+        return "test"
+
+    @app.route("/t2")
+    @limiter.limit("1/minute", expose_headers=False)
+    def t2():
+        return "test"
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            resp = cli.get("/t2")
+            assert resp.status_code == 200
+            assert "X-RateLimit-Limit" not in resp.headers
+            resp = cli.get("/t2")
+            assert resp.status_code == 429
+            assert "1 per 1 minute" not in resp.text
+            assert cli.get("/t1").status_code == 200
+
+
+def test_headers_expose_headers_false_on_blueprint_limit():
+    app = Flask(__name__)
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        headers_enabled=True,
+    )
+    bp = flask.Blueprint("bp", __name__)
+    limiter.limit("2/minute", expose_headers=False)(bp)
+
+    @bp.route("/")
+    def index():
+        return "bp"
+
+    app.register_blueprint(bp)
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            assert cli.get("/").status_code == 200
+            assert cli.get("/").status_code == 200
+            resp = cli.get("/")
+            assert resp.status_code == 429
+            assert "X-RateLimit-Limit" not in resp.headers
+            assert "2 per 1 minute" not in resp.text
+
+
+def test_headers_expose_headers_false_on_limit_object():
+    app = Flask(__name__)
+    Limiter(
+        get_remote_address,
+        app=app,
+        default_limits=[Limit("2/minute"), Limit("1/minute", expose_headers=False)],
+        headers_enabled=True,
+    )
+
+    @app.route("/")
+    def index():
+        return "ok"
+
+    with hiro.Timeline().freeze():
+        with app.test_client() as cli:
+            resp = cli.get("/")
+            assert resp.status_code == 200
+            assert resp.headers["X-RateLimit-Limit"] == "2"
+            resp = cli.get("/")
+            assert resp.status_code == 429
+            assert "1 per 1 minute" not in resp.text

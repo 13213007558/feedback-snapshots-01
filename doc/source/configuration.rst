@@ -270,6 +270,30 @@ used in the scenario when the request does not breach any rate limits.
 ============================== ================================================
 
 
+Limits that should not be disclosed to the client can be declared with
+``expose_headers=False`` (on :class:`~flask_limiter.Limit` or the
+:meth:`~flask_limiter.Limiter.limit` / :meth:`~flask_limiter.Limiter.shared_limit`
+decorators). Such limits are still enforced - requests are counted and rejected
+once the limit is exhausted - but they are excluded from the selection of the
+limit used to populate the response headers and from the default 429
+description. In the following example only the public per-caller quota is
+published, while the internal budget rejects requests without revealing its
+size or reset window::
+
+    limiter = Limiter(get_remote_address, headers_enabled=True)
+
+    @app.route("/work")
+    @limiter.limit("3/minute", scope="public-quota")
+    @limiter.limit("10/hour", scope="internal-budget", expose_headers=False)
+    def work():
+        ...
+
+.. note:: If no limit that is allowed to be disclosed applies to a request no
+   rate limiting headers are added, even when a hidden limit is breached. Use
+   :paramref:`~flask_limiter.Limiter.on_breach` or an error handler to render a
+   custom 429 response in that case.
+
+
 The header names can be customised if required by either using the flask configuration (
 :attr:`RATELIMIT_HEADER_LIMIT`,
 :attr:`RATELIMIT_HEADER_RESET`,
