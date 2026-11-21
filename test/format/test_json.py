@@ -132,6 +132,50 @@ def test_json_no_desc_no_aliases(vuln_data):
     assert json_format.format(vuln_data, []) == json.dumps(expected_json)
 
 
+def test_json_no_vuln_data(no_vuln_data):
+    json_format = format.JsonFormat(True, True)
+    expected_json = {
+        "dependencies": [
+            {
+                "name": "foo",
+                "version": "1.0",
+                "vulns": [],
+            },
+            {
+                "name": "bar",
+                "version": "0.1",
+                "vulns": [],
+            },
+        ],
+        "fixes": [],
+    }
+    assert json_format.format(no_vuln_data, []) == json.dumps(expected_json)
+
+
+def test_json_no_vuln_data_skipped_dep(no_vuln_data_skipped_dep):
+    json_format = format.JsonFormat(True, True)
+    expected_json = {
+        "dependencies": [
+            {
+                "name": "foo",
+                "version": "1.0",
+                "vulns": [],
+            },
+            {
+                "name": "bar",
+                "version": "0.1",
+                "vulns": [],
+            },
+            {
+                "name": "bar",
+                "skip_reason": "skip-reason",
+            },
+        ],
+        "fixes": [],
+    }
+    assert json_format.format(no_vuln_data_skipped_dep, []) == json.dumps(expected_json)
+
+
 def test_json_skipped_dep(vuln_data_skipped_dep):
     json_format = format.JsonFormat(False, True)
     expected_json = {
