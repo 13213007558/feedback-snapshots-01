@@ -127,6 +127,8 @@ class ValuesOfCorrectTypeRule(ValidationRule):
             def on_error(error: GraphQLError, _path: list[str | int]) -> None:
                 self.report_error(error)
 
+            argument = self.context.get_argument()
+            sensitive = bool(argument is not None and argument.sensitive)
             validate_input_literal(
                 node,
                 input_type,
@@ -134,5 +136,6 @@ class ValuesOfCorrectTypeRule(ValidationRule):
                 None,
                 None,
                 self.context.hide_suggestions,
+                sensitive,
             )
         return SKIP  # Don't traverse further.

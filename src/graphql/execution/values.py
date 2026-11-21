@@ -108,6 +108,36 @@ class FragmentVariableValues(NamedTuple):
 VariableValuesOrErrors: TypeAlias = list[GraphQLError] | VariableValues
 
 
+def _variable_is_sensitive(
+    signature: GraphQLVariableSignature, type_: GraphQLInputType
+) -> bool:
+    """Whether a whole variable value must be redacted from error output.
+
+    Whole-value redaction applies when the variable definition itself is marked
+    sensitive (fragment variables carry this on their signature) or when the
+    variable's root input object type directly declares a sensitive field. In
+    the latter case object-level errors (unknown/missing fields) redact the
+    whole object, while errors nested deeper are still redacted field by field
+    via the input field definitions.
+    """
+    if bool(getattr(signature, "sensitive", False)):
+        return True
+    root_type = type_
+    while is_non_null_type(root_type) or is_list_type(root_type):
+        root_type = root_type.of_type
+    return (
+        is_input_object_type(root_type)
+        and any(field.sensitive for field in root_type.fields.values())
+    )
+
+
+def _argument_is_sensitive(
+    arg_def: GraphQLArgument | GraphQLVariableSignature,
+) -> bool:
+    """Whether a whole argument literal must be redacted from error output."""
+    return bool(getattr(arg_def, "sensitive", False))
+
+
 def get_variable_values(
     schema: GraphQLSchema,
     var_def_nodes: Collection[VariableDefinitionNode],
@@ -316,7 +346,11 @@ def coerce_variable_values(
                 )
 
             validate_input_value(
-                value, var_type, on_input_value_error, hide_suggestions
+                value,
+                var_type,
+                on_input_value_error,
+                hide_suggestions,
+                _variable_is_sensitive(var_signature, var_type),
             )
 
     return VariableValues(sources, coerced)
@@ -584,6 +618,7 @@ def coerce_argument(
             variable_values,
             fragment_variable_values,
             hide_suggestions,
+            _argument_is_sensitive(arg_def),
         )
         # Unreachable: validate_input_literal always reports an error here.
         msg = "Invalid argument"  # pragma: no cover

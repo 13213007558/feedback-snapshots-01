@@ -24,6 +24,7 @@ from graphql.type import (
     GraphQLNonNull,
     GraphQLScalarType,
     GraphQLSchema,
+    GraphQLString,
 )
 from graphql.utilities import validate_input_literal, validate_input_value
 
@@ -1364,3 +1365,155 @@ def describe_validate_input_literal():
 
         def no_error_for_nested_null_for_nested_null_values():
             _test("[42, [null], null]", TestNestedList, [])
+
+
+def describe_sensitive_input_value_redaction():
+    SecretScalar = GraphQLScalarType(
+        "SecretScalar",
+        coerce_input_value=lambda value: (
+            value if isinstance(value, str) else (_ for _ in ()).throw(
+                ValueError(f"bad secret {value!r}")
+            )
+        ),
+    )
+
+    def _collect(input_value, type_, sensitive):
+        errors: list[dict[str, Any]] = []
+        validate_input_value(
+            input_value,
+            type_,
+            lambda error, path: errors.append(
+                {"error": error.message, "path": path}
+            ),
+            sensitive=sensitive,
+        )
+        return errors
+
+    def redacts_a_leaf_value_but_keeps_the_path():
+        errors = _collect(123, SecretScalar, sensitive=True)
+        assert errors == [
+            {
+                "error": "Expected value of type 'SecretScalar' to be valid.",
+                "path": [],
+            }
+        ]
+
+    def redacts_a_nested_field_value_but_keeps_its_path():
+        input_object = GraphQLInputObjectType(
+            "SecretInput",
+            {"secret": GraphQLInputField(SecretScalar, sensitive=True)},
+        )
+        errors = _collect({"secret": 123}, input_object, sensitive=False)
+        assert errors == [
+            {
+                "error": "Expected value of type 'SecretScalar' to be valid.",
+                "path": ["secret"],
+            }
+        ]
+
+    def redacts_unknown_field_sibling_values():
+        input_object = GraphQLInputObjectType(
+            "SecretInput",
+            {
+                "secret": GraphQLInputField(SecretScalar, sensitive=True),
+                "label": GraphQLInputField(GraphQLString),
+            },
+        )
+        errors = _collect(
+            {"secret": "shh", "label": "shown", "bogus": 1},
+            input_object,
+            sensitive=False,
+        )
+        assert len(errors) == 1
+        message = errors[0]["error"]
+        assert "shh" not in message
+        assert "'secret': '[redacted]'" in message
+        assert "'label': 'shown'" in message
+
+    def redacts_the_whole_object_when_sensitive():
+        input_object = GraphQLInputObjectType(
+            "SecretInput",
+            {"secret": GraphQLInputField(SecretScalar, sensitive=True)},
+        )
+        errors = _collect(
+            {"secret": "shh", "bogus": 1}, input_object, sensitive=True
+        )
+        message = errors[0]["error"]
+        assert "shh" not in message
+        assert message.endswith("found: [redacted].")
+
+    def redacts_when_a_required_sensitive_field_is_missing():
+        input_object = GraphQLInputObjectType(
+            "SecretInput",
+            {
+                "secret": GraphQLInputField(
+                    GraphQLNonNull(SecretScalar), sensitive=True
+                )
+            },
+        )
+        errors = _collect({}, input_object, sensitive=False)
+        assert errors == [
+            {
+                "error": "Expected value of type 'SecretInput' to include"
+                " required field 'secret', found: [redacted].",
+                "path": [],
+            }
+        ]
+
+
+def describe_sensitive_input_literal_redaction():
+    def _collect(literal, type_, sensitive, variable_values=None):
+        errors: list[dict[str, Any]] = []
+        validate_input_literal(
+            parse_value(literal),
+            type_,
+            lambda error, path: errors.append(
+                {"error": error.message, "path": path}
+            ),
+            variable_values,
+            None,
+            False,
+            sensitive,
+        )
+        return errors
+
+    def redacts_a_leaf_literal_but_keeps_the_path():
+        errors = _collect('"bad"', GraphQLInt, sensitive=True)
+        assert errors == [
+            {
+                "error": "Expected value of type 'Int' to be valid.",
+                "path": [],
+            }
+        ]
+
+    def redacts_an_object_literal_with_sensitive_field():
+        input_object = GraphQLInputObjectType(
+            "LiteralSecretInput",
+            {
+                "secret": GraphQLInputField(GraphQLString, sensitive=True),
+                "count": GraphQLInputField(GraphQLInt),
+            },
+        )
+        errors = _collect(
+            '{ secret: "shh", count: "bad" }',
+            input_object,
+            sensitive=False,
+        )
+        # The non-sensitive count error renders normally; the secret value is
+        # never rendered anywhere.
+        blob = str(errors)
+        assert "shh" not in blob
+        count_errors = [e for e in errors if e["path"] == ["count"]]
+        assert count_errors and '"bad"' in count_errors[0]["error"]
+
+    def redacts_the_whole_literal_when_sensitive():
+        input_object = GraphQLInputObjectType(
+            "WholeSecretInput",
+            {"secret": GraphQLInputField(GraphQLString, sensitive=True)},
+        )
+        errors = _collect(
+            '{ secret: "shh", bogus: 1 }', input_object, sensitive=True
+        )
+        blob = str(errors)
+        assert "shh" not in blob
+        assert "[redacted]" in blob

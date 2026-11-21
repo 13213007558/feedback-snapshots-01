@@ -1293,6 +1293,13 @@ class GraphQLArgumentKwargs(TypedDict, total=False):
     """Reason this element is deprecated, if one was provided."""
     out_name: str | None
     """Name of the Python keyword argument (extension of GraphQL.js)."""
+    sensitive: bool
+    """Whether values of this argument must not appear in public error output.
+
+    When set, validation errors still report the argument's location (message
+    context and error path) but redact the supplied input value instead of
+    rendering it.
+    """
     extensions: dict[str, Any]
     """Custom extension fields reserved for users."""
     ast_node: InputValueDefinitionNode | None
@@ -1310,6 +1317,8 @@ class GraphQLArgument:  # noqa: PLW1641
         provided
     :param out_name: name of the Python keyword argument passed to the resolver,
         if different from the argument name (extension of GraphQL.js)
+    :param sensitive: whether values of this argument must be redacted from
+        public validation error output
     :param extensions: custom extensions for this argument
     :param ast_node: AST node from which this argument was built, if available
     :param default: default value represented as either a runtime value or a
@@ -1347,6 +1356,12 @@ class GraphQLArgument:  # noqa: PLW1641
 
     Used for transforming names; if not set, the argument name is used.
     """
+    sensitive: bool
+    """Whether values must be redacted from public validation error output.
+
+    When set, validation errors still identify the argument through the message
+    and the error path, but render the supplied input value as redacted.
+    """
     extensions: dict[str, Any]
     """Custom extension fields reserved for users."""
     ast_node: InputValueDefinitionNode | None
@@ -1363,6 +1378,7 @@ class GraphQLArgument:  # noqa: PLW1641
         description: str | None = None,
         deprecation_reason: str | None = None,
         out_name: str | None = None,
+        sensitive: bool = False,
         extensions: dict[str, Any] | None = None,
         ast_node: InputValueDefinitionNode | None = None,
         default: GraphQLDefaultInput | None = None,
@@ -1376,6 +1392,7 @@ class GraphQLArgument:  # noqa: PLW1641
         self.description = description
         self.deprecation_reason = deprecation_reason
         self.out_name = out_name
+        self.sensitive = sensitive
         self.extensions = extensions or {}
         self.ast_node = ast_node
 
@@ -1388,6 +1405,7 @@ class GraphQLArgument:  # noqa: PLW1641
             and self.description == other.description
             and self.deprecation_reason == other.deprecation_reason
             and self.out_name == other.out_name
+            and self.sensitive == other.sensitive
             and self.extensions == other.extensions
         )
 
@@ -1411,6 +1429,7 @@ class GraphQLArgument:  # noqa: PLW1641
             description=self.description,
             deprecation_reason=self.deprecation_reason,
             out_name=self.out_name,
+            sensitive=self.sensitive,
             extensions=self.extensions,
             ast_node=self.ast_node,
         )
@@ -3270,6 +3289,8 @@ class GraphQLInputFieldKwargs(TypedDict, total=False):
     """Reason this element is deprecated, if one was provided."""
     out_name: str | None
     """Name of the key in the outbound value (extension of GraphQL.js)."""
+    sensitive: bool
+    """Whether values must be redacted from public validation error output."""
     extensions: dict[str, Any]
     """Custom extension fields reserved for users."""
     ast_node: InputValueDefinitionNode | None
@@ -3288,6 +3309,8 @@ class GraphQLInputField:  # noqa: PLW1641
         provided
     :param out_name: name of the key in the outbound value, if different from the
         field name (extension of GraphQL.js)
+    :param sensitive: whether values of this field must be redacted from public
+        validation error output
     :param extensions: custom extensions for this input field
     :param ast_node: AST node from which this input field was built, if available
     :param default: default value represented as either a runtime value or a
@@ -3327,6 +3350,12 @@ class GraphQLInputField:  # noqa: PLW1641
 
     Used for transforming names; if not set, the field name is used.
     """
+    sensitive: bool
+    """Whether values must be redacted from public validation error output.
+
+    When set, validation errors still identify the field through the message
+    and the error path, but render the supplied input value as redacted.
+    """
     extensions: dict[str, Any]
     """Custom extension fields reserved for users."""
     ast_node: InputValueDefinitionNode | None
@@ -3343,6 +3372,7 @@ class GraphQLInputField:  # noqa: PLW1641
         description: str | None = None,
         deprecation_reason: str | None = None,
         out_name: str | None = None,
+        sensitive: bool = False,
         extensions: dict[str, Any] | None = None,
         ast_node: InputValueDefinitionNode | None = None,
         default: GraphQLDefaultInput | None = None,
@@ -3356,6 +3386,7 @@ class GraphQLInputField:  # noqa: PLW1641
         self.description = description
         self.deprecation_reason = deprecation_reason
         self.out_name = out_name
+        self.sensitive = sensitive
         self.extensions = extensions or {}
         self.ast_node = ast_node
 
@@ -3368,6 +3399,7 @@ class GraphQLInputField:  # noqa: PLW1641
             and self.description == other.description
             and self.deprecation_reason == other.deprecation_reason
             and self.extensions == other.extensions
+            and self.sensitive == other.sensitive
             and self.out_name == other.out_name
         )
 
@@ -3391,6 +3423,7 @@ class GraphQLInputField:  # noqa: PLW1641
             description=self.description,
             deprecation_reason=self.deprecation_reason,
             out_name=self.out_name,
+            sensitive=self.sensitive,
             extensions=self.extensions,
             ast_node=self.ast_node,
         )
