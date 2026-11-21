@@ -15,10 +15,26 @@ from opensearchpy.helpers.signer import AWSV4Signer
 class AWSV4SignerAsyncAuth:
     """
     AWS V4 Request Signer for Async Requests.
+
+    :arg reuse_credentials_on_retry: when ``True`` (default) retries of a
+        request reuse the frozen credentials resolved for its first attempt;
+        when ``False`` every retry fetches a fresh snapshot from the
+        credential provider.
     """
 
-    def __init__(self, credentials: Any, region: str, service: str = "es") -> None:
-        self.signer = AWSV4Signer(credentials, region, service)
+    def __init__(
+        self,
+        credentials: Any,
+        region: str,
+        service: str = "es",
+        reuse_credentials_on_retry: bool = True,
+    ) -> None:
+        self.signer = AWSV4Signer(
+            credentials,
+            region,
+            service,
+            reuse_credentials_on_retry=reuse_credentials_on_retry,
+        )
 
     def __call__(
         self,
@@ -28,6 +44,10 @@ class AWSV4SignerAsyncAuth:
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, str]:
         return self._sign_request(method=method, url=url, body=body, headers=headers)
+
+    def reset_request(self) -> None:
+        """Reset retry bookkeeping for the next logical request."""
+        self.signer.reset_request()
 
     def _sign_request(
         self,

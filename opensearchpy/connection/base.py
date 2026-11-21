@@ -242,6 +242,15 @@ class Connection:
     ) -> Any:
         raise NotImplementedError()
 
+    def reset_auth_request(self) -> None:
+        """
+        Reset per-request bookkeeping kept by a stateful auth object (for
+        example an AWS signer reusing credentials across retries). Called by
+        the transport once before each logical request. Connections without
+        a stateful auth object have nothing to reset.
+        """
+        return None
+
     def log_request_success(
         self,
         method: str,

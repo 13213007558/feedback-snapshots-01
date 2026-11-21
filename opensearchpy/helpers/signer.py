@@ -7,21 +7,81 @@
 # Modifications Copyright OpenSearch Contributors. See
 # GitHub history for details.
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
 
+class CredentialProviderError(RuntimeError):
+    """
+    Raised when a credential provider cannot supply credentials.
+
+    The underlying provider failure is attached as the cause so applications
+    can distinguish a temporarily unavailable provider from a configuration
+    problem and decide whether to retry later.
+    """
+
+
+class CredentialProvider:
+    """
+    Supplies temporary AWS credentials, typically backed by an STS assume-role
+    or web-identity session that the application refreshes once the current
+    credentials expire.
+
+    A provider only needs to implement ``get_credentials()`` and return an
+    object exposing ``access_key``, ``secret_key`` and ``token`` attributes
+    (for example a botocore credential object). Callable providers are also
+    accepted directly, so a plain function or lambda can be used in tests and
+    simple applications.
+    """
+
+    def get_credentials(self) -> Any:
+        raise NotImplementedError(
+            "CredentialProvider subclasses must implement get_credentials()"
+        )
+
+
+def _is_credential_provider(value: Any) -> bool:
+    # Credential objects (and their mocks) expose the signing attributes.
+    # Check those first so auto-created Mock attributes such as
+    # ``get_credentials`` cannot make a credentials object look like a
+    # provider.
+    if hasattr(value, "access_key") and hasattr(value, "secret_key"):
+        return False
+    # A real provider exposes get_credentials(); plain callables
+    # (functions/lambdas) are supported as providers too.
+    return callable(getattr(value, "get_credentials", None)) or callable(value)
+
+
 class AWSV4Signer:
     """
     Generic AWS V4 Request Signer.
+
+    Credentials may be provided either directly as a credentials object or
+    through a :class:`CredentialProvider` (or any callable returning
+    credentials). When a provider is used, credentials are resolved once per
+    signing call and immediately frozen, so a single outgoing request is
+    always signed with one consistent credential view even if the provider
+    rotates credentials mid-request.
+
+    Set ``reuse_credentials_on_retry=False`` to take a fresh credential
+    snapshot from the provider whenever a request is retried. By default the
+    signer tracks the retry state and reuses the frozen credentials across
+    retries of the same logical request, keeping every attempt identical.
     """
 
-    def __init__(self, credentials, region: str, service: str = "es") -> Any:  # type: ignore
+    def __init__(
+        self,
+        credentials: Union[Any, CredentialProvider, Callable[..., Any]],
+        region: str,
+        service: str = "es",
+        reuse_credentials_on_retry: bool = True,
+    ) -> Any:  # type: ignore
         if not credentials:
             raise ValueError("Credentials cannot be empty")
         self.credentials = credentials
+        self._uses_provider = _is_credential_provider(credentials)
 
         if not region:
             raise ValueError("Region cannot be empty")
@@ -31,27 +91,54 @@ class AWSV4Signer:
             raise ValueError("Service name cannot be empty")
         self.service = service
 
-    def sign(
-        self, method: str, url: str, body: Any, headers: Optional[Dict[str, str]] = None
-    ) -> Dict[str, str]:
+        self.reuse_credentials_on_retry = reuse_credentials_on_retry
+        # Frozen credentials reused across retries of the current request.
+        self._frozen_credentials: Any = None
+        # Number of signing attempts performed for the current logical request.
+        self._sign_attempts = 0
+
+    def _resolve_credentials(self, force_refresh: bool = False) -> Any:
         """
-        This method signs the request and returns headers.
-        :param method: HTTP method
-        :param url: url
-        :param body: body
-        :return: headers
+        Return a non-refreshing snapshot of the credentials.
+
+        With a static credentials object the existing object is frozen. With a
+        provider, ``get_credentials()`` is called lazily and its result frozen
+        via ``get_frozen_credentials()`` when available. Provider failures are
+        surfaced as :class:`CredentialProviderError` instead of leaking the
+        underlying implementation exception.
         """
+        if not self._uses_provider:
+            return self._freeze(self.credentials)
 
-        from botocore.auth import SigV4Auth
-        from botocore.awsrequest import AWSRequest
+        if (
+            self.reuse_credentials_on_retry
+            and self._frozen_credentials is not None
+            and not force_refresh
+        ):
+            return self._frozen_credentials
 
-        signature_host = self._fetch_url(url, headers or dict())
+        try:
+            if hasattr(self.credentials, "get_credentials"):
+                resolved = self.credentials.get_credentials()
+            else:
+                resolved = self.credentials()
+        except CredentialProviderError:
+            raise
+        except Exception as error:
+            raise CredentialProviderError(
+                "Credential provider was unable to supply credentials"
+            ) from error
 
-        # create an AWS request object and sign it using SigV4Auth
-        aws_request = AWSRequest(
-            method=method.upper(), url=signature_host, data=body, headers=headers or {}
-        )
+        if not resolved:
+            raise CredentialProviderError(
+                "Credential provider returned empty credentials"
+            )
 
+        self._frozen_credentials = self._freeze(resolved)
+        return self._frozen_credentials
+
+    @staticmethod
+    def _freeze(credentials: Any) -> Any:
         # credentials objects expose access_key, secret_key and token attributes
         # via @property annotations that call _refresh() on every access,
         # creating a race condition if the credentials expire before secret_key
@@ -59,11 +146,55 @@ class AWSV4Signer:
         # correspond to the secret_key used to sign the request. To avoid this,
         # get_frozen_credentials() which returns non-refreshing credentials is
         # called if it exists.
-        credentials = (
-            self.credentials.get_frozen_credentials()
-            if hasattr(self.credentials, "get_frozen_credentials")
-            and callable(self.credentials.get_frozen_credentials)
-            else self.credentials
+        if hasattr(credentials, "get_frozen_credentials") and callable(
+            credentials.get_frozen_credentials
+        ):
+            return credentials.get_frozen_credentials()
+        return credentials
+
+    def reset_request(self) -> None:
+        """
+        Mark the start of a new logical request.
+
+        Retry bookkeeping is otherwise advanced on every :meth:`sign` call.
+        Transports that reuse one auth instance across several requests should
+        call this before each new request so the first attempt of every
+        request resolves credentials from the provider again.
+        """
+        self._sign_attempts = 0
+        self._frozen_credentials = None
+
+    def sign(
+        self,
+        method: str,
+        url: str,
+        body: Any,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        """
+        Sign the request and return the resulting headers.
+
+        Each call counts as one attempt of the current logical request. The
+        first call resolves and freezes the credentials; subsequent calls
+        (retries) reuse that snapshot when
+        ``reuse_credentials_on_retry`` is enabled, otherwise a fresh snapshot
+        is taken from the provider before signing.
+        """
+
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        force_refresh = (
+            self._sign_attempts > 0 and not self.reuse_credentials_on_retry
+        )
+        credentials = self._resolve_credentials(force_refresh=force_refresh)
+        self._sign_attempts += 1
+
+        signature_host = self._fetch_url(url, headers or dict())
+
+        # create an AWS request object and sign it using SigV4Auth
+        aws_request = AWSRequest(
+            method=method.upper(), url=signature_host, data=body, headers=headers or {}
         )
 
         sig_v4_auth = SigV4Auth(credentials, self.service, self.region)
@@ -108,14 +239,34 @@ class AWSV4Signer:
 class RequestsAWSV4SignerAuth(requests.auth.AuthBase):
     """
     AWS V4 Request Signer for Requests.
+
+    :arg reuse_credentials_on_retry: when ``True`` (default) retries of a
+        request reuse the frozen credentials resolved for its first attempt;
+        when ``False`` every retry fetches a fresh snapshot from the
+        credential provider.
     """
 
-    def __init__(self, credentials, region, service: str = "es") -> None:  # type: ignore
-        self.signer = AWSV4Signer(credentials, region, service)
+    def __init__(
+        self,
+        credentials,
+        region,
+        service: str = "es",
+        reuse_credentials_on_retry: bool = True,
+    ) -> None:  # type: ignore
+        self.signer = AWSV4Signer(
+            credentials,
+            region,
+            service,
+            reuse_credentials_on_retry=reuse_credentials_on_retry,
+        )
         self.service = service  # tools like LangChain rely on this, see https://github.com/opensearch-project/opensearch-py/issues/600
 
     def __call__(self, request):  # type: ignore
         return self._sign_request(request)  # type: ignore
+
+    def reset_request(self) -> None:
+        """Reset retry bookkeeping for the next logical request."""
+        self.signer.reset_request()
 
     def _sign_request(self, prepared_request):  # type: ignore
         """
@@ -142,11 +293,26 @@ class AWSV4SignerAuth(RequestsAWSV4SignerAuth):
 
 
 class Urllib3AWSV4SignerAuth(Callable):  # type: ignore
-    def __init__(self, credentials, region, service: str = "es") -> None:  # type: ignore
-        self.signer = AWSV4Signer(credentials, region, service)
+    def __init__(
+        self,
+        credentials,
+        region,
+        service: str = "es",
+        reuse_credentials_on_retry: bool = True,
+    ) -> None:  # type: ignore
+        self.signer = AWSV4Signer(
+            credentials,
+            region,
+            service,
+            reuse_credentials_on_retry=reuse_credentials_on_retry,
+        )
         self.service = service  # tools like LangChain rely on this, see https://github.com/opensearch-project/opensearch-py/issues/600
 
     def __call__(
         self, method: str, url: str, body: Any, headers: Optional[Dict[str, str]] = None
     ) -> Dict[str, str]:
         return self.signer.sign(method, url, body, headers)
+
+    def reset_request(self) -> None:
+        """Reset retry bookkeeping for the next logical request."""
+        self.signer.reset_request()

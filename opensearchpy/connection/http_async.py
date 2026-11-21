@@ -173,6 +173,11 @@ class AsyncHttpConnection(AIOHttpConnection):
         self._http_auth = http_auth
         self._ssl_context = ssl_context
 
+    def reset_auth_request(self) -> None:
+        reset_request = getattr(self._http_auth, "reset_request", None)
+        if reset_request is not None:
+            reset_request()
+
     async def perform_request(
         self,
         method: str,

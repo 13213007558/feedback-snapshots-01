@@ -411,6 +411,12 @@ class Transport:
             method, params, body, ignore, timeout
         )
 
+        # A signer auth instance is shared by every connection in the pool.
+        # Reset its retry bookkeeping so each logical request resolves a fresh
+        # credential snapshot on its first attempt.
+        for connection in self.connection_pool.connections:
+            connection.reset_auth_request()
+
         for attempt in range(self.max_retries + 1):
             connection = self.get_connection()
 

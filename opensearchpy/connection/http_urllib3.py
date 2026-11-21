@@ -229,6 +229,11 @@ class Urllib3HttpConnection(Connection):
     def _create_urllib3_pool(self) -> None:
         self.pool = self._urllib3_pool_factory()  # type: ignore
 
+    def reset_auth_request(self) -> None:
+        reset_request = getattr(self.http_auth, "reset_request", None)
+        if reset_request is not None:
+            reset_request()
+
     def perform_request(
         self,
         method: str,

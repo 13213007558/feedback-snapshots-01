@@ -163,6 +163,11 @@ class RequestsHttpConnection(Connection):
                 % self.host
             )
 
+    def reset_auth_request(self) -> None:
+        reset_request = getattr(self.session.auth, "reset_request", None)
+        if reset_request is not None:
+            reset_request()
+
     def perform_request(  # type: ignore
         self,
         method: str,

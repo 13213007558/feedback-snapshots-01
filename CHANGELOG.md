@@ -3,6 +3,7 @@ Inspired from [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 ### Added
+- Add `CredentialProvider`/`CredentialProviderError` and `reuse_credentials_on_retry` to the AWS SigV4 signers so temporary credentials supplied by a provider are resolved into one frozen, consistent snapshot per request, with explicit reuse-or-refresh behavior on retries
 - Add gRPC translation layer with `BulkRequestProtoBuilder` and `ResponseConverter` for bulk operations ([#1058](https://github.com/opensearch-project/opensearch-py/pull/1058))
 - Add JWT/Bearer token authentication support for gRPC transport via `BearerTokenInterceptor` ([#1090](https://github.com/opensearch-project/opensearch-py/pull/1090))
 - Add gRPC transport for bulk operations with `OpenSearchGrpc` client and `GrpcTransport` ([#1078](https://github.com/opensearch-project/opensearch-py/pull/1078))

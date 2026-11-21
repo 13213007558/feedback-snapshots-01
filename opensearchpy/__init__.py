@@ -71,7 +71,13 @@ from .exceptions import (
     UnknownDslObject,
     ValidationException,
 )
-from .helpers import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
+from .helpers import (
+    AWSV4SignerAuth,
+    CredentialProvider,
+    CredentialProviderError,
+    RequestsAWSV4SignerAuth,
+    Urllib3AWSV4SignerAuth,
+)
 from .helpers.aggs import A
 from .helpers.analysis import analyzer, char_filter, normalizer, token_filter, tokenizer
 from .helpers.document import Document, InnerDoc, MetaField
@@ -169,6 +175,8 @@ __all__ = [
     "AWSV4SignerAuth",
     "Urllib3AWSV4SignerAuth",
     "RequestsAWSV4SignerAuth",
+    "CredentialProvider",
+    "CredentialProviderError",
     "A",
     "AttrDict",
     "AttrList",

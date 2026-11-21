@@ -2,6 +2,8 @@
   - [IAM Authentication](#iam-authentication)
   - [IAM Authentication with a Synchronous Client](#iam-authentication-with-a-synchronous-client)
   - [IAM Authentication with an Async Client](#iam-authentication-with-an-async-client)
+  - [Refreshing Credentials with a Credential Provider](#refreshing-credentials-with-a-credential-provider)
+    - [Credentials on Retries](#credentials-on-retries)
   - [IAM Authentication via Tunnel](#iam-authentication-via-tunnel)
   - [Kerberos](#kerberos)
 
@@ -103,6 +105,64 @@ async def search():
     print(response)
 
 search()
+```
+
+## Refreshing Credentials with a Credential Provider
+
+When credentials are short-lived (for example STS assume-role or web-identity sessions), pass a `CredentialProvider` instead of a static credentials object. The provider is asked for credentials once per outgoing request and the returned credentials are immediately frozen, so every request is signed with one consistent credential view even if the provider rotates credentials while the request is being signed or retried.
+
+```python
+from opensearchpy import OpenSearch, Urllib3HttpConnection, Urllib3AWSV4SignerAuth, CredentialProvider, CredentialProviderError
+import boto3
+
+class BotoCredentialProvider(CredentialProvider):
+    def __init__(self):
+        self._session = boto3.Session()
+
+    def get_credentials(self):
+        # Refresh the session (or re-assume the role) when the previous
+        # credentials have expired. Raising here surfaces a
+        # CredentialProviderError to the application instead of sending an
+        # unsigned or partially signed request.
+        return self._session.get_credentials()
+
+host = '' # cluster endpoint, for example: my-test-domain.us-east-1.es.amazonaws.com
+region = 'us-west-2'
+service = 'es' # 'aoss' for OpenSearch Serverless
+auth = Urllib3AWSV4SignerAuth(BotoCredentialProvider(), region, service)
+
+client = OpenSearch(
+    hosts = [{'host': host, 'port': 443}],
+    http_auth = auth,
+    use_ssl = True,
+    verify_certs = True,
+    connection_class = Urllib3HttpConnection,
+)
+
+try:
+    client.info()
+except CredentialProviderError:
+    # The provider was temporarily unavailable; retry the operation later.
+    pass
+```
+
+A plain callable returning credentials is accepted as well:
+
+```python
+auth = Urllib3AWSV4SignerAuth(lambda: boto3.Session().get_credentials(), region, service)
+```
+
+### Credentials on Retries
+
+Retries of the same request reuse the frozen credentials resolved for the first attempt, keeping every attempt identical (`reuse_credentials_on_retry=True`, the default). Pass `reuse_credentials_on_retry=False` to force a fresh credential resolution from the provider before each retry. The same option is available on `RequestsAWSV4SignerAuth` and `AWSV4SignerAsyncAuth`.
+
+```python
+auth = Urllib3AWSV4SignerAuth(
+    BotoCredentialProvider(),
+    region,
+    service,
+    reuse_credentials_on_retry=False,
+)
 ```
 
 ## IAM Authentication via Tunnel
