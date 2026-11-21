@@ -1354,3 +1354,226 @@ async def test_async_stream_read_after_close(
     finally:
         await stream.close()
         await fs._session.close()
+
+
+class FakePrivateResponse:
+    """Minimal stand-in for an aiohttp response, serving one fixed file."""
+
+    def __init__(self, url, status, headers, body):
+        self.url = url
+        self.status = status
+        self.headers = headers
+        self._body = body
+
+    async def read(self):
+        await asyncio.sleep(0)  # let concurrent operations interleave
+        return self._body
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise aiohttp.ClientResponseError(
+                request_info=None, history=(), status=self.status
+            )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def __await__(self):
+        async def _ready():
+            await asyncio.sleep(0)
+            return self
+
+        return _ready().__await__()
+
+
+class FakePrivateSession:
+    """Stand-in for an aiohttp.ClientSession bound to one private service.
+
+    Every request is attributed to this client through ``record.requests``.
+    """
+
+    def __init__(self, client_id, content, record):
+        self.client_id = client_id
+        self.content = content
+        self.record = record
+        self.closed = False
+        self._connector = SimpleNamespace(_close=self._connector_close)
+
+    def _connector_close(self):
+        self.closed = True
+
+    async def close(self):
+        self.closed = True
+
+    def _log(self, method, url, headers):
+        self.record.requests.append(
+            SimpleNamespace(
+                client=self.client_id,
+                method=method,
+                url=str(url),
+                headers=dict(headers),
+            )
+        )
+
+    def head(self, url, **kwargs):
+        self._log("HEAD", url, kwargs.get("headers") or {})
+        return FakePrivateResponse(
+            url,
+            200,
+            {
+                "Content-Length": str(len(self.content)),
+                "Accept-Ranges": "bytes",
+                "Content-Type": "application/octet-stream",
+            },
+            b"",
+        )
+
+    def get(self, url, **kwargs):
+        headers = kwargs.get("headers") or {}
+        self._log("GET", url, headers)
+        range_header = headers.get("Range")
+        if range_header:
+            total = len(self.content)
+            start_s, _, end_s = range_header.removeprefix("bytes=").partition("-")
+            start = int(start_s) if start_s else max(total - int(end_s), 0)
+            end = min(int(end_s), total - 1) if end_s else total - 1
+            body = self.content[start : end + 1]
+            return FakePrivateResponse(
+                url,
+                206,
+                {
+                    "Content-Range": f"bytes {start}-{end}/{total}",
+                    "Content-Length": str(len(body)),
+                    "Accept-Ranges": "bytes",
+                },
+                body,
+            )
+        return FakePrivateResponse(
+            url,
+            200,
+            {"Content-Length": str(len(self.content)), "Accept-Ranges": "bytes"},
+            self.content,
+        )
+
+
+def make_private_service(name, content, asynchronous=True, **client_kwargs):
+    """An HTTPFileSystem with its own registered client factory and fake file.
+
+    The returned record tracks every client the factory built (with the
+    kwargs it received) and every request each client served.
+    """
+    record = SimpleNamespace(clients=[], requests=[])
+
+    async def get_client(**kwargs):
+        session = FakePrivateSession(f"{name}-{len(record.clients)}", content, record)
+        record.clients.append(SimpleNamespace(session=session, kwargs=kwargs))
+        return session
+
+    fs = fsspec.filesystem(
+        "http",
+        asynchronous=asynchronous,
+        skip_instance_cache=True,
+        get_client=get_client,
+        client_kwargs=client_kwargs,
+    )
+    return SimpleNamespace(
+        fs=fs,
+        record=record,
+        content=content,
+        url=f"http://{name}.example.com/data",
+        client_kwargs=client_kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registered_clients_concurrent_info_and_range_reads():
+    auth_a = SimpleNamespace(user="user-a", password="pass-a")
+    auth_b = SimpleNamespace(user="user-b", password="pass-b")
+    service_a = make_private_service("alpha", b"alpha-" * 64, auth=auth_a)
+    service_b = make_private_service("beta", b"BETA!" * 100, auth=auth_b)
+
+    info_a, range_a, info_b, range_b = await asyncio.gather(
+        service_a.fs._info(service_a.url),
+        service_a.fs._cat_file(service_a.url, start=6, end=70),
+        service_b.fs._info(service_b.url),
+        service_b.fs._cat_file(service_b.url, start=5, end=55),
+    )
+
+    assert info_a["size"] == len(service_a.content)
+    assert info_b["size"] == len(service_b.content)
+    assert range_a == service_a.content[6:70]
+    assert range_b == service_b.content[5:55]
+
+    client_a = service_a.record.clients[0].session
+    client_b = service_b.record.clients[0].session
+    assert client_a is not client_b
+    for service, client in [(service_a, client_a), (service_b, client_b)]:
+        # one client was built, with this service's own registered auth
+        assert len(service.record.clients) == 1
+        assert service.record.clients[0].kwargs["auth"] is service.client_kwargs[
+            "auth"
+        ]
+        # every request went out on this service's own client, to its own URL
+        methods = {r.method for r in service.record.requests}
+        assert {"HEAD", "GET"} <= methods
+        assert all(r.client == client.client_id for r in service.record.requests)
+        assert all(r.url == service.url for r in service.record.requests)
+        # the range read carried a Range header on that same client
+        ranged = [
+            r for r in service.record.requests if r.method == "GET" and "Range" in r.headers
+        ]
+        assert len(ranged) == 1
+
+
+def test_registered_client_rebuilt_between_reads():
+    auth = SimpleNamespace(user="user", password="pass")
+    content = bytes(range(256)) * 4
+    service = make_private_service(
+        "rebuild", content, asynchronous=False, auth=auth
+    )
+    fs = service.fs
+
+    assert fs.info(service.url)["size"] == len(content)
+    assert fs.cat_file(service.url, start=10, end=20) == content[10:20]
+    assert len(service.record.clients) == 1
+    first_client = service.record.clients[0].session
+    assert all(
+        r.client == first_client.client_id for r in service.record.requests
+    )
+
+    # drop the client: the next operation must rebuild it via the factory
+    fs._session = None
+    assert fs.cat_file(service.url, start=100, end=130) == content[100:130]
+    assert len(service.record.clients) == 2
+    second_client = service.record.clients[1].session
+    assert second_client is not first_client
+    assert service.record.requests[-1].client == second_client.client_id
+    # the rebuilt client was registered with the same auth settings
+    assert service.record.clients[1].kwargs["auth"] is auth
+
+
+def test_registered_client_read_after_close():
+    auth = SimpleNamespace(user="user", password="pass")
+    content = b"closed-loop-" * 32
+    service = make_private_service("closer", content, asynchronous=False, auth=auth)
+    fs = service.fs
+
+    assert fs.cat_file(service.url, start=0, end=12) == content[:12]
+    assert len(service.record.clients) == 1
+    first_client = service.record.clients[0].session
+
+    fs.close_session(fs.loop, first_client)
+    assert first_client.closed
+    fs._session = None
+
+    # reading after the close builds a fresh client from the same factory
+    assert fs.cat_file(service.url, start=12, end=24) == content[12:24]
+    assert len(service.record.clients) == 2
+    second_client = service.record.clients[1].session
+    assert second_client is not first_client
+    assert not second_client.closed
+    assert service.record.requests[-1].client == second_client.client_id
+    assert service.record.clients[1].kwargs["auth"] is auth
