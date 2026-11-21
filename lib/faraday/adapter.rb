@@ -28,7 +28,32 @@ module Faraday
       end
     end
 
+    # This module allows an Adapter to declare which SSL options
+    # (see Faraday::SSLOptions) it actually honors. Connections that
+    # require strict TLS configuration can verify the current adapter
+    # against these declarations before establishing a connection.
+    module SSLCapabilities
+      # Declares the SSL options this adapter supports.
+      #
+      # @param keys [Array<Symbol>] SSL option keys, e.g. :ca_file, :client_cert
+      def supports_ssl_options(*keys)
+        @supported_ssl_options = keys.flatten.map(&:to_sym).freeze
+      end
+
+      # @return [Array<Symbol>] SSL options this adapter declared support for.
+      #         Defaults to [] (basic verification only, no guarantees).
+      def supported_ssl_options
+        @supported_ssl_options ||= []
+      end
+
+      def inherited(subclass)
+        super
+        subclass.supports_ssl_options(*supported_ssl_options)
+      end
+    end
+
     extend Parallelism
+    extend SSLCapabilities
 
     self.supports_parallel = false
 
@@ -57,6 +82,17 @@ module Faraday
     def close
       # Possible implementation:
       #   @app.close if @app.respond_to?(:close)
+    end
+
+    # Whether this adapter honors all the given SSL options.
+    #
+    # @param required [Array<Symbol>] SSL option keys, e.g. :ca_file
+    #
+    # @return [Boolean]
+    def supports_ssl_config?(*required)
+      required.flatten.all? do |key|
+        self.class.supported_ssl_options.include?(key.to_sym)
+      end
     end
 
     def call(env)

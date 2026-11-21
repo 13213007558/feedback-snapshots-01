@@ -222,6 +222,11 @@ module Faraday
   class SSLError < Error
   end
 
+  # Raised when the current adapter does not support the SSL/TLS
+  # configuration required by the connection.
+  class AdapterCapabilityError < Error
+  end
+
   # Raised by middlewares that parse the response, like the JSON response middleware.
   class ParsingError < Error
   end

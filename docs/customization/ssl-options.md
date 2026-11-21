@@ -35,4 +35,32 @@ conn = Faraday.new(ssl: ssl_options) do |faraday|
 end
 ```
 
+## Verifying adapter support
+
+Not every adapter honors every SSL option, and the adapter may be replaced
+at runtime. If your connection relies on strict TLS settings (e.g. a custom
+CA or a client certificate), you can opt in to a capability check that runs
+before every request:
+
+```ruby
+conn = Faraday.new('https://example.com', ssl: { ca_file: '/path/to/ca_file' })
+conn.require_ssl_support :ca_file, :client_cert
+```
+
+If the current adapter doesn't declare support for all required options,
+the request is rejected with `Faraday::AdapterCapabilityError` before any
+connection is established. Connections that never call
+`require_ssl_support` are unaffected.
+
+Adapters declare the SSL options they support with `supports_ssl_options`:
+
+```ruby
+class MyAdapter < Faraday::Adapter
+  supports_ssl_options :verify, :ca_file, :client_cert, :client_key
+end
+```
+
+Adapters that declare nothing are treated as supporting basic verification
+only, so a strict requirement will reject them.
+
 [net_http]: /adapters/net-http.md

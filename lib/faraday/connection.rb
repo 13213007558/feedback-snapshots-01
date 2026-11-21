@@ -69,6 +69,7 @@ module Faraday
       end
 
       @parallel_manager = nil
+      @required_ssl_options = nil
       @headers = Utils::Headers.new
       @params  = Utils::ParamsHash.new
       @options = options.request
@@ -452,6 +453,7 @@ module Faraday
         yield(req) if block_given?
       end
 
+      verify_adapter_ssl_support!
       builder.build_response(self, request)
     end
 
@@ -506,7 +508,10 @@ module Faraday
                      params: params.dup,
                      builder: builder.dup,
                      ssl: ssl.dup,
-                     request: options.dup).tap { |copy| copy.proxy = proxy if @manual_proxy }
+                     request: options.dup).tap do |copy|
+        copy.proxy = proxy if @manual_proxy
+        copy.require_ssl_support(*@required_ssl_options) if @required_ssl_options
+      end
     end
 
     # Yields username and password extracted from a URI if they both exist.
@@ -569,6 +574,51 @@ module Faraday
     # @return [Boolean]
     def support_parallel?(adapter = @builder.adapter&.klass)
       adapter.respond_to?(:supports_parallel?) && adapter&.supports_parallel?
+    end
+
+    # Opt-in: require the current adapter to support the given SSL options
+    # (see Faraday::SSLOptions). The requirement is verified before every
+    # request, so replacing the adapter at runtime re-triggers the check
+    # and raises Faraday::AdapterCapabilityError before any connection is
+    # established if the new adapter doesn't declare support.
+    # Connections that never call this are unaffected.
+    #
+    # @param options [Array<Symbol>] required SSL option keys,
+    #                e.g. :ca_file, :client_cert
+    #
+    # @return [Faraday::Connection] self
+    #
+    # @example
+    #   conn = Faraday.new('https://example.com', ssl: { ca_file: '...' })
+    #   conn.require_ssl_support :ca_file, :client_cert
+    def require_ssl_support(*options)
+      @required_ssl_options = options.flatten.map(&:to_sym)
+      self
+    end
+
+    # Verify the current adapter supports the SSL options required through
+    # #require_ssl_support. No-op when no requirement was set.
+    #
+    # @raise [Faraday::AdapterCapabilityError] if the adapter doesn't
+    #        declare support for all required SSL options.
+    # @api private
+    def verify_adapter_ssl_support!
+      return if @required_ssl_options.nil? || @required_ssl_options.empty?
+
+      adapter = @builder.adapter&.klass
+      declared = if adapter.respond_to?(:supported_ssl_options)
+                   adapter.supported_ssl_options
+                 else
+                   []
+                 end
+      missing = @required_ssl_options - declared
+      return if missing.empty?
+
+      raise AdapterCapabilityError,
+            "#{adapter} does not support the required SSL option(s): " \
+            "#{missing.map(&:inspect).join(', ')}. Either configure an " \
+            'adapter that declares support for them via ' \
+            '`supports_ssl_options`, or relax the requirement.'
     end
   end
 end
