@@ -6,6 +6,12 @@ from sentry_sdk.consts import VERSION
 from sentry_sdk.transport import HttpTransport, Transport
 
 from sentry_sdk.api import *  # noqa # isort: skip
+from sentry_sdk.projects import (  # isort: skip
+    DEFAULT_PROJECT,
+    MemoryTransport,
+    ProjectRouter,
+    ProjectTransport,
+)
 
 __all__ = [  # noqa
     "Hub",
@@ -13,6 +19,10 @@ __all__ = [  # noqa
     "Client",
     "Transport",
     "HttpTransport",
+    "ProjectRouter",
+    "ProjectTransport",
+    "MemoryTransport",
+    "DEFAULT_PROJECT",
     "VERSION",
     "integrations",
     # From sentry_sdk.api

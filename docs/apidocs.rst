@@ -52,3 +52,12 @@ API Docs
 
 .. autoclass:: sentry_sdk.envelope.Item
    :members:
+
+.. autoclass:: sentry_sdk.projects.ProjectRouter
+    :members:
+
+.. autoclass:: sentry_sdk.projects.ProjectTransport
+    :members:
+
+.. autoclass:: sentry_sdk.projects.MemoryTransport
+    :members:

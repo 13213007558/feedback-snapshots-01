@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### New Features ✨
+
+- Add project routing for services that send events to multiple Sentry projects
+  with separate transports. Register approved projects with
+  `sentry_sdk.ProjectRouter.register`, bind requests and background tasks with
+  `router.scope(project)`, and retry a temporarily failing project with
+  `router.retry(project)`. Events without a binding or for an unregistered
+  project are not sent.
+
 ## 2.75.0
 
 ### New Features ✨
