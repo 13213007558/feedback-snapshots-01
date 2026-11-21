@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias, TypeGuard
 
     from ..pyutils import UndefinedType
+    from ..utilities.coerce_input_value import CoercionPermissionRule
     from .get_variable_signature import GraphQLVariableSignature
 
 __all__ = [
@@ -256,6 +257,8 @@ class Executor(Generic[TContext]):
         errors.
     :param abort_signal: External signal that may abort execution.
     :param hooks: Execution hooks supplied by the caller.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
 
     >>> from graphql import Executor, build_schema, parse
     >>> schema = build_schema('type Query { greeting: String }')
@@ -314,6 +317,9 @@ class Executor(Generic[TContext]):
     hide_suggestions: bool
     """Whether suggestion text should be omitted from execution errors."""
 
+    permission_rule: CoercionPermissionRule | None
+    """Rule consulted before invoking a leaf type's coercion functions."""
+
     abort_signal: AbortSignal | None
     """External signal that may abort execution."""
 
@@ -370,6 +376,7 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        permission_rule: CoercionPermissionRule | None = None,
     ) -> None:
         self.schema = schema
         self.fragment_definitions = fragment_definitions
@@ -383,6 +390,7 @@ class Executor(Generic[TContext]):
         self.subscribe_field_resolver = subscribe_field_resolver
         self.enable_early_execution = enable_early_execution
         self.hide_suggestions = hide_suggestions
+        self.permission_rule = permission_rule
         self.abort_signal = abort_signal
         self.hooks = hooks
         self.async_helpers = GraphQLResolveInfoHelpers(
@@ -427,6 +435,7 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        permission_rule: CoercionPermissionRule | None = None,
         **custom_args: Any,
     ) -> list[GraphQLError] | Executor:
         """Build an executor.
@@ -466,6 +475,8 @@ class Executor(Generic[TContext]):
             request errors.
         :param abort_signal: AbortSignal used to cancel execution.
         :param hooks: Execution hooks invoked during this operation.
+        :param permission_rule: Optional rule consulted for each leaf type before
+            its coercion functions are invoked while coercing input values.
         :returns: The executor for the validated execution arguments, or a list of
             validation errors.
 
@@ -511,7 +522,7 @@ class Executor(Generic[TContext]):
         True
         """
         # If the schema used for execution is invalid, raise an error.
-        assert_valid_schema(schema)
+        assert_valid_schema(schema, permission_rule)
 
         operation: OperationDefinitionNode | None = None
         fragment_definitions: dict[str, FragmentDefinitionNode] = {}
@@ -573,6 +584,7 @@ class Executor(Generic[TContext]):
             raw_variable_values or {},
             max_errors=max_coercion_errors,
             hide_suggestions=hide_suggestions,
+            permission_rule=permission_rule,
         )
 
         if isinstance(variable_values, list):
@@ -596,6 +608,7 @@ class Executor(Generic[TContext]):
             hide_suggestions=hide_suggestions,
             abort_signal=abort_signal,
             hooks=hooks,
+            permission_rule=permission_rule,
             **custom_args,
         )
 
@@ -707,6 +720,7 @@ class Executor(Generic[TContext]):
                     root_type,
                     operation,
                     self.hide_suggestions,
+                    permission_rule=self.permission_rule,
                 )
             except RecursionError:
                 collected_fields = None
@@ -973,6 +987,7 @@ class Executor(Generic[TContext]):
                     self.variable_values,
                     first_field_details.fragment_variable_values,
                     self.hide_suggestions,
+                    self.permission_rule,
                 )
                 if field_def.args or first_field_node.arguments
                 else {}
@@ -1513,7 +1528,10 @@ class Executor(Generic[TContext]):
         # validation only allows equivalent streams on multiple fields, so it is
         # safe to only check the first field_node for the stream directive
         stream = get_directive_values(
-            GraphQLStreamDirective, field_details_list[0].node, self.variable_values
+            GraphQLStreamDirective,
+            field_details_list[0].node,
+            self.variable_values,
+            permission_rule=self.permission_rule,
         )
 
         if not stream or stream.get("if") is False:
@@ -2171,6 +2189,7 @@ class Executor(Generic[TContext]):
             return_type,
             field_details_list,
             self.hide_suggestions,
+            self.permission_rule,
         )
         relevant_sub_fields[key] = (field_details_list, collected_fields)
         return collected_fields

@@ -63,7 +63,11 @@ from .replace_variables import replace_variables
 from .type_info import TypeInfo, TypeInfoVisitor
 
 # Coerce a Python value to a GraphQL type, or return Undefined.
-from .coerce_input_value import coerce_input_literal, coerce_input_value
+from .coerce_input_value import (
+    CoercionPermissionRule,
+    coerce_input_literal,
+    coerce_input_value,
+)
 
 # Validate a Python value or a GraphQL literal with a GraphQL type.
 from .validate_input_value import validate_input_literal, validate_input_value
@@ -133,6 +137,7 @@ __all__ = [
     "build_ast_schema",
     "build_client_schema",
     "build_schema",
+    "CoercionPermissionRule",
     "coerce_input_literal",
     "coerce_input_value",
     "concat_ast",

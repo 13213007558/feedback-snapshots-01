@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         GraphQLSchema,
         GraphQLTypeResolver,
     )
+    from ..utilities.coerce_input_value import CoercionPermissionRule
     from .middleware import MiddlewareManager
 
 __all__ = [
@@ -116,6 +117,7 @@ def execute(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a GraphQL operation.
@@ -168,6 +170,11 @@ def execute(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
+        Coercion of types for which the rule returns ``False`` is not permitted
+        and fails without invoking them, which is useful for preview entries
+        that only validate input against the registered types.
     :returns: A completed execution result, or an awaitable resolving to one when
         execution is asynchronous.
 
@@ -303,6 +310,7 @@ def execute(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        permission_rule=permission_rule,
         **custom_context_args,
     )
     if isinstance(result, ExecutionResult):
@@ -338,6 +346,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult | ExperimentalIncrementalExecutionResults]:
     """Execute a GraphQL operation incrementally.
@@ -385,6 +394,8 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
     :returns: A single execution result or incremental execution results.
 
     >>> from graphql import build_schema, parse
@@ -448,6 +459,7 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        permission_rule=permission_rule,
         **custom_context_args,
     )
 
@@ -490,6 +502,7 @@ def execute_sync(
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -518,6 +531,8 @@ def execute_sync(
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
     :returns: The completed execution result for a synchronous operation.
 
     Execute an operation synchronously when all resolvers are synchronous:
@@ -579,6 +594,7 @@ def execute_sync(
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        permission_rule=permission_rule,
     )
 
     # Assert that the execution was synchronous.
@@ -1037,6 +1053,7 @@ def execute_subscription(
         root_type,
         executor.operation,
         executor.hide_suggestions,
+        permission_rule=executor.permission_rule,
     ).grouped_field_set
 
     first_root_field = next(iter(grouped_field_set.items()))
@@ -1064,6 +1081,7 @@ def execute_subscription(
             executor.variable_values,
             field_details_list[0].fragment_variable_values,
             executor.hide_suggestions,
+            executor.permission_rule,
         )
 
         # Call the `subscribe()` resolver or the default resolver to produce an

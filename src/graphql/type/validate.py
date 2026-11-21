@@ -32,6 +32,7 @@ from .definition import (
     GraphQLInputObjectType,
     GraphQLInputType,
     GraphQLInterfaceType,
+    GraphQLLeafType,
     GraphQLObjectType,
     GraphQLUnionType,
     assert_leaf_type,
@@ -56,10 +57,14 @@ from .schema import GraphQLSchema, assert_schema
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
+    from ..utilities.coerce_input_value import CoercionPermissionRule
+
 __all__ = ["assert_valid_schema", "validate_schema"]
 
 
-def validate_schema(schema: GraphQLSchema) -> list[GraphQLError]:
+def validate_schema(
+    schema: GraphQLSchema, permission_rule: CoercionPermissionRule | None = None
+) -> list[GraphQLError]:
     """Validate a GraphQL schema.
 
     Implements the "Type Validation" sub-sections of the specification's "Type System"
@@ -69,6 +74,11 @@ def validate_schema(schema: GraphQLSchema) -> list[GraphQLError]:
     list if no errors were encountered and the Schema is valid.
 
     :param schema: the GraphQL schema to validate
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while validating default values.
+        Defaults of types for which the rule returns ``False`` cannot be
+        validated without invoking forbidden coercion functions and are
+        skipped. Results are only cached when no rule is given.
     :returns: the schema validation errors, or an empty list if the schema is valid
 
     >>> from graphql import build_schema, validate_schema
@@ -84,10 +94,17 @@ def validate_schema(schema: GraphQLSchema) -> list[GraphQLError]:
     assert_schema(schema)
 
     # If this Schema has already been validated, return the previous results.
-    errors = schema._validation_errors  # noqa: SLF001
+    # Results are only cached and reused when no permission rule is given,
+    # since a rule skips the validation of defaults that cannot be checked
+    # without invoking forbidden coercion functions.
+    errors = (
+        schema._validation_errors  # noqa: SLF001
+        if permission_rule is None
+        else None
+    )
     if errors is None:
         # Validate the schema, producing a list of errors.
-        context = SchemaValidationContext(schema)
+        context = SchemaValidationContext(schema, permission_rule)
         context.validate_root_types()
         context.validate_directives()
         context.validate_types()
@@ -95,17 +112,22 @@ def validate_schema(schema: GraphQLSchema) -> list[GraphQLError]:
         # Persist the results of validation before returning to ensure validation does
         # not run multiple times for this schema.
         errors = context.errors
-        schema._validation_errors = errors  # noqa: SLF001
+        if permission_rule is None:
+            schema._validation_errors = errors  # noqa: SLF001
 
     return errors
 
 
-def assert_valid_schema(schema: GraphQLSchema) -> None:
+def assert_valid_schema(
+    schema: GraphQLSchema, permission_rule: CoercionPermissionRule | None = None
+) -> None:
     """Utility function which asserts a schema is valid.
 
     Throws a TypeError if the schema is invalid.
 
     :param schema: the GraphQL schema to validate
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while validating default values.
 
     >>> from graphql import assert_valid_schema, build_schema
     >>> schema = build_schema('''
@@ -115,7 +137,7 @@ def assert_valid_schema(schema: GraphQLSchema) -> None:
     ... ''')
     >>> assert_valid_schema(schema)  # does not raise
     """
-    errors = validate_schema(schema)
+    errors = validate_schema(schema, permission_rule)
     if errors:
         raise TypeError("\n\n".join(error.message for error in errors))
 
@@ -125,10 +147,16 @@ class SchemaValidationContext:
 
     errors: list[GraphQLError]
     schema: GraphQLSchema
+    permission_rule: CoercionPermissionRule | None
 
-    def __init__(self, schema: GraphQLSchema) -> None:
+    def __init__(
+        self,
+        schema: GraphQLSchema,
+        permission_rule: CoercionPermissionRule | None = None,
+    ) -> None:
         self.errors = []
         self.schema = schema
+        self.permission_rule = permission_rule
 
     def report_error(
         self,
@@ -233,11 +261,20 @@ class SchemaValidationContext:
         if not default_input:
             return
 
+        permission_rule = self.permission_rule
+        if permission_rule is not None and not input_coercion_is_permitted(
+            input_value.type, permission_rule
+        ):
+            # The default value cannot be validated without invoking coercion
+            # functions that are not permitted at this entry.
+            return
+
         errors: list[tuple[GraphQLError, list[str | int]]] = []
         validate_default_input(
             default_input,
             input_value.type,
             lambda error, path: errors.append((error, path)),
+            permission_rule=permission_rule,
         )
 
         if not errors:
@@ -638,11 +675,34 @@ class SchemaValidationContext:
             )
 
 
+def input_coercion_is_permitted(
+    input_type: GraphQLInputType, permission_rule: CoercionPermissionRule
+) -> bool:
+    """Check whether coercion of the given input type may be invoked.
+
+    Returns ``False`` when the input type contains a leaf type for which the
+    given permission rule forbids invoking the coercion functions.
+
+    :meta private:
+    """
+    types = [input_type]
+    while types:
+        type_ = types.pop()
+        if is_non_null_type(type_) or is_list_type(type_):
+            types.append(type_.of_type)
+        elif is_input_object_type(type_):
+            types.extend(field.type for field in type_.fields.values())
+        elif not permission_rule(cast("GraphQLLeafType", type_)):
+            return False
+    return True
+
+
 def validate_default_input(
     default_input: GraphQLDefaultInput,
     input_type: GraphQLInputType,
     on_error: Callable[[GraphQLError, list[str | int]], None],
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> None:
     """Validate a default input value against the given input type.
 
@@ -658,9 +718,12 @@ def validate_default_input(
             None,
             None,
             hide_suggestions,
+            permission_rule,
         )
         return
-    validate_input_value(default_input.value, input_type, on_error, hide_suggestions)
+    validate_input_value(
+        default_input.value, input_type, on_error, hide_suggestions, permission_rule
+    )
 
 
 def uncoerce_default_value(value: Any, type_: GraphQLInputType) -> Any:

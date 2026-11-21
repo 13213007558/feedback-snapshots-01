@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from ..language import (
     ListValueNode,
@@ -21,6 +22,7 @@ from ..type import (
     GraphQLArgument,
     GraphQLInputField,
     GraphQLInputType,
+    GraphQLLeafType,
     assert_leaf_type,
     is_input_object_type,
     is_list_type,
@@ -35,10 +37,38 @@ if TYPE_CHECKING:
     from ..language import ConstValueNode
     from ..type import GraphQLDefaultInput
 
-__all__ = ["coerce_default_value", "coerce_input_literal", "coerce_input_value"]
+__all__ = [
+    "CoercionPermissionRule",
+    "coerce_default_value",
+    "coerce_input_literal",
+    "coerce_input_value",
+]
+
+CoercionPermissionRule: TypeAlias = Callable[[GraphQLLeafType], bool]
+"""Rule deciding whether a leaf type's coercion functions may be invoked.
+
+Called with each leaf type (scalar or enum) encountered while coercing input
+values, literals, or default values. Returning ``False`` forbids invoking that
+type's coercion functions, which is useful for preview or validation-only
+entries that must not execute custom scalar coercion (which may have side
+effects like accessing application configuration). When coercion of a type is
+not permitted, the value is treated as invalid and a corresponding error is
+reported. ``None`` (the default) permits coercion of all types.
+"""
 
 
-def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
+def _coercion_is_permitted(
+    leaf_type: GraphQLLeafType, permission_rule: CoercionPermissionRule | None
+) -> bool:
+    """Check whether the coercion functions of the leaf type may be invoked."""
+    return permission_rule is None or permission_rule(leaf_type)
+
+
+def coerce_input_value(
+    input_value: Any,
+    type_: GraphQLInputType,
+    permission_rule: CoercionPermissionRule | None = None,
+) -> Any:
     """Coerce a Python value given a GraphQL Input Type.
 
     Returns ``Undefined`` when the value could not be validly coerced according
@@ -47,6 +77,10 @@ def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
 
     :param input_value: Python value to coerce.
     :param type_: GraphQL input type to coerce the value against.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Coercion of types for which the
+        rule returns ``False`` is not permitted and fails without invoking
+        them.
     :returns: Coerced value, or ``Undefined`` if coercion fails.
 
     Coerce runtime input values, returning ``Undefined`` when coercion fails:
@@ -75,7 +109,7 @@ def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
     if is_non_null_type(type_):
         if input_value is None or input_value is Undefined:
             return Undefined  # Invalid: intentionally return no value.
-        return coerce_input_value(input_value, type_.of_type)
+        return coerce_input_value(input_value, type_.of_type, permission_rule)
 
     if input_value is None or input_value is Undefined:
         return None  # Explicitly return the value null.
@@ -84,14 +118,14 @@ def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
         item_type = type_.of_type
         if not is_iterable(input_value):
             # Lists accept a non-list value as a list of one.
-            coerced_item = coerce_input_value(input_value, item_type)
+            coerced_item = coerce_input_value(input_value, item_type, permission_rule)
             if coerced_item is Undefined:
                 return Undefined  # Invalid: intentionally return no value.
             return [coerced_item]
         coerced_list: list[Any] = []
         append_item = coerced_list.append
         for item_value in input_value:
-            coerced_item = coerce_input_value(item_value, item_type)
+            coerced_item = coerce_input_value(item_value, item_type, permission_rule)
             if coerced_item is Undefined:
                 return Undefined  # Invalid: intentionally return no value.
             append_item(coerced_item)
@@ -115,12 +149,14 @@ def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
             if field_value is Undefined:
                 if is_required_input_field(field):
                     return Undefined  # Invalid: intentionally return no value.
-                coerced_default_value = coerce_default_value(field)
+                coerced_default_value = coerce_default_value(field, permission_rule)
                 if coerced_default_value is not Undefined:
                     # Use out name as name if it exists (extension of GraphQL.js).
                     coerced_dict[field.out_name or field_name] = coerced_default_value
             else:
-                coerced_field = coerce_input_value(field_value, field.type)
+                coerced_field = coerce_input_value(
+                    field_value, field.type, permission_rule
+                )
                 if coerced_field is Undefined:
                     return Undefined  # Invalid: intentionally return no value.
                 coerced_dict[field.out_name or field_name] = coerced_field
@@ -137,6 +173,8 @@ def coerce_input_value(input_value: Any, type_: GraphQLInputType) -> Any:
         return type_.out_type(coerced_dict)
 
     leaf_type = assert_leaf_type(type_)
+    if not _coercion_is_permitted(leaf_type, permission_rule):
+        return Undefined  # Invalid: coercion of this type is not permitted.
     try:
         return leaf_type.coerce_input_value(input_value)
     except Exception:  # noqa: BLE001
@@ -149,6 +187,7 @@ def coerce_input_literal(
     type_: GraphQLInputType,
     variable_values: VariableValues | None = None,
     fragment_variable_values: FragmentVariableValues | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> Any:
     """Produce a coerced Python value given a GraphQL Value AST.
 
@@ -164,6 +203,10 @@ def coerce_input_literal(
         :func:`~graphql.execution.get_variable_values`.
     :param fragment_variable_values: Fragment variable values for the current
         fragment scope.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Coercion of types for which the
+        rule returns ``False`` is not permitted and fails without invoking
+        them.
     :returns: Coerced value, or ``Undefined`` if coercion fails.
 
     Coerce literal input values without variables:
@@ -239,6 +282,7 @@ def coerce_input_literal(
                 item_type,
                 variable_values,
                 fragment_variable_values,
+                permission_rule,
             )
             if item_value is Undefined:
                 return Undefined  # Invalid: intentionally return no value.
@@ -250,6 +294,7 @@ def coerce_input_literal(
                 item_type,
                 variable_values,
                 fragment_variable_values,
+                permission_rule,
             )
             if item_value is Undefined:
                 if (
@@ -286,7 +331,7 @@ def coerce_input_literal(
             ):
                 if is_required_input_field(field):
                     return Undefined  # Invalid: intentionally return no value.
-                coerced_default_value = coerce_default_value(field)
+                coerced_default_value = coerce_default_value(field, permission_rule)
                 if coerced_default_value is not Undefined:
                     # Use out name as name if it exists (extension of GraphQL.js).
                     coerced_dict[field.out_name or field_name] = coerced_default_value
@@ -296,6 +341,7 @@ def coerce_input_literal(
                     field.type,
                     variable_values,
                     fragment_variable_values,
+                    permission_rule,
                 )
                 if field_value is Undefined:
                     return Undefined  # Invalid: intentionally return no value.
@@ -317,6 +363,8 @@ def coerce_input_literal(
         return type_.out_type(coerced_dict)
 
     leaf_type = assert_leaf_type(type_)
+    if not _coercion_is_permitted(leaf_type, permission_rule):
+        return Undefined  # Invalid: coercion of this type is not permitted.
     try:
         if leaf_type.coerce_input_literal is not None:
             # A bare variable was handled above, so only list and object literals
@@ -337,6 +385,7 @@ def coerce_input_literal(
 
 def coerce_default_value(
     input_value: GraphQLArgument | GraphQLInputField | GraphQLVariableSignature,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> Any:
     """Coerce the default value of an argument or input field to a Python value.
 
@@ -346,6 +395,10 @@ def coerce_default_value(
     If the default value is invalid, this will raise an error. Invalid default
     values should be caught during validation, however, so this function assumes
     that the default value is valid.
+
+    When a ``permission_rule`` is given, the memoized coerced value is not
+    reused, so that the rule is always consulted before a leaf type's coercion
+    functions are invoked.
 
     :meta private:
     """
@@ -361,12 +414,22 @@ def coerce_default_value(
             if isinstance(input_value, (GraphQLArgument, GraphQLInputField))
             else default_input
         )
-        coerced_value = memo._memoized_coerced_value  # noqa: SLF001
+        coerced_value = (
+            Undefined
+            if permission_rule is not None
+            else memo._memoized_coerced_value  # noqa: SLF001
+        )
         if coerced_value is Undefined:
             coerced_value = (
-                coerce_input_literal(default_input.literal, input_value.type)
+                coerce_input_literal(
+                    default_input.literal,
+                    input_value.type,
+                    permission_rule=permission_rule,
+                )
                 if default_input.literal is not None
-                else coerce_input_value(default_input.value, input_value.type)
+                else coerce_input_value(
+                    default_input.value, input_value.type, permission_rule
+                )
             )
             if coerced_value is Undefined:
                 found = (
@@ -379,7 +442,8 @@ def coerce_default_value(
                     f" to be valid, found: {found}."
                 )
                 raise TypeError(msg)
-            memo._memoized_coerced_value = coerced_value  # noqa: SLF001
+            if permission_rule is None:
+                memo._memoized_coerced_value = coerced_value  # noqa: SLF001
         return coerced_value
 
     # The deprecated internal default value is used as is.

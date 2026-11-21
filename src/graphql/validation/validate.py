@@ -27,6 +27,7 @@ from .validation_context import SDLValidationContext, ValidationContext
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+    from ..utilities.coerce_input_value import CoercionPermissionRule
     from .rules import ASTValidationRule
 
 __all__ = [
@@ -152,6 +153,7 @@ def validate(
     max_errors: int | None = None,
     hide_suggestions: bool = False,
     allow_empty_selection_sets: bool = True,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> list[GraphQLError]:
     """Implements the "Validation" section of the spec.
 
@@ -186,6 +188,10 @@ def validate(
         than to be non-empty. Pair this with the ``allow_empty_selection_sets``
         parse option. See https://github.com/graphql/graphql-spec/pull/1227.
         Deprecated, since empty selection sets are now always allowed.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while validating input literals.
+        Literals of types for which the rule returns ``False`` are reported as
+        invalid without invoking them.
     :returns: Validation errors, or an empty list when the document is valid.
 
     Validate with the default specified rules:
@@ -214,7 +220,7 @@ def validate(
     Cannot query field 'name' on type 'Query'.
     """
     # If the schema used for validation is invalid, throw an error.
-    assert_valid_schema(schema)
+    assert_valid_schema(schema, permission_rule)
     if max_errors is None:
         max_errors = 100
     if rules is None:
@@ -238,6 +244,7 @@ def validate(
         on_error,
         hide_suggestions,
         allow_empty_selection_sets,
+        permission_rule,
     )
 
     # This uses a specialized visitor which runs multiple visitors in parallel,

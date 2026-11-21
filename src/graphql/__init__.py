@@ -223,6 +223,8 @@ from .utilities import (
     # GraphQL type system.
     TypeInfo,
     TypeInfoVisitor,
+    # Rule deciding whether a leaf type's coercion functions may be invoked.
+    CoercionPermissionRule,
     # Coerce a Python value to a GraphQL type, or return Undefined.
     coerce_input_value,
     # Coerce a GraphQL literal (AST) to a GraphQL type, or return Undefined.
@@ -849,6 +851,7 @@ __all__ = [
     "build_ast_schema",
     "build_client_schema",
     "build_schema",
+    "CoercionPermissionRule",
     "coerce_input_literal",
     "coerce_input_value",
     "concat_ast",

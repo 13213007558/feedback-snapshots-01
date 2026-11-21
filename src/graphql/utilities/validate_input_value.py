@@ -38,6 +38,7 @@ from .replace_variables import replace_variables
 
 if TYPE_CHECKING:
     from ..execution.values import FragmentVariableValues, VariableValues
+    from .coerce_input_value import CoercionPermissionRule
 
 __all__ = ["validate_input_literal", "validate_input_value"]
 
@@ -50,6 +51,7 @@ def validate_input_value(
     type_: GraphQLInputType,
     on_error: OnErrorCB,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> None:
     """Validate that the provided input value is allowed for this type.
 
@@ -59,6 +61,9 @@ def validate_input_value(
     :param type_: GraphQL input type to validate the value against.
     :param on_error: Callback invoked for each validation error and path.
     :param hide_suggestions: Whether suggestion text should be omitted from errors.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Validation of types for which the
+        rule returns ``False`` reports an error without invoking them.
 
     Collect validation errors with their input paths:
 
@@ -101,7 +106,9 @@ def validate_input_value(
     ["Expected value of type 'ReviewInput' not to include unknown field 'rating',
      found: {'rating': 'extra field'}."]
     """
-    validate_input_value_impl(input_value, type_, on_error, hide_suggestions, None)
+    validate_input_value_impl(
+        input_value, type_, on_error, hide_suggestions, permission_rule, None
+    )
 
 
 def validate_input_value_impl(
@@ -109,6 +116,7 @@ def validate_input_value_impl(
     type_: GraphQLInputType,
     on_error: OnErrorCB,
     hide_suggestions: bool,
+    permission_rule: CoercionPermissionRule | None,
     path: Path | None,
 ) -> None:
     if is_non_null_type(type_):
@@ -127,7 +135,12 @@ def validate_input_value_impl(
             )
             return
         validate_input_value_impl(
-            input_value, type_.of_type, on_error, hide_suggestions, path
+            input_value,
+            type_.of_type,
+            on_error,
+            hide_suggestions,
+            permission_rule,
+            path,
         )
         return
 
@@ -139,7 +152,12 @@ def validate_input_value_impl(
         if not is_iterable(input_value):
             # Lists accept a non-list value as a list of one.
             validate_input_value_impl(
-                input_value, item_type, on_error, hide_suggestions, path
+                input_value,
+                item_type,
+                on_error,
+                hide_suggestions,
+                permission_rule,
+                path,
             )
         else:
             for index, item_value in enumerate(input_value):
@@ -148,6 +166,7 @@ def validate_input_value_impl(
                     item_type,
                     on_error,
                     hide_suggestions,
+                    permission_rule,
                     Path(path, index, None),
                 )
     elif is_input_object_type(type_):
@@ -178,6 +197,7 @@ def validate_input_value_impl(
                     field.type,
                     on_error,
                     hide_suggestions,
+                    permission_rule,
                     Path(path, field_name, type_.name),
                 )
 
@@ -221,7 +241,15 @@ def validate_input_value_impl(
                         Path(path, field_name, type_.name),
                     )
     else:
-        assert_leaf_type(type_)
+        leaf_type = assert_leaf_type(type_)
+
+        if permission_rule is not None and not permission_rule(leaf_type):
+            report_invalid_value(
+                on_error,
+                f"Coercion of type '{type_}' is not permitted.",
+                path,
+            )
+            return
 
         result: Any = Undefined
         caught_error: Exception | None = None
@@ -275,6 +303,7 @@ def validate_input_literal(
     variables: VariableValues | None = None,
     fragment_variable_values: FragmentVariableValues | None = None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> None:
     """Validate that the provided input literal is allowed for this type.
 
@@ -291,6 +320,9 @@ def validate_input_literal(
     :param fragment_variable_values: Fragment variable values for the current
         fragment scope.
     :param hide_suggestions: Whether suggestion text should be omitted from errors.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Validation of types for which the
+        rule returns ``False`` reports an error without invoking them.
 
     Validate literal input values and collect literal paths:
 
@@ -349,6 +381,7 @@ def validate_input_literal(
         on_error=on_error,
         variables=variables,
         fragment_variable_values=fragment_variable_values,
+        permission_rule=permission_rule,
     )
     validate_input_literal_impl(context, value_node, type_, hide_suggestions, None)
 
@@ -360,6 +393,7 @@ class ValidationContext(NamedTuple):
     on_error: OnErrorCB
     variables: VariableValues | None
     fragment_variable_values: FragmentVariableValues | None
+    permission_rule: CoercionPermissionRule | None = None
 
 
 def validate_input_literal_impl(
@@ -547,6 +581,16 @@ def validate_input_literal_impl(
                 )
     else:
         leaf_type = assert_leaf_type(type_)
+
+        permission_rule = context.permission_rule
+        if permission_rule is not None and not permission_rule(leaf_type):
+            report_invalid_literal(
+                context.on_error,
+                f"Coercion of type '{type_}' is not permitted.",
+                value_node,
+                path,
+            )
+            return
 
         result: Any = Undefined
         caught_error: Exception | None = None

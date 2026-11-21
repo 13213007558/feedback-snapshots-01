@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         GraphQLOutputType,
         GraphQLSchema,
     )
+    from ..utilities.coerce_input_value import CoercionPermissionRule
     from ..utilities.type_info import FragmentSignature, FragmentSignatureByNameFn
 
 from typing import TypeAlias
@@ -404,6 +405,8 @@ class ValidationContext(ASTValidationContext):
     :param allow_empty_selection_sets: Whether selection sets on composite types may
         be empty (the default). Deprecated, since empty selection sets are now always
         allowed.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while validating input literals.
 
     >>> from graphql import GraphQLError, TypeInfo, build_schema, parse
     >>> from graphql.validation import ValidationContext
@@ -427,6 +430,7 @@ class ValidationContext(ASTValidationContext):
     _fragment_variable_usages: RefMap[list[FragmentDefinitionNode], list[VariableUsage]]
     _hide_suggestions: bool
     _allow_empty_selection_sets: bool
+    _permission_rule: CoercionPermissionRule | None
 
     def __init__(
         self,
@@ -436,6 +440,7 @@ class ValidationContext(ASTValidationContext):
         on_error: Callable[[GraphQLError], None],
         hide_suggestions: bool = False,
         allow_empty_selection_sets: bool = True,
+        permission_rule: CoercionPermissionRule | None = None,
     ) -> None:
         super().__init__(ast, on_error)
         self.schema = schema
@@ -445,11 +450,17 @@ class ValidationContext(ASTValidationContext):
         self._fragment_variable_usages = RefMap()
         self._hide_suggestions = hide_suggestions
         self._allow_empty_selection_sets = allow_empty_selection_sets
+        self._permission_rule = permission_rule
 
     @property
     def hide_suggestions(self) -> bool:
         """Whether validation error suggestions are hidden."""
         return self._hide_suggestions
+
+    @property
+    def permission_rule(self) -> CoercionPermissionRule | None:
+        """Rule consulted before invoking a leaf type's coercion functions."""
+        return self._permission_rule
 
     @property
     def allow_empty_selection_sets(self) -> bool:

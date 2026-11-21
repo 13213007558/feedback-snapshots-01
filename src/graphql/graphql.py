@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from .language import DocumentNode, Source
     from .pyutils import AbortSignal, AwaitableOrValue
+    from .utilities.coerce_input_value import CoercionPermissionRule
     from .validation import ASTValidationRule
 
 __all__ = ["graphql", "graphql_sync"]
@@ -52,6 +53,7 @@ async def graphql(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation asynchronously.
 
@@ -111,6 +113,11 @@ async def graphql(  # noqa: PLR0913, PLR0917
         to limit the memory used by comments in the token linked list.
     :param max_source_length: The maximum length of the source text in code points,
         checked before lexing.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
+        Coercion of types for which the rule returns ``False`` is not permitted
+        and fails without invoking them, which is useful for preview entries
+        that only validate input against the registered types.
     :returns: An execution result or validation errors.
 
     Execute a complete asynchronous request with variables:
@@ -225,6 +232,7 @@ async def graphql(  # noqa: PLR0913, PLR0917
         max_lexical_tokens,
         max_comments,
         max_source_length,
+        permission_rule,
     )
 
     if default_is_awaitable(result):
@@ -256,6 +264,7 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -307,6 +316,8 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
         to limit the memory used by comments in the token linked list.
     :param max_source_length: The maximum length of the source text in code points,
         checked before lexing.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked while coercing input values.
     :returns: Completed execution output, or request errors if parsing or
         validation fails.
 
@@ -376,6 +387,7 @@ def graphql_sync(  # noqa: PLR0913, PLR0917
         max_lexical_tokens,
         max_comments,
         max_source_length,
+        permission_rule,
     )
 
     # Assert that the execution was synchronous.
@@ -413,13 +425,14 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
     max_lexical_tokens: int | None = None,
     max_comments: int | None = None,
     max_source_length: int | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a query, return asynchronously only if necessary.
 
     :meta private:
     """
     # Validate Schema
-    if schema_validation_errors := validate_schema(schema):
+    if schema_validation_errors := validate_schema(schema, permission_rule):
         return ExecutionResult(data=None, errors=schema_validation_errors)
 
     def check_validation_and_execute(
@@ -447,6 +460,7 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
             is_async_iterable,
             hide_suggestions=hide_suggestions,
             abort_signal=abort_signal,
+            **permission_option,
         )
 
     def validate_and_execute(
@@ -454,7 +468,12 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
     ) -> AwaitableOrValue[ExecutionResult]:
         # Validate
         validation_result = harness.validate(
-            schema, document, rules, max_errors, hide_suggestions=hide_suggestions
+            schema,
+            document,
+            rules,
+            max_errors,
+            hide_suggestions=hide_suggestions,
+            **permission_option,
         )
 
         if default_is_awaitable(validation_result):
@@ -473,6 +492,12 @@ def graphql_impl(  # noqa: PLR0913, PLR0917
         return check_validation_and_execute(
             cast("list[GraphQLError]", validation_result), document
         )
+
+    # Pass this option only when set, so that a custom harness with
+    # validate or execute functions that do not know it keeps working.
+    permission_option = (
+        {"permission_rule": permission_rule} if permission_rule is not None else {}
+    )
 
     # Pass these limits only when set, so that a custom harness
     # with a parse function that does not know them keeps working.

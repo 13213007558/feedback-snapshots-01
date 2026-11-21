@@ -134,5 +134,6 @@ class ValuesOfCorrectTypeRule(ValidationRule):
                 None,
                 None,
                 self.context.hide_suggestions,
+                self.context.permission_rule,
             )
         return SKIP  # Don't traverse further.

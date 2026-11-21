@@ -34,6 +34,7 @@ from .values import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ..utilities.coerce_input_value import CoercionPermissionRule
     from .get_variable_signature import GraphQLVariableSignature
 
 __all__ = [
@@ -92,6 +93,7 @@ class CollectFieldsContext(NamedTuple):
     forbidden_directive_instances: list[DirectiveNode]
     forbid_skip_and_include: bool
     on_selection_set: Callable[[SelectionSetNode], None] | None = None
+    permission_rule: CoercionPermissionRule | None = None
 
 
 class CollectedFields(NamedTuple):
@@ -111,6 +113,7 @@ def collect_fields(
     hide_suggestions: bool = False,
     forbid_skip_and_include: bool = False,
     on_selection_set: Callable[[SelectionSetNode], None] | None = None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> CollectedFields:
     """Collect fields.
 
@@ -135,6 +138,7 @@ def collect_fields(
         [],
         forbid_skip_and_include,
         on_selection_set,
+        permission_rule,
     )
 
     visit_selection_sets(
@@ -153,6 +157,7 @@ def collect_subfields(
     return_type: GraphQLObjectType,
     field_details_list: FieldDetailsList,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> CollectedFields:
     """Collect subfields.
 
@@ -175,6 +180,8 @@ def collect_subfields(
         hide_suggestions,
         [],
         False,
+        None,
+        permission_rule,
     )
     sub_grouped_field_set: dict[str, list[FieldDetails]] = defaultdict(list)
     new_defer_usages: list[DeferUsage] = []
@@ -219,6 +226,7 @@ def visit_selection_sets(
         _forbidden_directive_instances,
         _forbid_skip_and_include,
         on_selection_set,
+        permission_rule,
     ) = context
 
     if on_selection_set:
@@ -245,6 +253,7 @@ def visit_selection_sets(
                 fragment_variable_values,
                 selection,
                 defer_usage,
+                permission_rule,
             )
 
             if new_defer_usage is None:
@@ -285,6 +294,7 @@ def visit_selection_sets(
                 fragment_variable_values,
                 selection,
                 defer_usage,
+                permission_rule,
             )
 
             maybe_new_defer_usage = (
@@ -318,6 +328,7 @@ def visit_selection_sets(
                     variable_values,
                     fragment_variable_values,
                     hide_suggestions,
+                    permission_rule,
                 )
 
             visit_selection_sets(
@@ -335,6 +346,7 @@ def get_defer_usage(
     fragment_variable_values: FragmentVariableValues | None,
     node: FragmentSpreadNode | InlineFragmentNode,
     parent_defer_usage: DeferUsage | None,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> DeferUsage | None:
     """Get values of defer directive if active.
 
@@ -360,6 +372,7 @@ def get_defer_usage(
         directive_node,
         variable_values,
         fragment_variable_values,
+        permission_rule=permission_rule,
     )
 
     if defer.get("if") is False:
@@ -401,6 +414,7 @@ def should_include_node(
             variable_values,
             fragment_variable_values,
             context.hide_suggestions,
+            context.permission_rule,
         )
         if skip_directive_node
         else None
@@ -430,6 +444,7 @@ def should_include_node(
             variable_values,
             fragment_variable_values,
             context.hide_suggestions,
+            context.permission_rule,
         )
         if include_directive_node
         else None

@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from ..language import ArgumentNode, FragmentArgumentNode
     from ..type import GraphQLArgument, GraphQLInputType
+    from ..utilities.coerce_input_value import CoercionPermissionRule
 
 __all__ = [
     "FragmentVariableValueSource",
@@ -114,6 +115,7 @@ def get_variable_values(
     inputs: dict[str, Any],
     max_errors: int | None = None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> VariableValuesOrErrors:
     """Get coerced variable values based on provided definitions.
 
@@ -129,6 +131,11 @@ def get_variable_values(
         default). When the limit is exceeded, an additional error is added and
         coercion is aborted.
     :param hide_suggestions: Whether suggestion text should be omitted from errors.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Coercion of types for which the
+        rule returns ``False`` is not permitted and fails without invoking
+        them, which is useful for preview entries that only validate input
+        against the registered types.
     :returns: Coerced variable values with source metadata, or request errors.
 
     Coerce provided variables and apply operation defaults:
@@ -193,7 +200,7 @@ def get_variable_values(
 
     try:
         variable_values = coerce_variable_values(
-            schema, var_def_nodes, inputs, on_error, hide_suggestions
+            schema, var_def_nodes, inputs, on_error, hide_suggestions, permission_rule
         )
         if not errors:
             return variable_values
@@ -245,6 +252,7 @@ def coerce_variable_values(
     inputs: dict[str, Any],
     on_error: Callable[[GraphQLError], None],
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> VariableValues:
     """Coerce the variable values, reporting errors via the given callback.
 
@@ -285,6 +293,7 @@ def coerce_variable_values(
                     var_signature,
                     on_default_value_error,
                     hide_suggestions,
+                    permission_rule,
                 )
                 continue
             if not is_non_null_type(var_type):
@@ -295,7 +304,7 @@ def coerce_variable_values(
 
         if input_is_nested_too_deeply(value, var_type):
             raise RecursionError
-        coerced_value = coerce_input_value(value, var_type)
+        coerced_value = coerce_input_value(value, var_type, permission_rule)
         if coerced_value is not Undefined:
             coerced[var_name] = coerced_value
         else:
@@ -316,7 +325,7 @@ def coerce_variable_values(
                 )
 
             validate_input_value(
-                value, var_type, on_input_value_error, hide_suggestions
+                value, var_type, on_input_value_error, hide_suggestions, permission_rule
             )
 
     return VariableValues(sources, coerced)
@@ -328,13 +337,14 @@ def maybe_use_default_value(
     input_value: GraphQLArgument | GraphQLVariableSignature,
     on_error: Callable[[GraphQLError, list[str | int]], None],
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> None:
     """Use the default value of the given input value definition, if it exists."""
     try:
         # coerce_default_value() assumes validation has already rejected invalid
         # defaults. If validation was skipped, invalid defaults or nested input
         # field defaults can raise here; recover with validation-style errors below.
-        coerced_default_value = coerce_default_value(input_value)
+        coerced_default_value = coerce_default_value(input_value, permission_rule)
         if coerced_default_value is not Undefined:
             coerced_values[name] = coerced_default_value
     except TypeError as error:
@@ -355,7 +365,11 @@ def maybe_use_default_value(
             on_error(default_error, path)
 
         validate_default_input(
-            default_input, input_value.type, on_default_input_error, hide_suggestions
+            default_input,
+            input_value.type,
+            on_default_input_error,
+            hide_suggestions,
+            permission_rule,
         )
 
         if not reported_validation_error:
@@ -370,6 +384,7 @@ def get_fragment_variable_values(
     variable_values: VariableValues,
     fragment_variable_values: FragmentVariableValues | None = None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> FragmentVariableValues:
     """Get coerced variable values for a fragment spread.
 
@@ -399,6 +414,7 @@ def get_fragment_variable_values(
             variable_values,
             fragment_variable_values,
             hide_suggestions,
+            permission_rule,
         )
 
     return FragmentVariableValues(sources, coerced)
@@ -410,6 +426,7 @@ def get_argument_values(
     variable_values: VariableValues | None = None,
     fragment_variable_values: FragmentVariableValues | None = None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> dict[str, Any]:
     """Get coerced argument values based on provided definitions and nodes.
 
@@ -423,6 +440,11 @@ def get_argument_values(
     :param fragment_variable_values: Fragment variable values for the current
         fragment scope.
     :param hide_suggestions: Whether suggestion text should be omitted from errors.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked. Coercion of types for which the
+        rule returns ``False`` is not permitted and fails without invoking
+        them, which is useful for preview entries that only validate input
+        against the registered types.
     :returns: A dict of coerced argument values.
 
     Read literal argument values and defaults:
@@ -478,6 +500,7 @@ def get_argument_values(
             variable_values,
             fragment_variable_values,
             hide_suggestions,
+            permission_rule,
         )
     return coerced_values
 
@@ -508,6 +531,7 @@ def coerce_argument(
     variable_values: VariableValues | None,
     fragment_variable_values: FragmentVariableValues | None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> None:
     """Coerce a single argument value into the given coerced values mapping."""
     arg_type = arg_def.type
@@ -529,6 +553,7 @@ def coerce_argument(
             arg_def,
             _default_value_error_handler(arg_def, arg_name, node),
             hide_suggestions,
+            permission_rule,
         )
         return
 
@@ -554,6 +579,7 @@ def coerce_argument(
                 arg_def,
                 _default_value_error_handler(arg_def, arg_name, node),
                 hide_suggestions,
+                permission_rule,
             )
             return
 
@@ -562,6 +588,7 @@ def coerce_argument(
         arg_type,
         variable_values,
         fragment_variable_values,
+        permission_rule,
     )
     if coerced_value is Undefined:
         # Note: `values_of_correct_type` validation should catch this before
@@ -584,6 +611,7 @@ def coerce_argument(
             variable_values,
             fragment_variable_values,
             hide_suggestions,
+            permission_rule,
         )
         # Unreachable: validate_input_literal always reports an error here.
         msg = "Invalid argument"  # pragma: no cover
@@ -624,6 +652,7 @@ def get_directive_values(
     variable_values: VariableValues | None = None,
     fragment_variable_values: FragmentVariableValues | None = None,
     hide_suggestions: bool = False,
+    permission_rule: CoercionPermissionRule | None = None,
 ) -> dict[str, Any] | None:
     """Get coerced argument values based on provided nodes.
 
@@ -639,6 +668,8 @@ def get_directive_values(
     :param fragment_variable_values: Fragment variable values for the current
         fragment scope.
     :param hide_suggestions: Whether suggestion text should be omitted from errors.
+    :param permission_rule: Optional rule consulted for each leaf type before
+        its coercion functions are invoked.
     :returns: A dict of coerced directive argument values, or None when absent.
 
     Read literal directive arguments from a node:
@@ -679,5 +710,6 @@ def get_directive_values(
                     variable_values,
                     fragment_variable_values,
                     hide_suggestions,
+                    permission_rule,
                 )
     return None
