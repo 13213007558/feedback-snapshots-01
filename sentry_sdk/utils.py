@@ -19,7 +19,10 @@ from functools import partial, partialmethod, wraps
 from numbers import Real
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit, urlunsplit
 
-from sentry_sdk.data_collection import _apply_key_value_collection_filtering
+from sentry_sdk.data_collection import (
+    _apply_key_value_collection_filtering,
+    _stack_frame_variables_behaviour_for_frame,
+)
 
 try:
     # Python 3.11
@@ -638,22 +641,33 @@ def serialize_frame(
             "stack_frame_variables"
         ]
 
-        if isinstance(dc_stack_frame_vars_config, bool):
-            if dc_stack_frame_vars_config:
-                rv["vars"] = serialize(
-                    dict(frame.f_locals), is_vars=True, custom_repr=custom_repr
-                )
-        else:
+        # Resolve the behaviour for this frame's source *before* touching
+        # `frame.f_locals`. Reading locals is cheap, but serializing them is
+        # not: for denied frames we must not evaluate any values (including
+        # running `repr` or `custom_repr` on restricted objects). Skipping the
+        # `f_locals` access itself also avoids triggering lazy/proxy locals.
+        frame_behaviour = _stack_frame_variables_behaviour_for_frame(
+            dc_stack_frame_vars_config,
+            module=module,
+            abs_path=os_abs_path,
+        )
+
+        if frame_behaviour is True:
+            # `stack_frame_variables=True` keeps the historical meaning:
+            # collect everything without applying the sensitive-key denylist.
+            rv["vars"] = serialize(
+                dict(frame.f_locals), is_vars=True, custom_repr=custom_repr
+            )
+        elif isinstance(frame_behaviour, dict):
             local_variables_to_send = _apply_key_value_collection_filtering(
-                items=dict(frame.f_locals),
-                behaviour=dc_stack_frame_vars_config,
+                items=frame.f_locals,
+                behaviour=frame_behaviour,
             )
 
             if local_variables_to_send:
                 serialized_variables = serialize(
                     local_variables_to_send, is_vars=True, custom_repr=custom_repr
                 )
-
                 rv["vars"] = serialized_variables
 
     elif include_local_variables:

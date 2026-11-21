@@ -22,6 +22,7 @@ Resolution precedence (see :func:`_resolve_data_collection`):
   ``DeprecationWarning`` is emitted for ``send_default_pii``.
 """
 
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Union, cast
 from urllib.parse import parse_qs, urlencode
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
         GraphQLCollectionBehaviour,
         HttpHeadersCollectionBehaviour,
         KeyValueCollectionBehaviour,
+        StackFrameVariablesBehaviour,
     )
 
 # ``http_bodies`` defaults to this (collect everything the
@@ -118,7 +120,6 @@ def _apply_key_value_collection_filtering(
     behaviour: "KeyValueCollectionBehaviour",
     substitute: "Any" = SENSITIVE_DATA_SUBSTITUTE,
 ) -> "Dict[str, Any]":
-
     if behaviour["mode"] == "off":
         return {}
 
@@ -207,13 +208,7 @@ def _resolve_explicit(
             )
 
     raw_stack_frame_variables = d.get("stack_frame_variables", True)
-    stack_frame_variables: "Union[bool, KeyValueCollectionBehaviour]"
-
-    stack_frame_variables = (
-        _kvcb_from_value(raw_stack_frame_variables)
-        if isinstance(raw_stack_frame_variables, dict)
-        else bool(raw_stack_frame_variables)
-    )
+    stack_frame_variables = _stack_frame_variables_from_value(raw_stack_frame_variables)
 
     # http_bodies: omitted means "all valid types"; [] is the explicit opt-out.
     http_bodies = d.get("http_bodies")
@@ -254,6 +249,162 @@ def _kvcb_from_value(
     if terms is not None:
         behaviour["terms"] = list(terms)
     return cast("KeyValueCollectionBehaviour", behaviour)
+
+
+def _stack_frame_variable_source_from_value(
+    val: "Any",
+    index: int,
+) -> "dict[str, Any]":
+    """
+    Normalize a single ``stack_frame_variables.sources`` entry.
+
+    A source rule selects frames by ``module`` (a dotted module name or prefix)
+    or by ``path`` (an absolute file path or prefix). Exactly one of the two
+    selectors is required.
+    """
+    prefix = "Invalid `stack_frame_variables.sources[{}]`".format(index)
+
+    if not isinstance(val, dict):
+        raise ValueError("{}: expected a dict.".format(prefix))
+
+    module = val.get("module")
+    path = val.get("path")
+    if (module is None) == (path is None):
+        raise ValueError(
+            "{}: exactly one of `module` or `path` is required.".format(prefix)
+        )
+    if module is not None and (not isinstance(module, str) or not module):
+        raise ValueError("{}: `module` must be a non-empty string.".format(prefix))
+    if path is not None and (not isinstance(path, str) or not path):
+        raise ValueError("{}: `path` must be a non-empty string.".format(prefix))
+
+    rule: "dict[str, Any]" = dict(_kvcb_from_value(val))
+    if module is not None:
+        rule["module"] = module
+    else:
+        rule["path"] = path
+    return rule
+
+
+def _stack_frame_variables_from_value(
+    val: "Any",
+) -> "Union[bool, StackFrameVariablesBehaviour]":
+    """
+    Normalize the ``stack_frame_variables`` option.
+
+    In addition to the global boolean/key-value form, this accepts a
+    ``sources`` list that selects frames by module or path. Rules are evaluated
+    in order and the first match wins.
+
+    Frames that match no rule -- including frames without a module or path --
+    use the fallback behaviour from the top-level ``mode``/``terms``. When
+    ``sources`` is present and no top-level ``mode`` is given, the fallback is
+    ``"off"`` so unknown sources never leak locals by default.
+    """
+    if not isinstance(val, dict):
+        return bool(val)
+
+    sources = val.get("sources")
+    if sources is None:
+        return _kvcb_from_value(val)
+
+    if not isinstance(sources, list):
+        raise ValueError("Invalid `stack_frame_variables.sources`: expected a list.")
+
+    fallback_value: "dict[str, Any]" = {}
+    if "mode" in val:
+        fallback_value["mode"] = val["mode"]
+    else:
+        fallback_value["mode"] = "off"
+    if "terms" in val:
+        fallback_value["terms"] = val["terms"]
+    fallback = _kvcb_from_value(fallback_value)
+
+    rules = [
+        _stack_frame_variable_source_from_value(rule, index)
+        for index, rule in enumerate(sources)
+    ]
+
+    behaviour: "dict[str, Any]" = dict(fallback)
+    behaviour["sources"] = rules
+    return cast("StackFrameVariablesBehaviour", behaviour)
+
+
+def _frame_matches_source_rule(
+    rule: "Mapping[str, Any]",
+    module: "Optional[str]",
+    abs_path: "Optional[str]",
+) -> bool:
+    module_prefix = rule.get("module")
+    if module_prefix is not None:
+        return bool(
+            module
+            and (module == module_prefix or module.startswith(module_prefix + "."))
+        )
+
+    path_prefix = rule.get("path")
+    if path_prefix is not None:
+        if not abs_path:
+            return False
+        if abs_path.startswith(path_prefix):
+            return True
+        try:
+            normalized_path_prefix = os.path.abspath(path_prefix)
+        except Exception:
+            return False
+        return abs_path.startswith(normalized_path_prefix)
+
+    return False
+
+
+def _stack_frame_variables_behaviour_for_frame(
+    behaviour: "Union[bool, StackFrameVariablesBehaviour]",
+    module: "Optional[str]",
+    abs_path: "Optional[str]",
+) -> "Optional[Union[bool, KeyValueCollectionBehaviour]]":
+    """
+    Resolve the effective collection behaviour for one frame.
+
+    Returns:
+
+    * ``None`` -- do not collect local variables for this frame. Callers must
+      not evaluate anything (including ``repr``/``custom_repr``) in that case.
+    * ``True`` -- collect all locals without key filtering (the historical
+      meaning of ``stack_frame_variables=True``).
+    * a key-value behaviour -- collect locals with the given filtering.
+
+    Frames that match no source rule, including frames without a module or
+    absolute path, fall back to the top-level ``mode``/``terms``.
+    """
+    if isinstance(behaviour, bool):
+        return True if behaviour else None
+
+    sources = behaviour.get("sources")
+    if not sources:
+        resolved: "Optional[KeyValueCollectionBehaviour]" = cast(
+            "KeyValueCollectionBehaviour", behaviour
+        )
+    else:
+        resolved = None
+        for rule in sources:
+            if _frame_matches_source_rule(rule, module, abs_path):
+                resolved = cast("KeyValueCollectionBehaviour", rule)
+                break
+
+        if resolved is None:
+            resolved = cast(
+                "KeyValueCollectionBehaviour",
+                {
+                    key: value
+                    for key, value in behaviour.items()
+                    if key in ("mode", "terms")
+                },
+            )
+
+    if resolved.get("mode") == "off":
+        return None
+
+    return resolved
 
 
 def _http_headers_from_value(

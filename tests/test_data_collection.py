@@ -1,10 +1,11 @@
+import sys
 import warnings
 
 import pytest
 
 import sentry_sdk
 from sentry_sdk.data_collection import _ALL_HTTP_BODY_TYPES
-from sentry_sdk.utils import has_data_collection_enabled
+from sentry_sdk.utils import has_data_collection_enabled, serialize_frame
 
 
 def test_kvcb_invalid_mode(sentry_init):
@@ -329,6 +330,64 @@ def test_initialize_client_data_collection(sentry_init, options, expected):
         assert _get(dc, path) == value, f"{path} != {value!r}"
 
 
+def test_initialize_client_stack_frame_variable_sources(sentry_init):
+    dc = _initialize_client_with_config(
+        sentry_init,
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [
+                    {"module": "myapp", "mode": "allowlist", "terms": ["order"]},
+                    {"path": "/srv/internal", "mode": "off"},
+                ]
+            }
+        },
+    )
+
+    assert dc["stack_frame_variables"] == {
+        "mode": "off",
+        "sources": [
+            {"module": "myapp", "mode": "allowlist", "terms": ["order"]},
+            {"path": "/srv/internal", "mode": "off"},
+        ],
+    }
+
+
+def test_initialize_client_stack_frame_variable_sources_with_explicit_fallback(
+    sentry_init,
+):
+    dc = _initialize_client_with_config(
+        sentry_init,
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [{"module": "myapp", "mode": "denylist"}],
+                "mode": "denylist",
+                "terms": ["nickname"],
+            }
+        },
+    )
+
+    assert dc["stack_frame_variables"] == {
+        "mode": "denylist",
+        "terms": ["nickname"],
+        "sources": [{"module": "myapp", "mode": "denylist"}],
+    }
+
+
+def test_initialize_client_stack_frame_variable_sources_default_mode_is_denylist(
+    sentry_init,
+):
+    dc = _initialize_client_with_config(
+        sentry_init,
+        data_collection={
+            "stack_frame_variables": {"sources": [{"module": "myapp"}]}
+        },
+    )
+
+    assert dc["stack_frame_variables"]["sources"] == [
+        {"module": "myapp", "mode": "denylist"}
+    ]
+
+
 def test_initialize_client_data_collection_overrides_send_default_pii_and_warns(
     sentry_init,
 ):
@@ -461,3 +520,361 @@ def test_top_level_takes_precedence_over_experiments(sentry_init):
     assert dc is not None
     assert dc["provided_by_user"] is True
     assert dc["user_info"] is False
+
+
+def _import_module_from_source(tmp_path, module_name, source):
+    """
+    Import a real module from a temp file so frames have genuine source
+    files, module names, and line numbers.
+    """
+    import importlib.util
+    import sys
+    from textwrap import dedent
+
+    path = tmp_path / f"{module_name}.py"
+    path.write_text(dedent(source), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(module_name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module, path
+
+
+def test_stack_frame_variable_source_rules_preserve_chain_and_deny_unlisted_frames(
+    sentry_init, capture_events, tmp_path
+):
+    """
+    Acceptance test for source-based frame collection:
+
+    * the exception chain and both source locations survive,
+    * an approved module keeps bounded local state,
+    * an internal module contributes no locals,
+    * and the restricted object's serialization/``repr``/attribute access
+      never runs.
+    """
+    import sys
+
+    from sentry_sdk.serializer import MAX_DATABAG_BREADTH
+
+    internal_name = "sentry_test_internal_restricted"
+    approved_name = "sentry_test_approved_handler"
+
+    internal_module, internal_path = _import_module_from_source(
+        tmp_path,
+        internal_name,
+        """
+        CALLS = []
+
+        class Restricted:
+            def __repr__(self):
+                CALLS.append("repr")
+                return "<restricted>"
+
+            def __getattr__(self, name):
+                CALLS.append("getattr:" + name)
+                raise AssertionError("restricted attribute access must not run")
+
+        def fail():
+            restricted = Restricted()
+            transcript = {"note": "must not be serialized"}
+            raise ValueError("internal boom")
+        """,
+    )
+
+    approved_module, approved_path = _import_module_from_source(
+        tmp_path,
+        approved_name,
+        f"""
+        import {internal_name}
+
+        def handle():
+            order_id = "order-123"
+            password = "hunter2"
+            safe_state = {{"attempt": 1}}
+            try:
+                {internal_name}.fail()
+            except ValueError as exc:
+                raise RuntimeError("approved wrapper") from exc
+
+        def many_locals():
+            v00 = 0
+            v01 = 1
+            v02 = 2
+            v03 = 3
+            v04 = 4
+            v05 = 5
+            v06 = 6
+            v07 = 7
+            v08 = 8
+            v09 = 9
+            v10 = 10
+            v11 = 11
+            v12 = 12
+            v13 = 13
+            v14 = 14
+            raise RuntimeError("many locals")
+        """,
+    )
+
+    custom_repr_seen = []
+
+    def custom_repr(value):
+        custom_repr_seen.append(type(value).__name__)
+        return None
+
+    sentry_init(
+        custom_repr=custom_repr,
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [
+                    {"module": approved_name, "mode": "denylist"},
+                    {"path": str(internal_path), "mode": "off"},
+                ]
+            }
+        },
+    )
+    events = capture_events()
+
+    try:
+        approved_module.handle()
+    except RuntimeError:
+        sentry_sdk.capture_exception()
+
+    (event,) = events
+    values = event["exception"]["values"]
+
+    assert [value["type"] for value in values] == ["ValueError", "RuntimeError"]
+
+    internal_source = internal_path.read_text(encoding="utf-8").splitlines()
+
+    fail_frame = next(
+        frame
+        for frame in values[0]["stacktrace"]["frames"]
+        if frame["function"] == "fail"
+    )
+    handle_cause_frame = next(
+        frame
+        for frame in values[0]["stacktrace"]["frames"]
+        if frame["function"] == "handle"
+    )
+    handle_wrapper_frame = next(
+        frame
+        for frame in values[1]["stacktrace"]["frames"]
+        if frame["function"] == "handle"
+    )
+
+    # Source locations are intact for both modules.
+    assert fail_frame["module"] == internal_name
+    assert fail_frame["abs_path"] == str(internal_path)
+    assert fail_frame["filename"] == f"{internal_name}.py"
+    assert fail_frame["lineno"] == next(
+        lineno
+        for lineno, line in enumerate(internal_source, 1)
+        if 'raise ValueError("internal boom")' in line
+    )
+    assert fail_frame["context_line"].strip() == 'raise ValueError("internal boom")'
+
+    assert handle_cause_frame["module"] == approved_name
+    assert handle_cause_frame["abs_path"] == str(approved_path)
+    assert handle_cause_frame["context_line"].strip() == f"{internal_name}.fail()"
+    assert handle_wrapper_frame["context_line"].strip() == (
+        'raise RuntimeError("approved wrapper") from exc'
+    )
+
+    # The internal frame is denied entirely.
+    assert "vars" not in fail_frame
+    assert internal_module.CALLS == []
+    assert "Restricted" not in custom_repr_seen
+
+    # The approved frame keeps locals, with sensitive keys filtered.
+    assert handle_cause_frame["vars"]["order_id"] == "'order-123'"
+    assert handle_cause_frame["vars"]["password"] == "'[Filtered]'"
+    assert "safe_state" in handle_cause_frame["vars"]
+
+    # Any frame without an explicit source silently falls back to "off".
+    for value in values:
+        for frame in value["stacktrace"]["frames"]:
+            if frame["module"] != approved_name:
+                assert "vars" not in frame
+
+    # Approved frames are still bounded.
+    del events[:]
+    try:
+        approved_module.many_locals()
+    except RuntimeError:
+        sentry_sdk.capture_exception()
+
+    (event,) = events
+    many_frame = next(
+        frame
+        for frame in event["exception"]["values"][0]["stacktrace"]["frames"]
+        if frame["function"] == "many_locals"
+    )
+    assert len(many_frame["vars"]) == MAX_DATABAG_BREADTH
+
+    for module_name in (internal_name, approved_name):
+        sys.modules.pop(module_name, None)
+
+
+def test_stack_frame_variable_source_rules_unmatched_frames_default_to_off(
+    sentry_init,
+):
+    sentry_init(
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [{"module": "some.approved.module", "mode": "denylist"}]
+            }
+        }
+    )
+
+    def frame_with_locals():
+        safe_value = "ok"  # noqa: F841
+        password = "hunter2"  # noqa: F841
+        return sys._getframe()
+
+    result = serialize_frame(frame_with_locals())
+
+    assert "vars" not in result
+
+
+def test_stack_frame_variable_source_rules_explicit_fallback_for_unmatched_frames(
+    sentry_init,
+):
+    sentry_init(
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [{"module": "some.approved.module", "mode": "denylist"}],
+                "mode": "allowlist",
+                "terms": ["safe_value"],
+            }
+        }
+    )
+
+    def frame_with_locals():
+        safe_value = "ok"  # noqa: F841
+        password = "hunter2"  # noqa: F841
+        return sys._getframe()
+
+    result = serialize_frame(frame_with_locals())
+
+    assert result["vars"] == {
+        "safe_value": "'ok'",
+        "password": "'[Filtered]'",
+    }
+
+
+def test_stack_frame_variable_source_rules_frames_without_source_use_fallback(
+    sentry_init,
+):
+    """
+    A frame with no ``__name__`` in its globals (and therefore no module) has
+    no identifiable source; it must use the fallback behaviour as well.
+    """
+    sentry_init(
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [{"module": "some.approved.module", "mode": "denylist"}],
+                "mode": "allowlist",
+                "terms": ["safe_value"],
+            }
+        }
+    )
+
+    namespace = {}
+    exec(
+        compile(
+            "import sys\n"
+            "safe_value = 'ok'\n"
+            "password = 'hunter2'\n"
+            "frame = sys._getframe()\n",
+            "<synthetic-no-module>",
+            "exec",
+        ),
+        namespace,
+    )
+
+    result = serialize_frame(namespace["frame"], include_local_variables=False)
+
+    assert result["module"] is None
+    assert result["vars"]["safe_value"] == "'ok'"
+    assert result["vars"]["password"] == "'[Filtered]'"
+
+
+def test_stack_frame_variable_source_rules_path_prefix(
+    sentry_init, capture_events, tmp_path
+):
+    internal_name = "sentry_test_path_internal"
+    approved_name = "sentry_test_path_approved"
+
+    _internal_module, internal_path = _import_module_from_source(
+        tmp_path,
+        internal_name,
+        """
+        def fail():
+            secret = "internal"
+            raise ValueError("internal path boom")
+        """,
+    )
+    approved_module, approved_path = _import_module_from_source(
+        tmp_path,
+        approved_name,
+        f"""
+        import {internal_name}
+
+        def handle():
+            order_id = "order-456"
+            try:
+                {internal_name}.fail()
+            except ValueError as exc:
+                raise RuntimeError("wrapped") from exc
+        """,
+    )
+
+    sentry_init(
+        data_collection={
+            "stack_frame_variables": {
+                "sources": [
+                    {"path": str(approved_path), "mode": "denylist"},
+                    {"path": str(internal_path), "mode": "off"},
+                ]
+            }
+        }
+    )
+    events = capture_events()
+    try:
+        approved_module.handle()
+    except RuntimeError:
+        sentry_sdk.capture_exception()
+
+    (event,) = events
+    frames = event["exception"]["values"][0]["stacktrace"]["frames"]
+    approved_frame = next(frame for frame in frames if frame["function"] == "handle")
+    internal_frame = next(frame for frame in frames if frame["function"] == "fail")
+
+    assert approved_frame["vars"]["order_id"] == "'order-456'"
+    assert "vars" not in internal_frame
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        pytest.param("not-a-list", id="sources_not_a_list"),
+        pytest.param(["not-a-dict"], id="source_not_a_dict"),
+        pytest.param([{}], id="source_missing_selector"),
+        pytest.param(
+            [{"module": "a", "path": "/tmp/a.py"}],
+            id="source_both_selectors",
+        ),
+        pytest.param([{"module": ""}], id="source_empty_module"),
+        pytest.param([{"path": ""}], id="source_empty_path"),
+        pytest.param([{"module": 123}], id="source_non_string_module"),
+        pytest.param([{"path": 123}], id="source_non_string_path"),
+    ],
+)
+def test_stack_frame_variable_source_rules_invalid_config(sentry_init, sources):
+    with pytest.raises(ValueError, match="stack_frame_variables"):
+        sentry_init(data_collection={"stack_frame_variables": {"sources": sources}})

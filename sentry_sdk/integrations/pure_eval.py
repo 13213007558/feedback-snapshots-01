@@ -3,15 +3,28 @@ from typing import TYPE_CHECKING
 
 import sentry_sdk
 from sentry_sdk import serializer
+from sentry_sdk.data_collection import (
+    _apply_key_value_collection_filtering,
+    _stack_frame_variables_behaviour_for_frame,
+)
 from sentry_sdk.integrations import DidNotEnable, Integration
 from sentry_sdk.scope import add_global_event_processor
-from sentry_sdk.utils import iter_stacks, walk_exception_chain
+from sentry_sdk.utils import (
+    has_data_collection_enabled,
+    iter_stacks,
+    walk_exception_chain,
+)
 
 if TYPE_CHECKING:
     from types import FrameType
-    from typing import Any, Dict, List, Optional, Tuple
+    from typing import Any, Dict, List, Optional, Tuple, Union
 
-    from sentry_sdk._types import Event, Hint
+    from sentry_sdk._types import (
+        Event,
+        Hint,
+        KeyValueCollectionBehaviour,
+        StackFrameVariablesBehaviour,
+    )
 
 try:
     from executing import Source
@@ -60,6 +73,14 @@ class PureEvalIntegration(Integration):
             if values is None:
                 return event
 
+            client_options = sentry_sdk.get_client().options
+            data_collection_enabled = has_data_collection_enabled(client_options)
+            stack_frame_variables = (
+                client_options["data_collection"]["stack_frame_variables"]
+                if data_collection_enabled
+                else None
+            )
+
             for exception, (_exc_type, _exc_value, exc_tb) in zip(
                 reversed(values), walk_exception_chain(exc_info)
             ):
@@ -73,13 +94,42 @@ class PureEvalIntegration(Integration):
                     continue
 
                 for sentry_frame, tb in zip(sentry_frames, tbs):
-                    sentry_frame["vars"] = (
-                        pure_eval_frame(tb.tb_frame) or sentry_frame["vars"]
+                    tb_frame = tb.tb_frame
+                    behaviour: "Optional[Union[bool, KeyValueCollectionBehaviour]]" = (
+                        None
                     )
+
+                    if data_collection_enabled:
+                        try:
+                            abs_path = tb_frame.f_code.co_filename
+                        except Exception:
+                            abs_path = None
+                        try:
+                            module = tb_frame.f_globals["__name__"]
+                        except Exception:
+                            module = None
+
+                        behaviour = _stack_frame_variables_behaviour_for_frame(
+                            stack_frame_variables,
+                            module=module,
+                            abs_path=abs_path,
+                        )
+                        if behaviour is None:
+                            # This frame's source is not allowed to contribute
+                            # local variables. Do not evaluate anything.
+                            sentry_frame.pop("vars", None)
+                            continue
+
+                    evaluated = pure_eval_frame(tb_frame, behaviour=behaviour)
+                    if evaluated:
+                        sentry_frame["vars"] = evaluated
             return event
 
 
-def pure_eval_frame(frame: "FrameType") -> "Dict[str, Any]":
+def pure_eval_frame(
+    frame: "FrameType",
+    behaviour: "Optional[Union[bool, StackFrameVariablesBehaviour]]" = None,
+) -> "Dict[str, Any]":
     source = Source.for_frame(frame)
     if not source.tree:
         return {}
@@ -131,4 +181,10 @@ def pure_eval_frame(frame: "FrameType") -> "Dict[str, Any]":
         atok.get_text(nodes[0]): value
         for nodes, value in expressions[: serializer.MAX_DATABAG_BREADTH]
     }
+
+    if isinstance(behaviour, dict):
+        vars = _apply_key_value_collection_filtering(items=vars, behaviour=behaviour)
+        if not vars:
+            return {}
+
     return serializer.serialize(vars, is_vars=True)

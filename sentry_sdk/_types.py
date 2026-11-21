@@ -156,6 +156,14 @@ if TYPE_CHECKING:
         mode: 'Literal["off", "denylist", "allowlist"]'
         terms: "NotRequired[List[str]]"
 
+    class StackFrameVariableSourceRule(TypedDict):
+        module: str
+        mode: 'Literal["off", "denylist", "allowlist"]'
+        terms: "NotRequired[List[str]]"
+
+    class StackFrameVariablesBehaviour(KeyValueCollectionBehaviour):
+        sources: "NotRequired[List[StackFrameVariableSourceRule]]"
+
     class GenAICollectionUserOptions(TypedDict, total=False):
         inputs: bool
         outputs: bool
@@ -188,7 +196,7 @@ if TYPE_CHECKING:
         gen_ai: "GenAICollectionUserOptions"
         database_query_data: bool
         queues: bool
-        stack_frame_variables: "Union[bool, KeyValueCollectionBehaviour]"
+        stack_frame_variables: "Union[bool, StackFrameVariablesBehaviour]"
         frame_context_lines: int
 
     class DataCollection(TypedDict):
@@ -202,7 +210,7 @@ if TYPE_CHECKING:
         gen_ai: "GenAICollectionBehaviour"
         database_query_data: bool
         queues: bool
-        stack_frame_variables: "Union[bool, KeyValueCollectionBehaviour]"
+        stack_frame_variables: "Union[bool, StackFrameVariablesBehaviour]"
         frame_context_lines: int
 
     # "critical" is an alias of "fatal" recognized by Relay

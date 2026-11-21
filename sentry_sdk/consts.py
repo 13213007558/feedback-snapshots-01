@@ -1562,11 +1562,28 @@ class ClientConstructor:
             HTTP headers/bodies, query params, generative AI inputs/outputs, stack frame variables,
             source context). If `send_default_pii` is also set, `data_collection` takes precedence.
 
+            ``stack_frame_variables`` can also take per-source rules, so only approved modules
+            contribute frame locals. Rules are evaluated in order; the first matching
+            ``module`` (dotted name or prefix) or ``path`` (file path prefix) wins. Frames that
+            match no rule -- including frames with no module or path -- use the top-level
+            ``mode``/``terms``. When ``sources`` is present without a top-level ``mode``, that
+            fallback defaults to ``"off"``, so unknown sources never leak locals. Denied frames
+            are not serialized at all, so ``repr``/``custom_repr`` never run for them.
+
             Example::
 
                 sentry_sdk.init(
                     dsn="...",
-                    data_collection={"user_info": False, "http_bodies": []},
+                    data_collection={
+                        "user_info": False,
+                        "http_bodies": [],
+                        "stack_frame_variables": {
+                            "sources": [
+                                {"module": "myapp", "mode": "denylist"},
+                                {"path": "/srv/internal", "mode": "off"},
+                            ]
+                        },
+                    },
                 )
 
             See https://docs.sentry.io/platforms/python/configuration/options/#data_collection for more details.
