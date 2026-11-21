@@ -8,6 +8,14 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `pip-audit` now verifies that the HTTP cache directory is owned by the
+  current user, is not writable by other users, and is writable by the
+  current user before caching anything. If the directory is rejected (or its
+  ownership/permissions change while an audit is running), the audit
+  continues without a cache instead of falling back to a different directory.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
