@@ -91,6 +91,13 @@ from .collect_fields import (
 )
 from .get_variable_signature import get_variable_signature
 from .middleware import MiddlewareManager
+from .mutation_audit import (
+    MutationAuditEntry,
+    MutationAuditor,
+    MutationAuditStatus,
+    MutationAuthorizationError,
+    MutationAuthorizer,
+)
 from .types import ExecutionResult, ExperimentalIncrementalExecutionResults
 from .values import (
     VariableValues,
@@ -112,6 +119,11 @@ __all__ = [
     "ExecutionHooks",
     "Executor",
     "Middleware",
+    "MutationAuditEntry",
+    "MutationAuditStatus",
+    "MutationAuditor",
+    "MutationAuthorizationError",
+    "MutationAuthorizer",
     "StreamUsage",
     "default_field_resolver",
     "default_type_resolver",
@@ -256,6 +268,11 @@ class Executor(Generic[TContext]):
         errors.
     :param abort_signal: External signal that may abort execution.
     :param hooks: Execution hooks supplied by the caller.
+    :param mutation_authorizer: Optional authorizer consulted for each executed mutation
+        root field before its resolver runs; a denied field is not executed and is
+        reported as a field error.
+    :param mutation_auditor: Optional auditor receiving :class:`MutationAuditEntry`
+        records for the mutation root fields that are actually executed.
 
     >>> from graphql import Executor, build_schema, parse
     >>> schema = build_schema('type Query { greeting: String }')
@@ -320,6 +337,12 @@ class Executor(Generic[TContext]):
     hooks: ExecutionHooks | None
     """Execution hooks supplied by the caller."""
 
+    mutation_authorizer: MutationAuthorizer | None
+    """Authorizer consulted for each executed mutation root field."""
+
+    mutation_auditor: MutationAuditor | None
+    """Auditor receiving entries for each executed mutation root field."""
+
     async_helpers: GraphQLResolveInfoHelpers
     """Helpers for asynchronous work that are passed to the resolvers."""
 
@@ -370,6 +393,8 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        mutation_authorizer: MutationAuthorizer | None = None,
+        mutation_auditor: MutationAuditor | None = None,
     ) -> None:
         self.schema = schema
         self.fragment_definitions = fragment_definitions
@@ -385,6 +410,8 @@ class Executor(Generic[TContext]):
         self.hide_suggestions = hide_suggestions
         self.abort_signal = abort_signal
         self.hooks = hooks
+        self.mutation_authorizer = mutation_authorizer
+        self.mutation_auditor = mutation_auditor
         self.async_helpers = GraphQLResolveInfoHelpers(
             gather=self.gather_async_work, track=self.track_async_work
         )
@@ -427,6 +454,8 @@ class Executor(Generic[TContext]):
         hide_suggestions: bool = False,
         abort_signal: AbortSignal | None = None,
         hooks: ExecutionHooks | None = None,
+        mutation_authorizer: MutationAuthorizer | None = None,
+        mutation_auditor: MutationAuditor | None = None,
         **custom_args: Any,
     ) -> list[GraphQLError] | Executor:
         """Build an executor.
@@ -466,6 +495,11 @@ class Executor(Generic[TContext]):
             request errors.
         :param abort_signal: AbortSignal used to cancel execution.
         :param hooks: Execution hooks invoked during this operation.
+        :param mutation_authorizer: Optional authorizer consulted for each executed
+        mutation root field before its resolver runs; a denied field is not executed
+        and is reported as a field error.
+        :param mutation_auditor: Optional auditor receiving :class:`MutationAuditEntry`
+        records for the mutation root fields that are actually executed.
         :returns: The executor for the validated execution arguments, or a list of
             validation errors.
 
@@ -596,6 +630,8 @@ class Executor(Generic[TContext]):
             hide_suggestions=hide_suggestions,
             abort_signal=abort_signal,
             hooks=hooks,
+            mutation_authorizer=mutation_authorizer,
+            mutation_auditor=mutation_auditor,
             **custom_args,
         )
 
@@ -789,6 +825,13 @@ class Executor(Generic[TContext]):
 
         :meta private:
         """
+        if (
+            self.operation.operation == OperationType.MUTATION
+            and (self.mutation_auditor is not None or self.mutation_authorizer)
+        ):
+            return self.execute_audited_mutation_fields(
+                root_type, root_value, grouped_field_set, position_context
+            )
         return (self.execute_fields_serially if serially else self.execute_fields)(
             root_type,
             root_value,
@@ -796,6 +839,120 @@ class Executor(Generic[TContext]):
             grouped_field_set,
             position_context,
         )
+
+    def execute_audited_mutation_fields(
+        self,
+        root_type: GraphQLObjectType,
+        root_value: Any,
+        grouped_field_set: GroupedFieldSet,
+        position_context: TContext | None,
+    ) -> AwaitableOrValue[dict[str, Any]]:
+        """Execute mutation root fields serially with authorization and audit.
+
+        Mutation root fields are always executed serially. When an authorizer
+        is configured, it is consulted per field before the resolver runs.
+        When an auditor is configured, every executed field is audited with
+        its actual schema field name, independent of the (possibly customized)
+        client operation name. Fields that are merely parsed or validated
+        never reach this method and therefore are not audited.
+
+        :meta private:
+        """
+        is_awaitable = self.is_awaitable
+        abort_signal = self.abort_signal
+
+        def reducer(
+            results: dict[str, Any],
+            field_item: tuple[str, FieldDetailsList],
+        ) -> AwaitableOrValue[dict[str, Any]]:
+            response_name, field_details_list = field_item
+            field_path = Path(None, response_name, root_type.name)
+            if abort_signal is not None and abort_signal.aborted:
+                # Reject the whole operation rather than serially completing the
+                # remaining fields with located abort errors.
+                raise self.abort_error()
+            result = self.execute_audited_mutation_field(
+                root_type,
+                root_value,
+                field_details_list,
+                field_path,
+                position_context,
+            )
+            if result is Undefined:
+                return results
+            if is_awaitable(result):
+
+                async def set_result() -> dict[str, Any]:
+                    results[response_name] = await result
+                    return results
+
+                return set_result()
+
+            results[response_name] = result
+            return results
+
+        return async_reduce(reducer, grouped_field_set.items(), {})
+
+    def execute_audited_mutation_field(
+        self,
+        root_type: GraphQLObjectType,
+        source: Any,
+        field_details_list: FieldDetailsList,
+        path: Path,
+        position_context: TContext | None,
+    ) -> AwaitableOrValue[Any] | UndefinedType:
+        """Authorize, execute and audit a single mutation root field.
+
+        :meta private:
+        """
+        field_name = field_details_list[0].node.name.value
+        field_def = self.schema.get_field(root_type, field_name)
+        audit = self.mutation_auditor
+        if not field_def:
+            # Undefined fields are not executed, so they are not audited.
+            return Undefined
+
+        field_nodes = to_nodes(field_details_list)
+        info = self.build_resolve_info(field_def, field_nodes, root_type, path)
+
+        authorizer = self.mutation_authorizer
+        if authorizer is not None and not authorizer(info):
+            if audit is not None:
+                audit(MutationAuditEntry(field_name, MutationAuditStatus.DENIED))
+            self.handle_field_error(
+                MutationAuthorizationError(field_name),
+                field_def.type,
+                field_details_list,
+                path,
+            )
+            return None
+
+        if audit is not None:
+            audit(MutationAuditEntry(field_name, MutationAuditStatus.AUTHORIZED))
+        result = self.execute_field(
+            root_type,
+            source,
+            field_details_list,
+            path,
+            position_context,
+        )
+
+        if audit is None:
+            return result
+
+        def record_success(value: Any) -> Any:
+            audit(MutationAuditEntry(field_name, MutationAuditStatus.SUCCESS))
+            return value
+
+        if self.is_awaitable(result):
+
+            async def await_result() -> Any:
+                completed = await result
+                return record_success(completed)
+
+            return await_result()
+
+        return record_success(result)
 
     def build_response(
         self, data: dict[str, Any] | None

@@ -25,6 +25,16 @@ Execution
 
 .. autoclass:: AsyncWorkFinishedInfo
 
+.. autoclass:: MutationAuditEntry
+
+.. autoclass:: MutationAuditStatus
+
+.. autoclass:: MutationAuditor
+
+.. autoclass:: MutationAuthorizer
+
+.. autoclass:: MutationAuthorizationError
+
 .. autoexception:: AbortedGraphQLExecutionError
 
 .. autoclass:: ExecutionResult

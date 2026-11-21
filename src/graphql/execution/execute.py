@@ -36,6 +36,7 @@ from .executor import (
 )
 from .executor_throwing_on_incremental import ExecutorThrowingOnIncremental
 from .incremental.incremental_executor import IncrementalExecutor
+from .mutation_audit import MutationAuditor, MutationAuthorizer
 from .types import ExecutionResult, ExperimentalIncrementalExecutionResults
 from .values import get_argument_values
 
@@ -116,6 +117,8 @@ def execute(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    mutation_authorizer: MutationAuthorizer | None = None,
+    mutation_auditor: MutationAuditor | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult]:
     """Execute a GraphQL operation.
@@ -168,6 +171,11 @@ def execute(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param mutation_authorizer: Optional authorizer consulted for each executed mutation
+        root field before its resolver runs; a denied field is not executed and is
+        reported as a field error.
+    :param mutation_auditor: Optional auditor receiving :class:`MutationAuditEntry`
+        records for the mutation root fields that are actually executed.
     :returns: A completed execution result, or an awaitable resolving to one when
         execution is asynchronous.
 
@@ -303,6 +311,8 @@ def execute(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        mutation_authorizer=mutation_authorizer,
+        mutation_auditor=mutation_auditor,
         **custom_context_args,
     )
     if isinstance(result, ExecutionResult):
@@ -338,6 +348,8 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    mutation_authorizer: MutationAuthorizer | None = None,
+    mutation_auditor: MutationAuditor | None = None,
     **custom_context_args: Any,
 ) -> AwaitableOrValue[ExecutionResult | ExperimentalIncrementalExecutionResults]:
     """Execute a GraphQL operation incrementally.
@@ -385,6 +397,11 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param mutation_authorizer: Optional authorizer consulted for each executed mutation
+        root field before its resolver runs; a denied field is not executed and is
+        reported as a field error.
+    :param mutation_auditor: Optional auditor receiving :class:`MutationAuditEntry`
+        records for the mutation root fields that are actually executed.
     :returns: A single execution result or incremental execution results.
 
     >>> from graphql import build_schema, parse
@@ -448,6 +465,8 @@ def experimental_execute_incrementally(  # noqa: PLR0913, PLR0917
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        mutation_authorizer=mutation_authorizer,
+        mutation_auditor=mutation_auditor,
         **custom_context_args,
     )
 
@@ -490,6 +509,8 @@ def execute_sync(
     hide_suggestions: bool = False,
     abort_signal: AbortSignal | None = None,
     hooks: ExecutionHooks | None = None,
+    mutation_authorizer: MutationAuthorizer | None = None,
+    mutation_auditor: MutationAuditor | None = None,
 ) -> ExecutionResult:
     """Execute a GraphQL operation synchronously.
 
@@ -518,6 +539,11 @@ def execute_sync(
         errors.
     :param abort_signal: The abort signal used to cancel execution.
     :param hooks: Execution hooks invoked during this operation.
+    :param mutation_authorizer: Optional authorizer consulted for each executed mutation
+        root field before its resolver runs; a denied field is not executed and is
+        reported as a field error.
+    :param mutation_auditor: Optional auditor receiving :class:`MutationAuditEntry`
+        records for the mutation root fields that are actually executed.
     :returns: The completed execution result for a synchronous operation.
 
     Execute an operation synchronously when all resolvers are synchronous:
@@ -579,6 +605,8 @@ def execute_sync(
         hide_suggestions=hide_suggestions,
         abort_signal=abort_signal,
         hooks=hooks,
+        mutation_authorizer=mutation_authorizer,
+        mutation_auditor=mutation_auditor,
     )
 
     # Assert that the execution was synchronous.

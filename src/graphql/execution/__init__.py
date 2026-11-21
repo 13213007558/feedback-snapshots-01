@@ -25,6 +25,14 @@ from .types import (
     SubsequentIncrementalExecutionResult,
 )
 from .middleware import MiddlewareManager
+from .mutation_audit import (
+    MUTATION_AUTHORIZATION_ERROR_MESSAGE,
+    MutationAuditEntry,
+    MutationAuditStatus,
+    MutationAuditor,
+    MutationAuthorizationError,
+    MutationAuthorizer,
+)
 from .values import (
     get_argument_values,
     get_directive_values,
@@ -70,6 +78,12 @@ __all__ = [
     "InitialIncrementalExecutionResult",
     "Middleware",
     "MiddlewareManager",
+    "MUTATION_AUTHORIZATION_ERROR_MESSAGE",
+    "MutationAuditEntry",
+    "MutationAuditStatus",
+    "MutationAuditor",
+    "MutationAuthorizationError",
+    "MutationAuthorizer",
     "PendingResult",
     "RootSelectionSetExecutor",
     "SubsequentIncrementalExecutionResult",
