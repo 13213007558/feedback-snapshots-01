@@ -23,6 +23,7 @@ class HTTPAuth:
         self.get_password_callback = None
         self.get_user_roles_callback = None
         self.auth_error_callback = None
+        self.auth_audit_callback = None
 
         def default_get_password(username):
             return None
@@ -101,6 +102,44 @@ class HTTPAuth:
             return res
         self.auth_error_callback = decorated
         return decorated
+
+    def auth_audit(self, f):
+        """Decorator for a callback function that will be called by the
+        framework to report the outcome of the authorization process, so
+        that the application can collect an audit trail. The callback
+        receives two arguments: the authentication scheme and the result
+        of the authorization, which is one of ``authenticated`` (the
+        client credentials were verified), ``role_denied`` (the client
+        credentials were verified, but the user does not have the role
+        required by the route) or ``success`` (the view function executed
+        and returned). Example::
+
+            @auth.auth_audit
+            def auth_audit(scheme, result):
+                audit_log.record(scheme=scheme, result=result,
+                                 correlation_id=g.get('correlation_id'))
+
+        To avoid leaking sensitive information, the framework does not
+        pass user or credential details to this callback. Applications
+        that need to attach a correlation id or other request context to
+        their audit records can obtain it from ``flask.g`` or the
+        request, as shown above.
+
+        The return value of the callback is ignored, and any exception it
+        raises is suppressed, so registering this callback never changes
+        the responses sent by the application.
+        """
+        self.auth_audit_callback = f
+        return f
+
+    def _record_audit(self, result):
+        if self.auth_audit_callback is not None:
+            try:
+                self.ensure_sync(self.auth_audit_callback)(
+                    self.scheme, result)
+            except Exception:  # pragma: no cover
+                # auditing must never affect the application's response
+                pass
 
     def authenticate_header(self):
         return f'{self.scheme} realm="{self.realm}"'
@@ -222,9 +261,13 @@ class HTTPAuth:
                     user = self.authenticate(auth, password)
                     if user in (False, None):
                         status = 401
-                    elif not self.authorize(role, user, auth):
-                        status = 403
+                    else:
+                        self._record_audit('authenticated')
+                        if not self.authorize(role, user, auth):
+                            status = 403
                     if not optional and status:
+                        if status == 403:
+                            self._record_audit('role_denied')
                         try:
                             return self.auth_error_callback(status)
                         except TypeError:
@@ -232,7 +275,9 @@ class HTTPAuth:
 
                     g.flask_httpauth_user = user if user is not True \
                         else auth.username if auth else None
-                return self.ensure_sync(f)(*args, **kwargs)
+                response = self.ensure_sync(f)(*args, **kwargs)
+                self._record_audit('success')
+                return response
             return decorated
 
         if f:

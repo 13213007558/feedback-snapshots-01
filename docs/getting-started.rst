@@ -193,6 +193,20 @@ In the most advanced usage, users can be filtered by having multiple roles::
     def admins_only():
         return "Hello {}, you are a user or a moderator/contributor!".format(auth.current_user())
 
+Auditing
+--------
+
+Applications that need to keep an audit trail of authorization outcomes can register an ``auth_audit`` callback::
+
+    @auth.auth_audit
+    def auth_audit(scheme, result):
+        audit_log.record(scheme=scheme, result=result,
+                         correlation_id=g.get('correlation_id'))
+
+The callback is invoked with the authentication scheme and a result, which is one of ``authenticated`` (the client credentials were verified), ``role_denied`` (the credentials were verified, but the user does not have the role required by the route) or ``success`` (the view function executed and returned). To avoid leaking sensitive information, the framework does not pass user or credential details to this callback; any request context the application wants to attach to its audit records, such as a correlation id, can be read from ``flask.g`` or the request.
+
+Auditing is completely passive: the return value of the callback is ignored and any exception it raises is suppressed, so the responses sent by the application are the same whether this callback is registered or not.
+
 Deployment Considerations
 -------------------------
 
