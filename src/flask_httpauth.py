@@ -7,11 +7,82 @@ routes.
 """
 import hmac
 from base64 import b64decode
+from dataclasses import dataclass, replace
+from enum import Enum
 from functools import wraps
 from hashlib import md5
 from random import Random, SystemRandom
 from flask import request, make_response, session, g, Response, current_app
 from werkzeug.datastructures import Authorization
+
+
+class AuthStatus(str, Enum):
+    """Classification of an authentication attempt.
+
+    ``OK`` means the credentials were accepted. ``REJECTED`` means the
+    credentials were invalid or the account does not exist. ``DISABLED``
+    means the account exists but is not allowed to authenticate.
+    ``UNAVAILABLE`` means the identity store could not be reached, so the
+    credentials could not be checked.
+    """
+    OK = 'ok'
+    REJECTED = 'rejected'
+    DISABLED = 'disabled'
+    UNAVAILABLE = 'unavailable'
+
+
+@dataclass(frozen=True)
+class AuthResult:
+    """Structured return value for a verification callback.
+
+    Verification callbacks may return one of these objects to communicate
+    more than a simple success or failure to the framework. Returning a user
+    object, ``True``, ``False`` or ``None`` continues to work as before.
+
+    The ``user`` attribute is only used when the status is
+    :attr:`AuthStatus.OK`. The ``username`` attribute is filled in by the
+    framework and is intended for audit callbacks.
+    """
+    status: AuthStatus
+    user: object = None
+    username: object = None
+
+    def __post_init__(self):
+        if not isinstance(self.status, AuthStatus):
+            try:
+                object.__setattr__(self, 'status', AuthStatus(self.status))
+            except ValueError:
+                raise ValueError(
+                    f'{self.status!r} is not a valid AuthStatus')
+
+    @classmethod
+    def ok(cls, user=None):
+        """Build a successful result, optionally associated with a user."""
+        return cls(AuthStatus.OK, user=user)
+
+    @classmethod
+    def rejected(cls):
+        """Build a result for invalid credentials or an unknown account."""
+        return cls(AuthStatus.REJECTED)
+
+    @classmethod
+    def disabled(cls):
+        """Build a result for an account that is not allowed to log in."""
+        return cls(AuthStatus.DISABLED)
+
+    @classmethod
+    def unavailable(cls):
+        """Build a result for a temporarily unreachable identity store."""
+        return cls(AuthStatus.UNAVAILABLE)
+
+
+_AUTH_STATUS_CODES = {
+    # A disabled account is reported exactly like invalid credentials so that
+    # the response cannot be used to discover which accounts exist.
+    AuthStatus.REJECTED: 401,
+    AuthStatus.DISABLED: 401,
+    AuthStatus.UNAVAILABLE: 503,
+}
 
 
 class HTTPAuth:
@@ -23,11 +94,14 @@ class HTTPAuth:
         self.get_password_callback = None
         self.get_user_roles_callback = None
         self.auth_error_callback = None
+        self.auth_audit_callback = None
 
         def default_get_password(username):
             return None
 
         def default_auth_error(status):
+            if status == 503:
+                return "Service Unavailable", status
             return "Unauthorized Access", status
 
         self.get_password(default_get_password)
@@ -96,11 +170,40 @@ class HTTPAuth:
             if check_status_code and res.status_code == 200:
                 # if user didn't set status code, use 401
                 res.status_code = 401
-            if 'WWW-Authenticate' not in res.headers.keys():
+            if res.status_code != 503 and \
+                    'WWW-Authenticate' not in res.headers.keys():
+                # A 503 indicates an unavailable identity store, so a
+                # challenge would wrongly ask the client to retry credentials
                 res.headers['WWW-Authenticate'] = self.authenticate_header()
             return res
         self.auth_error_callback = decorated
         return decorated
+
+    def auth_audit(self, f):
+        """Decorator for a function that records the outcome of each
+        authentication attempt. The callback receives an :class:`AuthResult`
+        whose ``status`` is one of :class:`AuthStatus`, and whose ``username``
+        attribute contains the username sent by the client (if any). Its
+        return value is ignored. Example::
+
+            @auth.auth_audit
+            def auth_audit(result):
+                audit_log.record(result.username, result.status.value)
+        """
+        self.auth_audit_callback = f
+        return f
+
+    def _audit(self, result):
+        if self.auth_audit_callback is not None:
+            self.ensure_sync(self.auth_audit_callback)(result)
+
+    @staticmethod
+    def _to_result(value, username):
+        if isinstance(value, AuthResult):
+            return replace(value, username=username)
+        if value in (False, None):
+            return AuthResult(AuthStatus.REJECTED, username=username)
+        return AuthResult(AuthStatus.OK, user=value, username=username)
 
     def authenticate_header(self):
         return f'{self.scheme} realm="{self.realm}"'
@@ -218,11 +321,20 @@ class HTTPAuth:
                 if request.method != 'OPTIONS':  # pragma: no cover
                     password = self.get_auth_password(auth)
 
-                    status = None
-                    user = self.authenticate(auth, password)
-                    if user in (False, None):
-                        status = 401
-                    elif not self.authorize(role, user, auth):
+                    username = auth.username if auth else None
+                    result = self._to_result(
+                        self.authenticate(auth, password), username)
+                    self._audit(result)
+                    g.flask_httpauth_result = result
+                    user = result.user if result.status == AuthStatus.OK \
+                        else None
+                    if user is None and result.status == AuthStatus.OK:
+                        # AuthResult.ok() without a user object behaves like
+                        # a callback that returned True
+                        user = True
+                    status = _AUTH_STATUS_CODES.get(result.status)
+                    if not status and result.status == AuthStatus.OK and \
+                            not self.authorize(role, user, auth):
                         status = 403
                     if not optional and status:
                         try:
@@ -231,13 +343,22 @@ class HTTPAuth:
                             return self.auth_error_callback()
 
                     g.flask_httpauth_user = user if user is not True \
-                        else auth.username if auth else None
+                        else username
                 return self.ensure_sync(f)(*args, **kwargs)
             return decorated
 
         if f:
             return login_required_internal(f)
         return login_required_internal
+
+    def auth_result(self):
+        """The :class:`AuthResult` produced for the current request, or
+        ``None`` if no authentication was attempted. Unlike
+        :meth:`current_user`, this is also available for failed attempts, so
+        views and error handlers can tell the failure reasons apart.
+        """
+        if hasattr(g, 'flask_httpauth_result'):
+            return g.flask_httpauth_result
 
     def username(self):
         """*Deprecated* A view function that is protected with this class can
@@ -338,6 +459,24 @@ class HTTPBasicAuth(HTTPAuth):
         function can indicate that the user is anonymous by writing a state
         variable to ``flask.g`` or by checking if ``auth.current_user()`` is
         ``None``.
+
+        As an alternative to returning a user object, ``True``, ``False`` or
+        ``None``, the callback can return an :class:`AuthResult` to distinguish
+        invalid credentials (401), a disabled account (also 401, so it cannot
+        be told apart from invalid credentials) and a temporary failure of the
+        identity store (503). Example::
+
+            @auth.verify_password
+            def verify_password(username, password):
+                try:
+                    user = directory.authenticate(username, password)
+                except DirectoryUnavailable:
+                    return AuthResult.unavailable()
+                if user is None:
+                    return AuthResult.rejected()
+                if user.disabled:
+                    return AuthResult.disabled()
+                return AuthResult.ok(user)
 
         Note that when a ``verify_password`` callback is provided the
         ``get_password`` and ``hash_password`` callbacks are not used.

@@ -41,6 +41,58 @@ The following example application uses HTTP Basic authentication to protect rout
 
 The function decorated with the ``verify_password`` decorator receives the username and password sent by the client. If the credentials belong to a user, then the function should return the user object. If the credentials are invalid the function can return ``None`` or ``False``. The user object can then be queried from the ``current_user()`` method of the authentication instance.
 
+Structured authentication results
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Callbacks that talk to an external identity store often need to tell apart
+several failure modes. Instead of ``None`` or ``False``, a
+``verify_password`` callback can return an ``AuthResult``::
+
+    from flask_httpauth import AuthResult
+
+    @auth.verify_password
+    def verify_password(username, password):
+        try:
+            employee = directory.lookup(username)
+        except DirectoryUnavailable:
+            return AuthResult.unavailable()
+        if employee is None or not employee.check_password(password):
+            return AuthResult.rejected()
+        if employee.disabled:
+            return AuthResult.disabled()
+        return AuthResult.ok(employee)
+
+The framework maps each status to an HTTP response and never lets a
+``DISABLED`` account be distinguished from a ``REJECTED`` one by the client:
+
+==========================  ========================================  ====
+Status                      Meaning                                   HTTP
+==========================  ========================================  ====
+``AuthStatus.OK``           Credentials accepted.                     200
+``AuthStatus.REJECTED``     Invalid credentials or unknown account.   401
+``AuthStatus.DISABLED``     Account exists but may not authenticate.  401
+``AuthStatus.UNAVAILABLE``  Identity store cannot be reached.         503
+==========================  ========================================  ====
+
+``REJECTED`` and ``DISABLED`` produce identical bodies and
+``WWW-Authenticate`` headers. ``UNAVAILABLE`` does not include a
+``WWW-Authenticate`` header, as retrying the same credentials would not
+help. Returning a user object, ``True``, ``False`` or ``None`` keeps
+working exactly as before.
+
+To record the outcome of every attempt, register an audit callback. It is
+called once per attempt with the resulting ``AuthResult``, including the
+username that was sent by the client::
+
+    @auth.auth_audit
+    def auth_audit(result):
+        audit_log.record(result.username, result.status.value)
+
+Views and error handlers can inspect the result through
+``auth.auth_result()``. When ``login_required(role=...)`` is used, a valid
+user lacking the required role is reported as 403, as before, and is not
+reported as ``DISABLED``.
+
 Digest authentication example
 -----------------------------
 

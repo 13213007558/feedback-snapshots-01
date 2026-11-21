@@ -1,6 +1,12 @@
 API Documentation
 -----------------
 
+.. autoclass:: flask_httpauth.AuthResult
+  :members:
+
+.. autoclass:: flask_httpauth.AuthStatus
+  :members:
+
 .. autoclass:: flask_httpauth.HTTPBasicAuth
   :members:
   :inherited-members:

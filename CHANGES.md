@@ -1,5 +1,14 @@
 # Flask-HTTPAuth change log
 
+**Unreleased**
+
+- Add optional structured results for verification callbacks, distinguishing
+  rejected credentials (401), disabled accounts (401, indistinguishable from
+  rejection) and an unavailable identity store (503). Existing callbacks that
+  return a user object, ``True``, ``False`` or ``None`` keep working.
+- Add an ``auth_audit`` callback and ``auth_result()`` accessor to record and
+  inspect the outcome classification of each authentication attempt.
+
 **Release 4.8.1** - 2026-03-28
 
 - Do not accept empty or missing tokens ([commit](https://github.com/miguelgrinberg/flask-httpauth/commit/b15ffe9e50e110d7174ccd944f642079e1dcf9ee))
