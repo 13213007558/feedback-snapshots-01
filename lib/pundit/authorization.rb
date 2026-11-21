@@ -94,6 +94,66 @@ module Pundit
       pundit.authorize(record, query: query, policy_class: policy_class)
     end
 
+    # Combined authorization of several records (e.g. a ticket and the
+    # organization resource it borrows) against one permission.
+    #
+    # Every record is checked and an {Pundit::AuthorizationResult} is returned.
+    # The actual processing must only run when the result is successful:
+    #
+    # @example
+    #   result = authorize_all([@ticket, [:organization, @resource]])
+    #   if result.success?
+    #     @ticket.approve!(@resource)
+    #   else
+    #     head :forbidden
+    #   end
+    #
+    # The result identifies the failing business object by index and class name
+    # without carrying the records themselves, so it is safe to surface in a
+    # response or the logs. A missing policy raises {Pundit::NotDefinedError}.
+    #
+    # @param records [Array<Object, Array>] the records to check; each may be a
+    #   namespaced array such as `[:admin, post]`
+    # @param query [Symbol, String] the predicate method to check. Defaults to
+    #   the Rails controller action name when omitted
+    # @param policy_class [Class] the policy class to force for every record
+    # @raise [Pundit::NotDefinedError] if a policy cannot be found
+    # @return [Pundit::AuthorizationResult] the combined outcome of all checks
+    # @see Pundit::Context#authorize_all
+    # @see #authorize_all!
+    # @since v2.6.0
+    def authorize_all(records, query = nil, policy_class: nil)
+      query ||= "#{action_name}?"
+
+      @_pundit_policy_authorized = true
+
+      pundit.authorize_all(records, query: query, policy_class: policy_class)
+    end
+
+    # Bang variant of {#authorize_all} that raises
+    # {Pundit::AuthorizationFailedError} when any check is denied, so the
+    # processing code after it only runs when every record passed.
+    #
+    # @example
+    #   authorize_all!([@ticket, [:organization, @resource]])
+    #   @ticket.approve!(@resource)
+    #
+    # @param records [Array<Object, Array>] see {#authorize_all}
+    # @param query [Symbol, String] see {#authorize_all}
+    # @param policy_class [Class] see {#authorize_all}
+    # @raise [Pundit::AuthorizationFailedError] if any check is denied
+    # @raise [Pundit::NotDefinedError] if a policy cannot be found
+    # @return [Pundit::AuthorizationResult] the successful combined outcome
+    # @see Pundit::Context#authorize_all!
+    # @since v2.6.0
+    def authorize_all!(records, query = nil, policy_class: nil)
+      query ||= "#{action_name}?"
+
+      @_pundit_policy_authorized = true
+
+      pundit.authorize_all!(records, query: query, policy_class: policy_class)
+    end
+
     # Allow this action not to perform authorization.
     #
     # @see https://github.com/varvet/pundit#ensuring-policies-and-scopes-are-used

@@ -72,6 +72,70 @@ module Pundit
       record
     end
 
+    # Performs a combined authorization of several records against one query.
+    #
+    # Every record is checked and the method always returns an
+    # {AuthorizationResult}, it never raises on a denied check. Processing of
+    # the business action should only continue when {AuthorizationResult#success?}
+    # is true. A missing policy still raises {NotDefinedError}, since that is a
+    # programmer error rather than an authorization decision.
+    #
+    # The returned result identifies which business object failed (by index and
+    # class name) without holding the records or policies themselves, so it can
+    # be rendered or logged without exposing object details.
+    #
+    # @example
+    #   result = pundit.authorize_all([ticket, [:organization, resource]], query: :approve?)
+    #   raise Pundit::AuthorizationFailedError, result unless result.success?
+    #
+    # @param possibly_namespaced_records [Array<Object, Array>] the records to
+    #   check; each may be a namespaced array as accepted by {#authorize}
+    # @param query [Symbol, String] the predicate method to check on every policy
+    # @param policy_class [Class, nil] a policy class to force for every record
+    # @raise [NotDefinedError] if a policy for one of the records cannot be found
+    # @raise [InvalidConstructorError] if a policy constructor is called incorrectly
+    # @return [AuthorizationResult] the combined outcome of all checks
+    # @see #authorize_all!
+    # @since v2.6.0
+    def authorize_all(possibly_namespaced_records, query:, policy_class: nil)
+      checks = possibly_namespaced_records.each_with_index.map do |possibly_namespaced_record, index|
+        record = pundit_model(possibly_namespaced_record)
+        policy = if policy_class
+          policy_class.new(user, record)
+        else
+          policy!(possibly_namespaced_record)
+        end
+
+        {
+          index: index,
+          query: query.to_sym,
+          record_class: record_identifier(record),
+          policy_class: policy.class.name || policy.class.to_s,
+          allowed: !!policy.public_send(query)
+        }
+      end
+
+      AuthorizationResult.new(checks)
+    end
+
+    # Bang variant of {#authorize_all} that raises instead of returning a failed
+    # result.
+    #
+    # @param possibly_namespaced_records [Array<Object, Array>] see {#authorize_all}
+    # @param query [Symbol, String] see {#authorize_all}
+    # @param policy_class [Class, nil] see {#authorize_all}
+    # @raise [AuthorizationFailedError] if any check is denied
+    # @raise [NotDefinedError] if a policy for one of the records cannot be found
+    # @return [AuthorizationResult] the successful combined outcome
+    # @see #authorize_all
+    # @since v2.6.0
+    def authorize_all!(possibly_namespaced_records, query:, policy_class: nil)
+      result = authorize_all(possibly_namespaced_records, query: query, policy_class: policy_class)
+      raise AuthorizationFailedError, result unless result.success?
+
+      result
+    end
+
     # Retrieves the policy for the given record.
     #
     # @see https://github.com/varvet/pundit#policies
@@ -185,6 +249,22 @@ module Pundit
     # @since v2.3.2
     def pundit_model(record)
       record.is_a?(Array) ? record.last : record
+    end
+
+    # Stable, non-sensitive identifier for a record.
+    #
+    # Uses the class name for regular objects and the symbol name for headless
+    # policies, so result metadata never embeds record instances or their
+    # attributes.
+    #
+    # @api private
+    # @since v2.6.0
+    def record_identifier(record)
+      case record
+      when Symbol then record.to_s
+      when Class then record.name || record.to_s
+      else record.class.name || record.class.to_s
+      end
     end
   end
 end

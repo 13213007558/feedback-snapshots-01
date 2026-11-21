@@ -6,6 +6,7 @@ require "pundit/version"
 require "pundit/error"
 require "pundit/policy_finder"
 require "pundit/context"
+require "pundit/authorization_result"
 require "pundit/authorization"
 require "pundit/helper"
 require "pundit/cache_store"
@@ -51,6 +52,32 @@ module Pundit
       end
 
       context.authorize(record, query: query, policy_class: policy_class)
+    end
+
+    # @see Pundit::Context#authorize_all
+    # @since v2.6.0
+    def authorize_all(user, records, query, policy_class: nil, cache: nil)
+      context = if cache
+        policy_cache = CacheStore::LegacyStore.new(cache)
+        Context.new(user: user, policy_cache: policy_cache)
+      else
+        Context.new(user: user)
+      end
+
+      context.authorize_all(records, query: query, policy_class: policy_class)
+    end
+
+    # @see Pundit::Context#authorize_all!
+    # @since v2.6.0
+    def authorize_all!(user, records, query, policy_class: nil, cache: nil)
+      context = if cache
+        policy_cache = CacheStore::LegacyStore.new(cache)
+        Context.new(user: user, policy_cache: policy_cache)
+      else
+        Context.new(user: user)
+      end
+
+      context.authorize_all!(records, query: query, policy_class: policy_class)
     end
 
     # @see Pundit::Context#policy_scope

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+### Added
+- Add combined authorization helpers `Pundit::Authorization#authorize_all` / `#authorize_all!` (plus `Pundit.authorize_all` and `Pundit::Context#authorize_all`) which check several records, including namespaced ones, against one query. The non-bang form returns a `Pundit::AuthorizationResult` that reports the index and class name of every denied object without carrying the records themselves, and the bang form raises `Pundit::AuthorizationFailedError`. A missing policy still raises `Pundit::NotDefinedError`.
 - Add support for `params.expect` using `expected_parameters` and `expected_parameters_for`. [#855](https://github.com/varvet/pundit/pull/855)
 
 ### Deprecated

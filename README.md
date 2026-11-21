@@ -666,6 +666,69 @@ class Admin::PostController < AdminController
 end
 ```
 
+## Combined authorization
+
+Sometimes a single action touches more than one business object. Approving a
+ticket, for example, also borrows an organization resource, and the action may
+only proceed when the user is allowed to do both. `authorize_all` checks
+several records against one query and only reports success when *every* policy
+passes. Each record may be a plain record or a namespaced array, just like with
+`authorize`:
+
+```ruby
+def approve
+  @ticket = Ticket.find(params[:id])
+  @resource = Resource.find(params[:resource_id])
+
+  result = authorize_all([@ticket, [:organization, @resource]], :approve?)
+
+  if result.success?
+    @ticket.approve!(@resource)
+    redirect_to @ticket
+  else
+    # result.index tells you which business object was rejected.
+    head :forbidden
+  end
+end
+```
+
+`authorize_all` returns a `Pundit::AuthorizationResult`. It never raises on a
+denied check; instead it records the outcome of every check. The result only
+holds identifying metadata — the zero-based index, the query, and the class
+names of the record and policy — never the records or their attributes, so it
+is safe to log or render without exposing object details:
+
+```ruby
+result.success?          # => true only when every check passed
+result.failure?          # => inverse of success?
+result.index             # => index of the first denied check, or nil
+result.denied_indexes    # => indexes of every denied check
+result.first_denied      # => metadata of the first denied check
+result.checks            # => metadata of every check, in order
+```
+
+If you prefer exception-driven flow, use the bang variant. It raises
+`Pundit::AuthorizationFailedError` as soon as any check is denied, so the code
+after it only runs when all resources passed. The error likewise identifies the
+denied object by index without holding the record:
+
+```ruby
+def approve
+  @ticket = Ticket.find(params[:id])
+  @resource = Resource.find(params[:resource_id])
+
+  authorize_all!([@ticket, [:organization, @resource]], :approve?)
+  @ticket.approve!(@resource) # only reached when both checks passed
+end
+```
+
+As with `authorize`, the query defaults to the controller action name and a
+single `policy_class:` can be forced for every record. A policy that cannot be
+found is a programmer error and raises `Pundit::NotDefinedError` rather than
+being reported as a denied check. The same helpers are available on
+`Pundit::Context` (`pundit.authorize_all`) and as module functions
+(`Pundit.authorize_all(user, records, query)`).
+
 ## Additional context
 
 Pundit strongly encourages you to model your application in such a way that the
