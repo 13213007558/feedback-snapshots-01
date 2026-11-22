@@ -32,10 +32,27 @@ from unittest.mock import patch
 
 from opensearchpy.connection import Connection
 from opensearchpy.connection_pool import DummyConnectionPool
-from opensearchpy.exceptions import ConnectionError, TransportError
+from opensearchpy.exceptions import ConnectionError, SerializationError, TransportError
+from opensearchpy.serializer import Serializer
 from opensearchpy.transport import Transport, get_host_info
 
 from .test_cases import TestCase
+
+
+class PluginFormatSerializer(Serializer):
+    """Custom response format only registered for internal plugin requests."""
+
+    mimetype = "application/vnd.opensearch.plugin+json"
+
+    def __init__(self) -> None:
+        self.load_calls = 0
+
+    def loads(self, s: Any) -> Any:
+        self.load_calls += 1
+        return {"plugin_only": True, "raw": s}
+
+    def dumps(self, data: Any) -> Any:
+        return str(data)
 
 
 class DummyConnection(Connection):
@@ -431,3 +448,104 @@ class TestTransport(TestCase):
             t.connection_pool.connection_opts[0][1],
             {"host": "somehost.tld", "port": 123},
         )
+
+
+class TestAllowedResponseMimetypes(TestCase):
+    plugin_mimetype = PluginFormatSerializer.mimetype
+    json_payload = '{"answer":42}'
+    plugin_payload = "plugin-payload"
+
+    def _transport(self, headers: Any, data: Any) -> Any:
+        self.plugin_serializer = PluginFormatSerializer()
+        return Transport(
+            [{"data": data, "headers": headers}],
+            connection_class=DummyConnection,
+            serializers={self.plugin_mimetype: self.plugin_serializer},
+        )
+
+    def test_json_response_still_decoded_without_custom_decoder(self) -> None:
+        t = self._transport(
+            {"content-type": "application/json"}, self.json_payload
+        )
+
+        response = t.perform_request(
+            "GET", "/public-search", allowed_mimetypes=("application/json",)
+        )
+
+        self.assertEqual({"answer": 42}, response)
+        self.assertEqual(0, self.plugin_serializer.load_calls)
+
+    def test_plugin_format_decoded_only_when_allowed_by_request(self) -> None:
+        t = self._transport(
+            {"content-type": self.plugin_mimetype}, self.plugin_payload
+        )
+
+        response = t.perform_request(
+            "GET",
+            "/_plugins/internal",
+            allowed_mimetypes=("application/json", self.plugin_mimetype),
+        )
+
+        self.assertEqual(
+            {"plugin_only": True, "raw": self.plugin_payload}, response
+        )
+        self.assertEqual(1, self.plugin_serializer.load_calls)
+
+    def test_public_request_rejects_plugin_format_without_decoding(self) -> None:
+        t = self._transport(
+            {"content-type": self.plugin_mimetype}, self.plugin_payload
+        )
+
+        with self.assertRaises(SerializationError):
+            t.perform_request(
+                "GET", "/public-search", allowed_mimetypes=("application/json",)
+            )
+
+        self.assertEqual(0, self.plugin_serializer.load_calls)
+
+    def test_response_without_content_type_uses_default_mimetype(self) -> None:
+        t = self._transport({}, self.json_payload)
+
+        response = t.perform_request(
+            "GET", "/public-search", allowed_mimetypes=("application/json",)
+        )
+
+        self.assertEqual({"answer": 42}, response)
+        self.assertEqual(0, self.plugin_serializer.load_calls)
+
+    def test_missing_content_type_rejected_when_default_is_not_allowed(self) -> None:
+        t = self._transport({}, self.json_payload)
+
+        with self.assertRaises(SerializationError):
+            t.perform_request(
+                "GET",
+                "/_plugins/internal",
+                allowed_mimetypes=(self.plugin_mimetype,),
+            )
+
+        self.assertEqual(0, self.plugin_serializer.load_calls)
+
+    def test_omitting_allowed_mimetypes_keeps_legacy_behavior(self) -> None:
+        t = self._transport(
+            {"content-type": self.plugin_mimetype}, self.plugin_payload
+        )
+
+        response = t.perform_request("GET", "/legacy")
+
+        self.assertEqual(
+            {"plugin_only": True, "raw": self.plugin_payload}, response
+        )
+        self.assertEqual(1, self.plugin_serializer.load_calls)
+
+    def test_charset_suffix_is_stripped_before_allowlist_check(self) -> None:
+        t = self._transport(
+            {"content-type": "application/json; charset=utf-8"},
+            self.json_payload,
+        )
+
+        response = t.perform_request(
+            "GET", "/public-search", allowed_mimetypes=("application/json",)
+        )
+
+        self.assertEqual({"answer": 42}, response)
+        self.assertEqual(0, self.plugin_serializer.load_calls)

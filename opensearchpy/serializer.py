@@ -25,7 +25,7 @@
 #  under the License.
 
 
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 try:
     import simplejson as json
@@ -180,24 +180,41 @@ class Deserializer:
                 f"Cannot find default serializer ({default_mimetype})"
             )
         self.serializers = serializers
+        self.default_mimetype = default_mimetype
 
-    def loads(self, s: str, mimetype: Optional[str] = None) -> Any:
-        if not mimetype:
-            deserializer = self.default
+    def loads(
+        self,
+        s: str,
+        mimetype: Optional[str] = None,
+        allowed_mimetypes: Optional[Collection[str]] = None,
+    ) -> Any:
+        # Treat 'application/vnd.elasticsearch+json'
+        # as application/json for compatibility.
+        if mimetype == "application/vnd.elasticsearch+json":
+            mimetype = "application/json"
+
+        # split out charset, fall back to the default mimetype when the
+        # response does not declare a content type
+        if mimetype:
+            mimetype = mimetype.partition(";")[0]
         else:
-            # Treat 'application/vnd.elasticsearch+json'
-            # as application/json for compatibility.
-            if mimetype == "application/vnd.elasticsearch+json":
-                mimetype = "application/json"
+            mimetype = self.default_mimetype
 
-            # split out charset
-            mimetype, _, _ = mimetype.partition(";")
-            try:
-                deserializer = self.serializers[mimetype]
-            except KeyError:
-                raise SerializationError(
-                    f"Unknown mimetype, unable to deserialize: {mimetype}"
-                )
+        # Only use the decoders that the interface behind this request
+        # explicitly allows, so a custom format registered for internal
+        # plugins cannot be selected through an ordinary public request.
+        if allowed_mimetypes is not None and mimetype not in allowed_mimetypes:
+            raise SerializationError(
+                f"Mimetype '{mimetype}' is not an allowed response format "
+                f"for this request: {tuple(allowed_mimetypes)}"
+            )
+
+        try:
+            deserializer = self.serializers[mimetype]
+        except KeyError:
+            raise SerializationError(
+                f"Unknown mimetype, unable to deserialize: {mimetype}"
+            )
 
         return deserializer.loads(s)
 

@@ -227,6 +227,50 @@ class TestDeserializer(TestCase):
     def test_raises_serialization_error_on_unknown_mimetype(self) -> None:
         self.assertRaises(SerializationError, self.de.loads, "{}", "text/html")
 
+    def test_allowed_mimetypes_gates_custom_deserializer(self) -> None:
+        custom = TextSerializer()
+        custom.mimetype = "application/vnd.opensearch.plugin+json"
+        de = Deserializer(
+            {
+                "application/json": JSONSerializer(),
+                custom.mimetype: custom,
+            }
+        )
+
+        # an allowlist matching the response still uses its deserializer
+        self.assertEqual(
+            '{"a":1}',
+            de.loads(
+                '{"a":1}',
+                custom.mimetype,
+                allowed_mimetypes=("application/json", custom.mimetype),
+            ),
+        )
+
+        # a format not allowed for this request is rejected, even though
+        # a deserializer for it is registered on the shared client
+        self.assertRaises(
+            SerializationError,
+            de.loads,
+            '{"a":1}',
+            custom.mimetype,
+            allowed_mimetypes=("application/json",),
+        )
+
+        # the default mimetype applies when the response has no content type
+        self.assertEqual(
+            {"a": 1}, de.loads('{"a":1}', allowed_mimetypes=("application/json",))
+        )
+        self.assertRaises(
+            SerializationError,
+            de.loads,
+            '{"a":1}',
+            allowed_mimetypes=(custom.mimetype,),
+        )
+
+        # omitting the allowlist preserves the legacy behavior
+        self.assertEqual('{"a":1}', de.loads('{"a":1}', custom.mimetype))
+
     def test_raises_improperly_configured_when_default_mimetype_cannot_be_deserialized(
         self,
     ) -> None:

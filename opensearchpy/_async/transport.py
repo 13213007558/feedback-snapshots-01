@@ -355,6 +355,7 @@ class AsyncTransport(Transport):
         timeout: Optional[Union[int, float]] = None,
         ignore: Collection[int] = (),
         headers: Optional[Mapping[str, str]] = None,
+        allowed_mimetypes: Optional[Collection[str]] = None,
     ) -> Any:
         """
         Perform the actual request. Retrieve a connection from the connection
@@ -377,6 +378,11 @@ class AsyncTransport(Transport):
             passed to the connection
         :arg timeout: timeout of the request. If it is not presented as argument
             will be extracted from `params`
+        :arg allowed_mimetypes: collection of response mimetypes the interface
+            behind this request is allowed to return. When given, any response
+            declaring another content type is rejected instead of being passed
+            to a matching custom deserializer. When ``None`` every registered
+            deserializer remains available, preserving the default behavior.
         """
         await self._async_call()
 
@@ -437,7 +443,9 @@ class AsyncTransport(Transport):
 
                 if data:
                     data = self.deserializer.loads(
-                        data, headers_response.get("content-type")
+                        data,
+                        headers_response.get("content-type"),
+                        allowed_mimetypes=allowed_mimetypes,
                     )
                 return data
 
