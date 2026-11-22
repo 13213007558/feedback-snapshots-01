@@ -11,6 +11,7 @@ from unittest.mock import patch
 from flask import Blueprint
 from flask import Flask
 from flask import get_flashed_messages
+from flask import request
 from flask import Response
 from flask import session
 from flask.views import MethodView
@@ -1127,6 +1128,191 @@ class LoginTestCase(unittest.TestCase):
         with self.app.test_request_context():
             _ucp = self.app.context_processor(_user_context_processor)
             self.assertIsInstance(_ucp()["current_user"], AnonymousUserMixin)
+
+
+class SessionIdentifierPolicyTestCase(unittest.TestCase):
+    """Session protection with a deployment-supplied identity policy."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["REMEMBER_COOKIE_NAME"] = "remember"
+        self.app.response_class.autocorrect_location_header = False
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        self.login_manager.refresh_view = "/refresh"
+        self.device_override = None
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS.get(int(user_id)) if str(user_id).isdigit() else None
+
+        @self.login_manager.session_identifier_policy
+        def identifier_policy():
+            if self.device_override is not None:
+                return self.device_override
+            return {
+                "device": request.headers.get("X-Device-Id"),
+                "connection": f"{request.remote_addr}|{request.user_agent.string}",
+            }
+
+        @self.app.route("/login-notch-remember")
+        def login_notch_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/username")
+        def username():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous"
+
+        @self.app.route("/is-fresh")
+        def is_fresh():
+            return f"fresh={login_fresh()}"
+
+        @self.app.route("/protected")
+        @fresh_login_required
+        def protected():
+            return "protected"
+
+        @self.app.route("/refresh")
+        def refresh():
+            return "refresh"
+
+        @self.app.route("/confirm-login")
+        def confirm_login_view():
+            confirm_login()
+            return "confirmed"
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+    def _request(self, client, path, device, remote_addr="10.0.0.1", user_agent=None):
+        headers = {"X-Device-Id": device}
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        return client.get(path, headers=headers, environ_overrides={"REMOTE_ADDR": remote_addr})
+
+    def _drop_session(self, client):
+        client.delete_cookie(self.app.config.get("SESSION_COOKIE_NAME", "session"))
+
+    def _assert_policy(self, mode, device, expected_name, expected_fresh):
+        self.app.config["SESSION_PROTECTION"] = mode
+        with self.app.test_client() as client:
+            login = self._request(client, "/login-notch-remember", device)
+            self.assertEqual(login.status_code, 200)
+
+            # The proxy reconnects from a different address and user agent.
+            switched = self._request(
+                client, "/username", device, remote_addr="10.0.0.99", user_agent="proxy-relay/2"
+            )
+            self.assertEqual(switched.data.decode("utf-8"), "Notch")
+            self.assertIn("fresh=True", self._request(client, "/is-fresh", device).data.decode())
+
+            # A clearly different registered device is not the same session.
+            other = self._request(client, "/username", "other-device", remote_addr="10.0.0.50")
+            self.assertEqual(other.data.decode("utf-8"), expected_name)
+
+            fresh = self._request(client, "/is-fresh", "other-device", remote_addr="10.0.0.50")
+            self.assertEqual(fresh.data.decode("utf-8"), f"fresh={expected_fresh}")
+
+    def test_basic_keeps_same_device_and_requires_confirmation_for_other(self):
+        self._assert_policy("basic", "device-a", "Notch", False)
+
+    def test_strong_keeps_same_device_and_rejects_other(self):
+        self._assert_policy("strong", "device-a", "Anonymous", False)
+
+    def test_basic_other_device_can_confirm_and_continue(self):
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "device-a")
+            self._request(client, "/username", "device-b", remote_addr="10.0.0.8")
+
+            blocked = self._request(client, "/protected", "device-b", remote_addr="10.0.0.8")
+            self.assertEqual(blocked.status_code, 302)
+            self.assertEqual(blocked.location, "/refresh?next=%2Fprotected")
+
+            confirmed = self._request(client, "/confirm-login", "device-b", remote_addr="10.0.0.8")
+            self.assertEqual(confirmed.data.decode("utf-8"), "confirmed")
+            allowed = self._request(client, "/protected", "device-b", remote_addr="10.0.0.8")
+            self.assertEqual(allowed.status_code, 200)
+
+    def test_strong_other_device_clears_remember_cookie(self):
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "device-a")
+            self.assertIsNotNone(client.get_cookie("remember"))
+
+            self._request(client, "/username", "device-b")
+            self.assertIsNone(client.get_cookie("remember"))
+
+    def test_strong_same_device_keeps_remember_cookie(self):
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "device-a")
+            cookie = client.get_cookie("remember")
+            self.assertIsNotNone(cookie)
+
+            self._request(client, "/username", "device-a", remote_addr="10.0.0.77")
+            refreshed = client.get_cookie("remember")
+            self.assertIsNotNone(refreshed)
+            self.assertEqual(cookie.value, refreshed.value)
+
+    def test_remember_cookie_is_usable_after_proxy_reconnect(self):
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "device-a")
+            self._drop_session(client)
+            restored = self._request(client, "/username", "device-a", remote_addr="10.0.0.88")
+            self.assertEqual(restored.data.decode("utf-8"), "Notch")
+            follows = self._request(client, "/username", "device-a", remote_addr="10.0.0.89")
+            self.assertEqual(follows.data.decode("utf-8"), "Notch")
+
+    def test_scalar_policy_value_is_verified_device_identity(self):
+        self.device_override = "device-a"
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "unused")
+            switched = self._request(
+                client, "/username", "unused", remote_addr="10.1.1.1", user_agent="new-proxy"
+            )
+            self.assertEqual(switched.data.decode("utf-8"), "Notch")
+
+            self.device_override = "device-b"
+            username = self._request(client, "/username", "unused").data.decode()
+            self.assertEqual(username, "Anonymous")
+
+    def test_policy_returning_none_uses_connection_fallback(self):
+        self.device_override = None
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        self.login_manager.session_identifier_policy = lambda: None
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "ignored")
+            switched = self._request(
+                client, "/username", "ignored", remote_addr="10.2.2.2", user_agent="other"
+            )
+            self.assertEqual(switched.data.decode("utf-8"), "Anonymous")
+
+    def test_config_policy_is_used(self):
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        self.app.config["SESSION_PROTECTION_IDENTIFIER"] = lambda: {"device": "config-device"}
+        with self.app.test_client() as client:
+            self._request(client, "/login-notch-remember", "header-device")
+            switched = self._request(client, "/username", "header-device", remote_addr="10.3.3.3")
+            self.assertEqual(switched.data.decode("utf-8"), "Notch")
+            fresh = self._request(client, "/is-fresh", "header-device", remote_addr="10.3.3.3")
+            self.assertEqual(fresh.data.decode("utf-8"), "fresh=True")
+
+    def test_default_protection_still_uses_connection(self):
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        self.login_manager.session_identifier_policy = None
+        with self.app.test_client() as client:
+            client.get("/login-notch-remember")
+            switched = client.get("/username", headers={"User-Agent": "different"})
+            self.assertEqual(switched.data.decode("utf-8"), "Notch")
+            fresh = client.get("/is-fresh", headers={"User-Agent": "different"})
+            self.assertEqual(fresh.data.decode("utf-8"), "fresh=False")
 
 
 class LoginViaRequestTestCase(unittest.TestCase):

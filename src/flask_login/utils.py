@@ -1,4 +1,5 @@
 import hmac
+from collections.abc import Mapping
 from functools import wraps
 from hashlib import sha512
 from urllib.parse import parse_qs
@@ -181,7 +182,7 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
     user_id = getattr(user, current_app.login_manager.id_attribute)()
     session["_user_id"] = user_id
     session["_fresh"] = fresh
-    session["_id"] = current_app.login_manager._session_identifier_generator()
+    current_app.login_manager._store_session_identifier(session)
 
     if remember:
         session["_remember"] = "set"
@@ -218,6 +219,8 @@ def logout_user():
     if "_id" in session:
         session.pop("_id")
 
+    session.pop("_device_id", None)
+
     cookie_name = current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
     if cookie_name in request.cookies:
         session["_remember"] = "clear"
@@ -236,7 +239,7 @@ def confirm_login():
     are reloaded from a cookie.
     """
     session["_fresh"] = True
-    session["_id"] = current_app.login_manager._session_identifier_generator()
+    current_app.login_manager._store_session_identifier(session)
     user_login_confirmed.send(current_app._get_current_object())
 
 
@@ -377,6 +380,35 @@ def _create_identifier():
     h = sha512()
     h.update(f"{request.remote_addr}|{request.user_agent.string}".encode())
     return h.hexdigest()
+
+
+def _normalize_session_identifier(value):
+    """Split a session identifier policy result into device and connection.
+
+    A policy may return a single value, which is treated as the verified
+    device identity, or a mapping/object/two-item sequence with ``device``
+    and ``connection`` members. The device part is authoritative when it is
+    available; the connection part is the fallback for deployments that do
+    not have a verified device identifier for the request.
+    """
+    if value is None:
+        return None, None
+
+    if isinstance(value, Mapping):
+        return (
+            value.get("device", value.get("device_id")),
+            value.get("connection", value.get("connection_id")),
+        )
+
+    device = getattr(value, "device", None)
+    connection = getattr(value, "connection", None)
+    if device is not None or connection is not None:
+        return device, connection
+
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return value[0], value[1]
+
+    return value, None
 
 
 def _user_context_processor():

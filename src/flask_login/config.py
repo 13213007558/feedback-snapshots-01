@@ -38,6 +38,7 @@ SESSION_KEYS = {
     "_remember",
     "_remember_seconds",
     "_id",
+    "_device_id",
     "_fresh",
     "next",
 }

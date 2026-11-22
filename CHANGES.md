@@ -18,6 +18,11 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add `LoginManager.session_identifier_policy` and the
+  `SESSION_PROTECTION_IDENTIFIER` config to let deployments supply a verified
+  device identity alongside the connection identifier. A stable device
+  identity survives proxy reconnects; a different device still triggers the
+  configured `basic` or `strong` protection response.
 
 
 Version 0.6.3

@@ -30,6 +30,7 @@ from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
 from .signals import user_unauthorized
 from .utils import _create_identifier
+from .utils import _normalize_session_identifier
 from .utils import _user_context_processor
 from .utils import decode_cookie
 from .utils import encode_cookie
@@ -99,6 +100,15 @@ class LoginManager:
         self._request_callback = None
 
         self._session_identifier_generator = _create_identifier
+
+        #: An optional callable that returns the deployment's session
+        #: identifier. It may return a single value, treated as the verified
+        #: device identity, or a ``{"device": ..., "connection": ...}``
+        #: mapping (or an object with those attributes). A verified
+        #: ``device`` value is authoritative across connection changes;
+        #: ``connection`` is only compared when no device identifier is
+        #: available. See :meth:`session_identifier_policy`.
+        self._session_identifier_policy = None
 
         if app is not None:
             self.init_app(app, add_context_processor)
@@ -171,13 +181,138 @@ class LoginManager:
         config = current_app.config
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
             login_url = expand_login_view(login_view)
-            session["_id"] = self._session_identifier_generator()
+            self._store_session_identifier(session)
             session["next"] = make_next_param(login_url, request.url)
             redirect_url = make_login_url(login_view)
         else:
             redirect_url = make_login_url(login_view, next_url=request.url)
 
         return redirect(redirect_url)
+
+    def session_identifier_policy(self, callback):
+        """Set the callable used to derive the session protection identifier.
+
+        The callable is invoked with no arguments in a request context. It
+        may return a single value, which is treated as the deployment's
+        verified device identity, or a mapping with ``device`` and
+        ``connection`` keys. The device identity is authoritative once
+        recorded: a proxy reconnecting and changing the connection
+        attributes does not invalidate the session, while a different
+        device identity does. The connection value is only used when no
+        device identity is available on either side.
+
+        Return ``None`` from the callable to fall back to the default
+        ``remote_addr`` and user agent identifier for that request.
+
+        :param callback: The callback for deriving the session identifier.
+        :type callback: callable
+        """
+        self._session_identifier_policy = callback
+        return callback
+
+    @property
+    def session_identifier_policy_callback(self):
+        """Gets the callback set by :meth:`session_identifier_policy`."""
+        return self._session_identifier_policy
+
+    @property
+    def session_identifier_generator(self):
+        """The deployment-provided session identifier callable, if any.
+
+        This is an alias for the callback set by
+        :meth:`session_identifier_policy`. Assigning to it has the same
+        effect.
+        """
+        return self._session_identifier_policy
+
+    @session_identifier_generator.setter
+    def session_identifier_generator(self, callback):
+        self._session_identifier_policy = callback
+
+    def _session_identifier_policy_value(self):
+        app = current_app._get_current_object()
+        policy = app.config.get("SESSION_PROTECTION_IDENTIFIER")
+
+        if policy is None:
+            # Support both the decorator form and assigning the policy
+            # directly as an attribute, which shadows the method.
+            policy = self.__dict__.get(
+                "session_identifier_policy", self._session_identifier_policy
+            )
+
+        if policy is None:
+            return None
+
+        return policy() if callable(policy) else policy
+
+    def _session_identifier(self):
+        value = self._session_identifier_policy_value()
+        if value is not None:
+            return _normalize_session_identifier(value)
+
+        return None, self._session_identifier_generator()
+
+    def _store_session_identifier(self, sess):
+        device, connection = self._session_identifier()
+
+        if connection is None:
+            sess.pop("_id", None)
+        else:
+            sess["_id"] = connection
+
+        if device is None:
+            sess.pop("_device_id", None)
+        else:
+            sess["_device_id"] = device
+
+    def _session_identifier_matches(self, sess):
+        device, connection = self._session_identifier()
+        stored_device = sess.get("_device_id")
+        stored_connection = sess.get("_id")
+
+        if device is not None and stored_device is not None:
+            # A verified device identity survives connection changes, such
+            # as a proxy reconnecting from a different address.
+            return device == stored_device
+
+        if device is None and stored_device is None:
+            return connection == stored_connection
+
+        # One side has verified device evidence and the other does not.
+        # Do not silently accept a downgrade or an unrecorded session.
+        return False
+
+    def _session_protection_failed(self):
+        sess = session._get_current_object()
+
+        app = current_app._get_current_object()
+        mode = app.config.get("SESSION_PROTECTION", self.session_protection)
+
+        if not mode or mode not in ["basic", "strong"]:
+            return False
+
+        # if the sess is empty, it's an anonymous user or just logged out
+        # so we can skip this
+        if not sess:
+            return False
+
+        if self._session_identifier_matches(sess):
+            return False
+
+        if mode == "basic" or sess.permanent:
+            if sess.get("_fresh") is not False:
+                sess["_fresh"] = False
+            session_protected.send(app)
+            return False
+        elif mode == "strong":
+            for k in SESSION_KEYS:
+                sess.pop(k, None)
+
+            sess["_remember"] = "clear"
+            session_protected.send(app)
+            return True
+
+        return False
 
     def user_loader(self, callback):
         """
@@ -282,7 +417,7 @@ class LoginManager:
         config = current_app.config
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
             login_url = expand_login_view(self.refresh_view)
-            session["_id"] = self._session_identifier_generator()
+            self._store_session_identifier(session)
             session["next"] = make_next_param(login_url, request.url)
             redirect_url = make_login_url(self.refresh_view)
         else:
@@ -335,34 +470,6 @@ class LoginManager:
 
         return self._update_request_context_with_user(user)
 
-    def _session_protection_failed(self):
-        sess = session._get_current_object()
-        ident = self._session_identifier_generator()
-
-        app = current_app._get_current_object()
-        mode = app.config.get("SESSION_PROTECTION", self.session_protection)
-
-        if not mode or mode not in ["basic", "strong"]:
-            return False
-
-        # if the sess is empty, it's an anonymous user or just logged out
-        # so we can skip this
-        if sess and ident != sess.get("_id", None):
-            if mode == "basic" or sess.permanent:
-                if sess.get("_fresh") is not False:
-                    sess["_fresh"] = False
-                session_protected.send(app)
-                return False
-            elif mode == "strong":
-                for k in SESSION_KEYS:
-                    sess.pop(k, None)
-
-                sess["_remember"] = "clear"
-                session_protected.send(app)
-                return True
-
-        return False
-
     def _load_user_from_remember_cookie(self, cookie):
         user_id = decode_cookie(cookie)
         if user_id is not None:
@@ -372,6 +479,11 @@ class LoginManager:
             if self._user_callback:
                 user = self._user_callback(user_id)
             if user is not None:
+                # Bind the restored session to the current request's
+                # identifier. The remember cookie was just accepted as this
+                # user's credential, so the session starts non-fresh and is
+                # stable for subsequent requests under strong protection.
+                self._store_session_identifier(session)
                 app = current_app._get_current_object()
                 user_loaded_from_cookie.send(app, user=user)
                 return user

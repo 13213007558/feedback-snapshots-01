@@ -409,6 +409,36 @@ agent). If the session does not have an associated identifier, the one
 generated will be stored. If it has an identifier, and it matches the one
 generated, then the request is OK.
 
+The default identifier follows the connection, so a proxy reconnect that
+changes the address or user agent looks like a new identifier. If your
+deployment has a verified device identity that stays stable across such
+reconnects, register a policy with
+:meth:`~LoginManager.session_identifier_policy`::
+
+    @login_manager.session_identifier_policy
+    def session_identifier():
+        return {
+            "device": verified_device_from_my_proxy(),
+            "connection": f"{request.remote_addr}|{request.user_agent.string}",
+        }
+
+A single return value is treated as the verified device identity. A mapping
+(or an object with attributes, or a two-item sequence) may provide both
+``device`` and ``connection``. When both the stored session and the current
+request have a device identity, only that value is compared: a normal proxy
+reconnect keeps the session, while a different registered device does not
+match. The connection value is the fallback when neither side has a device
+identity. Returning ``None`` falls back to the default connection identifier
+for that request. The policy can also be set through the
+``SESSION_PROTECTION_IDENTIFIER`` config key.
+
+.. note::
+
+    The policy does not verify anything by itself. Only return a device
+    identifier that your proxy or edge infrastructure has already
+    authenticated. Returning an untrusted client-supplied header defeats the
+    protection.
+
 If the identifiers do not match in `basic` mode, or when the session is
 permanent, then the session will simply be marked as non-fresh, and anything
 requiring a fresh login will force the user to re-authenticate. (Of course,
