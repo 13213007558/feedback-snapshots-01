@@ -1,5 +1,7 @@
 === master
 
+* Add allow_file_uploads plugin, for allowing file uploads in specific routes when using the disallow_file_uploads plugin
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)
