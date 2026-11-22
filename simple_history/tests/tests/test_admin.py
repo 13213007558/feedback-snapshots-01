@@ -7,9 +7,10 @@ from django.contrib.admin.views.main import PAGE_VAR
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.contrib.messages.storage.fallback import FallbackStorage
+from django.db import connection
 from django.test import TestCase
 from django.test.client import RequestFactory
-from django.test.utils import override_settings
+from django.test.utils import CaptureQueriesContext, override_settings
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.utils.encoding import force_str
@@ -17,6 +18,7 @@ from django.utils.encoding import force_str
 from simple_history.admin import SimpleHistoryAdmin
 from simple_history.models import HistoricalRecords
 from simple_history.template_utils import HistoricalRecordContextHelper
+from simple_history.tests.admin import PollWithManyToManyAdmin
 from simple_history.tests.external.models import ExternalModelWithCustomUserIdField
 from simple_history.tests.tests.utils import (
     PermissionAction,
@@ -202,6 +204,112 @@ class AdminSiteTest(TestCase):
             f"[Deleted place (pk={place1_pk}), Deleted place (pk={place2_pk})]"
         )
         self.assertContains(response, expected_new_places)
+
+    def _create_poll_with_two_versions(self) -> PollWithManyToMany:
+        """
+        Create a ``PollWithManyToMany`` with exactly two historical records,
+        where the second version changes both a regular field (``question``)
+        and the M2M field (``places``).
+        """
+        place1 = Place.objects.create(name="Here")
+        place2 = Place.objects.create(name="There")
+        poll = PollWithManyToMany(question="why?", pub_date=today)
+        poll.save()
+        # Update ``question`` without creating a historical record, so that the
+        # M2M change below ends up in the same (second) version
+        PollWithManyToMany.objects.filter(pk=poll.pk).update(question="how?")
+        poll.refresh_from_db()
+        poll.places.add(place1, place2)
+        self.assertEqual(poll.history.count(), 2)
+        return poll
+
+    def test_history_list_diff_changes_respects_disclosed_fields(self):
+        poll = self._create_poll_with_two_versions()
+
+        def get_disclosed_fields(model_admin, request):
+            fields = []
+            if request.user.has_perm("tests.change_pollwithmanytomany"):
+                fields.extend(["question", "pub_date"])
+            if request.user.has_perm("tests.change_place"):
+                fields.append("places")
+            return fields
+
+        question_admin = User.objects.create(
+            username="question_admin", is_staff=True, is_active=True
+        )
+        question_admin.user_permissions.add(
+            Permission.objects.get(codename="view_pollwithmanytomany"),
+            Permission.objects.get(codename="change_pollwithmanytomany"),
+        )
+        place_admin = User.objects.create(
+            username="place_admin", is_staff=True, is_active=True
+        )
+        place_admin.user_permissions.add(
+            Permission.objects.get(codename="view_pollwithmanytomany"),
+            Permission.objects.get(codename="change_place"),
+        )
+
+        with patch.object(
+            PollWithManyToManyAdmin,
+            "get_history_diff_disclosed_fields",
+            get_disclosed_fields,
+        ):
+            # The admin responsible for the regular fields sees their old and
+            # new values, but nothing from the M2M field
+            self.login(question_admin)
+            response = self.client.get(get_history_url(poll))
+            self.assertContains(response, "Question:")
+            self.assertContains(response, "why?")
+            self.assertContains(response, "how?")
+            self.assertNotContains(response, "Places:")
+            self.assertNotContains(response, "Here")
+            self.assertNotContains(response, "There")
+
+            # The admin responsible for the M2M field sees its old and new
+            # values, but nothing from the regular fields
+            self.login(place_admin)
+            response = self.client.get(get_history_url(poll))
+            self.assertContains(response, "Places:")
+            self.assertContains(response, "[<b>Here</b>, <b>There</b>]")
+            self.assertNotContains(response, "Question:")
+            self.assertNotContains(response, "why?")
+            self.assertNotContains(response, "Date published:")
+
+    def test_history_diff_disclosed_fields_doesnt_load_restricted_relations(self):
+        poll = self._create_poll_with_two_versions()
+
+        class QuestionOnlyAdmin(SimpleHistoryAdmin):
+            history_diff_disclosed_fields = ["question"]
+
+        admin_site = AdminSite()
+        request = RequestFactory().get("/")
+        request.user = self.user
+        history = PollWithManyToMany.history
+
+        # Generating the delta summary for the disclosed regular field must not
+        # query the database for the restricted M2M field's relations
+        question_admin = QuestionOnlyAdmin(PollWithManyToMany, admin_site)
+        records = list(
+            question_admin.get_history_queryset(request, history, "id", poll.pk)
+        )
+        with self.assertNumQueries(0):
+            question_admin.set_history_delta_changes(request, records)
+        (question_change,) = records[0].history_delta_changes
+        self.assertEqual(question_change["field"], "Question")
+        self.assertEqual(question_change["old"], "why?")
+        self.assertEqual(question_change["new"], "how?")
+
+        # Without any disclosure restriction, the M2M relations are loaded and
+        # both changes are summarized
+        full_admin = SimpleHistoryAdmin(PollWithManyToMany, admin_site)
+        records = list(full_admin.get_history_queryset(request, history, "id", poll.pk))
+        with CaptureQueriesContext(connection) as queries:
+            full_admin.set_history_delta_changes(request, records)
+        self.assertGreater(len(queries), 0)
+        disclosed_fields = [
+            change["field"] for change in records[0].history_delta_changes
+        ]
+        self.assertEqual(disclosed_fields, ["Places", "Question"])
 
     def test_history_list_doesnt_contain_too_long_diff_changes(self):
         self.login()

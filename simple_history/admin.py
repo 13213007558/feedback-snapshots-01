@@ -29,6 +29,7 @@ SIMPLE_HISTORY_EDIT = getattr(settings, "SIMPLE_HISTORY_EDIT", False)
 
 class SimpleHistoryAdmin(admin.ModelAdmin):
     history_list_display = []
+    history_diff_disclosed_fields = None
 
     object_history_template = "simple_history/object_history.html"
     object_history_list_template = "simple_history/object_history_list.html"
@@ -149,6 +150,20 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         """
         return self.history_list_display
 
+    def get_history_diff_disclosed_fields(self, request) -> Sequence[str] | None:
+        """
+        Return the names of the fields whose changes may be disclosed to the
+        current user in the history delta summaries, or ``None`` (the default)
+        to disclose changes to all history-tracked fields.
+
+        The returned fields are passed as ``included_fields`` to
+        ``HistoricalChanges.diff_against()``; changes to any other fields -
+        regular as well as many-to-many fields - are left out of the summaries,
+        and the related objects of undisclosed fields are never queried from
+        the database.
+        """
+        return self.history_diff_disclosed_fields
+
     def get_historical_record_context_helper(
         self, request, historical_record: HistoricalChanges
     ) -> HistoricalRecordContextHelper:
@@ -173,6 +188,7 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         :param foreign_keys_are_objs: Passed to ``diff_against()`` when calculating
                the deltas; see its docstring for details.
         """
+        disclosed_fields = self.get_history_diff_disclosed_fields(request)
         previous = None
         for current in historical_records:
             if previous is None:
@@ -180,7 +196,9 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
                 continue
             # Related objects should have been prefetched in `get_history_queryset()`
             delta = previous.diff_against(
-                current, foreign_keys_are_objs=foreign_keys_are_objs
+                current,
+                included_fields=disclosed_fields,
+                foreign_keys_are_objs=foreign_keys_are_objs,
             )
             helper = self.get_historical_record_context_helper(request, previous)
             previous.history_delta_changes = helper.context_for_delta_changes(delta)

@@ -6,6 +6,11 @@ Unreleased
 
 **New features:**
 
+- Added ``SimpleHistoryAdmin.history_diff_disclosed_fields`` and
+  ``SimpleHistoryAdmin.get_history_diff_disclosed_fields()`` for restricting
+  which fields' changes are disclosed in the admin history list view's delta
+  summaries; undisclosed fields' related objects are never queried
+
 
 **Breaking changes:**
 

@@ -92,6 +92,40 @@ You can change this by adding a `history_list_per_page` attribute to the admin c
     admin.site.register(Poll, PollHistoryAdmin)
 
 
+Restricting which field changes are disclosed in the admin history list view
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, the delta summaries in the history list view disclose the old and
+new values of every history-tracked field - including many-to-many fields - to
+anyone allowed to view the history. If some fields should only be visible to
+certain users (for example, admins that are responsible for those fields), set
+the ``history_diff_disclosed_fields`` attribute or override
+``get_history_diff_disclosed_fields()`` to limit which fields' changes are
+summarized for the current user. Returning ``None`` (the default) discloses
+changes to all fields.
+
+The disclosed fields are passed as ``included_fields`` to
+``HistoricalChanges.diff_against()`` (see :doc:`/history_diffing`), so changes
+to any other fields are left out of the summaries, and the related objects of
+undisclosed fields are never queried from the database.
+
+.. code-block:: python
+
+    from django.contrib import admin
+    from simple_history.admin import SimpleHistoryAdmin
+    from .models import Poll
+
+
+    class PollHistoryAdmin(SimpleHistoryAdmin):
+        def get_history_diff_disclosed_fields(self, request):
+            fields = ["question"]
+            if request.user.has_perm("tests.change_place"):
+                fields.append("places")
+            return fields
+
+    admin.site.register(Poll, PollHistoryAdmin)
+
+
 Customizing the History Admin Templates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
