@@ -186,8 +186,11 @@ class MethodViewLoginTestCase(unittest.TestCase):
     def setUp(self):
         self.app = Flask(__name__)
         self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
         self.login_manager = LoginManager()
         self.login_manager.init_app(self.app)
+        self.login_manager.user_loader(lambda user_id: USERS.get(user_id))
+        self.app.test_client_class = FlaskLoginClient
 
         class SecretEndpoint(MethodView):
             decorators = [
@@ -203,10 +206,104 @@ class MethodViewLoginTestCase(unittest.TestCase):
 
         self.app.add_url_rule("/secret", view_func=SecretEndpoint.as_view("secret"))
 
-    def test_options_call_exempt(self):
+    def test_application_options_not_exempt(self):
         with self.app.test_client() as c:
             result = c.open("/secret", method="OPTIONS")
+            self.assertEqual(result.status_code, 401)
+
+        with self.app.test_client(user=notch) as c:
+            result = c.open("/secret", method="OPTIONS")
             self.assertEqual(result.status_code, 200)
+
+
+class PreflightLoginTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        self.login_manager.user_loader(lambda user_id: USERS.get(user_id))
+        self.app.test_client_class = FlaskLoginClient
+
+        self.automatic_calls = []
+        self.application_calls = []
+        self.fresh_calls = []
+
+        @self.app.route("/automatic", methods=["GET", "POST"])
+        @login_required
+        def automatic():
+            self.automatic_calls.append("called")
+            return "restricted data"
+
+        @self.app.route("/application-options", methods=["GET", "OPTIONS"])
+        @login_required
+        def application_options():
+            self.application_calls.append("called")
+            response = Response("restricted data")
+            response.headers["Access-Control-Allow-Origin"] = "https://client.example"
+            return response
+
+        @self.app.route("/fresh-options", methods=["GET", "OPTIONS"])
+        @fresh_login_required
+        def fresh_options():
+            self.fresh_calls.append("called")
+            return "restricted data"
+
+        @self.app.route("/protected")
+        @login_required
+        def protected():
+            return "restricted data"
+
+    def test_automatic_options_is_public(self):
+        with self.app.test_client() as c:
+            result = c.open("/automatic", method="OPTIONS")
+
+        self.assertEqual(result.status_code, 200)
+        allowed = {method.strip() for method in result.headers["Allow"].split(",")}
+        self.assertEqual(allowed, {"GET", "HEAD", "OPTIONS", "POST"})
+        self.assertEqual(result.data, b"")
+        self.assertEqual(self.automatic_calls, [])
+
+    def test_application_options_requires_authentication(self):
+        with self.app.test_client() as c:
+            result = c.open("/application-options", method="OPTIONS")
+
+        self.assertEqual(result.status_code, 401)
+        self.assertNotIn(b"restricted data", result.data)
+        self.assertEqual(self.application_calls, [])
+
+    def test_application_options_with_authentication(self):
+        with self.app.test_client(user=notch) as c:
+            result = c.open("/application-options", method="OPTIONS")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.data, b"restricted data")
+        self.assertEqual(result.headers["Access-Control-Allow-Origin"], "https://client.example")
+        self.assertEqual(self.application_calls, ["called"])
+
+    def test_fresh_application_options_requires_authentication(self):
+        with self.app.test_client() as c:
+            result = c.open("/fresh-options", method="OPTIONS")
+
+        self.assertEqual(result.status_code, 401)
+        self.assertEqual(self.fresh_calls, [])
+
+        with self.app.test_client(user=notch) as c:
+            result = c.open("/fresh-options", method="OPTIONS")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(self.fresh_calls, ["called"])
+
+    def test_normal_request_requires_authentication(self):
+        with self.app.test_client() as c:
+            result = c.get("/protected")
+            self.assertEqual(result.status_code, 401)
+
+            result = c.get("/application-options")
+            self.assertEqual(result.status_code, 401)
+
+        self.assertEqual(self.application_calls, [])
 
 
 class LoginTestCase(unittest.TestCase):

@@ -240,6 +240,23 @@ def confirm_login():
     user_login_confirmed.send(current_app._get_current_object())
 
 
+def _is_exempt_method():
+    """Whether Flask handles this request without calling the decorated view.
+
+    Flask automatically answers ``OPTIONS`` requests for routes that do not
+    provide their own ``OPTIONS`` handler. No view is called in that case, so
+    there is no application handler to protect. An ``OPTIONS`` handler
+    registered by the application is not exempt and must authenticate like any
+    other view.
+    """
+    rule = request.url_rule
+    return (
+        request.method in EXEMPT_METHODS
+        and rule is not None
+        and getattr(rule, "provide_automatic_options", False)
+    )
+
+
 def login_required(func):
     """
     If you decorate a view with this, it will ensure that the current user is
@@ -264,7 +281,9 @@ def login_required(func):
 
         Per `W3 guidelines for CORS preflight requests
         <http://www.w3.org/TR/cors/#cross-origin-request-with-preflight-0>`_,
-        HTTP ``OPTIONS`` requests are exempt from login checks.
+        automatically generated HTTP ``OPTIONS`` requests are exempt from
+        login checks. If the application registers its own ``OPTIONS``
+        handler, that handler is protected like any other view.
 
     :param func: The view function to decorate.
     :type func: function
@@ -272,7 +291,7 @@ def login_required(func):
 
     @wraps(func)
     def decorated_view(*args, **kwargs):
-        if request.method in EXEMPT_METHODS:
+        if _is_exempt_method():
             pass
         elif not current_user.is_authenticated:
             return current_app.login_manager.unauthorized()
@@ -305,7 +324,9 @@ def fresh_login_required(func):
 
         Per `W3 guidelines for CORS preflight requests
         <http://www.w3.org/TR/cors/#cross-origin-request-with-preflight-0>`_,
-        HTTP ``OPTIONS`` requests are exempt from login checks.
+        automatically generated HTTP ``OPTIONS`` requests are exempt from
+        login checks. If the application registers its own ``OPTIONS``
+        handler, that handler is protected like any other view.
 
     :param func: The view function to decorate.
     :type func: function
@@ -313,7 +334,7 @@ def fresh_login_required(func):
 
     @wraps(func)
     def decorated_view(*args, **kwargs):
-        if request.method in EXEMPT_METHODS:
+        if _is_exempt_method():
             pass
         elif not current_user.is_authenticated:
             return current_app.login_manager.unauthorized()
