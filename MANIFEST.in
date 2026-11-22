@@ -5,4 +5,5 @@ include *.txt
 recursive-include guardian *.py
 recursive-include guardian/locale *.po *.mo
 recursive-include guardian *.html
+recursive-include guardian/testapp/fixtures *.json
 recursive-include guardian *.svg

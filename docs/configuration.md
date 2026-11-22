@@ -233,6 +233,43 @@ GUARDIAN_ANONYMOUS_USER_CACHE_TTL = -1
     configuration (`CACHES` setting). When TTL is 0, no caching occurs
     and each call to `get_anonymous_user()` performs a fresh database query.
 
+## `GUARDIAN_DELEGATION_RULES`
+
+!!! abstract "Added in version 3.6.0"
+
+Configures the delegation rules used by
+`guardian.core.ObjectPermissionChecker.has_perm(..., on_behalf_of=...)`,
+`explain_perm()` and `guardian.shortcuts.get_objects_for_user(..., on_behalf_of=...)`.
+Delegation changes the result of a permission check; it never writes to the
+object-permission tables.
+
+The value may be a callable returning rules, an iterable of rules, a single rule,
+or a dotted path resolving to one of those:
+
+```python
+GUARDIAN_DELEGATION_RULES = "myapp.delegation.rules"
+```
+
+```python
+# myapp/delegation.py
+from guardian.delegation import make_shared_group_rule
+
+def rules():
+    return [
+        make_shared_group_rule(
+            name="team-cover",
+            group=my_group,
+            permissions={"change_project"},
+        )
+    ]
+```
+
+With the default empty value, delegation is disabled and all `on_behalf_of`
+checks fail closed. See [Delegated permissions](../userguide/delegation.md) for
+rule shapes and the explanation API.
+
+Defaults to `()`.
+
 ## `GUARDIAN_USER_OBJ_PERMS_MODEL`
 
 !!! abstract "Added in version 2.0.0"

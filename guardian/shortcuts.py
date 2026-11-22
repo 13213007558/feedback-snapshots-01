@@ -31,6 +31,7 @@ from django.shortcuts import _get_queryset
 from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
+from guardian.delegation import delegated_objects_for_principal
 from guardian.exceptions import (
     MixedContentTypeError,
     MultipleIdentityAndObjectError,
@@ -570,6 +571,8 @@ def get_objects_for_user(
     any_perm: bool = False,
     with_superuser: bool = True,
     accept_global_perms: bool = True,
+    on_behalf_of: Any = None,
+    delegation_rules=None,
 ) -> QuerySet[T]:
     """Get objects that a user has *all* the supplied permissions for.
 
@@ -593,6 +596,16 @@ def get_objects_for_user(
             If `any_perm` is `False` then the intersection of matching object is returned.
             Note, that if `with_superuser` is `False`, `accept_global_perms` will be ignored,
             which means that only object permissions will be checked!
+        on_behalf_of (User | Group | list | QuerySet): Principal(s) the user is
+            acting for. When supplied, only objects where the delegation rules
+            approve both the actor and the principal are returned. The rules
+            are the same objects used by
+            :meth:`guardian.core.ObjectPermissionChecker.has_perm`, so bulk
+            filtering and per-object checks agree. Delegation does not write
+            permission rows. Accepts a single user/group or an iterable of them;
+            the result is the union across principals.
+        delegation_rules: Optional iterable of rules overriding
+            ``GUARDIAN_DELEGATION_RULES`` for this call.
 
     Raises:
         MixedContentTypeError: when computed content type for `perms` and/or `klass` clashes.
@@ -670,6 +683,18 @@ def get_objects_for_user(
     """
     ctype, codenames = _compute_codenames_and_ctype(perms)
     ctype, queryset = _compute_queryset(ctype, klass)
+
+    if on_behalf_of is not None:
+        return _get_objects_delegated(
+            user,
+            codenames,
+            queryset,
+            on_behalf_of,
+            delegation_rules,
+            use_groups=use_groups,
+            any_perm=any_perm,
+            with_superuser=with_superuser,
+        )
 
     # At this point, we should have both ctype and queryset and they should
     # match which means: ctype.model_class() == queryset.model
@@ -800,6 +825,47 @@ def get_objects_for_user(
         else:
             q |= Q(pk__in=values)
     return queryset.filter(q)
+
+
+def _get_objects_delegated(
+    actor: Any,
+    codenames: set[str],
+    queryset: QuerySet,
+    on_behalf_of: Any,
+    delegation_rules,
+    *,
+    use_groups: bool,
+    any_perm: bool,
+    with_superuser: bool,
+) -> QuerySet:
+    """Return objects the actor may operate on for one or more principals."""
+    from django.db.models import Model
+
+    if isinstance(on_behalf_of, Model):
+        principals: list[Any] = [on_behalf_of]
+    elif isinstance(on_behalf_of, QuerySet | list | tuple | set):
+        principals = list(on_behalf_of)
+    else:
+        # Unknown input still goes through the rules so the failure is
+        # explicit and fail-closed rather than silently widening the queryset.
+        principals = [on_behalf_of]
+
+    if delegation_rules is not None:
+        delegation_rules = list(delegation_rules)
+
+    result = queryset.none()
+    for principal in principals:
+        result = result | delegated_objects_for_principal(
+            actor,
+            principal,
+            codenames,
+            queryset,
+            delegation_rules,
+            any_perm=any_perm,
+            use_groups=use_groups,
+            with_superuser=with_superuser,
+        )
+    return result.distinct()
 
 
 def get_objects_for_group(

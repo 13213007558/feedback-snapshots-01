@@ -8,6 +8,13 @@ from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
 from guardian.ctypes import get_content_type
+from guardian.delegation import (
+    DelegationEvaluation,
+    PermissionExplanation,
+    candidate_delegations,
+    evaluate_delegation,
+    permission_source,
+)
 from guardian.utils import get_group_obj_perms_model, get_identity, get_user_obj_perms_model
 
 
@@ -62,24 +69,127 @@ class ObjectPermissionChecker:
         self.user, self.group = get_identity(user_or_group)  # type: ignore[arg-type] # None is not allowed
         self._obj_perms_cache: dict = {}
 
-    def has_perm(self, perm: str, obj: Model) -> bool:
+    def has_perm(
+        self,
+        perm: str,
+        obj: Model,
+        on_behalf_of: Model | None = None,
+        delegation_rules=None,
+    ) -> bool:
         """Checks if user/group has the specified permission for the given object.
 
         Parameters:
             perm (str): permission as string, may or may not contain app_label
                 prefix (if not prefixed, we grab app_label from `obj`)
             obj (Model): Django model instance for which permission should be checked
+            on_behalf_of (User | Group): Principal the user is acting for. When
+                supplied, the configured delegation rules decide whether the
+                actor may exercise the permission for that principal. Both the
+                actor and the principal must satisfy the rule; for the default
+                rule both need the permission themselves.
+            delegation_rules: Optional iterable of rules overriding
+                ``GUARDIAN_DELEGATION_RULES`` for this call.
 
         Returns:
             True if user/group has the permission, False otherwise
         """
         if self.user and not self.user.is_active:
             return False
-        elif self.user and self.user.is_superuser:
+        if on_behalf_of is not None:
+            if not self.user:
+                return False
+            return evaluate_delegation(
+                self.user,
+                on_behalf_of,
+                perm,
+                obj,
+                delegation_rules,
+            ).allowed
+        if self.user and self.user.is_superuser:
             return True
         if "." in perm:
             _, perm = perm.split(".", 1)
         return perm in self.get_perms(obj)
+
+    def explain_perm(
+        self,
+        perm: str,
+        obj: Model,
+        on_behalf_of: Model | None = None,
+        delegation_rules=None,
+    ) -> PermissionExplanation:
+        """Explain whether a permission is granted, and by which condition.
+
+        The returned :class:`guardian.delegation.PermissionExplanation` names
+        the rule that matched, the principal used, and the permission source of
+        the actor, principal and any extra approval permission. When
+        ``on_behalf_of`` is omitted, candidate principals are evaluated too, so
+        callers can locate which person's condition limits a permission.
+
+        Parameters:
+            perm (str): Permission codename or ``app_label.codename``.
+            obj (Model): Object to check.
+            on_behalf_of (User | Group): Principal to evaluate. When omitted,
+                the actor's own permission is checked and candidate principals
+                are reported for diagnosis.
+            delegation_rules: Optional iterable of rules overriding
+                ``GUARDIAN_DELEGATION_RULES`` for this call.
+
+        Returns:
+            A structured explanation; nothing is cached or written.
+        """
+        codename = perm.rsplit(".", 1)[-1]
+
+        if on_behalf_of is not None:
+            explanation = evaluate_delegation(self.user or self.group, on_behalf_of, codename, obj, delegation_rules)
+            return PermissionExplanation(
+                allowed=explanation.allowed,
+                perm=codename,
+                reason=explanation.reason,
+                rule_name=explanation.rule_name,
+                principal=explanation.principal,
+                actor_source=explanation.actor_source,
+                principal_source=explanation.principal_source,
+                required_source=explanation.required_source,
+            )
+
+        identity = self.user or self.group
+        own_source = permission_source(identity, codename, obj)
+        own_allowed = False
+        if self.user and not self.user.is_active:
+            own_allowed = False
+        elif self.user and self.user.is_superuser:
+            own_allowed = True
+        else:
+            own_allowed = own_source.allowed
+
+        candidates: tuple[DelegationEvaluation, ...] = ()
+        if self.user:
+            candidates = tuple(candidate_delegations(self.user, codename, obj, delegation_rules))
+        allowed_candidate = next((candidate for candidate in candidates if candidate.allowed), None)
+        blocked_candidate = next((candidate for candidate in candidates if not candidate.allowed), None)
+        chosen = allowed_candidate or blocked_candidate
+
+        if own_allowed:
+            reason = f"actor holds {codename!r} on this object ({own_source.reason})"
+        elif allowed_candidate is not None:
+            reason = allowed_candidate.reason
+        elif blocked_candidate is not None:
+            reason = blocked_candidate.reason
+        else:
+            reason = own_source.reason
+
+        return PermissionExplanation(
+            allowed=own_allowed or allowed_candidate is not None,
+            perm=codename,
+            reason=reason,
+            rule_name=chosen.rule_name if chosen else None,
+            principal=chosen.principal if chosen else None,
+            actor_source=own_source,
+            principal_source=chosen.principal_source if chosen else None,
+            required_source=chosen.required_source if chosen else None,
+            candidates=candidates,
+        )
 
     def get_group_filters(self, obj):
         ctype = get_content_type(obj)

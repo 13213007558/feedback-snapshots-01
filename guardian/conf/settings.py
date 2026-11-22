@@ -42,6 +42,10 @@ GET_CONTENT_TYPE = getattr(settings, "GUARDIAN_GET_CONTENT_TYPE", "guardian.ctyp
 
 AUTO_PREFETCH = getattr(settings, "GUARDIAN_AUTO_PREFETCH", False)
 
+# Delegation rules used by object checks and get_objects_for_user.
+# A callable returning rules, an iterable of rules, a single rule, or a dotted path.
+DELEGATION_RULES = getattr(settings, "GUARDIAN_DELEGATION_RULES", ())
+
 # Restores the pre-3.5.1 get_objects_for_user behaviour fixed in GHSA-5729-mvhf-9gq4. Insecure, removed in 3.6.0.
 LEGACY_GLOBAL_PERMS_GROUP_UNION = getattr(settings, "GUARDIAN_LEGACY_GLOBAL_PERMS_GROUP_UNION", False)
 

@@ -184,7 +184,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-guardian = ["py.typed"]
+guardian = ["py.typed", "testapp/fixtures/*.json"]
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]

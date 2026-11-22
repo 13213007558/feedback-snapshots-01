@@ -1,0 +1,149 @@
+[
+  {
+    "model": "auth.group",
+    "pk": 1,
+    "fields": {
+      "name": "delegation-team",
+      "permissions": []
+    }
+  },
+  {
+    "model": "testapp.customuser",
+    "pk": 1,
+    "fields": {
+      "password": "!",
+      "last_login": null,
+      "is_superuser": false,
+      "username": "delegator",
+      "first_name": "",
+      "last_name": "",
+      "email": "delegator@example.com",
+      "is_staff": false,
+      "is_active": true,
+      "date_joined": "2026-01-01T00:00:00Z",
+      "groups": [
+        1
+      ],
+      "user_permissions": []
+    }
+  },
+  {
+    "model": "testapp.customuser",
+    "pk": 2,
+    "fields": {
+      "password": "!",
+      "last_login": null,
+      "is_superuser": false,
+      "username": "principal",
+      "first_name": "",
+      "last_name": "",
+      "email": "principal@example.com",
+      "is_staff": false,
+      "is_active": true,
+      "date_joined": "2026-01-01T00:00:00Z",
+      "groups": [
+        1
+      ],
+      "user_permissions": []
+    }
+  },
+  {
+    "model": "testapp.project",
+    "pk": 1,
+    "fields": {
+      "name": "alpha",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "testapp.project",
+    "pk": 2,
+    "fields": {
+      "name": "beta",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "testapp.project",
+    "pk": 3,
+    "fields": {
+      "name": "gamma",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "testapp.projectuserobjectpermission",
+    "pk": 1,
+    "fields": {
+      "user": [
+        "delegator"
+      ],
+      "permission": [
+        "change_project",
+        "testapp",
+        "project"
+      ],
+      "content_object": 1
+    }
+  },
+  {
+    "model": "testapp.projectuserobjectpermission",
+    "pk": 2,
+    "fields": {
+      "user": [
+        "delegator"
+      ],
+      "permission": [
+        "change_project",
+        "testapp",
+        "project"
+      ],
+      "content_object": 2
+    }
+  },
+  {
+    "model": "testapp.projectuserobjectpermission",
+    "pk": 3,
+    "fields": {
+      "user": [
+        "principal"
+      ],
+      "permission": [
+        "change_project",
+        "testapp",
+        "project"
+      ],
+      "content_object": 2
+    }
+  },
+  {
+    "model": "testapp.projectuserobjectpermission",
+    "pk": 4,
+    "fields": {
+      "user": [
+        "principal"
+      ],
+      "permission": [
+        "change_project",
+        "testapp",
+        "project"
+      ],
+      "content_object": 3
+    }
+  },
+  {
+    "model": "testapp.projectgroupobjectpermission",
+    "pk": 1,
+    "fields": {
+      "group": [
+        "delegation-team"
+      ],
+      "permission": [
+        "delete_project",
+        "testapp",
+        "project"
+      ],
+      "content_object": 1
+    }
+  }
+]
