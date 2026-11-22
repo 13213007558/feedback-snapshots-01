@@ -41,6 +41,55 @@ _ACTIVE_TRANSACTIONS: ContextVar[
 ] = ContextVar("databases:active_transactions", default=None)
 
 
+class BorrowedConnectionExpired(RuntimeError):
+    """
+    Raised when attempting to use a borrowed raw driver connection after the
+    scope that lent it out has been exited.
+    """
+
+
+class BorrowedConnection:
+    """
+    Explicitly scoped handle around a raw driver connection.
+
+    The wrapped driver object is only usable while the ``async with`` block
+    that created the handle is active. Once the scope exits, the underlying
+    connection is returned to the pool and every subsequent access through
+    the handle raises ``BorrowedConnectionExpired``.
+    """
+
+    _expired = False
+
+    def __init__(self, raw_connection: typing.Any) -> None:
+        self._raw_connection = raw_connection
+
+    @property
+    def expired(self) -> bool:
+        return self._expired
+
+    def _expire(self) -> None:
+        self._expired = True
+        self._raw_connection = None
+
+    @property
+    def raw_connection(self) -> typing.Any:
+        if self._expired:
+            raise BorrowedConnectionExpired(
+                "The raw connection is no longer borrowed. "
+                "It can only be used within the scope that borrowed it."
+            )
+        return self._raw_connection
+
+    def __getattr__(self, attr: str) -> typing.Any:
+        if self._expired:
+            raise BorrowedConnectionExpired(
+                f"The raw connection is no longer borrowed; "
+                f"attribute {attr!r} cannot be accessed outside the "
+                f"scope that borrowed it."
+            )
+        return getattr(self._raw_connection, attr)
+
+
 class Database:
     SUPPORTED_BACKENDS = {
         "postgresql": "databases.backends.postgres:PostgresBackend",
@@ -222,6 +271,15 @@ class Database:
 
         return self._connection
 
+    def borrow_raw_connection(
+        self,
+    ) -> typing.AsyncIterator[BorrowedConnection]:
+        """
+        Lend the raw driver connection of the current task's connection
+        for the duration of an ``async with`` block.
+        """
+        return self.connection().borrow_raw_connection()
+
     def transaction(
         self, *, force_rollback: bool = False, **kwargs: typing.Any
     ) -> "Transaction":
@@ -346,6 +404,26 @@ class Connection:
     @property
     def raw_connection(self) -> typing.Any:
         return self._connection.raw_connection
+
+    @contextlib.asynccontextmanager
+    async def borrow_raw_connection(
+        self,
+    ) -> typing.AsyncIterator[BorrowedConnection]:
+        """
+        Lend the raw driver connection for operations that are not covered
+        by the database interface, within an explicit borrowing scope.
+
+        The returned :class:`BorrowedConnection` stops working as soon as
+        the scope is exited: the underlying connection is released back to
+        the pool and any later use of the handle raises
+        :class:`BorrowedConnectionExpired`.
+        """
+        async with self:
+            borrowed = BorrowedConnection(self._connection.raw_connection)
+            try:
+                yield borrowed
+            finally:
+                borrowed._expire()
 
     @staticmethod
     def _build_query(

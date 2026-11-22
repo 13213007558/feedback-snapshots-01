@@ -151,4 +151,35 @@ async with database.transaction(isolation="serializable"):
     ...
 ```
 
+## Borrowing the raw driver connection
+
+A few integrations need to reach the underlying driver object to perform an
+operation that the database interface does not cover. Instead of accessing the
+raw connection directly, borrow it inside an explicit scope:
+
+```python
+async with database.borrow_raw_connection() as borrowed:
+    raw_connection = borrowed.raw_connection
+    # Use the raw driver object while the scope is active...
+    await raw_connection.execute("SELECT pg_notify(:channel, :payload)", ...)
+
+# The scope has exited: the connection is back in the pool and the handle is
+# expired. Any further access raises `BorrowedConnectionExpired`.
+borrowed.raw_connection  # raises BorrowedConnectionExpired
+```
+
+The same scope can be opened from a specific connection:
+
+```python
+async with database.connection() as connection:
+    async with connection.borrow_raw_connection() as borrowed:
+        ...
+```
+
+The handle only works within the `async with` block. Nested borrows share the
+same acquired connection, which is released when the outermost scope exits, and
+scopes that are cancelled still expire their handles and release the
+connection. The existing `connection.raw_connection` property remains
+available for code that does not need an explicit scope.
+
 [starlette]: https://github.com/encode/starlette

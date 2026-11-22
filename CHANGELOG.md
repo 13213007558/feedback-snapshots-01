@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Add `Database.borrow_raw_connection()` and `Connection.borrow_raw_connection()`
+  for explicitly scoped access to the raw driver connection. The returned
+  handle expires when the scope exits (including on cancellation) and raises
+  `BorrowedConnectionExpired` on any subsequent use.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed
