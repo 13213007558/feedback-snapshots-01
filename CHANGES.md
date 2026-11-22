@@ -18,6 +18,9 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add `LoginManager.next_url_callback`, an optional callback to accept or
+  reject the `next` URL stored when redirecting to the login or refresh
+  view. If the callback rejects the URL, no `next` URL is stored.
 
 
 Version 0.6.3

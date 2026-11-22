@@ -88,6 +88,14 @@ class LoginManager:
         #: and ``self.needs_refresh_message``
         self.localize_callback = None
 
+        #: If present, called with the ``next`` URL that would be stored for
+        #: redirecting back after login or reauthentication. It should return
+        #: ``True`` to accept the URL, or ``False`` to reject it, in which
+        #: case no ``next`` URL is stored. Use this to restrict the pages
+        #: users can be sent back to, for example to a list of allowed
+        #: relative URLs.
+        self.next_url_callback = None
+
         self.unauthorized_callback = None
 
         self.needs_refresh_callback = None
@@ -169,13 +177,14 @@ class LoginManager:
                 flash(self.login_message, category=self.login_message_category)
 
         config = current_app.config
+        next_url = self._get_next_url(login_view)
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
-            login_url = expand_login_view(login_view)
             session["_id"] = self._session_identifier_generator()
-            session["next"] = make_next_param(login_url, request.url)
+            if next_url is not None:
+                session["next"] = next_url
             redirect_url = make_login_url(login_view)
         else:
-            redirect_url = make_login_url(login_view, next_url=request.url)
+            redirect_url = make_login_url(login_view, next_url=next_url)
 
         return redirect(redirect_url)
 
@@ -280,16 +289,29 @@ class LoginManager:
                 )
 
         config = current_app.config
+        next_url = self._get_next_url(self.refresh_view)
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
-            login_url = expand_login_view(self.refresh_view)
             session["_id"] = self._session_identifier_generator()
-            session["next"] = make_next_param(login_url, request.url)
+            if next_url is not None:
+                session["next"] = next_url
             redirect_url = make_login_url(self.refresh_view)
         else:
-            login_url = self.refresh_view
-            redirect_url = make_login_url(login_url, next_url=request.url)
+            redirect_url = make_login_url(self.refresh_view, next_url=next_url)
 
         return redirect(redirect_url)
+
+    def _get_next_url(self, login_view):
+        """
+        Returns the ``next`` URL to store for the current request, reduced
+        relative to the given login view. Returns ``None`` if
+        :attr:`next_url_callback` is set and rejects the URL.
+        """
+        next_url = make_next_param(expand_login_view(login_view), request.url)
+
+        if self.next_url_callback is not None and not self.next_url_callback(next_url):
+            return None
+
+        return next_url
 
     def _update_request_context_with_user(self, user=None):
         """Store the given user as ctx.user."""

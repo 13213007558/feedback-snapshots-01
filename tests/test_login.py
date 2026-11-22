@@ -492,6 +492,66 @@ class LoginTestCase(unittest.TestCase):
             self.assertEqual(result.location, "/login")
             self.assertEqual(c.get("/login").data.decode("utf-8"), "/secret")
 
+    def test_unauthorized_next_url_callback_accepts(self):
+        self.login_manager.login_view = "login"
+        allowed = {"/secret", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        @self.app.route("/login")
+        def login():
+            return "Login Form Goes Here!"
+
+        with self.app.test_client() as c:
+            result = c.get("/secret")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/login?next=%2Fsecret")
+
+    def test_unauthorized_next_url_callback_rejects(self):
+        self.login_manager.login_view = "login"
+        allowed = {"/employee/home", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        @self.app.route("/login")
+        def login():
+            return "Login Form Goes Here!"
+
+        with self.app.test_client() as c:
+            result = c.get("/secret")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/login")
+
+    def test_unauthorized_next_url_callback_accepts_with_session(self):
+        self.login_manager.login_view = "login"
+        self.app.config["USE_SESSION_FOR_NEXT"] = True
+        allowed = {"/secret", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        @self.app.route("/login")
+        def login():
+            return session.pop("next", "")
+
+        with self.app.test_client() as c:
+            result = c.get("/secret")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/login")
+            self.assertEqual(c.get("/login").data.decode("utf-8"), "/secret")
+
+    def test_unauthorized_next_url_callback_rejects_with_session(self):
+        self.login_manager.login_view = "login"
+        self.app.config["USE_SESSION_FOR_NEXT"] = True
+        allowed = {"/employee/home", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        @self.app.route("/login")
+        def login():
+            return session.pop("next", "")
+
+        with self.app.test_client() as c:
+            result = c.get("/secret")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/login")
+            self.assertEqual(c.get("/login").data.decode("utf-8"), "")
+
     def test_unauthorized_uses_blueprint_login_view(self):
         with self.app.app_context():
             first = Blueprint("first", "first")
@@ -865,6 +925,73 @@ class LoginTestCase(unittest.TestCase):
             self.assertEqual(result.location, "/refresh-view")
             result = c.get("/refresh-view")
             self.assertEqual(result.data.decode("utf-8"), "/needs-refresh")
+
+    def test_refresh_next_url_callback_accepts(self):
+        @self.app.route("/refresh-view")
+        def refresh_view():
+            return ""
+
+        self.login_manager.refresh_view = "refresh_view"
+        allowed = {"/needs-refresh", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            result = c.get("/needs-refresh")
+            self.assertEqual(result.status_code, 302)
+            expected = "/refresh-view?next=%2Fneeds-refresh"
+            self.assertEqual(result.location, expected)
+
+    def test_refresh_next_url_callback_rejects(self):
+        @self.app.route("/refresh-view")
+        def refresh_view():
+            return ""
+
+        self.login_manager.refresh_view = "refresh_view"
+        allowed = {"/employee/home", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            result = c.get("/needs-refresh")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/refresh-view")
+
+    def test_refresh_next_url_callback_accepts_with_session(self):
+        @self.app.route("/refresh-view")
+        def refresh_view():
+            return session.pop("next", "")
+
+        self.login_manager.refresh_view = "refresh_view"
+        self.app.config["USE_SESSION_FOR_NEXT"] = True
+        allowed = {"/needs-refresh", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            result = c.get("/needs-refresh")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/refresh-view")
+            result = c.get("/refresh-view")
+            self.assertEqual(result.data.decode("utf-8"), "/needs-refresh")
+
+    def test_refresh_next_url_callback_rejects_with_session(self):
+        @self.app.route("/refresh-view")
+        def refresh_view():
+            return session.pop("next", "")
+
+        self.login_manager.refresh_view = "refresh_view"
+        self.app.config["USE_SESSION_FOR_NEXT"] = True
+        allowed = {"/employee/home", "/workspace/home"}
+        self.login_manager.next_url_callback = lambda url: url in allowed
+
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            result = c.get("/needs-refresh")
+            self.assertEqual(result.status_code, 302)
+            self.assertEqual(result.location, "/refresh-view")
+            result = c.get("/refresh-view")
+            self.assertEqual(result.data.decode("utf-8"), "")
 
     def test_confirm_login(self):
         with self.app.test_client() as c:

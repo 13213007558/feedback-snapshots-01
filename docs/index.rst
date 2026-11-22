@@ -197,6 +197,18 @@ query string, which is the page that the user was trying to access. Alternativel
 if `USE_SESSION_FOR_NEXT` is `True`, the page is stored in the session under the
 key ``next``.
 
+To restrict which pages users can be sent back to, set
+`LoginManager.next_url_callback` to a function that receives the ``next`` URL
+and returns whether it is acceptable. If it returns ``False``, no ``next``
+URL is stored. This applies both when redirecting to the log in view and to
+the reauthentication (``refresh_view``) page. For example, to only allow a
+few configured relative URLs::
+
+    login_manager.next_url_callback = lambda url: url in {
+        "/employee/home",
+        "/workspace/home",
+    }
+
 If you would like to customize the process further, decorate a function with
 `LoginManager.unauthorized_handler`::
 
