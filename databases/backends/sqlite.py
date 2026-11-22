@@ -19,6 +19,9 @@ logger = logging.getLogger("databases")
 
 
 class SQLiteBackend(DatabaseBackend):
+    driver = "aiosqlite"
+    supports_tls = False
+
     def __init__(
         self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
     ) -> None:

@@ -59,6 +59,63 @@ Available keyword arguments may differ between database backends.
 database = Database('postgresql+asyncpg://localhost/example', ssl=True, min_size=5, max_size=20)
 ```
 
+Keyword arguments override URL query parameters. That means the two sources
+can disagree without any error by default: the URL may say `ssl=false` while
+the application passes `ssl=True`, and only the keyword argument takes effect.
+
+## Connection validation
+
+When a deployment must prove that a connection uses an approved transport, pass
+a `validator` to `Database(...)`. Rules run during `connect()` — before the
+backend opens a pool — and receive the driver that will actually be used plus
+the effective options after both configuration sources are merged.
+
+```python
+from databases import (
+    Database,
+    RequireTLS,
+    TLSConfigurationError,
+    UnsupportedDriverError,
+)
+
+database = Database(
+    'postgresql://localhost/example?ssl=verify-full',
+    validator=RequireTLS(allowed_modes={"verify-full"}),
+)
+```
+
+`RequireTLS` rejects:
+
+* a URL whose requested driver is not the driver the backend would use (for
+  example an unknown `postgresql+driver` that silently falls back to `asyncpg`);
+* backends that cannot carry TLS, such as SQLite;
+* URL/application options that disagree about the TLS setting;
+* a missing TLS setting, or one whose mode is not approved.
+
+The error is raised before any connection is created and leaves the
+`Database` disconnected. A connection with no `validator` is unchanged, so
+plain SQLite usage never runs TLS checks.
+
+For finer control, pass any callable that accepts a
+`ConnectionValidationContext` and raises `ConnectionValidationError` (or a
+subclass such as `TLSConfigurationError` / `UnsupportedDriverError`) to reject
+the connection. The context exposes `driver`, `requested_driver`, `options`,
+`url_options`, and `application_options`.
+
+```python
+def approved_transport(context):
+    if context.driver not in {"asyncpg", "aiopg"}:
+        raise UnsupportedDriverError("driver not approved", driver=context.driver)
+    if context.options.get("ssl") != "verify-full":
+        raise TLSConfigurationError("unapproved TLS mode", driver=context.driver)
+
+database = Database(DATABASE_URL, validator=approved_transport, ssl="verify-full")
+```
+
+For a fake driver that records what it received, `.backend` and
+`.connection_options()` expose the selected backend and its effective options
+after construction, without opening a connection.
+
 ## Transactions
 
 Transactions are managed by async context blocks.

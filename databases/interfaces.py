@@ -5,6 +5,17 @@ from sqlalchemy.sql import ClauseElement
 
 
 class DatabaseBackend:
+    #: The concrete async driver used by this backend. Backends that are
+    #: selected from a bare dialect URL (for example ``postgresql://``)
+    #: should define this so callers can see the driver that was actually
+    #: chosen, not just the driver spelled in the URL.
+    driver: typing.Optional[str] = None
+
+    #: Whether this backend can carry a TLS-protected transport. ``None``
+    #: means the backend has not declared its capability; validation rules
+    #: that require TLS should treat that as unsupported.
+    supports_tls: typing.Optional[bool] = None
+
     async def connect(self) -> None:
         raise NotImplementedError()  # pragma: no cover
 
@@ -13,6 +24,33 @@ class DatabaseBackend:
 
     def connection(self) -> "ConnectionBackend":
         raise NotImplementedError()  # pragma: no cover
+
+    def connection_options(self) -> typing.Dict[str, typing.Any]:
+        """
+        Return the connection options this backend will pass to its driver.
+
+        Backends merge URL query parameters and application-supplied keyword
+        arguments in their own constructors. This method exposes the effective
+        result without opening a connection. The default implementation is
+        suitable for backends that store the URL as ``_database_url`` and the
+        keyword arguments as ``_options``.
+        """
+        options = self.application_options()
+        database_url = getattr(self, "_database_url", None)
+        merged = dict(getattr(database_url, "options", {}) or {})
+        merged.update(options)
+        return merged
+
+    def application_options(self) -> typing.Dict[str, typing.Any]:
+        """
+        Return the keyword arguments supplied by the application.
+
+        These are the values that override URL query parameters in the
+        built-in backends. They are kept separate from
+        :meth:`connection_options` so validation rules can tell which
+        configuration source supplied a value.
+        """
+        return dict(getattr(self, "_options", {}) or {})
 
 
 class ConnectionBackend:

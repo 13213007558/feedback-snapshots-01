@@ -13,6 +13,12 @@ from sqlalchemy.sql import ClauseElement
 
 from databases.importer import import_from_string
 from databases.interfaces import DatabaseBackend, Record, TransactionBackend
+from databases.validation import (
+    ConnectionValidationContext,
+    ConnectionValidationError,
+    ConnectionValidator,
+    normalize_validators,
+)
 
 try:  # pragma: no cover
     import click
@@ -58,6 +64,11 @@ class Database:
         url: typing.Union[str, "DatabaseURL"],
         *,
         force_rollback: bool = False,
+        validator: typing.Union[
+            ConnectionValidator,
+            typing.Iterable[ConnectionValidator],
+            None,
+        ] = None,
         **options: typing.Any,
     ):
         self.url = DatabaseURL(url)
@@ -66,6 +77,7 @@ class Database:
         self._connection_map = weakref.WeakKeyDictionary()
 
         self._force_rollback = force_rollback
+        self._validator = normalize_validators(validator)
 
         backend_str = self._get_backend()
         backend_cls = import_from_string(backend_str)
@@ -101,6 +113,74 @@ class Database:
 
         return self._connection
 
+    @property
+    def driver(self) -> str:
+        """
+        The async driver the selected backend will actually use.
+
+        This may differ from :attr:`DatabaseURL.driver`. For example, an
+        unrecognized ``postgresql+driver`` URL falls back to the default
+        PostgreSQL backend, and a bare ``postgresql://`` URL resolves to
+        ``asyncpg``. Validation rules see this value, not only the URL text.
+        """
+        backend_driver = getattr(self._backend, "driver", None)
+        return backend_driver or self.url.driver or self.url.dialect
+
+    @property
+    def backend(self) -> DatabaseBackend:
+        return self._backend
+
+    def connection_options(self) -> typing.Dict[str, typing.Any]:
+        """
+        Return the effective options the selected backend will pass to its
+        driver after URL query parameters and application keyword arguments
+        have been merged.
+        """
+        return dict(self._backend.connection_options())
+
+    def _validate_connection(self) -> None:
+        if not self._validator:
+            return
+
+        driver = self.driver
+        try:
+            options = dict(self._backend.connection_options())
+            application_options = dict(self._backend.application_options())
+        except Exception as exc:
+            raise ConnectionValidationError(
+                "Could not inspect the connection options for driver "
+                "{driver!r}; refusing to open a validated connection.".format(
+                    driver=driver
+                ),
+                driver=driver,
+            ) from exc
+
+        context = ConnectionValidationContext(
+            database=self,
+            url=self.url,
+            backend=self._backend,
+            driver=driver,
+            requested_driver=self.url.driver,
+            options=options,
+            url_options=dict(self.url.options),
+            application_options=application_options,
+        )
+        for validator in self._validator:
+            if validator(context) is False:
+                raise ConnectionValidationError(
+                    "Connection validation rule rejected driver {!r}.".format(driver),
+                    driver=driver,
+                )
+
+    def validate_connection(self) -> None:
+        """
+        Run the configured validation rules without opening a connection.
+
+        ``connect()`` calls this automatically. Calling it explicitly is useful
+        for failing fast at application startup or in health checks.
+        """
+        self._validate_connection()
+
     async def connect(self) -> None:
         """
         Establish the connection pool.
@@ -109,6 +189,7 @@ class Database:
             logger.debug("Already connected, skipping connection")
             return None
 
+        self._validate_connection()
         await self._backend.connect()
         logger.info(
             "Connected to database %s", self.url.obscure_password, extra=CONNECT_EXTRA

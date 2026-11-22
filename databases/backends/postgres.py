@@ -20,6 +20,9 @@ logger = logging.getLogger("databases")
 
 
 class PostgresBackend(DatabaseBackend):
+    driver = "asyncpg"
+    supports_tls = True
+
     def __init__(
         self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
     ) -> None:
@@ -40,6 +43,9 @@ class PostgresBackend(DatabaseBackend):
         dialect.supports_native_decimal = True
 
         return dialect
+
+    def connection_options(self) -> dict:
+        return self._get_connection_kwargs()
 
     def _get_connection_kwargs(self) -> dict:
         url_options = self._database_url.options
