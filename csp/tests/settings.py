@@ -1,4 +1,9 @@
+from pathlib import Path
+
 from csp.constants import NONCE, SELF
+
+TEST_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+TEST_JINJA2_DIR = Path(__file__).resolve().parent / "jinja2"
 
 CONTENT_SECURITY_POLICY = {
     "DIRECTIVES": {
@@ -27,7 +32,7 @@ SECRET_KEY = "csp-test-key"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.jinja2.Jinja2",
-        "DIRS": [],
+        "DIRS": [TEST_JINJA2_DIR],
         "APP_DIRS": True,
         "OPTIONS": {
             "environment": "csp.tests.environment.environment",
@@ -36,7 +41,7 @@ TEMPLATES = [
     },
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [TEST_TEMPLATE_DIR],
         "APP_DIRS": True,
         "OPTIONS": {},
     },
