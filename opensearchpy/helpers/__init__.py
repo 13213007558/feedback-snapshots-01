@@ -42,6 +42,16 @@ from .actions import (
     streaming_bulk,
 )
 from .asyncsigner import AWSV4SignerAsyncAuth
+from .diagnostics import (
+    AsyncDiagnosticSampler,
+    DiagnosticConfig,
+    DiagnosticSampler,
+    DiagnosticSummary,
+    async_sample_results,
+    async_scan_with_summary,
+    sample_results,
+    scan_with_summary,
+)
 from .errors import BulkIndexError, ScanError
 from .signer import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
 
@@ -64,4 +74,12 @@ __all__ = [
     "async_bulk",
     "async_reindex",
     "async_streaming_bulk",
+    "DiagnosticConfig",
+    "DiagnosticSampler",
+    "DiagnosticSummary",
+    "AsyncDiagnosticSampler",
+    "sample_results",
+    "async_sample_results",
+    "scan_with_summary",
+    "async_scan_with_summary",
 ]

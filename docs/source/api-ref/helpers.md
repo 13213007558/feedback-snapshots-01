@@ -9,6 +9,7 @@ maxdepth: 1
 
 helpers/aggs
 helpers/analysis
+helpers/diagnostics
 helpers/document
 helpers/faceted_search
 helpers/field

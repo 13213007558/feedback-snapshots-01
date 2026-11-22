@@ -75,6 +75,16 @@ from .helpers import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4Signe
 from .helpers.aggs import A
 from .helpers.analysis import analyzer, char_filter, normalizer, token_filter, tokenizer
 from .helpers.document import Document, InnerDoc, MetaField
+from .helpers.diagnostics import (
+    AsyncDiagnosticSampler,
+    DiagnosticConfig,
+    DiagnosticSampler,
+    DiagnosticSummary,
+    async_sample_results,
+    async_scan_with_summary,
+    sample_results,
+    scan_with_summary,
+)
 from .helpers.faceted_search import (
     DateHistogramFacet,
     Facet,
@@ -180,6 +190,14 @@ __all__ = [
     "Date",
     "DateHistogramFacet",
     "DateRange",
+    "DiagnosticConfig",
+    "DiagnosticSampler",
+    "DiagnosticSummary",
+    "AsyncDiagnosticSampler",
+    "async_sample_results",
+    "async_scan_with_summary",
+    "sample_results",
+    "scan_with_summary",
     "KnnVector",
     "Document",
     "Double",

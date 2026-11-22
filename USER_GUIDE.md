@@ -160,6 +160,7 @@ print(response)
 - [Connection Classes](guides/connection_classes.md)
 - [Document Lifecycle](guides/document_lifecycle.md)
 - [Collecting Logs](guides/log_collection.md)
+- [Search Result Diagnostics](guides/diagnostics.md)
 
 ## Plugins
 
