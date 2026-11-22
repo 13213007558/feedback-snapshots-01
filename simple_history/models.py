@@ -32,7 +32,7 @@ from django.utils.functional import cached_property
 from django.utils.text import format_lazy
 from django.utils.translation import gettext_lazy as _
 
-from . import exceptions, utils
+from . import attribution, exceptions, utils
 from .manager import (
     SIMPLE_HISTORY_REVERSE_ATTR_NAME,
     HistoricalQuerySet,
@@ -57,6 +57,8 @@ else:
     ModelTypeHint = object
 
 registered_models = {}
+
+_UNSET = object()
 
 
 def _default_get_user(request, **kwargs):
@@ -789,16 +791,30 @@ class HistoricalRecords:
         )
 
     def get_history_user(self, instance):
-        """Get the modifying user from instance or middleware."""
+        """Get the modifying user from instance, task context, or middleware."""
         try:
-            return instance._history_user
+            instance_user = instance._history_user
         except AttributeError:
-            request = None
-            try:
-                if self.context.request.user.is_authenticated:
-                    request = self.context.request
-            except AttributeError:
-                pass
+            instance_user = _UNSET
+        else:
+            if instance_user is not None:
+                return instance_user
+
+        task_user = attribution.get_context_history_user()
+        if task_user is not None:
+            return task_user
+
+        if instance_user is not _UNSET:
+            # Preserve the usual precedence of an explicit ``_history_user``
+            # when no task context is active.
+            return instance_user
+
+        request = None
+        try:
+            if self.context.request.user.is_authenticated:
+                request = self.context.request
+        except AttributeError:
+            pass
 
         return self.get_user(instance=instance, request=request)
 

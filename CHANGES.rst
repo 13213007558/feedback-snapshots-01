@@ -6,6 +6,10 @@ Unreleased
 
 **New features:**
 
+- Added ``simple_history.attribution.history_user_context`` for declaring the
+  author of history created by background tasks and imports, separately from
+  request-based attribution
+
 
 **Breaking changes:**
 

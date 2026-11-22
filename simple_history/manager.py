@@ -3,6 +3,7 @@ from django.db import models
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils import timezone
 
+from simple_history.attribution import get_context_history_user
 from simple_history.utils import (
     get_app_model_primary_key_name,
     get_change_reason_from_object,
@@ -230,12 +231,19 @@ class HistoryManager(models.Manager):
             history_type = "~"
 
         historical_instances = []
+        task_user = get_context_history_user()
         for instance in objs:
-            history_user = getattr(
-                instance,
-                "_history_user",
-                default_user or self.model.get_default_history_user(instance),
-            )
+            if (
+                hasattr(instance, "_history_user")
+                and instance._history_user is not None
+            ):
+                history_user = instance._history_user
+            elif default_user is not None:
+                history_user = default_user
+            elif task_user is not None:
+                history_user = task_user
+            else:
+                history_user = self.model.get_default_history_user(instance)
             row = self.model(
                 history_date=getattr(
                     instance, "_history_date", default_date or timezone.now()

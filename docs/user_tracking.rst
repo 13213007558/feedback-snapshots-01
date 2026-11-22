@@ -86,6 +86,54 @@ This is very helpful when using ``register``:
 .. _`Manually Track User Model`:
 
 
+Attributing History from Background Tasks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``HistoryRequestMiddleware`` is only appropriate for web requests. Background
+work such as imports or management commands has no request, and its executor is
+usually a service identity rather than a person. Use
+``simple_history.attribution.history_user_context`` to declare the author for
+the work inside a block:
+
+.. code-block:: python
+
+    from simple_history.attribution import history_user_context
+
+    author = approval.approved_by if approval else service_account
+    with history_user_context(user=service_account, approver=author):
+        import_rows()
+
+``user`` is the identity executing the task. If ``approver`` is supplied, the
+approver is recorded as ``history_user`` instead, and the context yields that
+effective author. Inside the block, records resolve their author in this order:
+
+1. an explicit ``instance._history_user``
+2. the author declared by ``history_user_context``
+3. the authenticated user from ``HistoryRequestMiddleware``
+4. the model's ``get_user`` callable
+
+The task context therefore never changes how ordinary requests are attributed:
+it is opt-in, and it takes precedence only while the block is active. When the
+block exits, the declared author is removed from the current thread or async
+task, even if the block raises, so a later request cannot inherit it:
+
+.. code-block:: python
+
+    with history_user_context(user=service_account, approver=author):
+        import_rows()
+
+    # No task author remains here; the next request uses its own user.
+    handle_request()
+
+Because the value is stored with ``asgiref.local.Local``, concurrent threads and
+async tasks each see only the author they declared. Bulk helpers
+(``bulk_create_with_history`` and ``bulk_update_with_history``) also honor the
+context when no ``default_user`` is passed.
+
+
+.. _`Manually Track User Model`:
+
+
 Manually Track User Model
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
