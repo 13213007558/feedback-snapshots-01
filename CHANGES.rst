@@ -6,6 +6,11 @@ Unreleased
 
 **New features:**
 
+- ``clean_old_history`` now accepts a ``--policy`` option pointing to a
+  ``HistoryCleanupPolicy`` subclass.  The policy can protect expired
+  historical records from deletion and provide a reason that is shown during
+  dry runs; a ``--database`` option allows cleaning historical tables stored
+  on a separate database (gh-1637)
 
 **Breaking changes:**
 

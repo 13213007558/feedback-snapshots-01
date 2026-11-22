@@ -107,6 +107,64 @@ database_router_override_settings_history_in_diff_db = {
 }
 
 
+class TestComplianceFreezeHistoryInDifferentDbRouter:
+    """Routes only the historical model to the ``other`` database."""
+
+    def db_for_read(self, model, **hints):
+        from ..models import HistoricalRecordWithComplianceFreezeInDifferentDb
+
+        if model == HistoricalRecordWithComplianceFreezeInDifferentDb:
+            return OTHER_DB_NAME
+        return None
+
+    def db_for_write(self, model, **hints):
+        from ..models import HistoricalRecordWithComplianceFreezeInDifferentDb
+
+        if model == HistoricalRecordWithComplianceFreezeInDifferentDb:
+            return OTHER_DB_NAME
+        return None
+
+    def allow_relation(self, obj1, obj2, **hints):
+        from ..models import (
+            HistoricalRecordWithComplianceFreezeInDifferentDb,
+            RecordWithComplianceFreezeInDifferentDb,
+        )
+
+        if isinstance(
+            obj1,
+            (
+                RecordWithComplianceFreezeInDifferentDb,
+                HistoricalRecordWithComplianceFreezeInDifferentDb,
+            ),
+        ) or isinstance(
+            obj2,
+            (
+                RecordWithComplianceFreezeInDifferentDb,
+                HistoricalRecordWithComplianceFreezeInDifferentDb,
+            ),
+        ):
+            return False
+        return None
+
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        from ..models import HistoricalRecordWithComplianceFreezeInDifferentDb
+
+        if (
+            model_name
+            == HistoricalRecordWithComplianceFreezeInDifferentDb._meta.model_name
+        ):
+            return db == OTHER_DB_NAME
+        return None
+
+
+database_router_override_settings_compliance_freeze_in_diff_db = {
+    "DATABASE_ROUTERS": [
+        "simple_history.tests.tests.utils."
+        "TestComplianceFreezeHistoryInDifferentDbRouter"
+    ]
+}
+
+
 class PermissionAction(Enum):
     ADD = "add"
     CHANGE = "change"

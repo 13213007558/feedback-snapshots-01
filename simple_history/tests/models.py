@@ -617,6 +617,20 @@ class ModelWithHistoryInDifferentDb(models.Model):
     history = HistoricalRecords()
 
 
+class RecordWithComplianceFreeze(models.Model):
+    name = models.CharField(max_length=30)
+    compliance_frozen = models.BooleanField(default=False)
+    freeze_reason = models.CharField(max_length=100, blank=True, default="")
+    history = HistoricalRecords()
+
+
+class RecordWithComplianceFreezeInDifferentDb(models.Model):
+    name = models.CharField(max_length=30)
+    compliance_frozen = models.BooleanField(default=False)
+    freeze_reason = models.CharField(max_length=100, blank=True, default="")
+    history = HistoricalRecords()
+
+
 class ModelWithHistoryUsingBaseModelDb(models.Model):
     name = models.CharField(max_length=30)
     history = HistoricalRecords(use_base_model_db=True)

@@ -60,3 +60,48 @@ all records older than 30 days would be removed.
 .. code-block:: bash
 
     $ python manage.py clean_old_history --days 60 --auto
+
+Retention policies
+^^^^^^^^^^^^^^^^^^
+
+Some historical records must be kept even when they are older than the
+retention window - for example archives belonging to an object that is under
+a compliance freeze.  Pass ``--policy`` with the dotted path of a
+``HistoryCleanupPolicy`` subclass to decide which expired records are
+protected and why:
+
+.. code-block:: python
+
+    from simple_history.cleanup import HistoryCleanupPolicy
+
+
+    class ComplianceFreezePolicy(HistoryCleanupPolicy):
+        def protect_reason(self, history_record):
+            instance = history_record.history_object
+            if instance.compliance_frozen:
+                return instance.freeze_reason or "Object is under a compliance freeze"
+            return None
+
+``protect_reason()`` is called for every expired record.  Returning ``None``
+allows the record to be deleted; returning a string keeps the record and uses
+the string as the protection reason.
+
+.. code-block:: bash
+
+    $ python manage.py clean_old_history --auto --policy myapp.cleanup.ComplianceFreezePolicy
+
+A dry run (``--dry``) never deletes anything and prints one
+``Protecting historical record ...`` line per protected record, including the
+reason returned by the policy, followed by a summary of how many records were
+kept.  Protected records are excluded from the deletion queryset, so they can
+never be removed by the command.  Each run evaluates the policy against the
+rules currently in force, which makes rerunning a failed cleanup safe: records
+that have since become unfrozen become eligible, while any record that is
+still frozen stays untouched.
+
+If the historical table lives in another database, select it with
+``--database``:
+
+.. code-block:: bash
+
+    $ python manage.py clean_old_history --auto --database other --policy myapp.cleanup.ComplianceFreezePolicy
