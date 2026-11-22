@@ -99,29 +99,56 @@ async def create_users(request):
 ```
 
 Transaction state is tied to the connection used in the currently executing asynchronous task.
-If you would like to influence an active transaction from another task, the connection must be
-shared. This state is _inherited_ by tasks that share the same connection:
+Child tasks do **not** inherit access to an active transaction. Each task acquires its own
+connection, and transaction state is only visible to the task that started it.
+
+If a child task needs to share the parent's transaction, the parent must authorize it
+explicitly by issuing a handoff:
 
 ```python
-async def add_excitement(connnection: databases.core.Connection, id: int):
-    await connection.execute(
-        "UPDATE notes SET text = CONCAT(text, '!!!') WHERE id = :id",
-        {"id": id}
-    )
-
+async def add_excitement(handoff, id: int):
+    # The handoff must be used from the single task it is delegated to.
+    async with handoff:
+        await database.execute(
+            "UPDATE notes SET text = text || '!!!' WHERE id = :id",
+            {"id": id},
+        )
 
 async with Database(database_url) as database:
-    async with database.transaction():
-        # This note won't exist until the transaction closes...
+    async with database.transaction() as transaction:
+        # This note won't exist outside the transaction until it commits...
         await database.execute(
-            "INSERT INTO notes(id, text) values (1, 'databases is cool')"
+            "INSERT INTO notes(id, text) VALUES (1, 'databases is cool')"
         )
-        # ...but child tasks can use this connection now!
-        await asyncio.create_task(add_excitement(database.connection(), id=1))
+        # ...but the delegated task can read and write it through the handoff.
+        await asyncio.create_task(
+            add_excitement(transaction.handoff(), id=1)
+        )
 
     await database.fetch_val("SELECT text FROM notes WHERE id=1")
     # ^ returns: "databases is cool!!!"
 ```
+
+A handoff behaves like a capability:
+
+* `transaction.handoff()` may only be called by the task that owns the active
+  transaction.
+* The handoff is bound to the first task that uses it. Passing it to a sibling
+  or reusing it from another task raises `TransactionNotAuthorized`.
+* The delegated task may run queries on the transaction's connection, but it
+  cannot commit or roll back. Commit and rollback always belong to the owner.
+* The handoff is revoked when the owning transaction closes. Using it afterwards
+  raises `TransactionHandoffError`.
+
+Without a handoff, a child task that receives the parent's `Connection` and tries
+to use it raises `TransactionNotAuthorized`, and reads through `database` go
+through the child's own connection and therefore do not see the parent's
+uncommitted changes. A connection that has been released cannot be used at all;
+doing so raises `ConnectionNotAcquired`.
+
+Databases configured with `force_rollback=True` are the exception: they
+intentionally expose one shared connection and transaction to every task, so
+that all work is rolled back on disconnect.
 
 Nested transactions are fully supported, and are implemented using database savepoints:
 

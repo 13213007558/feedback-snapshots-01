@@ -530,29 +530,31 @@ async def test_transaction_commit(database_url):
 @async_adapter
 async def test_transaction_context_child_task_inheritance(database_url):
     """
-    Ensure that transactions are inherited by child tasks.
+    Ensure that transaction state is not inherited by child tasks by default.
     """
     async with Database(database_url) as database:
 
-        async def check_transaction(transaction, active_transaction):
-            # Should have inherited the same transaction backend from the parent task
-            assert transaction._transaction is active_transaction
+        async def check_transaction(transaction):
+            # Child tasks do not inherit the parent's transaction state...
+            assert transaction._transaction is None
+            # ...and they get their own task-local connection.
+            assert database.connection() is not parent_connection
 
         async with database.transaction() as transaction:
-            await asyncio.create_task(
-                check_transaction(transaction, transaction._transaction)
-            )
+            parent_connection = database.connection()
+            assert transaction._transaction is not None
+            await asyncio.create_task(check_transaction(transaction))
 
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
-async def test_transaction_context_child_task_inheritance_example(database_url):
+async def test_transaction_context_child_task_handoff_example(database_url):
     """
-    Ensure that child tasks may influence inherited transactions.
+    Ensure that child tasks may influence a transaction they were handed.
     """
     # This is an practical example of the above test.
     async with Database(database_url) as database:
-        async with database.transaction():
+        async with database.transaction() as transaction:
             # Create a note
             await database.execute(
                 notes.insert().values(id=1, text="setup", completed=True)
@@ -567,13 +569,14 @@ async def test_transaction_context_child_task_inheritance_example(database_url):
             result = await database.fetch_one(notes.select().where(notes.c.id == 1))
             assert result.text == "prior"
 
-            async def run_update_from_child_task(connection):
-                # Change the note from a child task
-                await connection.execute(
-                    notes.update().where(notes.c.id == 1).values(text="test")
-                )
+            async def run_update_from_child_task(handoff):
+                # Change the note from a child task with explicit authorization
+                async with handoff:
+                    await database.execute(
+                        notes.update().where(notes.c.id == 1).values(text="test")
+                    )
 
-            await asyncio.create_task(run_update_from_child_task(database.connection()))
+            await asyncio.create_task(run_update_from_child_task(transaction.handoff()))
 
             # Confirm the child's change
             result = await database.fetch_one(notes.select().where(notes.c.id == 1))

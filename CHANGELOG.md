@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Explicit transaction handoffs for child tasks via `transaction.handoff()`.
+  Handoffs are bound to one delegated task, are checked on every use, and are
+  revoked when the owning transaction commits or rolls back.
+
+### Changed
+
+* Transaction state is no longer inherited implicitly by child tasks. Tasks
+  that need to share an active transaction must receive a handoff from the
+  owning task; otherwise `TransactionNotAuthorized` is raised.
+* Reusing a released `Connection` now raises `ConnectionNotAcquired` instead of
+  silently querying a closed driver connection.
+
+### Fixed
+
+* A task's connection is only cleared on release if it is still the connection
+  registered for that task, so concurrent task cleanup cannot detach another
+  task's connection.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed

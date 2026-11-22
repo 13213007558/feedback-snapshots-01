@@ -40,6 +40,199 @@ _ACTIVE_TRANSACTIONS: ContextVar[
     typing.Optional["weakref.WeakKeyDictionary['Transaction', 'TransactionBackend']"]
 ] = ContextVar("databases:active_transactions", default=None)
 
+# Set while a task is running inside an authorized transaction handoff.
+_CURRENT_HANDOFF: ContextVar[typing.Optional["TransactionHandoff"]] = ContextVar(
+    "databases:current_handoff", default=None
+)
+
+
+class TransactionHandoffError(RuntimeError):
+    """
+    Raised when a transaction handoff is used incorrectly, or after the
+    transaction that issued it has closed.
+    """
+
+
+class TransactionNotAuthorized(TransactionHandoffError):
+    """
+    Raised when a task uses a transaction, or a handoff for it, without having
+    been authorized to do so.
+    """
+
+
+class ConnectionNotAcquired(RuntimeError):
+    """
+    Raised when a released connection is used again.
+    """
+
+
+class _TransactionMetadata:
+    """
+    The owner-scoped state for a single `Transaction` activation.
+
+    This deliberately lives in task state instead of on the `Transaction`
+    object: decorator-based transactions are shared by concurrent tasks, and
+    each task has its own independent activation.
+    """
+
+    def __init__(
+        self,
+        owner: asyncio.Task,
+        transaction: "Transaction",
+        connection: "Connection",
+        backend: TransactionBackend,
+        shared: bool = False,
+    ) -> None:
+        self.owner = owner
+        self.transaction = transaction
+        self.connection = connection
+        self.backend = backend
+        # Force-rollback databases deliberately expose a single connection to
+        # every task, so that connection's root transaction must stay shared.
+        self.shared = shared
+        self.closed = False
+        self.handoffs: typing.Set["TransactionHandoff"] = set()
+
+    def close(self) -> None:
+        """
+        Revoke outstanding handoffs and prevent any further use of the
+        transaction's connection.
+
+        This runs before the backend commit/rollback so that a delegated task
+        cannot keep using the connection once the owner has decided the
+        transaction's fate.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        for handoff in list(self.handoffs):
+            handoff._invalidate()
+        self.handoffs.clear()
+
+
+class TransactionHandoff:
+    """
+    An authorization for one delegated task to use a transaction's connection.
+
+    Handoffs are created by the owning task with `transaction.handoff()` and
+    passed explicitly to a child task. They are intentionally not inherited
+    through task context: using one from a task other than the delegate raises
+    `TransactionNotAuthorized`, and using one after the owning transaction has
+    closed raises `TransactionHandoffError`.
+
+    The delegate can use the transaction's connection directly:
+
+    ```python
+    async def child(handoff):
+        async with handoff:
+            await handoff.connection.execute(...)
+
+    async with database.transaction() as transaction:
+        task = asyncio.create_task(child(transaction.handoff()))
+        ...
+    ```
+
+    Or the regular `Database` helpers while the handoff is active:
+
+    ```python
+    async def child(handoff):
+        async with handoff:
+            await database.execute(...)
+
+    async with database.transaction() as transaction:
+        await asyncio.create_task(child(transaction.handoff()))
+    ```
+
+    The first task to use the handoff becomes its delegate. Commit and rollback
+    always remain with the owning task. The handoff is revoked as soon as the
+    owning transaction commits or rolls back.
+    """
+
+    def __init__(
+        self,
+        transaction: "Transaction",
+        metadata: _TransactionMetadata,
+        task: typing.Optional[asyncio.Task] = None,
+    ):
+        self._transaction = transaction
+        self._metadata = metadata
+        self._task: typing.Optional[asyncio.Task] = task
+        self._tokens: typing.List[typing.Tuple[asyncio.Task, typing.Any]] = []
+        self._invalidated = False
+
+    @property
+    def transaction(self) -> "Transaction":
+        self._claim()
+        return self._transaction
+
+    @property
+    def connection(self) -> "Connection":
+        self._claim()
+        return self._metadata.connection
+
+    @property
+    def task(self) -> typing.Optional[asyncio.Task]:
+        return self._task
+
+    @property
+    def is_valid(self) -> bool:
+        return not self._invalidated and not self._metadata.closed
+
+    def _claim(self) -> asyncio.Task:
+        self._validate()
+        task = asyncio.current_task()
+        if task is None:  # pragma: no cover
+            raise TransactionHandoffError(
+                "Transaction handoffs can only be used from an asyncio task"
+            )
+        if task is self._metadata.owner:
+            # The owner does not need the handoff, but inspecting it must not
+            # consume the delegation intended for a child task.
+            return task
+        if self._task is None:
+            self._task = task
+        elif self._task is not task:
+            raise TransactionNotAuthorized(
+                "This transaction handoff was issued to a different task"
+            )
+        return task
+
+    def _validate(self) -> None:
+        if self._invalidated or self._metadata.closed:
+            raise TransactionHandoffError("This transaction handoff is no longer valid")
+
+    def _ensure_usable(self) -> None:
+        self._validate()
+        task = asyncio.current_task()
+        if task is self._metadata.owner:
+            return
+        if self._task is None or task is not self._task:
+            raise TransactionNotAuthorized(
+                "This transaction handoff was issued to a different task"
+            )
+
+    def _invalidate(self) -> None:
+        self._invalidated = True
+
+    async def __aenter__(self) -> "TransactionHandoff":
+        task = self._claim()
+        self._tokens.append((task, _CURRENT_HANDOFF.set(self)))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: typing.Optional[typing.Type[BaseException]] = None,
+        exc_value: typing.Optional[BaseException] = None,
+        traceback: typing.Optional[TracebackType] = None,
+    ) -> None:
+        task = asyncio.current_task()
+        for index in range(len(self._tokens) - 1, -1, -1):
+            token_task, token = self._tokens[index]
+            if token_task is task:
+                del self._tokens[index]
+                _CURRENT_HANDOFF.reset(token)
+                return
+
 
 class Database:
     SUPPORTED_BACKENDS = {
@@ -121,7 +314,7 @@ class Database:
 
             self._global_connection = Connection(self, self._backend)
             self._global_transaction = self._global_connection.transaction(
-                force_rollback=True
+                force_rollback=True, shared=True
             )
 
             await self._global_transaction.__aenter__()
@@ -217,6 +410,13 @@ class Database:
         if self._global_connection is not None:
             return self._global_connection
 
+        handoff = _CURRENT_HANDOFF.get()
+        if handoff is not None and handoff._metadata.connection._database is self:
+            # While a handoff is active, the regular database helpers operate
+            # on the transaction's connection rather than a task-local one.
+            handoff._ensure_usable()
+            return handoff._metadata.connection
+
         if not self._connection:
             self._connection = Connection(self, self._backend)
 
@@ -250,14 +450,57 @@ class Connection:
         self._connection_lock = asyncio.Lock()
         self._connection = self._backend.connection()
         self._connection_counter = 0
+        self._released = False
 
         self._transaction_lock = asyncio.Lock()
         self._transaction_stack: typing.List[Transaction] = []
+        # Metadata for the activations on `_transaction_stack`, in the same
+        # order. This lets authorization checks work from any task, including
+        # tasks that only hold a reference to this connection.
+        self._transaction_metadata_stack: typing.List[_TransactionMetadata] = []
 
         self._query_lock = asyncio.Lock()
 
+    def _ensure_acquired(self) -> None:
+        if self._connection_counter == 0:
+            raise ConnectionNotAcquired(
+                "This connection has been released and can no longer be used"
+            )
+
+    def _ensure_authorized(self) -> None:
+        """
+        Refuse to run work on this connection from a task that does not own the
+        active transaction, unless it holds an explicit handoff.
+        """
+        task = asyncio.current_task()
+        handoff = _CURRENT_HANDOFF.get()
+
+        for transaction, metadata in reversed(
+            list(zip(self._transaction_stack, self._transaction_metadata_stack))
+        ):
+            if metadata.shared:
+                continue
+            if metadata.closed:
+                raise TransactionHandoffError(
+                    "The transaction that owns this connection has already closed"
+                )
+            if task is metadata.owner:
+                return
+            if handoff is not None and handoff._transaction is transaction:
+                handoff._ensure_usable()
+                return
+            raise TransactionNotAuthorized(
+                "This connection is part of a transaction owned by a different "
+                "task. Use `transaction.handoff()` to delegate access explicitly."
+            )
+
     async def __aenter__(self) -> "Connection":
+        self._ensure_authorized()
         async with self._connection_lock:
+            if self._released:
+                raise ConnectionNotAcquired(
+                    "This connection has been released and can no longer be used"
+                )
             self._connection_counter += 1
             try:
                 if self._connection_counter == 1:
@@ -273,18 +516,23 @@ class Connection:
         exc_value: typing.Optional[BaseException] = None,
         traceback: typing.Optional[TracebackType] = None,
     ) -> None:
+        self._ensure_authorized()
         async with self._connection_lock:
             assert self._connection is not None
             self._connection_counter -= 1
             if self._connection_counter == 0:
+                self._released = True
                 await self._connection.release()
-                self._database._connection = None
+                if self._database._connection is self:
+                    self._database._connection = None
 
     async def fetch_all(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
     ) -> typing.List[Record]:
+        self._ensure_acquired()
+        self._ensure_authorized()
         built_query = self._build_query(query, values)
         async with self._query_lock:
             return await self._connection.fetch_all(built_query)
@@ -294,6 +542,8 @@ class Connection:
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
     ) -> typing.Optional[Record]:
+        self._ensure_acquired()
+        self._ensure_authorized()
         built_query = self._build_query(query, values)
         async with self._query_lock:
             return await self._connection.fetch_one(built_query)
@@ -304,6 +554,8 @@ class Connection:
         values: typing.Optional[dict] = None,
         column: typing.Any = 0,
     ) -> typing.Any:
+        self._ensure_acquired()
+        self._ensure_authorized()
         built_query = self._build_query(query, values)
         async with self._query_lock:
             return await self._connection.fetch_val(built_query, column)
@@ -313,6 +565,8 @@ class Connection:
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
     ) -> typing.Any:
+        self._ensure_acquired()
+        self._ensure_authorized()
         built_query = self._build_query(query, values)
         async with self._query_lock:
             return await self._connection.execute(built_query)
@@ -320,6 +574,8 @@ class Connection:
     async def execute_many(
         self, query: typing.Union[ClauseElement, str], values: list
     ) -> None:
+        self._ensure_acquired()
+        self._ensure_authorized()
         queries = [self._build_query(query, values_set) for values_set in values]
         async with self._query_lock:
             await self._connection.execute_many(queries)
@@ -329,6 +585,8 @@ class Connection:
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
+        self._ensure_acquired()
+        self._ensure_authorized()
         built_query = self._build_query(query, values)
         async with self.transaction():
             async with self._query_lock:
@@ -345,6 +603,8 @@ class Connection:
 
     @property
     def raw_connection(self) -> typing.Any:
+        self._ensure_acquired()
+        self._ensure_authorized()
         return self._connection.raw_connection
 
     @staticmethod
@@ -369,29 +629,115 @@ class Transaction:
         self,
         connection_callable: typing.Callable[[], Connection],
         force_rollback: bool,
+        shared: bool = False,
         **kwargs: typing.Any,
     ) -> None:
         self._connection_callable = connection_callable
         self._force_rollback = force_rollback
+        self._shared = shared
         self._extra_options = kwargs
+
+        # Activations are keyed by the task that owns them. Decorator-based
+        # transactions are shared across tasks, so activation state must not
+        # be stored on this object directly. Each key holds a stack to support
+        # recursive use of the same decorator within a single task.
+        self._activations: (
+            "weakref.WeakKeyDictionary[asyncio.Task, typing.List[_TransactionMetadata]]"
+        ) = weakref.WeakKeyDictionary()
+
+    def _activation_stack(self) -> typing.List["_TransactionMetadata"]:
+        task = asyncio.current_task()
+        if task is None:  # pragma: no cover
+            return []
+        return self._activations.get(task, [])
+
+    def _transaction_metadata(self) -> typing.Optional["_TransactionMetadata"]:
+        stack = self._activation_stack()
+        return stack[-1] if stack else None
+
+    def _push_transaction_metadata(self, metadata: "_TransactionMetadata") -> None:
+        task = metadata.owner
+        stack = list(self._activations.get(task, []))
+        stack.append(metadata)
+        self._activations[task] = stack
+
+    def _pop_transaction_metadata(self, metadata: "_TransactionMetadata") -> None:
+        task = metadata.owner
+        stack = list(self._activations.get(task, []))
+        if metadata in stack:
+            stack.remove(metadata)
+        if stack:
+            self._activations[task] = stack
+        else:
+            self._activations.pop(task, None)
+
+    @property
+    def owner(self) -> typing.Optional[asyncio.Task]:
+        """
+        The task that started this transaction activation, if any.
+        """
+        metadata = self._transaction_metadata()
+        return None if metadata is None else metadata.owner
 
     @property
     def _connection(self) -> "Connection":
-        # Returns the same connection if called multiple times
-        return self._connection_callable()
+        # Returns the same connection if called multiple times.
+        handoff = _CURRENT_HANDOFF.get()
+        if handoff is not None and handoff._transaction is self:
+            handoff._ensure_usable()
+            return handoff._metadata.connection
+
+        metadata = self._transaction_metadata()
+        if metadata is None:
+            return self._connection_callable()
+
+        if asyncio.current_task() is metadata.owner:
+            return metadata.connection
+
+        raise TransactionNotAuthorized(
+            "This transaction is owned by a different task. "
+            "Use `transaction.handoff()` to delegate access explicitly."
+        )
+
+    def handoff(self) -> "TransactionHandoff":
+        """
+        Create a single-use authorization for one other task to use this
+        transaction.
+
+        Only the task that owns the active transaction may issue a handoff.
+        The handoff must be passed to the delegated task explicitly; it is not
+        inherited by sibling or child tasks automatically.
+        """
+        metadata = self._transaction_metadata()
+        if metadata is None or metadata.closed:
+            raise TransactionHandoffError(
+                "Cannot hand off a transaction that is not active"
+            )
+
+        if asyncio.current_task() is not metadata.owner:
+            raise TransactionNotAuthorized(
+                "Only the task that owns a transaction can hand it off"
+            )
+
+        handoff = TransactionHandoff(self, metadata)
+        metadata.handoffs.add(handoff)
+        return handoff
 
     @property
     def _transaction(self) -> typing.Optional["TransactionBackend"]:
-        transactions = _ACTIVE_TRANSACTIONS.get()
-        if transactions is None:
-            return None
-
-        return transactions.get(self, None)
+        # Only the activation owned by the current task is visible. A child
+        # task that merely inherited the contextvar sees no transaction state.
+        metadata = self._transaction_metadata()
+        return None if metadata is None else metadata.backend
 
     @_transaction.setter
     def _transaction(
         self, transaction: typing.Optional["TransactionBackend"]
     ) -> typing.Optional["TransactionBackend"]:
+        # Kept in sync for backwards compatibility with code that inspects the
+        # contextvar directly. Authorization decisions use the per-task
+        # activation state instead, because contextvars are inherited by child
+        # tasks and would otherwise leak access.
         transactions = _ACTIVE_TRANSACTIONS.get()
         if transactions is None:
             transactions = weakref.WeakKeyDictionary()
@@ -446,33 +792,68 @@ class Transaction:
         return wrapper  # type: ignore
 
     async def start(self) -> "Transaction":
-        self._transaction = self._connection._connection.transaction()
+        connection = self._connection
+        backend = connection._connection.transaction()
+        self._transaction = backend
 
-        async with self._connection._transaction_lock:
-            is_root = not self._connection._transaction_stack
-            await self._connection.__aenter__()
-            await self._transaction.start(
-                is_root=is_root, extra_options=self._extra_options
+        async with connection._transaction_lock:
+            is_root = not connection._transaction_stack
+            await connection.__aenter__()
+            await backend.start(is_root=is_root, extra_options=self._extra_options)
+            owner = asyncio.current_task()
+            if owner is None:  # pragma: no cover
+                raise RuntimeError("No currently active asyncio.Task found")
+            metadata = _TransactionMetadata(
+                owner=owner,
+                transaction=self,
+                connection=connection,
+                backend=backend,
+                shared=self._shared,
             )
-            self._connection._transaction_stack.append(self)
+            connection._transaction_stack.append(self)
+            connection._transaction_metadata_stack.append(metadata)
+
+        self._push_transaction_metadata(metadata)
         return self
 
+    def _close_metadata(self, connection: "Connection") -> "_TransactionMetadata":
+        if not connection._transaction_metadata_stack:
+            raise TransactionHandoffError("Transaction is not active")
+
+        metadata = connection._transaction_metadata_stack[-1]
+        if metadata.transaction is not self:
+            raise TransactionHandoffError("Transaction is not active")
+        # The force-rollback global transaction may be started and stopped by
+        # different tasks, so it is exempt from the owner-only rule.
+        if not metadata.shared and asyncio.current_task() is not metadata.owner:
+            raise TransactionNotAuthorized(
+                "Only the task that owns a transaction can commit or roll it back"
+            )
+        metadata.close()
+        return metadata
+
     async def commit(self) -> None:
-        async with self._connection._transaction_lock:
-            assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
-            assert self._transaction is not None
-            await self._transaction.commit()
-            await self._connection.__aexit__()
+        connection = self._connection
+        async with connection._transaction_lock:
+            assert connection._transaction_stack[-1] is self
+            metadata = self._close_metadata(connection)
+            connection._transaction_stack.pop()
+            connection._transaction_metadata_stack.pop()
+            await metadata.backend.commit()
+            await connection.__aexit__()
+            self._pop_transaction_metadata(metadata)
             self._transaction = None
 
     async def rollback(self) -> None:
-        async with self._connection._transaction_lock:
-            assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
-            assert self._transaction is not None
-            await self._transaction.rollback()
-            await self._connection.__aexit__()
+        connection = self._connection
+        async with connection._transaction_lock:
+            assert connection._transaction_stack[-1] is self
+            metadata = self._close_metadata(connection)
+            connection._transaction_stack.pop()
+            connection._transaction_metadata_stack.pop()
+            await metadata.backend.rollback()
+            await connection.__aexit__()
+            self._pop_transaction_metadata(metadata)
             self._transaction = None
 
 
