@@ -22,9 +22,13 @@ from .config import REFRESH_MESSAGE
 from .config import REFRESH_MESSAGE_CATEGORY
 from .config import SESSION_KEYS
 from .config import USE_SESSION_FOR_NEXT
+from .load import LoadFailureReason
+from .load import LoadResult
+from .load import LoadSource
 from .mixins import AnonymousUserMixin
 from .signals import session_protected
 from .signals import user_accessed
+from .signals import user_load_failed
 from .signals import user_loaded_from_cookie
 from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
@@ -291,16 +295,30 @@ class LoginManager:
 
         return redirect(redirect_url)
 
-    def _update_request_context_with_user(self, user=None):
-        """Store the given user as ctx.user."""
+    def _update_request_context_with_user(self, user=None, result=None):
+        """Store the given user as ctx.user and the audit result, if any."""
 
         if user is None:
             user = self.anonymous_user()
 
         g._login_user = user
 
+        if result is not None:
+            g._login_load_result = result
+
+    def _record_failure(self, result):
+        """Emit the failure signal for an auditable, secret-free result."""
+        user_load_failed.send(current_app._get_current_object(), result=result)
+
     def _load_user(self):
-        """Loads user from session or remember_me cookie as applicable"""
+        """Loads user from session or remember_me cookie as applicable.
+
+        The outcome of every attempt is recorded as a secret-free
+        :class:`~flask_login.LoadResult` on ``flask.g._login_load_result`` and
+        a :func:`~flask_login.user_load_failed` signal is emitted whenever a
+        restoration attempt fails. The application keeps full control over how
+        (or whether) the failure is presented to the user.
+        """
 
         if self._user_callback is None and self._request_callback is None:
             raise Exception(
@@ -316,24 +334,58 @@ class LoginManager:
             return self._update_request_context_with_user()
 
         user = None
+        result = LoadResult.anonymous()
 
         # Load user from Flask Session
         user_id = session.get("_user_id")
         if user_id is not None and self._user_callback is not None:
-            user = self._user_callback(user_id)
+            user, result = self._load_from_callback(
+                LoadSource.SESSION, self._user_callback, user_id
+            )
 
         # Load user from Remember Me Cookie or Request Loader
         if user is None:
             config = current_app.config
             cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
-            has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
+            has_cookie = (
+                cookie_name in request.cookies and session.get("_remember") != "clear"
+            )
             if has_cookie:
                 cookie = request.cookies[cookie_name]
-                user = self._load_user_from_remember_cookie(cookie)
+                user, result = self._load_user_from_remember_cookie(cookie)
             elif self._request_callback:
-                user = self._load_user_from_request(request)
+                user, result = self._load_user_from_request(request)
 
-        return self._update_request_context_with_user(user)
+        if not result.success and result.source is not None:
+            self._record_failure(result)
+
+        return self._update_request_context_with_user(user, result)
+
+    def _load_from_callback(self, source, callback, user_id):
+        """Invoke a loader callback and turn the outcome into a LoadResult.
+
+        Exceptions raised by the directory are categorised rather than
+        propagated, and only the categorical reason plus the user id are kept;
+        the exception message and any credentials are discarded.
+        """
+        try:
+            user = callback(user_id)
+        except Exception:
+            return None, LoadResult.failed(
+                source, LoadFailureReason.UNAVAILABLE, user_id=user_id, retryable=True
+            )
+
+        if user is None:
+            return None, LoadResult.failed(
+                source, LoadFailureReason.NOT_FOUND, user_id=user_id
+            )
+
+        if not getattr(user, "is_active", True):
+            return None, LoadResult.failed(
+                source, LoadFailureReason.DISABLED, user_id=user_id
+            )
+
+        return user, LoadResult.loaded(source, user, user_id)
 
     def _session_protection_failed(self):
         sess = session._get_current_object()
@@ -365,26 +417,54 @@ class LoginManager:
 
     def _load_user_from_remember_cookie(self, cookie):
         user_id = decode_cookie(cookie)
-        if user_id is not None:
-            session["_user_id"] = user_id
-            session["_fresh"] = False
-            user = None
-            if self._user_callback:
-                user = self._user_callback(user_id)
-            if user is not None:
-                app = current_app._get_current_object()
-                user_loaded_from_cookie.send(app, user=user)
-                return user
-        return None
+        if user_id is None:
+            # The cookie could not be read. Record the source and category
+            # only; the raw cookie value must never leave this method.
+            return None, LoadResult.failed(
+                LoadSource.REMEMBER_COOKIE, LoadFailureReason.NO_IDENTIFIER
+            )
+
+        session["_user_id"] = user_id
+        session["_fresh"] = False
+        user = None
+        if self._user_callback:
+            user, result = self._load_from_callback(
+                LoadSource.REMEMBER_COOKIE, self._user_callback, user_id
+            )
+        else:
+            result = LoadResult.failed(
+                LoadSource.REMEMBER_COOKIE,
+                LoadFailureReason.NOT_FOUND,
+                user_id=user_id,
+            )
+        if user is not None:
+            app = current_app._get_current_object()
+            user_loaded_from_cookie.send(app, user=user)
+        return user, result
 
     def _load_user_from_request(self, request):
         if self._request_callback:
-            user = self._request_callback(request)
+            try:
+                user = self._request_callback(request)
+            except Exception:
+                return None, LoadResult.failed(
+                    LoadSource.REQUEST,
+                    LoadFailureReason.UNAVAILABLE,
+                    retryable=True,
+                )
             if user is not None:
+                if not getattr(user, "is_active", True):
+                    return None, LoadResult.failed(
+                        LoadSource.REQUEST, LoadFailureReason.DISABLED
+                    )
                 app = current_app._get_current_object()
                 user_loaded_from_request.send(app, user=user)
-                return user
-        return None
+                return user, LoadResult.loaded(
+                    LoadSource.REQUEST, user, getattr(user, "id", None)
+                )
+        return None, LoadResult.failed(
+            LoadSource.REQUEST, LoadFailureReason.NOT_FOUND
+        )
 
     def _update_remember_cookie(self, response):
         config = current_app.config

@@ -24,6 +24,12 @@ from .signals import user_login_confirmed
 #: anonymous user
 current_user = LocalProxy(lambda: _get_user())
 
+#: A proxy for the auditable result of restoring the current user. Accessing
+#: it triggers the same user-loading process as :data:`current_user`, so the
+#: :class:`~flask_login.LoadResult` is always available once a request is being
+#: handled. It is ``None`` outside of a request context.
+current_load_result = LocalProxy(lambda: _get_load_result())
+
 
 def encode_cookie(payload, key=None):
     """
@@ -363,6 +369,16 @@ def _get_user():
             current_app.login_manager._load_user()
 
         return g._login_user
+
+    return None
+
+
+def _get_load_result():
+    if has_request_context():
+        if "_login_user" not in g:
+            current_app.login_manager._load_user()
+
+        return g.get("_login_load_result")
 
     return None
 

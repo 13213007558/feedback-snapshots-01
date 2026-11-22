@@ -560,6 +560,48 @@ Configuring Login
    .. automethod:: needs_refresh_handler
 
 
+Auditing User Loading
+---------------------
+When a session cannot be restored, support often needs to know whether the
+account was disabled, the record had expired, or the user directory was simply
+unavailable. Flask-Login records each restoration attempt as an immutable
+:class:`LoadResult` that is available for the lifetime of the request through
+the :data:`current_load_result` proxy and on ``flask.g`` as
+``g._login_load_result``.
+
+A result only ever contains a categorical :class:`LoadFailureReason`, the
+:class:`LoadSource` that was tried, and the user id used for the lookup. It
+never contains the raw "remember me" cookie, a password, an authorization
+header or an exception message, so it is safe to forward to a log or event
+collector. The application remains free to decide what, if anything, is shown
+to the user::
+
+    from flask_login import current_load_result, LoadFailureReason
+
+    @app.route("/account")
+    def account():
+        result = current_load_result
+        if not result.success and result.reason == LoadFailureReason.UNAVAILABLE:
+            # Internal detail for operators; the user still sees a generic page.
+            metrics.increment("login.directory_unavailable")
+        ...
+
+.. autoclass:: LoadSource
+   :members:
+
+.. autoclass:: LoadFailureReason
+   :members:
+
+.. autoclass:: LoadResult
+   :members:
+
+.. data:: current_load_result
+
+   A proxy for the :class:`LoadResult` of restoring the current user. Accessing
+   it triggers the same loading process as :data:`current_user`. It is ``None``
+   outside of a request context.
+
+
 Login Mechanisms
 ----------------
 .. data:: current_user
@@ -620,6 +662,16 @@ signals in your code.
    Sent when a user's login is confirmed, marking it as fresh. (It is not
    called for a normal login.)
    It receives no additional arguments besides the app.
+
+.. data:: user_load_failed
+
+   Sent when restoring a user from the session, "remember me" cookie or a
+   request loader fails. In addition to the app (which is the sender), it is
+   passed a :class:`LoadResult` as `result`. The result carries only the load
+   source, a categorical failure reason and the user id -- never the raw
+   cookie, a password or network credentials -- so it can be sent directly to an
+   event collector. It is not sent for an anonymous request where no load was
+   attempted.
 
 .. data:: user_unauthorized
 

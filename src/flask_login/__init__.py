@@ -7,11 +7,15 @@ from .config import LOGIN_MESSAGE
 from .config import LOGIN_MESSAGE_CATEGORY
 from .config import REFRESH_MESSAGE
 from .config import REFRESH_MESSAGE_CATEGORY
+from .load import LoadFailureReason
+from .load import LoadResult
+from .load import LoadSource
 from .login_manager import LoginManager
 from .mixins import AnonymousUserMixin
 from .mixins import UserMixin
 from .signals import session_protected
 from .signals import user_accessed
+from .signals import user_load_failed
 from .signals import user_loaded_from_cookie
 from .signals import user_loaded_from_request
 from .signals import user_logged_in
@@ -21,6 +25,7 @@ from .signals import user_needs_refresh
 from .signals import user_unauthorized
 from .test_client import FlaskLoginClient
 from .utils import confirm_login
+from .utils import current_load_result
 from .utils import current_user
 from .utils import decode_cookie
 from .utils import encode_cookie
@@ -44,11 +49,15 @@ __all__ = [
     "LOGIN_MESSAGE_CATEGORY",
     "REFRESH_MESSAGE",
     "REFRESH_MESSAGE_CATEGORY",
+    "LoadFailureReason",
+    "LoadResult",
+    "LoadSource",
     "LoginManager",
     "AnonymousUserMixin",
     "UserMixin",
     "session_protected",
     "user_accessed",
+    "user_load_failed",
     "user_loaded_from_cookie",
     "user_loaded_from_request",
     "user_logged_in",
@@ -58,6 +67,7 @@ __all__ = [
     "user_unauthorized",
     "FlaskLoginClient",
     "confirm_login",
+    "current_load_result",
     "current_user",
     "decode_cookie",
     "encode_cookie",

@@ -18,6 +18,13 @@ user_loaded_from_cookie = _signals.signal("loaded-from-cookie")
 #: is the #: sender), it is passed `user`, which is the user being reloaded.
 user_loaded_from_request = _signals.signal("loaded-from-request")
 
+#: Sent when restoring a user fails. In addition to the app (which is the
+#: sender), it is passed a :class:`~flask_login.LoadResult` as `result`. The
+#: result only records the load source, a categorical failure reason and the
+#: user id (never the raw cookie, a password or network credentials), so it is
+#: safe to forward to an event collector.
+user_load_failed = _signals.signal("load-failed")
+
 #: Sent when a user's login is confirmed, marking it as fresh. (It is not
 #: called for a normal login.)
 #: It receives no additional arguments besides the app.
