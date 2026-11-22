@@ -24,6 +24,7 @@ from aws_lambda_powertools.utilities.idempotency.persistence.datarecord import (
     STATUS_CONSTANTS,
     DataRecord,
 )
+from aws_lambda_powertools.utilities.idempotency.response import PersistedResponse
 from aws_lambda_powertools.utilities.idempotency.serialization.no_op import (
     NoOpSerializer,
 )
@@ -296,13 +297,19 @@ class IdempotencyHandler:
 
         else:
             try:
-                serialized_response: dict = self._serialize_response(response)
+                # A PersistedResponse envelope stores only its `persisted` subset;
+                # the caller still receives the full business object below.
+                persisted = response.persisted if isinstance(response, PersistedResponse) else response
+                serialized_response: dict = self._serialize_response(persisted)
                 self.persistence_store.save_success(data=self.data, result=serialized_response)
             except Exception as save_exception:
                 raise IdempotencyPersistenceLayerError(
                     "Failed to update record state to success in idempotency store",
                     save_exception,
                 ) from save_exception
+
+        if isinstance(response, PersistedResponse):
+            return response.response
 
         return response
 

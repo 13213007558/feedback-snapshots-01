@@ -11,6 +11,7 @@ from aws_lambda_powertools.utilities.idempotency.persistence.base import (
 from aws_lambda_powertools.utilities.idempotency.persistence.dynamodb import (
     DynamoDBPersistenceLayer,
 )
+from aws_lambda_powertools.utilities.idempotency.response import PersistedResponse
 
 from .idempotency import IdempotencyConfig, idempotent, idempotent_function
 
@@ -21,4 +22,5 @@ __all__ = (
     "idempotent_function",
     "IdempotencyConfig",
     "IdempotentHookFunction",
+    "PersistedResponse",
 )

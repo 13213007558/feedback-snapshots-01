@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from typing import Any
 
 from aws_lambda_powertools.utilities.idempotency.exceptions import (
@@ -34,7 +34,10 @@ class DataclassSerializer(BaseIdempotencyModelSerializer):
         return asdict(data)
 
     def from_dict(self, data: dict) -> DataClass:
-        return self.__model(**data)
+        # Tolerate records stored with a wider shape (e.g. written before a
+        # PersistedResponse subset was introduced): only known fields are replayed.
+        field_names = {field.name for field in fields(self.__model)}
+        return self.__model(**{key: value for key, value in data.items() if key in field_names})
 
     @classmethod
     def instantiate(cls, model_type: Any) -> BaseIdempotencySerializer:

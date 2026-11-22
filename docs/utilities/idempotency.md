@@ -288,6 +288,22 @@ The output serializer supports any JSON serializable data, **Python Dataclasses*
     2. This function does the following <br><br>**1**. Receives the dictionary saved into the persistent storage <br>**1** Serializes to `OrderOutput` before `@idempotent` returns back to the caller.
     3. This serializer receives both functions so it knows who to call when to serialize to and from dictionary.
 
+#### Persisting a subset of the response
+
+Responses can carry temporary or personal fields (one-time download URLs, verification codes) that you don't want to keep in the persistent storage. Return a `PersistedResponse` envelope to decide explicitly which fields are stored and replayed, and which are only returned on the first execution:
+
+* **`response`**. The full business object returned to the caller on the first execution.
+* **`persisted`**. The subset serialized into the idempotency record. On replay, the caller receives this shape rehydrated from the stored record via the configured `output_serializer`. Fields left out are never stored and never provided again.
+
+```python hl_lines="7 33-36 43 45 47-50"
+--8<-- "examples/idempotency/src/working_with_persisted_response.py"
+```
+
+1. The output serializer is configured with the persisted shape, so replays rebuild `PersistedReceipt` from the stored record.
+2. The return annotation reflects the envelope; the caller never sees it.
+3. On the first execution, the caller receives the full `Receipt`, including `download_url`.
+4. Only `PersistedReceipt` is stored. Records written by previous versions that contain extra fields are still honored: unknown fields are ignored when replaying into the persisted shape.
+
 ### Using in-memory cache
 
 !!! note "In-memory cache is local to each Lambda execution environment."
