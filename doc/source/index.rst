@@ -461,6 +461,81 @@ the request endpoint.
        ...
 
 
+.. _ratelimit-decorator-multiple-dimensions:
+
+Multiple dimensions on the same request
+---------------------------------------
+
+A single request sometimes has to be counted against more than one business
+identity. For example a claim submission may be limited once per employee *and*
+once per project, where the project number is only trusted after the backend
+has confirmed that the employee may use it.
+
+:meth:`~flask_limiter.Limiter.limit` applies every rule with the same key
+function, so it cannot express this. Use
+:meth:`~flask_limiter.Limiter.multi_limit` instead, declaring each dimension as
+``(name, rate_limit, key_func?, when?)``::
+
+    def current_employee():
+        return g.employee.id
+
+    def authorized_project():
+        # only return a project the backend has authorized for this employee
+        return g.claim_project.id if g.claim_project.authorized else ""
+
+    claim_limit = limiter.multi_limit(
+        [
+            ("employee", "5/hour", current_employee),
+            ("project", "20/hour", authorized_project),
+        ],
+        name="claim-submit",
+        scope="claim-submit",
+    )
+
+    @app.post("/claims")
+    @claim_limit
+    def submit_claim():
+        ...
+
+Each dimension gets its own key, scope and counter, so an employee's usage is
+never charged to another employee, and a project's usage is never charged to
+another project. The dimensions are also namespaced separately, which means an
+employee id and a project id that happen to be the same string never share a
+bucket.
+
+``when`` makes a dimension conditional. A dimension whose identity is not
+available (for example a project that has not been authorized for the current
+employee) is skipped instead of being charged to a fallback or shared bucket;
+the other dimensions are still accounted normally. Return an empty string from
+the key function to skip a dimension as well.
+
+When one dimension breaches, the request is rejected by that dimension. The
+:class:`~flask_limiter.RateLimitExceeded` exception exposes
+:attr:`~flask_limiter.RateLimitExceeded.rejected_rule`,
+:attr:`~flask_limiter.RateLimitExceeded.rejected_dimension`,
+:meth:`~flask_limiter.RateLimitExceeded.remaining_for` and
+:meth:`~flask_limiter.RateLimitExceeded.remaining_by_dimension` so the
+application can tell which rule rejected the request and how much allowance the
+other identities have left::
+
+    @app.errorhandler(RateLimitExceeded)
+    def rate_limited(exc):
+        return {
+            "rule": exc.rejected_rule,
+            "dimension": exc.rejected_dimension,
+            "remaining": exc.remaining_by_dimension(),
+        }, 429
+
+The dimensions of a declaration are always evaluated together even when
+:paramref:`~flask_limiter.Limiter.fail_on_first_breach` is enabled: a breach in
+one dimension does not skip the accounting of the other dimensions of the same
+declaration.
+
+.. note:: A declared ``scope`` is shared between every route using the
+   declaration (like :meth:`~flask_limiter.Limiter.shared_limit`). Without a
+   ``scope`` each route keeps its own buckets.
+
+
 .. _ratelimit-decorator-exempt:
 
 Decorators for skipping rate limits

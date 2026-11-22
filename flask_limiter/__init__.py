@@ -8,6 +8,7 @@ from ._limits import (
     ApplicationLimit,
     Limit,
     MetaLimit,
+    MultiLimit,
     RouteLimit,
 )
 from .constants import ExemptionScope, HeaderNames
@@ -21,6 +22,7 @@ __all__ = [
     "RouteLimit",
     "ApplicationLimit",
     "MetaLimit",
+    "MultiLimit",
     "RateLimitExceeded",
     "RequestLimit",
 ]

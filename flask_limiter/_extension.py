@@ -30,6 +30,7 @@ from ._limits import (
     ApplicationLimit,
     Limit,
     MetaLimit,
+    MultiLimit,
     RouteLimit,
     RuntimeLimit,
 )
@@ -63,6 +64,18 @@ class RequestLimit:
     #: Whether the limit is a shared limit
     shared: bool
 
+    #: Identity of the rule declaration this limit belongs to (``None`` for a plain
+    #: single-key limit). Useful to tell which rule rejected a multi-dimensional request.
+    rule_id: str | None
+
+    #: Name of the dimension within :attr:`rule_id` (``None`` for a plain limit).
+    dimension: str | None
+
+    #: The runtime limit definition that produced this request limit.
+    #:
+    #: :meta private:
+    source: RuntimeLimit | None
+
     def __init__(
         self,
         extension: Limiter,
@@ -70,6 +83,9 @@ class RequestLimit:
         request_args: list[str],
         breached: bool,
         shared: bool,
+        rule_id: str | None = None,
+        dimension: str | None = None,
+        source: RuntimeLimit | None = None,
     ) -> None:
         self.extension: weakref.ProxyType[Limiter] = weakref.proxy(extension)
         self.limit = limit
@@ -77,6 +93,9 @@ class RequestLimit:
         self.key = limit.key_for(*request_args)
         self.breached = breached
         self.shared = shared
+        self.rule_id = rule_id
+        self.dimension = dimension
+        self.source = source
         self._window: WindowStats | None = None
 
     @property
@@ -653,6 +672,127 @@ class Limiter:
             meta_limits=meta_limits,
         )
 
+    def multi_limit(
+        self,
+        dimensions: Sequence[
+            tuple[str, str | Callable[[], str]]
+            | tuple[str, str | Callable[[], str], Callable[[], str] | None]
+            | tuple[
+                str,
+                str | Callable[[], str],
+                Callable[[], str] | None,
+                Callable[[], bool] | None,
+            ]
+        ],
+        *,
+        name: str | None = None,
+        key_func: Callable[[], str] | None = None,
+        shared: bool = True,
+        per_method: bool = False,
+        methods: list[str] | None = None,
+        error_message: str | Callable[[], str] | None = None,
+        exempt_when: Callable[[], bool] | None = None,
+        override_defaults: bool = True,
+        deduct_when: Callable[[flask.wrappers.Response], bool] | None = None,
+        on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
+        cost: int | Callable[[], int] = 1,
+        scope: str | Callable[[str], str] | None = None,
+        meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+    ) -> MultiLimit:
+        """
+        Decorator to declare several independent rate limits for the same route, each
+        one keyed by its own business identity.
+
+        Each dimension is specified as a tuple of
+        ``(name, rate_limit, key_func?, when?)``. The ``name`` identifies the dimension
+        (for example ``"employee"`` or ``"project"``), ``rate_limit`` is a limit string
+        or a callable returning one, ``key_func`` extracts that dimension's identity
+        and ``when`` is an optional predicate deciding whether the dimension applies
+        to the current request.
+
+        All dimensions are evaluated against the same request. Each one is counted
+        independently (and in its own storage namespace, so an employee id and a project
+        id with the same value never share a bucket). If a dimension is not applicable
+        (for example because the authenticated employee has no access to the requested
+        project) it is skipped without being charged, and the other dimensions are still
+        accounted normally. A request that breaches one dimension is rejected by that
+        dimension; the dimensions that were not breached keep their usage (or their
+        remaining allowance, when they were only tested).
+
+        :param dimensions: the ``(name, rate_limit, key_func?, when?)`` declarations.
+        :param name: optional name for this declaration reported by
+         :attr:`~flask_limiter.RateLimitExceeded.rejected_rule`. Defaults to a generated id.
+        :param key_func: default identity used by dimensions declared without a
+         ``key_func``. It is not called when every dimension provides its own.
+        :param shared: whether the declared ``scope`` is shared between all routes and
+         blueprints using this declaration instead of being namespaced by endpoint.
+        :param per_method: whether each dimension is sub categorized by HTTP method.
+        :param methods: if specified, only the requests with these methods are limited.
+        :param error_message: string (or callable returning one) used for the rejection
+         message of any dimension of this declaration.
+        :param exempt_when: function/lambda used to decide if *all* dimensions should be
+         skipped. Individual dimensions can be skipped with their ``when`` predicate.
+        :param override_defaults: whether this declaration overrides the default limits.
+        :param deduct_when: decides, after the response, whether each dimension should
+         still be charged.
+        :param on_breach: callback invoked when a dimension is breached.
+        :param cost: cost of a hit for each dimension (or a callable returning it).
+        :param scope: a string or callable returning a string used to further categorize
+         each dimension's scope. The scope is combined with the endpoint unless the
+         dimension should be shared across routes (use a callable/constant scope).
+        :param meta_limits: meta limits charged whenever one of the dimensions is breached.
+
+        Example::
+
+            submit_limit = limiter.multi_limit(
+                [
+                    ("employee", "5/hour", lambda: g.employee_id),
+                    ("project", "20/hour", project_key, can_access_project),
+                ],
+                scope="claim-submit",
+            )
+
+            @app.route("/claims", methods=["POST"])
+            @submit_limit
+            def submit_claim():
+                ...
+
+        A rejected request keeps the state of the other dimensions. The raised
+        :class:`~flask_limiter.RateLimitExceeded` reports which declaration and which
+        dimension rejected it, and the remaining allowance of every evaluated
+        dimension::
+
+            @app.errorhandler(RateLimitExceeded)
+            def rate_limited(exc):
+                return {
+                    "rule": exc.rejected_rule,
+                    "dimension": exc.rejected_dimension,
+                    "remaining": exc.remaining_by_dimension(),
+                }, 429
+
+        .. note:: This decorator is additive: unlike :meth:`limit` it does not replace
+           limits declared by other decorators on the same view.
+        """
+
+        return MultiLimit(
+            "",
+            limiter=self,
+            name=name,
+            dimensions=dimensions,
+            key_function=key_func or self._key_func,
+            shared=shared,
+            scope=scope,
+            per_method=per_method,
+            methods=methods,
+            error_message=error_message,
+            exempt_when=exempt_when,
+            override_defaults=override_defaults,
+            deduct_when=deduct_when,
+            on_breach=on_breach,
+            cost=cost,
+            meta_limits=meta_limits,
+        )
+
     @overload
     def exempt(
         self,
@@ -1051,9 +1191,21 @@ class Limiter:
                                 raise err
                     raise RateLimitExceeded(lim, response=meta_breach_response)
 
+        # Limits that belong to a multi-dimensional declaration are always evaluated
+        # together: one request must not be rejected by one dimension before the other
+        # dimensions of the same declaration have been accounted. Plain limits keep
+        # honoring ``fail_on_first_breach`` as before.
+        multi_rule_ids = {lim.rule_id for lim in limits if lim.rule_id}
+        stop_after_rule: str | None = None
+        should_stop = False
+
         for lim in sorted(limits, key=lambda x: x.limit):
             if lim.is_exempt or lim.method_exempt:
                 continue
+
+            if stop_after_rule is not None:
+                if lim.rule_id != stop_after_rule:
+                    continue
 
             limit_scope = lim.scope_for(endpoint, flask.request.method)
             limit_key = lim.key_func()
@@ -1075,7 +1227,16 @@ class Limiter:
                 method = self.limiter.hit
             kwargs["cost"] = lim.deduction_amount
 
-            request_limit = RequestLimit(self, lim.limit, args, False, lim.shared)
+            request_limit = RequestLimit(
+                self,
+                lim.limit,
+                args,
+                False,
+                lim.shared,
+                rule_id=lim.rule_id,
+                dimension=lim.dimension,
+                source=lim,
+            )
             view_limits.append(request_limit)
 
             if not method(lim.limit, *args, **kwargs):
@@ -1090,24 +1251,45 @@ class Limiter:
                 limit_for_header = view_limits[-1]
 
                 if self._fail_on_first_breach:
-                    break
+                    if lim.rule_id in multi_rule_ids:
+                        stop_after_rule = lim.rule_id
+                    else:
+                        should_stop = True
+
+            if should_stop:
+                break
 
         if not limit_for_header and view_limits:
             # Pick a non shared limit over a shared one if possible
             # when no rate limit has been hit. This should be the best hint
             # for the client.
             explicit = [limit for limit in view_limits if not limit.shared]
-            limit_for_header = explicit[0] if explicit else view_limits[0]
+            candidates = explicit or view_limits
+            dimensional = [limit for limit in candidates if limit.rule_id]
+
+            if dimensional:
+                # For a multi-dimensional declaration the client should be told about
+                # the tightest budget instead of whichever dimension was declared
+                # first. The rejection itself still identifies the breached dimension.
+                limit_for_header = min(dimensional, key=lambda limit: limit.remaining)
+            else:
+                limit_for_header = candidates[0]
 
         self.context.view_rate_limit = limit_for_header or None
         self.context.view_rate_limits = view_limits
 
         on_breach_response = None
 
-        for limit in failed_limits:
-            request_limit = RequestLimit(self, limit[0].limit, limit[1], True, limit[0].shared)
+        for request_limit in view_limits:
+            if not request_limit.breached:
+                continue
 
-            for cb in dict.fromkeys([self._on_breach, limit[0].on_breach]):
+            lim = request_limit.source
+
+            if lim is None:
+                continue
+
+            for cb in dict.fromkeys([self._on_breach, lim.on_breach]):
                 if cb:
                     try:
                         cb_response = cb(request_limit)
@@ -1137,6 +1319,9 @@ class Limiter:
             raise RateLimitExceeded(
                 sorted(failed_limits, key=lambda x: x[0].limit)[0][0],
                 response=on_breach_response,
+                # Snapshot the evaluated limits: ``view_limits`` is the list stored on
+                # the request context and is cleared on teardown.
+                limits=list(view_limits),
             )
 
     def _check_request_limit(

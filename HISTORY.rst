@@ -3,6 +3,19 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Feature
+
+  * Add ``Limiter.multi_limit`` (and the ``MultiLimit`` description class) to
+    declare several independent budgets on the same request, each keyed by its
+    own business identity. Dimensions can be conditional (``when``) so that an
+    identity that is not authorized for the request is skipped rather than
+    charged to a shared bucket. ``RateLimitExceeded`` now reports the rejected
+    rule and dimension as well as the remaining allowance of the other
+    dimensions.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

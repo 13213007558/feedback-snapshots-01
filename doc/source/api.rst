@@ -17,11 +17,18 @@ if needed (especially for **default**, **application wide** and **meta** limits)
 .. autoclass:: Limit
 .. autoclass:: ApplicationLimit
 .. autoclass:: MetaLimit
+.. autoclass:: MultiLimit
 
 For consistency the :class:`RouteLimit` dataclass is also available to define limits
 for decorating routes or blueprints.
 
 .. autoclass:: RouteLimit
+
+The :meth:`Limiter.multi_limit` decorator returns a :class:`MultiLimit` which declares
+several independent budgets for the same request.
+
+.. automethod:: Limiter.multi_limit
+   :noindex:
 
 Utilities
 ---------

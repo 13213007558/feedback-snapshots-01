@@ -12,6 +12,7 @@ import flask
 from flask import request
 from flask.wrappers import Response
 from limits import RateLimitItem, parse_many
+from limits.errors import ConfigurationError
 
 from ._typing import Callable, Iterable, Iterator, P, R, Self, Sequence
 from .util import get_qualified_name
@@ -39,6 +40,16 @@ class RuntimeLimit:
     cost: Callable[[], int] | int = 1
     shared: bool = False
     meta_limits: tuple[RuntimeLimit, ...] | None = None
+    #: Identity of the declared rule that produced this runtime limit.
+    #:
+    #: All dimensions of the same :class:`MultiLimit` share one rule identity so that a
+    #: single request can be attributed to the declaration that rejected it (while each
+    #: dimension is still counted in its own storage key).
+    rule_id: str | None = None
+    #: Name of the dimension this runtime limit accounts for (e.g. ``"employee"``).
+    dimension: str | None = None
+    #: Name of the rule declaration this limit belongs to.
+    rule_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.methods:
@@ -83,6 +94,12 @@ class RuntimeLimit:
         if self.per_method:
             assert method
             scope += f":{method.upper()}"
+
+        # Dimensions of a multi-dimensional limit always keep their own storage
+        # namespace, even when two business identities happen to have the same
+        # string value (for example an employee id and a project id).
+        if self.dimension:
+            scope += f":dimension={self.dimension}"
 
         return scope
 
@@ -334,6 +351,152 @@ class RouteLimit(Limit):
             setattr(__inner, "__wrapper-limiter-instance", self.limiter)
 
             return __inner
+
+
+@dataclasses.dataclass(unsafe_hash=True, kw_only=True)
+class MultiLimit(RouteLimit):
+    """
+    A declaration of several independent budgets that are all evaluated for the same
+    request, each one keyed by its own business identity.
+
+    :meth:`Limiter.limit` evaluates every rule with the same key function, which makes
+    it unsuitable when one request must be counted in more than one domain (for
+    example once per employee and once per project). A :class:`MultiLimit` accepts a
+    sequence of ``(dimension, budget)`` pairs. Every pair becomes its own rate limit
+    rule with its own key and scope, while all of them still belong to one declaration
+    so the request can report which rule rejected it::
+
+        submit_limit = limiter.multi_limit(
+            [
+                ("employee", "5/hour", lambda: g.employee_id),
+                ("project", "20/hour", lambda: g.project_id),
+            ],
+            scope="per-identity",
+        )
+
+        @app.post("/claims")
+        @submit_limit
+        def submit():
+            ...
+
+    Dimensions without a resolvable identity (for example a project that the
+    authenticated employee cannot access) can be declared with ``when``. Such a
+    dimension is skipped instead of being counted into a shared/fallback bucket, and
+    the remaining dimensions continue to be accounted normally::
+
+        ("project", "20/hour", project_key, project_is_authorized)
+
+    ``key_func`` is only used as the default identity for dimensions declared without
+    one. It is never evaluated when every dimension provides its own key function.
+    """
+
+    #: Optional human readable name for this declaration. It is reported by
+    #: :attr:`~flask_limiter.RateLimitExceeded.rejected_rule` so an application can
+    #: tell which declaration rejected the request. Defaults to a generated id.
+    name: str | None = None
+    #: A declared ``scope`` is shared between all routes using this declaration,
+    #: mirroring :meth:`Limiter.shared_limit`. Without a ``scope`` every route keeps
+    #: its own bucket.
+    shared: bool = True
+    #: ``(dimension_name, rate_limit, key_func?, when?)`` declarations.
+    dimensions: Sequence[
+        tuple[str, "str | Callable[[], str]"]
+        | tuple[str, "str | Callable[[], str]", "Callable[[], str] | None"]
+        | tuple[
+            str,
+            "str | Callable[[], str]",
+            "Callable[[], str] | None",
+            "Callable[[], bool] | None",
+        ]
+    ] = ()
+
+    def __post_init__(self, limiter: Limiter) -> None:
+        self.dimensions = tuple(self.dimensions)
+
+        for dimension in self.dimensions:
+            if not 2 <= len(dimension) <= 4 or not dimension[0]:
+                raise ConfigurationError(
+                    "Each multi-dimensional limit must be declared as "
+                    "'(name, rate_limit, key_func?, when?)' with a non-empty name."
+                )
+
+        super().__post_init__(limiter)
+
+    def _exempt_when_for(
+        self, enabled_when: Callable[[], bool] | None
+    ) -> Callable[[], bool] | None:
+        """
+        Combine a dimension's ``when`` predicate with the declaration's ``exempt_when``.
+
+        :meta private:
+        """
+        if enabled_when is None:
+            return self.exempt_when
+
+        exempt = self.exempt_when
+
+        if exempt is None:
+
+            def dimension_disabled() -> bool:
+                return not enabled_when()
+
+            return dimension_disabled
+
+        def dimension_disabled_or_exempt() -> bool:
+            return not enabled_when() or exempt()
+
+        return dimension_disabled_or_exempt
+
+    def __iter__(self) -> Iterator[RuntimeLimit]:  # type: ignore[override]
+        meta_limits: tuple[RuntimeLimit, ...] = ()
+
+        if self.meta_limits:
+            meta_limits = tuple(
+                itertools.chain(
+                    *[
+                        list(
+                            MetaLimit(meta_limit).bind_parent(self)
+                            if not isinstance(meta_limit, MetaLimit)
+                            else meta_limit
+                        )
+                        for meta_limit in self.meta_limits
+                    ]
+                )
+            )
+
+        rule_id = f"multi_limit:{id(self)}"
+        rule_name = self.name or rule_id
+
+        for dimension in self.dimensions:
+            name, limit_provider, *rest = dimension
+            key_function = rest[0] if rest else None
+            enabled_when = rest[1] if len(rest) > 1 else None
+            limit_str = limit_provider() if callable(limit_provider) else limit_provider
+            limit_items = parse_many(limit_str) if limit_str else []
+            # ``when`` decides whether the dimension applies; ``exempt_when`` skips a
+            # limit. Invert the predicate so that the dimension is skipped when the
+            # application says it does not apply, without losing a global exemption.
+            exempt_when = self._exempt_when_for(enabled_when)
+
+            for limit in limit_items:
+                yield RuntimeLimit(
+                    limit,
+                    key_function or self.limit_by,
+                    scope=self.scope,
+                    per_method=self.per_method,
+                    methods=self.methods,
+                    error_message=self.error_message,
+                    exempt_when=exempt_when,
+                    deduct_when=self.deduct_when,
+                    override_defaults=self.override_defaults,
+                    on_breach=self.on_breach,
+                    cost=self.cost or 1,
+                    shared=self.shared,
+                    meta_limits=meta_limits,
+                    rule_id=rule_id,
+                    rule_name=rule_name,
+                    dimension=name,
+                )
 
 
 @dataclasses.dataclass(kw_only=True, unsafe_hash=True)
