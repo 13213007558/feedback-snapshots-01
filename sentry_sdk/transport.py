@@ -44,6 +44,7 @@ import urllib3
 
 import sentry_sdk
 from sentry_sdk.consts import VERSION, EndpointType
+from sentry_sdk.data_category_policy import DATA_CATEGORY_POLICY_REASON
 from sentry_sdk.envelope import Envelope, Item, PayloadRef
 from sentry_sdk.utils import (
     Dsn,
@@ -164,6 +165,45 @@ class Transport(ABC):
         Subclasses should override this method if necessary.
         """
         return None
+
+    def _apply_data_category_policy(
+        self: "Self", envelope: "Envelope"
+    ) -> "Envelope":
+        """
+        Remove every envelope item whose data category the configured
+        ``data_category_policy`` does not approve.
+
+        The policy is evaluated right before the envelope leaves the SDK, so a
+        mixed envelope (e.g. a transaction paired with its profiler sample) is
+        trimmed to its approved categories instead of being sent or dropped
+        wholesale. Rejected items are removed outright, so the surviving items
+        never carry references to data that was not sent, and each rejection is
+        recorded as a lost event for client reports.
+
+        Transports without options (or without a configured policy) return the
+        envelope unchanged.
+        """
+        options = getattr(self, "options", None)
+        policy = options.get("data_category_policy") if options else None
+        if policy is None:
+            return envelope
+
+        new_items = []
+        for item in envelope.items:
+            if policy.allows(item.data_category):
+                new_items.append(item)
+            else:
+                logger.info(
+                    "Dropping envelope item of data category %r: rejected by "
+                    "data_category_policy.",
+                    item.data_category,
+                )
+                self.record_lost_event(DATA_CATEGORY_POLICY_REASON, item=item)
+
+        if len(new_items) == len(envelope.items):
+            return envelope
+
+        return Envelope(headers=envelope.headers, items=new_items)
 
     def record_lost_event(
         self,
@@ -481,6 +521,9 @@ class HttpTransportCore(Transport):
     def _prepare_envelope(
         self: "Self", envelope: "Envelope"
     ) -> "Optional[Tuple[Envelope, io.BytesIO, Dict[str, str]]]":
+        # remove items rejected by the configured data category policy
+        envelope = self._apply_data_category_policy(envelope)
+
         # remove all items from the envelope which are over quota
         new_items = []
         for item in envelope.items:

@@ -28,6 +28,7 @@ from sentry_sdk.data_collection import (
     _map_from_send_default_pii,
     _resolve_data_collection,
 )
+from sentry_sdk.data_category_policy import _build_data_category_policy
 from sentry_sdk.envelope import Envelope, Item, PayloadRef
 from sentry_sdk.integrations import _DEFAULT_INTEGRATIONS, setup_integrations
 from sentry_sdk.integrations.dedupe import DedupeIntegration
@@ -359,6 +360,9 @@ def _get_options(*args: "Optional[str]", **kwargs: "Any") -> "Dict[str, Any]":
         )
 
     rv["data_collection"] = _resolve_data_collection(rv)
+    rv["data_category_policy"] = _build_data_category_policy(
+        rv["data_category_policy"]
+    )
 
     # Do not add the event scrubber if data collection is enabled as it can remove data that's
     # collected under data collection config

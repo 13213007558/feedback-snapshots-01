@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         ContinuousProfilerMode,
         DataCollectionUserOptions,
         Event,
+        EventDataCategory,
         EventProcessor,
         Hint,
         IgnoreSpansConfig,
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
         TracesSampler,
         TransactionProcessor,
     )
+    from sentry_sdk.data_category_policy import DataCategoryPolicy
 
     # Experiments are feature flags to enable and disable certain unstable SDK
     # functionality. Changing them from the defaults (`None`) in production
@@ -91,6 +93,13 @@ if TYPE_CHECKING:
             ],
             "suppress_asgi_chained_exceptions": Optional[bool],
             "data_collection": Optional[DataCollectionUserOptions],
+            "data_category_policy": Optional[
+                Union[
+                    Sequence[EventDataCategory],
+                    Callable[[EventDataCategory], bool],
+                    DataCategoryPolicy,
+                ]
+            ],
         },
         total=False,
     )
@@ -1457,6 +1466,7 @@ class ClientConstructor:
         org_id: "Optional[str]" = None,
         strict_trace_continuation: bool = False,
         stream_gen_ai_spans: bool = True,
+        data_category_policy: "Optional[Union[Sequence[EventDataCategory], Callable[[EventDataCategory], bool], DataCategoryPolicy]]" = None,
     ) -> None:
         """Initialize the Sentry SDK with the given parameters. All parameters described here can be used in a call to `sentry_sdk.init()`.
 
@@ -1906,6 +1916,20 @@ class ClientConstructor:
             `trace_lifecycle="stream"` is enabled.
 
         :param _experiments: Dictionary of experimental, opt-in features that are not yet stable.
+
+        :param data_category_policy: Controls which envelope data categories are allowed to be
+            sent. The policy is checked immediately before an envelope leaves the SDK, so an
+            envelope containing items of several categories (e.g. a transaction together with its
+            profiler sample) is trimmed to only the approved categories; items of a rejected
+            category are dropped and recorded as lost in client reports.
+
+            Provide either a sequence of allowed category names (e.g. ``["error", "transaction"]``;
+            valid categories include ``"error"``, ``"transaction"``, ``"span"``, ``"profile"``,
+            ``"profile_chunk"``, ``"attachment"``, ``"session"`` and ``"monitor"``), or a callable
+            taking a category name and returning ``True`` when it may be sent (e.g.
+            ``lambda category: category != "profile"``). A callable is re-evaluated for every
+            envelope, which allows toggling a category at runtime. ``None`` (the default) allows
+            every category.
         """
         pass
 
