@@ -16,6 +16,7 @@ content type.
 * [`UrlEncoded`][url_encoded] converts a `Faraday::Request#body` hash of key/value pairs into a url-encoded request body.
 * [`Json Request`][json-request] converts a `Faraday::Request#body` hash of key/value pairs into a JSON request body.
 * [`Instrumentation`][instrumentation] allows to instrument requests using different tools.
+* [`Digest Verification`][digest_verification] confirms the final request body matches a pre-approved digest before the adapter sends it.
 
 
 ### Response Middleware
@@ -35,3 +36,4 @@ before returning it.
 [json-response]:        middleware/included/json#json-responses
 [logger]:               middleware/included/logging
 [raise_error]:          middleware/included/raising-errors
+[digest_verification]:  middleware/included/digest-verification

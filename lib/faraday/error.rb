@@ -229,4 +229,22 @@ module Faraday
   # Raised by Faraday::Middleware and subclasses when invalid default_options are used
   class InitializationError < Error
   end
+
+  # Base class for errors raised by Faraday::Request::DigestVerification.
+  # Request middleware that rescues generic Faraday errors can catch this
+  # class to handle every digest-verification failure uniformly.
+  class DigestVerificationError < Error
+  end
+
+  # Raised when the final request body's digest does not match the digest that
+  # was approved for the request. The request is aborted before the adapter
+  # sends it, so unapproved data never reaches the network.
+  class DigestMismatchError < DigestVerificationError
+  end
+
+  # Raised when a body has an approved digest but cannot be digested in a
+  # trustworthy way (for example an unrewindable streaming body), so the
+  # middleware cannot prove the bytes correspond to the approved version.
+  class UnverifiableBodyError < DigestVerificationError
+  end
 end
