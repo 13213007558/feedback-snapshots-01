@@ -22,6 +22,10 @@ from flask_login import decode_cookie
 from flask_login import encode_cookie
 from flask_login import FlaskLoginClient
 from flask_login import fresh_login_required
+from flask_login import IDENTITY_SOURCE_REMEMBER_COOKIE
+from flask_login import IDENTITY_SOURCE_REQUEST
+from flask_login import IDENTITY_SOURCE_SESSION
+from flask_login import identity_sources
 from flask_login import login_fresh
 from flask_login import login_remembered
 from flask_login import login_required
@@ -1237,6 +1241,263 @@ class LoginViaRequestTestCase(unittest.TestCase):
             url = "/username"
             result = c.get(url)
             self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+
+class IdentitySourcesTestCase(unittest.TestCase):
+    """Tests for route-level identity source selection via
+    :func:`flask_login.identity_sources`."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.remember_cookie_name = "remember"
+        self.app.config["REMEMBER_COOKIE_NAME"] = self.remember_cookie_name
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        # With no login view, an unauthenticated request aborts with 401,
+        # which is what an API endpoint is expected to return.
+        self.login_manager.login_view = None
+
+        self.user_loader = Mock(side_effect=lambda user_id: USERS.get(int(user_id)))
+        self.request_loader = Mock(
+            side_effect=lambda request: USERS.get(
+                int(request.headers["X-API-Key"]) if request.headers.get("X-API-Key") else None
+            )
+        )
+        self.login_manager.user_loader(self.user_loader)
+        self.login_manager.request_loader(self.request_loader)
+
+        def whoami():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous", 401
+
+        @self.app.route("/login-notch-remember")
+        def login_notch_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/login-steve")
+        def login_steve():
+            return str(login_user(steve))
+
+        # An automation endpoint: request loader credentials only. Browser
+        # cookies must never authorize this route.
+        @self.app.route("/api/whoami")
+        @identity_sources(IDENTITY_SOURCE_REQUEST)
+        @login_required
+        def api_whoami():
+            return whoami()
+
+        # A browser endpoint: session and remember cookie, never the request
+        # loader.
+        @self.app.route("/page/whoami")
+        @identity_sources(IDENTITY_SOURCE_SESSION, IDENTITY_SOURCE_REMEMBER_COOKIE)
+        @login_required
+        def page_whoami():
+            return whoami()
+
+        # A session-only endpoint: the remember cookie is rejected too.
+        @self.app.route("/session/whoami")
+        @identity_sources(IDENTITY_SOURCE_SESSION)
+        @login_required
+        def session_whoami():
+            return whoami()
+
+        # An unmarked view keeps the default session -> cookie -> request order.
+        @self.app.route("/default/whoami")
+        @login_required
+        def default_whoami():
+            return whoami()
+
+        # The marker must survive any decorator ordering.
+        @self.app.route("/order/whoami")
+        @login_required
+        @identity_sources(IDENTITY_SOURCE_REQUEST)
+        def order_whoami():
+            return whoami()
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+        unittest.TestCase.setUp(self)
+
+    def _prime_remember_cookie(self, client):
+        """Log in with remember-me then drop the session, leaving only the
+        signed remember cookie behind (a pure browser-cookie identity)."""
+        client.get("/login-notch-remember")
+        with client.session_transaction() as sess:
+            sess.clear()
+
+    def _session_snapshot(self, client):
+        with client.session_transaction() as sess:
+            return dict(sess)
+
+    def _reset_callbacks(self):
+        self.user_loader.reset_mock()
+        self.request_loader.reset_mock()
+
+    #
+    # The three required requests against the request-only automation route
+    #
+    def test_api_cookie_only_is_rejected(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            before = self._session_snapshot(c)
+            self._reset_callbacks()
+            with listen_to(user_loaded_from_cookie) as cookie_signal:
+                with listen_to(user_loaded_from_request) as request_signal:
+                    result = c.get("/api/whoami")
+            self.assertEqual(result.status_code, 401)
+            # The browser cookie is never consulted for this route...
+            self.user_loader.assert_not_called()
+            # ...the request loader is the only allowed source and finds no
+            # credentials, so the request stays anonymous...
+            self.request_loader.assert_called_once()
+            cookie_signal.assert_heard_none(self.app)
+            request_signal.assert_heard_none(self.app)
+            # ...and nothing leaks back into the session.
+            self.assertEqual(before, self._session_snapshot(c))
+
+    def test_api_request_credentials_load_principal(self):
+        with self.app.test_client() as c:
+            before = self._session_snapshot(c)
+            self._reset_callbacks()
+            with listen_to(user_loaded_from_request) as request_signal:
+                with listen_to(user_loaded_from_cookie) as cookie_signal:
+                    result = c.get("/api/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+            self.request_loader.assert_called_once()
+            self.user_loader.assert_not_called()
+            request_signal.assert_heard_one(self.app, user=steve)
+            cookie_signal.assert_heard_none(self.app)
+            # Request-loader authentication must not establish a session.
+            self.assertEqual(before, self._session_snapshot(c))
+
+    def test_api_both_present_prefers_request_credentials(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            before = self._session_snapshot(c)
+            self._reset_callbacks()
+            with listen_to(user_loaded_from_request) as request_signal:
+                with listen_to(user_loaded_from_cookie) as cookie_signal:
+                    result = c.get("/api/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 200)
+            # The request-loader principal wins, not the cookie's user.
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+            self.request_loader.assert_called_once()
+            self.user_loader.assert_not_called()
+            request_signal.assert_heard_one(self.app, user=steve)
+            cookie_signal.assert_heard_none(self.app)
+            self.assertEqual(before, self._session_snapshot(c))
+
+    #
+    # Browser-only route: request loader credentials must be ignored
+    #
+    def test_page_request_credentials_are_ignored(self):
+        with self.app.test_client() as c:
+            self._reset_callbacks()
+            with listen_to(user_loaded_from_request) as request_signal:
+                result = c.get("/page/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 401)
+            self.request_loader.assert_not_called()
+            request_signal.assert_heard_none(self.app)
+
+    def test_page_remember_cookie_is_accepted(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            self._reset_callbacks()
+            with listen_to(user_loaded_from_cookie) as cookie_signal:
+                result = c.get("/page/whoami")
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(notch.name, result.data.decode("utf-8"))
+            self.user_loader.assert_called_once_with("1")
+            cookie_signal.assert_heard_one(self.app, user=notch)
+
+    def test_page_both_present_uses_cookie_and_ignores_request(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            self._reset_callbacks()
+            result = c.get("/page/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(notch.name, result.data.decode("utf-8"))
+            self.request_loader.assert_not_called()
+
+    def test_session_only_rejects_remember_cookie(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            self._reset_callbacks()
+            result = c.get("/session/whoami")
+            self.assertEqual(result.status_code, 401)
+            self.user_loader.assert_not_called()
+            self.request_loader.assert_not_called()
+
+    def test_session_only_accepts_live_session(self):
+        with self.app.test_client() as c:
+            c.get("/login-steve")
+            self._reset_callbacks()
+            result = c.get("/session/whoami")
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+            self.user_loader.assert_called_once_with(2)
+            self.request_loader.assert_not_called()
+
+    #
+    # Unmarked routes keep the current session -> cookie -> request order
+    #
+    def test_default_cookie_only_falls_back_to_cookie(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            self._reset_callbacks()
+            result = c.get("/default/whoami")
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(notch.name, result.data.decode("utf-8"))
+            self.user_loader.assert_called_once_with("1")
+
+    def test_default_request_credentials_still_work(self):
+        with self.app.test_client() as c:
+            self._reset_callbacks()
+            result = c.get("/default/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+            self.request_loader.assert_called_once()
+
+    def test_default_session_takes_precedence_over_request(self):
+        with self.app.test_client() as c:
+            c.get("/login-steve")
+            self._reset_callbacks()
+            result = c.get("/default/whoami", headers={"X-API-Key": "1"})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+            self.user_loader.assert_called_once_with(2)
+            self.request_loader.assert_not_called()
+
+    def test_marker_is_decorator_order_independent(self):
+        with self.app.test_client() as c:
+            self._prime_remember_cookie(c)
+            self._reset_callbacks()
+            result = c.get("/order/whoami")
+            self.assertEqual(result.status_code, 401)
+            self.user_loader.assert_not_called()
+            self.request_loader.assert_called_once()
+            self._reset_callbacks()
+            result = c.get("/order/whoami", headers={"X-API-Key": "2"})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(steve.name, result.data.decode("utf-8"))
+
+    def test_unknown_source_is_rejected(self):
+        with self.assertRaises(ValueError):
+            identity_sources("header")
+
+    def test_no_source_is_rejected(self):
+        with self.assertRaises(ValueError):
+            identity_sources()
+
+    def test_duplicate_sources_are_rejected(self):
+        with self.assertRaises(ValueError):
+            identity_sources(IDENTITY_SOURCE_REQUEST, IDENTITY_SOURCE_REQUEST)
 
 
 class TestLoginUrlGeneration(unittest.TestCase):

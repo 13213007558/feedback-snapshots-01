@@ -18,6 +18,10 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add the `identity_sources` view decorator and the `IDENTITY_SOURCE_SESSION`,
+  `IDENTITY_SOURCE_REMEMBER_COOKIE` and `IDENTITY_SOURCE_REQUEST` constants to
+  restrict which identity sources may authenticate a particular route. Views
+  without the decorator retain the default session, cookie, request order.
 
 
 Version 0.6.3

@@ -1,5 +1,24 @@
 from datetime import timedelta
 
+#: Identity source: the Flask session populated by :func:`~flask_login.login_user`
+#: (i.e. a normal browser page login).
+IDENTITY_SOURCE_SESSION = "session"
+
+#: Identity source: the signed "remember me" cookie.
+IDENTITY_SOURCE_REMEMBER_COOKIE = "remember_cookie"
+
+#: Identity source: the :meth:`~flask_login.LoginManager.request_loader`
+#: callback, intended for automated clients such as API tokens or headers.
+IDENTITY_SOURCE_REQUEST = "request"
+
+#: Every supported identity source, in the order they are consulted by
+#: default when a view does not restrict them.
+IDENTITY_SOURCES = (
+    IDENTITY_SOURCE_SESSION,
+    IDENTITY_SOURCE_REMEMBER_COOKIE,
+    IDENTITY_SOURCE_REQUEST,
+)
+
 #: The default name of the "remember me" cookie (``remember_token``)
 COOKIE_NAME = "remember_token"
 

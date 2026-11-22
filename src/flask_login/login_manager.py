@@ -16,6 +16,9 @@ from .config import COOKIE_NAME
 from .config import COOKIE_SAMESITE
 from .config import COOKIE_SECURE
 from .config import ID_ATTRIBUTE
+from .config import IDENTITY_SOURCE_REMEMBER_COOKIE
+from .config import IDENTITY_SOURCE_REQUEST
+from .config import IDENTITY_SOURCE_SESSION
 from .config import LOGIN_MESSAGE
 from .config import LOGIN_MESSAGE_CATEGORY
 from .config import REFRESH_MESSAGE
@@ -30,6 +33,7 @@ from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
 from .signals import user_unauthorized
 from .utils import _create_identifier
+from .utils import _get_identity_sources
 from .utils import _user_context_processor
 from .utils import decode_cookie
 from .utils import encode_cookie
@@ -316,10 +320,18 @@ class LoginManager:
             return self._update_request_context_with_user()
 
         user = None
+        allowed_sources = _get_identity_sources()
+
+        def _allows(source):
+            return allowed_sources is None or source in allowed_sources
 
         # Load user from Flask Session
         user_id = session.get("_user_id")
-        if user_id is not None and self._user_callback is not None:
+        if (
+            _allows(IDENTITY_SOURCE_SESSION)
+            and user_id is not None
+            and self._user_callback is not None
+        ):
             user = self._user_callback(user_id)
 
         # Load user from Remember Me Cookie or Request Loader
@@ -327,10 +339,10 @@ class LoginManager:
             config = current_app.config
             cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
             has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
-            if has_cookie:
+            if _allows(IDENTITY_SOURCE_REMEMBER_COOKIE) and has_cookie:
                 cookie = request.cookies[cookie_name]
                 user = self._load_user_from_remember_cookie(cookie)
-            elif self._request_callback:
+            elif _allows(IDENTITY_SOURCE_REQUEST) and self._request_callback:
                 user = self._load_user_from_request(request)
 
         return self._update_request_context_with_user(user)

@@ -254,6 +254,48 @@ using the `Authorization` header::
         return None
 
 
+Restricting a View's Identity Sources
+=====================================
+By default a view accepts a user from whichever source supplies one first:
+the Flask session, then the "remember me" cookie, and finally the
+`~LoginManager.request_loader`. That is convenient for browser pages, but an
+endpoint reserved for automated clients should not treat a browser cookie as
+authorization, and vice versa.
+
+Use `identity_sources` to declare which sources a particular view may use.
+The available sources are `IDENTITY_SOURCE_SESSION`,
+`IDENTITY_SOURCE_REMEMBER_COOKIE` and `IDENTITY_SOURCE_REQUEST`. For example,
+an API endpoint that may only be reached with request loader credentials::
+
+    from flask_login import IDENTITY_SOURCE_REQUEST, identity_sources, login_required
+
+    @app.route("/api/whoami")
+    @identity_sources(IDENTITY_SOURCE_REQUEST)
+    @login_required
+    def api_whoami():
+        # A valid "remember me" cookie sent alongside the request is ignored,
+        # so only request loader credentials can authenticate this view.
+        ...
+
+Conversely, a browser page can be locked to the session and cookie so that
+request loader credentials are never accepted::
+
+    @app.route("/account")
+    @identity_sources(
+        IDENTITY_SOURCE_SESSION, IDENTITY_SOURCE_REMEMBER_COOKIE
+    )
+    @login_required
+    def account():
+        ...
+
+The decorator only marks the view and works in any order relative to other
+decorators. Views that are not decorated keep the default session, then
+cookie, then request loader order. A view whose allowed sources produce no
+user is treated as anonymous, so `login_required` (or your
+`~LoginManager.unauthorized_handler`) responds exactly as it would for a
+logged-out request.
+
+
 Anonymous Users
 ===============
 By default, when a user is not actually logged in, `current_user` is set to
@@ -582,6 +624,22 @@ Protecting Views
 .. autofunction:: login_required
 
 .. autofunction:: fresh_login_required
+
+.. autofunction:: identity_sources
+
+.. data:: IDENTITY_SOURCE_SESSION
+
+   Identity source representing the Flask session populated by
+   `login_user`, i.e. a normal browser page login.
+
+.. data:: IDENTITY_SOURCE_REMEMBER_COOKIE
+
+   Identity source representing the signed "remember me" cookie.
+
+.. data:: IDENTITY_SOURCE_REQUEST
+
+   Identity source representing the `~LoginManager.request_loader`
+   callback, intended for automated clients such as API tokens or headers.
 
 
 User Object Helpers

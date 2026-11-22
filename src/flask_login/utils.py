@@ -16,6 +16,7 @@ from werkzeug.local import LocalProxy
 
 from .config import COOKIE_NAME
 from .config import EXEMPT_METHODS
+from .config import IDENTITY_SOURCES
 from .signals import user_logged_in
 from .signals import user_logged_out
 from .signals import user_login_confirmed
@@ -238,6 +239,80 @@ def confirm_login():
     session["_fresh"] = True
     session["_id"] = current_app.login_manager._session_identifier_generator()
     user_login_confirmed.send(current_app._get_current_object())
+
+
+def identity_sources(*sources):
+    """Restrict the identity sources a view may use to authenticate.
+
+    This is useful when some views are meant to be used by browser sessions
+    while others are reserved for automated clients. It lets a route opt out
+    of sources that would otherwise be accepted, for instance ensuring an API
+    endpoint never treats a browser cookie as authorization.
+
+    The accepted sources are :data:`~flask_login.IDENTITY_SOURCE_SESSION`,
+    :data:`~flask_login.IDENTITY_SOURCE_REMEMBER_COOKIE` and
+    :data:`~flask_login.IDENTITY_SOURCE_REQUEST`. At least one source must be
+    given and each source may only be listed once. For example::
+
+        @app.route("/api/whoami")
+        @identity_sources(IDENTITY_SOURCE_REQUEST)
+        @login_required
+        def api_whoami():
+            ...
+
+    The marker is stored on the view itself, so the order relative to other
+    decorators (such as :func:`login_required`) does not matter. Views without
+    this decorator keep the default order: session, then the "remember me"
+    cookie, then the request loader.
+
+    :param sources: The identity sources allowed for this view.
+    :type sources: str
+    """
+
+    if not sources:
+        raise ValueError("At least one identity source is required.")
+
+    invalid = [source for source in sources if source not in IDENTITY_SOURCES]
+    if invalid:
+        allowed = ", ".join(IDENTITY_SOURCES)
+        raise ValueError(
+            f"Unknown identity source(s): {', '.join(invalid)}. " f"Allowed sources are: {allowed}."
+        )
+
+    if len(set(sources)) != len(sources):
+        raise ValueError("Identity sources must not be repeated.")
+
+    def decorator(view):
+        try:
+            view._flask_login_identity_sources = frozenset(sources)
+        except (AttributeError, TypeError) as error:
+            raise TypeError("identity_sources must decorate a view function.") from error
+        return view
+
+    return decorator
+
+
+def _get_identity_sources():
+    """Return the identity sources allowed for the current view.
+
+    Returns ``None`` when the current view does not restrict them, which
+    signals that the default session -> cookie -> request order applies. The
+    marker is looked up along the wrapper chain so it works regardless of
+    decorator ordering.
+    """
+
+    if not has_request_context():
+        return None
+
+    view = current_app.view_functions.get(request.endpoint) if request.endpoint else None
+
+    while view is not None:
+        sources = getattr(view, "_flask_login_identity_sources", None)
+        if sources is not None:
+            return sources
+        view = getattr(view, "__wrapped__", None)
+
+    return None
 
 
 def login_required(func):

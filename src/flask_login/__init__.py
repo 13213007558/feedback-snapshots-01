@@ -3,6 +3,10 @@ from .config import COOKIE_HTTPONLY
 from .config import COOKIE_NAME
 from .config import COOKIE_SECURE
 from .config import ID_ATTRIBUTE
+from .config import IDENTITY_SOURCE_REMEMBER_COOKIE
+from .config import IDENTITY_SOURCE_REQUEST
+from .config import IDENTITY_SOURCE_SESSION
+from .config import IDENTITY_SOURCES
 from .config import LOGIN_MESSAGE
 from .config import LOGIN_MESSAGE_CATEGORY
 from .config import REFRESH_MESSAGE
@@ -25,6 +29,7 @@ from .utils import current_user
 from .utils import decode_cookie
 from .utils import encode_cookie
 from .utils import fresh_login_required
+from .utils import identity_sources
 from .utils import login_fresh
 from .utils import login_remembered
 from .utils import login_required
@@ -40,6 +45,10 @@ __all__ = [
     "COOKIE_NAME",
     "COOKIE_SECURE",
     "ID_ATTRIBUTE",
+    "IDENTITY_SOURCE_REMEMBER_COOKIE",
+    "IDENTITY_SOURCE_REQUEST",
+    "IDENTITY_SOURCE_SESSION",
+    "IDENTITY_SOURCES",
     "LOGIN_MESSAGE",
     "LOGIN_MESSAGE_CATEGORY",
     "REFRESH_MESSAGE",
@@ -62,6 +71,7 @@ __all__ = [
     "decode_cookie",
     "encode_cookie",
     "fresh_login_required",
+    "identity_sources",
     "login_fresh",
     "login_remembered",
     "login_required",
