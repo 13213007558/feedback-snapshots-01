@@ -98,6 +98,8 @@ class LoginManager:
 
         self._request_callback = None
 
+        self._id_migrator_callback = None
+
         self._session_identifier_generator = _create_identifier
 
         if app is not None:
@@ -213,6 +215,41 @@ class LoginManager:
         """Gets the request_loader callback set by request_loader decorator."""
         return self._request_callback
 
+    def id_migrator(self, callback):
+        """
+        This sets the callback for translating a stored user ID into the
+        current stable user ID before the `user_loader` callback runs. Use
+        this when migrating an application from legacy account IDs to new
+        stable IDs, so that users with existing sessions or "remember me"
+        cookies are not logged out.
+
+        The function you set should take the stored user ID (a ``str``) and
+        return the current ID (a ``str``) to load instead, or ``None`` if
+        the stored ID is not a recognized legacy ID (for example, an
+        unregistered or deactivated legacy account). Returning ``None``
+        leaves the request anonymous; the legacy ID is never passed to the
+        `user_loader` callback.
+
+        :param callback: The callback for translating a stored user ID.
+        :type callback: callable
+        """
+        self._id_migrator_callback = callback
+        return callback
+
+    @property
+    def id_migrator_callback(self):
+        """Gets the id_migrator callback set by id_migrator decorator."""
+        return self._id_migrator_callback
+
+    def _migrate_user_id(self, user_id):
+        """Translate a stored user ID via the id_migrator callback, if any.
+
+        Returns the ID to load, or ``None`` if the stored ID was rejected.
+        """
+        if self._id_migrator_callback is None:
+            return user_id
+        return self._id_migrator_callback(user_id)
+
     def unauthorized_handler(self, callback):
         """
         This will set the callback for the `unauthorized` method, which among
@@ -320,7 +357,11 @@ class LoginManager:
         # Load user from Flask Session
         user_id = session.get("_user_id")
         if user_id is not None and self._user_callback is not None:
-            user = self._user_callback(user_id)
+            user_id = self._migrate_user_id(user_id)
+            if user_id is not None:
+                # Heal the session so subsequent requests use the new ID.
+                session["_user_id"] = user_id
+                user = self._user_callback(user_id)
 
         # Load user from Remember Me Cookie or Request Loader
         if user is None:
@@ -365,6 +406,8 @@ class LoginManager:
 
     def _load_user_from_remember_cookie(self, cookie):
         user_id = decode_cookie(cookie)
+        if user_id is not None:
+            user_id = self._migrate_user_id(user_id)
         if user_id is not None:
             session["_user_id"] = user_id
             session["_fresh"] = False

@@ -1129,6 +1129,122 @@ class LoginTestCase(unittest.TestCase):
             self.assertIsInstance(_ucp()["current_user"], AnonymousUserMixin)
 
 
+class UserIdMigrationTestCase(unittest.TestCase):
+    """Tests for LoginManager.id_migrator: legacy IDs are translated to new
+    stable IDs only when the app confirms the mapping; unregistered or
+    deactivated legacy records stay anonymous."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.remember_cookie_name = "remember"
+        self.app.config["REMEMBER_COOKIE_NAME"] = self.remember_cookie_name
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+
+        # Users are stored under the new stable IDs only.
+        self.users = {
+            "user-alice": User("Alice", "user-alice"),
+            "user-bob": User("Bob", "user-bob"),
+        }
+        # Legacy IDs the app has confirmed ownership for. The deactivated
+        # legacy record "legacy-carol" is deliberately absent.
+        self.legacy_id_map = {
+            "legacy-alice": "user-alice",
+            "legacy-bob": "user-bob",
+        }
+
+        @self.app.route("/username")
+        def username():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous"
+
+        @self.app.route("/session-user-id")
+        def session_user_id():
+            return str(session.get("_user_id"))
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return self.users.get(user_id)
+
+        @self.login_manager.id_migrator
+        def migrate_id(user_id):
+            if user_id in self.legacy_id_map:
+                return self.legacy_id_map[user_id]
+            if user_id in self.users:
+                return user_id
+            return None
+
+    def _set_remember_cookie(self, c, user_id):
+        key = self.app.config["SECRET_KEY"]
+        c.set_cookie(self.remember_cookie_name, encode_cookie(user_id, key=key))
+
+    def test_session_with_legacy_id_loads_first_mapped_user(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "legacy-alice"
+            result = c.get("/username")
+            self.assertEqual("Alice", result.data.decode("utf-8"))
+
+    def test_session_with_legacy_id_loads_second_mapped_user(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "legacy-bob"
+            result = c.get("/username")
+            self.assertEqual("Bob", result.data.decode("utf-8"))
+
+    def test_session_is_healed_to_new_id(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "legacy-alice"
+            c.get("/username")
+            result = c.get("/session-user-id")
+            self.assertEqual("user-alice", result.data.decode("utf-8"))
+
+    def test_session_with_current_id_passes_through(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "user-bob"
+            result = c.get("/username")
+            self.assertEqual("Bob", result.data.decode("utf-8"))
+
+    def test_session_with_deactivated_legacy_id_stays_anonymous(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "legacy-carol"
+            result = c.get("/username")
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+    def test_session_with_unregistered_legacy_id_stays_anonymous(self):
+        with self.app.test_client() as c:
+            with c.session_transaction() as sess:
+                sess["_user_id"] = "legacy-unknown"
+            result = c.get("/username")
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+    def test_remember_cookie_with_legacy_id_loads_mapped_user(self):
+        with self.app.test_client() as c:
+            self._set_remember_cookie(c, "legacy-bob")
+            result = c.get("/username")
+            self.assertEqual("Bob", result.data.decode("utf-8"))
+            result = c.get("/session-user-id")
+            self.assertEqual("user-bob", result.data.decode("utf-8"))
+
+    def test_remember_cookie_with_deactivated_legacy_id_stays_anonymous(self):
+        with self.app.test_client() as c:
+            self._set_remember_cookie(c, "legacy-carol")
+            result = c.get("/username")
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+    def test_remember_cookie_with_unregistered_legacy_id_stays_anonymous(self):
+        with self.app.test_client() as c:
+            self._set_remember_cookie(c, "legacy-unknown")
+            result = c.get("/username")
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+
 class LoginViaRequestTestCase(unittest.TestCase):
     """Tests for LoginManager.request_loader."""
 

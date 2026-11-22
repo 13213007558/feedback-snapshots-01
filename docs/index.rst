@@ -78,6 +78,34 @@ It should return `None` (**not raise an exception**) if the ID is not valid.
 (In that case, the ID will manually be removed from the session and processing
 will continue.)
 
+Migrating User IDs
+==================
+If your application moves from legacy account IDs to new stable IDs, users
+with existing sessions or "remember me" cookies would normally be logged out,
+because their stored IDs no longer resolve. To avoid this, register a
+`~LoginManager.id_migrator` callback. It runs before your
+`~LoginManager.user_loader` callback whenever a user is loaded from the
+session or the remember cookie, and translates the stored ID into the current
+one::
+
+    @login_manager.id_migrator
+    def migrate_id(user_id):
+        # Confirmed legacy-to-new mappings you have verified ownership for.
+        if user_id in LEGACY_ID_MAP:
+            return LEGACY_ID_MAP[user_id]
+        # IDs already in the new format pass through unchanged.
+        if User.exists(user_id):
+            return user_id
+        # Anything else (unregistered or deactivated legacy records) is
+        # rejected: the request stays anonymous.
+        return None
+
+Only IDs your callback confirms are translated; a return value of `None`
+means the stored ID is never passed to your `~LoginManager.user_loader`
+callback, so unrecognized or deactivated legacy records remain anonymous.
+When a legacy ID is successfully translated, the session is updated to the
+new ID so subsequent requests use it directly.
+
 Your User Class
 ===============
 The class that you use to represent users needs to implement these properties
@@ -519,6 +547,8 @@ Configuring Login
    .. automethod:: user_loader
 
    .. automethod:: request_loader
+
+   .. automethod:: id_migrator
 
    .. attribute:: anonymous_user
 
