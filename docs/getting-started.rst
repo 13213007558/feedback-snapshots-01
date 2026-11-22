@@ -163,6 +163,58 @@ party API clients use a JWS or JWT bearer token. The `MultiAuth` class allows yo
 
 In the examples directory you can find a complete example that uses basic and token authentication.
 
+Requiring Multiple Authentication Factors
+-----------------------------------------
+
+The ``MultiAuth`` class described above grants access when *any one* of the
+authentication objects validates. A restricted endpoint that needs two
+independent proofs, for example a service credential plus a one-time token
+from the operator, instead stacks the ``login_required`` decorators of two
+authentication objects. Access is granted only when *both* validations
+succeed. The two factors must be carried on separate headers so that each
+object can read its own proof::
+
+    from flask import Flask, g
+    from flask_httpauth import HTTPBasicAuth, HTTPTokenAuth
+
+    app = Flask(__name__)
+
+    service_auth = HTTPBasicAuth()
+    otp_auth = HTTPTokenAuth(header='X-OTP')
+
+    @service_auth.verify_password
+    def verify_service(username, password):
+        if username == 'billing-service' and password == 'service-secret':
+            g.two_factor_service = username
+            return username
+        return None
+
+    @otp_auth.verify_token
+    def verify_otp(token):
+        if token == '424242':
+            g.two_factor_operator = 'alice'
+            return 'alice'
+        return None
+
+    @app.route('/restricted')
+    @service_auth.login_required
+    @otp_auth.login_required
+    def restricted():
+        return 'service {}, operator {}'.format(
+            g.two_factor_service, g.two_factor_operator)
+
+A request that only provides valid basic credentials, or only a valid
+one-time token, is rejected with ``401``; both proofs are required. Other
+endpoints can keep using a single ``login_required`` decorator and remain
+open to one factor.
+
+All authentication objects share the framework's current-user slot, so when
+several objects are stacked each ``verify`` callback should store its
+authenticated identity under a dedicated ``flask.g`` key, as shown above,
+instead of relying on ``current_user()``. A complete runnable application,
+including asynchronous routes and tests, is available in
+``examples/two_factor_auth.py``.
+
 User Roles
 ----------
 
