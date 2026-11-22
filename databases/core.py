@@ -36,6 +36,13 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("databases")
 
 
+class ReadOnlyTransactionNotSupportedError(RuntimeError):
+    """
+    Raised when a read-only transaction is requested from a backend
+    that does not support read-only transactions.
+    """
+
+
 _ACTIVE_TRANSACTIONS: ContextVar[
     typing.Optional["weakref.WeakKeyDictionary['Transaction', 'TransactionBackend']"]
 ] = ContextVar("databases:active_transactions", default=None)
@@ -223,9 +230,25 @@ class Database:
         return self._connection
 
     def transaction(
-        self, *, force_rollback: bool = False, **kwargs: typing.Any
+        self,
+        *,
+        force_rollback: bool = False,
+        read_only: bool = False,
+        **kwargs: typing.Any,
     ) -> "Transaction":
-        return Transaction(self.connection, force_rollback=force_rollback, **kwargs)
+        return Transaction(
+            self.connection,
+            force_rollback=force_rollback,
+            read_only=read_only,
+            **kwargs,
+        )
+
+    @property
+    def supports_read_only_transactions(self) -> bool:
+        """
+        `True` if the backend can enforce read-only transactions.
+        """
+        return self._backend.supports_read_only_transactions
 
     @contextlib.contextmanager
     def force_rollback(self) -> typing.Iterator[None]:
@@ -336,12 +359,18 @@ class Connection:
                     yield record
 
     def transaction(
-        self, *, force_rollback: bool = False, **kwargs: typing.Any
+        self,
+        *,
+        force_rollback: bool = False,
+        read_only: bool = False,
+        **kwargs: typing.Any,
     ) -> "Transaction":
         def connection_callable() -> Connection:
             return self
 
-        return Transaction(connection_callable, force_rollback, **kwargs)
+        return Transaction(
+            connection_callable, force_rollback, read_only=read_only, **kwargs
+        )
 
     @property
     def raw_connection(self) -> typing.Any:
@@ -446,6 +475,14 @@ class Transaction:
         return wrapper  # type: ignore
 
     async def start(self) -> "Transaction":
+        if (
+            self._extra_options.get("read_only")
+            and not self._connection._backend.supports_read_only_transactions
+        ):
+            raise ReadOnlyTransactionNotSupportedError(
+                "The database backend does not support read-only transactions."
+            )
+
         self._transaction = self._connection._connection.transaction()
 
         async with self._connection._transaction_lock:

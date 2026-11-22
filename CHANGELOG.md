@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Support read-only transactions via `database.transaction(read_only=True)`, with a checkable `database.supports_read_only_transactions` capability. Backends without support raise `databases.ReadOnlyTransactionNotSupportedError`.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed

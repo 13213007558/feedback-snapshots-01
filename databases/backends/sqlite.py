@@ -19,6 +19,8 @@ logger = logging.getLogger("databases")
 
 
 class SQLiteBackend(DatabaseBackend):
+    supports_read_only_transactions = True
+
     def __init__(
         self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
     ) -> None:
@@ -220,12 +222,28 @@ class SQLiteTransaction(TransactionBackend):
         self._connection = connection
         self._is_root = False
         self._savepoint_name = ""
+        self._read_only = False
+        self._previous_query_only: typing.Optional[int] = None
 
     async def start(
         self, is_root: bool, extra_options: typing.Dict[typing.Any, typing.Any]
     ) -> None:
         assert self._connection._connection is not None, "Connection is not acquired"
         self._is_root = is_root
+        self._read_only = extra_options.get("read_only", False)
+        if self._read_only:
+            # Enforce read-only at the database level. Any write is rejected
+            # by SQLite with `SQLITE_READONLY`. The previous value is saved
+            # so that nested read-only transactions restore it correctly.
+            async with self._connection._connection.execute(
+                "PRAGMA query_only"
+            ) as cursor:
+                row = await cursor.fetchone()
+                self._previous_query_only = row[0]
+            async with self._connection._connection.execute(
+                "PRAGMA query_only = ON"
+            ) as cursor:
+                await cursor.close()
         if self._is_root:
             async with self._connection._connection.execute("BEGIN") as cursor:
                 await cursor.close()
@@ -247,6 +265,7 @@ class SQLiteTransaction(TransactionBackend):
                 f"RELEASE SAVEPOINT {self._savepoint_name}"
             ) as cursor:
                 await cursor.close()
+        await self._restore_query_only()
 
     async def rollback(self) -> None:
         assert self._connection._connection is not None, "Connection is not acquired"
@@ -258,3 +277,15 @@ class SQLiteTransaction(TransactionBackend):
                 f"ROLLBACK TO SAVEPOINT {self._savepoint_name}"
             ) as cursor:
                 await cursor.close()
+        await self._restore_query_only()
+
+    async def _restore_query_only(self) -> None:
+        if self._read_only and self._previous_query_only is not None:
+            assert (
+                self._connection._connection is not None
+            ), "Connection is not acquired"
+            async with self._connection._connection.execute(
+                f"PRAGMA query_only = {self._previous_query_only}"
+            ) as cursor:
+                await cursor.close()
+            self._previous_query_only = None

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import sqlalchemy
 
-from databases import Database, DatabaseURL
+from databases import Database, DatabaseURL, ReadOnlyTransactionNotSupportedError
 
 assert "TEST_DATABASE_URLS" in os.environ, "TEST_DATABASE_URLS is not set."
 
@@ -818,6 +818,90 @@ async def test_transaction_commit_serializable(database_url):
             assert len(results) == 0
 
             delete_independently()
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_read_only_transaction(database_url):
+    """
+    Ensure that read-only transactions allow reads, that the backend rejects
+    writes with an explicit error (also within nested transactions), and that
+    regular write transactions still work.
+    """
+
+    database_url = DatabaseURL(database_url)
+
+    if database_url.scheme not in ["sqlite", "sqlite+aiosqlite"]:
+        pytest.skip("Test (currently) only supports SQLite")
+
+    async with Database(database_url) as database:
+        assert database.supports_read_only_transactions is True
+
+        # A regular write transaction works.
+        async with database.transaction():
+            query = notes.insert().values(text="example1", completed=True)
+            await database.execute(query)
+
+        async with database.transaction(read_only=True):
+            # Reads are allowed.
+            query = notes.select()
+            results = await database.fetch_all(query=query)
+            assert len(results) == 1
+
+            # Writes are rejected by the backend with an explicit error,
+            # not silently treated as an execution affecting 0 rows.
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                query = notes.insert().values(text="example2", completed=False)
+                await database.execute(query)
+
+            # Nested transactions remain read-only.
+            async with database.transaction():
+                with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                    query = notes.update().values(text="example2")
+                    await database.execute(query)
+
+    # Verify against the real database, through a fresh connection,
+    # that the rejected writes did not change anything.
+    async with Database(database_url) as database:
+        query = notes.select()
+        results = await database.fetch_all(query=query)
+        assert len(results) == 1
+        assert results[0]["text"] == "example1"
+
+        # A regular write transaction still works after a read-only one.
+        async with database.transaction():
+            query = notes.delete()
+            await database.execute(query)
+
+        query = notes.select()
+        results = await database.fetch_all(query=query)
+        assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_read_only_transaction_unsupported(database_url):
+    """
+    Ensure that requesting a read-only transaction from a backend without
+    support raises an explicit error instead of being silently ignored.
+    """
+
+    database_url = DatabaseURL(database_url)
+
+    if database_url.scheme in [
+        "sqlite",
+        "sqlite+aiosqlite",
+        "postgresql",
+        "postgresql+asyncpg",
+    ]:
+        pytest.skip("Backend supports read-only transactions")
+
+    async with Database(database_url) as database:
+        assert database.supports_read_only_transactions is False
+
+        with pytest.raises(ReadOnlyTransactionNotSupportedError):
+            async with database.transaction(read_only=True):
+                pass
 
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)

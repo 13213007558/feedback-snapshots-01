@@ -5,6 +5,9 @@ from sqlalchemy.sql import ClauseElement
 
 
 class DatabaseBackend:
+    # Whether the backend can enforce read-only transactions.
+    supports_read_only_transactions: bool = False
+
     async def connect(self) -> None:
         raise NotImplementedError()  # pragma: no cover
 

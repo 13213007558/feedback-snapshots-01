@@ -151,4 +151,32 @@ async with database.transaction(isolation="serializable"):
     ...
 ```
 
+## Read-only transactions
+
+For workloads such as reporting, where a transaction must only ever read a
+consistent snapshot of the data, a transaction can be declared read-only:
+
+```python
+async with database.transaction(read_only=True):
+    ...
+```
+
+Within a read-only transaction any write operation is rejected by the database
+backend with an explicit error, instead of being executed. Nested transactions
+remain read-only as well.
+
+Read-only transactions are currently supported by the SQLite backend
+(enforced with `PRAGMA query_only`) and the asyncpg PostgreSQL backend.
+
+You can check if the backend in use supports read-only transactions:
+
+```python
+if database.supports_read_only_transactions:
+    ...
+```
+
+Requesting a read-only transaction from a backend without support raises
+`databases.ReadOnlyTransactionNotSupportedError`, rather than being silently
+ignored.
+
 [starlette]: https://github.com/encode/starlette

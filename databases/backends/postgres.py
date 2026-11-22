@@ -20,6 +20,8 @@ logger = logging.getLogger("databases")
 
 
 class PostgresBackend(DatabaseBackend):
+    supports_read_only_transactions = True
+
     def __init__(
         self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
     ) -> None:
@@ -206,6 +208,9 @@ class PostgresTransaction(TransactionBackend):
         self, is_root: bool, extra_options: typing.Dict[typing.Any, typing.Any]
     ) -> None:
         assert self._connection._connection is not None, "Connection is not acquired"
+        extra_options = dict(extra_options)
+        if extra_options.pop("read_only", False):
+            extra_options["readonly"] = True
         self._transaction = self._connection._connection.transaction(**extra_options)
         await self._transaction.start()
 
