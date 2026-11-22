@@ -6,6 +6,11 @@ Unreleased
 
 **New features:**
 
+- Added ``simple_history.audit`` and an ``export_audit`` management command
+  for batched, re-runnable audit exports. Rows contain only the change time,
+  change type and the tracked object's primary key; they are filtered by an
+  optional time window, an ``approved`` boolean and a history-column access
+  rule, with stable keyset pagination on ``(history_date, history_id)``.
 
 **Breaking changes:**
 

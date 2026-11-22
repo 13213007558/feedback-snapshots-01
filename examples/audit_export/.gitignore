@@ -1,0 +1,5 @@
+audit.sqlite3
+auditcase/migrations/
+sample_rerun/
+__pycache__/
+*.pyc

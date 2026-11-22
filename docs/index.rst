@@ -60,6 +60,7 @@ Documentation
 
    quick_start
    querying_history
+   audit_export
    admin
    historical_model
    user_tracking

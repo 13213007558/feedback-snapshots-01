@@ -1082,3 +1082,18 @@ class TestHistoricParticipantToHistoricOrganizationOneToOne(
         related_name="historic_participant",
     )
     history = HistoricalRecords()
+
+
+class AuditCaseFile(models.Model):
+    """Tracked object used by the minimal audit-export tests.
+
+    ``case_secret`` deliberately holds sensitive content: the audit export
+    must never serialise it. ``department`` is copied onto every historical
+    row so access rules keep working after the live object is deleted.
+    """
+
+    case_secret = models.CharField(max_length=200)
+    department = models.CharField(max_length=50)
+    approved = models.BooleanField(default=False)
+
+    history = HistoricalRecords()
