@@ -6,6 +6,13 @@ Unreleased
 
 **New features:**
 
+- Added ``HistoryManager.get_history_scope()`` (and
+  ``SimpleHistoryAdmin.get_history_scope()``) so history queries can be
+  restricted to an application object scope.  The restriction survives
+  ``latest_of_each()``, ``as_instances()``, ``as_of()`` and historic
+  relationships, and objects outside the admin scope are reported as not found.
+- Added ``HistoricalQuerySet.restrict_to()`` / ``as_of(scope=...)`` and
+  ``HistoryManager.restrict_to()`` for explicitly scoped history queries.
 
 **Breaking changes:**
 

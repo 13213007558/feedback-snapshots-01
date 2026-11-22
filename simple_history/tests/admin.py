@@ -18,6 +18,7 @@ from .models import (
     Planet,
     Poll,
     PollWithManyToMany,
+    ScopedDocument,
 )
 
 
@@ -80,3 +81,11 @@ admin.site.register(Employee, SimpleHistoryAdmin)
 admin.site.register(ExternalModelWithCustomUserIdField, SimpleHistoryAdmin)
 admin.site.register(Paper, SimpleHistoryAdmin)
 admin.site.register(Poll, SimpleHistoryAdmin)
+
+
+@admin.register(ScopedDocument)
+class ScopedDocumentAdmin(SimpleHistoryAdmin):
+    """Only let the current request see its approved workspaces."""
+
+    def get_history_scope(self, request):
+        return getattr(request, "workspace_scope", None)

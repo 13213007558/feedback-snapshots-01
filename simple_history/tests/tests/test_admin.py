@@ -17,6 +17,7 @@ from django.utils.encoding import force_str
 from simple_history.admin import SimpleHistoryAdmin
 from simple_history.models import HistoricalRecords
 from simple_history.template_utils import HistoricalRecordContextHelper
+from simple_history.tests.admin import ScopedDocumentAdmin
 from simple_history.tests.external.models import ExternalModelWithCustomUserIdField
 from simple_history.tests.tests.utils import (
     PermissionAction,
@@ -36,7 +37,9 @@ from ..models import (
     Planet,
     Poll,
     PollWithManyToMany,
+    ScopedDocument,
     State,
+    Workspace,
 )
 
 User = get_user_model()
@@ -1211,3 +1214,66 @@ class AdminSiteTest(TestCase):
 
     def test_permission_combos__default(self):
         self._test_permission_combos_with_enforce_history_permissions(enforced=False)
+
+
+class ScopedHistoryAdminTest(TestCase):
+    """Admin history pages must honour the same object scope as the API."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("scope_admin", "s@example.com", "x")
+        self.workspace_a = Workspace.objects.create(name="workspace-a")
+        self.workspace_b = Workspace.objects.create(name="workspace-b")
+        self.doc_a = ScopedDocument.objects.create(
+            workspace=self.workspace_a, name="shared"
+        )
+        self.doc_b = ScopedDocument.objects.create(
+            workspace=self.workspace_b, name="shared"
+        )
+        self.client.force_login(self.user)
+
+    def _request_for_workspace(self, workspace):
+        def scope_request(admin_self, request):
+            request.workspace_scope = {"workspace_id__in": [workspace.pk]}
+            return request.workspace_scope
+
+        return scope_request
+
+    def test_list_and_single_object_share_not_found_result(self):
+        scope = self._request_for_workspace(self.workspace_a)
+        with patch.object(ScopedDocumentAdmin, "get_history_scope", scope):
+            allowed_list = self.client.get(get_history_url(self.doc_a))
+            denied_list = self.client.get(get_history_url(self.doc_b))
+            allowed_single = self.client.get(get_history_url(self.doc_a, 0))
+            denied_single = self.client.get(get_history_url(self.doc_b, 0))
+
+        self.assertEqual(allowed_list.status_code, 200)
+        self.assertEqual(allowed_single.status_code, 200)
+        self.assertEqual(denied_list.status_code, 404)
+        self.assertEqual(denied_single.status_code, 404)
+
+    def test_denied_object_does_not_affect_other_workspace_history(self):
+        scope = self._request_for_workspace(self.workspace_b)
+        with patch.object(ScopedDocumentAdmin, "get_history_scope", scope):
+            response = self.client.get(get_history_url(self.doc_b))
+
+        self.assertEqual(response.status_code, 200)
+        records = response.context["page_obj"].object_list
+        self.assertTrue(records)
+        self.assertTrue(
+            all(record.workspace_id == self.workspace_b.pk for record in records)
+        )
+        self.assertTrue(all(record.name == "shared" for record in records))
+
+    def test_missing_object_and_out_of_scope_object_are_indistinguishable(self):
+        scope = self._request_for_workspace(self.workspace_a)
+        with patch.object(ScopedDocumentAdmin, "get_history_scope", scope):
+            out_of_scope = self.client.get(get_history_url(self.doc_b))
+            missing = self.client.get(
+                reverse(
+                    "admin:tests_scopeddocument_history",
+                    args=[quote(10_000)],
+                )
+            )
+
+        self.assertEqual(out_of_scope.status_code, 404)
+        self.assertEqual(missing.status_code, 404)

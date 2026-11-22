@@ -3,11 +3,24 @@ from operator import attrgetter
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.db.models import Q
 from django.test import TestCase, override_settings, skipUnlessDBFeature
 
-from simple_history.manager import SIMPLE_HISTORY_REVERSE_ATTR_NAME
+from simple_history.manager import (
+    SIMPLE_HISTORY_REVERSE_ATTR_NAME,
+    SIMPLE_HISTORY_SCOPE_ATTR_NAME,
+)
 
-from ..models import Choice, Document, Poll, RankedDocument
+from ..models import (
+    Choice,
+    Document,
+    Poll,
+    RankedDocument,
+    ScopedChoice,
+    ScopedDocument,
+    Workspace,
+    workspace_scope,
+)
 from .utils import HistoricalTestCase
 
 User = get_user_model()
@@ -460,3 +473,137 @@ class PrefetchingMethodsTestCase(TestCase):
             self.assertEqual(len(historical_records), num_choices)
         with self.assertNumQueries(0):
             access_related_objs(historical_records)
+
+
+class ScopedHistoryTestCase(TestCase):
+    """
+    Validate that an application-provided object scope is enforced while
+    querying history and survives the conversion to business instances.
+    """
+
+    def setUp(self):
+        self.workspace_a = Workspace.objects.create(name="workspace-a")
+        self.workspace_b = Workspace.objects.create(name="workspace-b")
+        self.token = workspace_scope.set([self.workspace_a.pk])
+        self.addCleanup(self._reset_scope)
+
+        # Same-named objects in two workspaces, each with several time points.
+        self.doc_a = ScopedDocument.objects.create(
+            workspace=self.workspace_a, name="shared"
+        )
+        self.doc_b = ScopedDocument.objects.create(
+            workspace=self.workspace_b, name="shared"
+        )
+        self.t1 = datetime.now()
+        self.doc_a.name = "shared-a2"
+        self.doc_a.save()
+        self.doc_b.name = "shared-b2"
+        self.doc_b.save()
+        self.t2 = datetime.now()
+
+    def _reset_scope(self):
+        workspace_scope.set(None)
+
+    def test_scope_applies_to_history_queryset(self):
+        self.assertFalse(
+            ScopedDocument.history.filter(pk=self.doc_b.pk).exists(),
+        )
+        self.assertEqual(
+            {record.id for record in ScopedDocument.history.all()},
+            {self.doc_a.pk},
+        )
+
+    def test_scope_survives_as_of_and_as_instances(self):
+        snapshot = ScopedDocument.history.as_of(self.t2)
+        self.assertEqual([doc.pk for doc in snapshot], [self.doc_a.pk])
+        self.assertEqual(snapshot[0].name, "shared-a2")
+
+        historic = ScopedDocument.history.as_of(self.t1).get()
+        self.assertEqual(historic.pk, self.doc_a.pk)
+        self.assertEqual(historic.name, "shared")
+        self.assertEqual(
+            getattr(historic, SIMPLE_HISTORY_REVERSE_ATTR_NAME)._as_of, self.t1
+        )
+
+        # Conversion through as_instances() keeps the restriction too.
+        instances = ScopedDocument.history.all().as_instances()
+        self.assertEqual({doc.pk for doc in instances}, {self.doc_a.pk})
+
+    def test_scope_compares_only_latest_versions_in_scope(self):
+        # Adding a newer version of the out-of-scope object must not make the
+        # in-scope object drop out of latest_of_each().
+        self.doc_b.name = "shared-b3"
+        self.doc_b.save()
+        self.assertEqual(
+            [doc.pk for doc in ScopedDocument.history.as_of(datetime.now())],
+            [self.doc_a.pk],
+        )
+
+    def test_scope_is_combined_with_explicit_filters(self):
+        queryset = ScopedDocument.history.restrict_to(Q(name__startswith="shared"))
+        self.assertEqual(
+            {record.id for record in queryset},
+            {self.doc_a.pk},
+        )
+        # A scope can only narrow the allowed set, never widen it.
+        self.assertFalse(
+            queryset.filter(workspace_id=self.workspace_b.pk).exists(),
+        )
+
+    def test_scope_is_denied_when_lookup_does_not_exist(self):
+        self.assertFalse(
+            ScopedDocument.history.restrict_to({"missing_field": 1}).exists()
+        )
+
+    def test_scope_is_carried_across_historic_relations(self):
+        choice_a = ScopedChoice.objects.create(document=self.doc_a, label="in-scope")
+        ScopedChoice.objects.create(document=self.doc_b, label="out-of-scope")
+
+        historic_doc = ScopedDocument.history.as_of(datetime.now()).get(
+            pk=self.doc_a.pk
+        )
+        related = list(historic_doc.choices.all())
+        self.assertEqual([choice.pk for choice in related], [choice_a.pk])
+
+    def test_scope_does_not_leak_after_context_reset(self):
+        workspace_scope.set(None)
+        self.assertEqual(
+            ScopedDocument.history.count(),
+            ScopedDocument.history.get_super_queryset().count(),
+        )
+
+
+class ScopeValueTypesTestCase(TestCase):
+    """The scope hook accepts Q objects, lookups, querysets and callables."""
+
+    def setUp(self):
+        self.workspace = Workspace.objects.create(name="workspace")
+        self.other = Workspace.objects.create(name="other")
+        self.doc = ScopedDocument.objects.create(workspace=self.workspace, name="doc")
+        ScopedDocument.objects.create(workspace=self.other, name="doc")
+
+    def test_q_object_scope(self):
+        scoped = ScopedDocument.history.restrict_to(Q(workspace_id=self.workspace.pk))
+        self.assertEqual({record.id for record in scoped}, {self.doc.pk})
+
+    def test_lookup_scope(self):
+        scoped = ScopedDocument.history.restrict_to({"workspace_id": self.workspace.pk})
+        self.assertEqual({record.id for record in scoped}, {self.doc.pk})
+
+    def test_queryset_scope(self):
+        allowed = ScopedDocument.objects.filter(workspace=self.workspace)
+        scoped = ScopedDocument.history.restrict_to(allowed)
+        self.assertEqual({record.id for record in scoped}, {self.doc.pk})
+
+    def test_callable_scope(self):
+        def scope(queryset):
+            return queryset.filter(workspace_id=self.workspace.pk)
+
+        scoped = ScopedDocument.history.restrict_to(scope)
+        self.assertEqual({record.id for record in scoped}, {self.doc.pk})
+
+    def test_none_scope_is_a_no_op(self):
+        self.assertEqual(
+            set(ScopedDocument.history.restrict_to(None)),
+            set(ScopedDocument.history.all()),
+        )

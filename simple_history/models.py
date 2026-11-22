@@ -35,6 +35,7 @@ from django.utils.translation import gettext_lazy as _
 from . import exceptions, utils
 from .manager import (
     SIMPLE_HISTORY_REVERSE_ATTR_NAME,
+    SIMPLE_HISTORY_SCOPE_ATTR_NAME,
     HistoricalQuerySet,
     HistoryDescriptor,
     HistoryManager,
@@ -848,6 +849,21 @@ def transform_field(field):
         field.serialize = True
 
 
+def _apply_carried_scope(queryset, history):
+    """
+    Apply a scope carried by a historical record to a related history queryset.
+
+    When a business instance was produced by a scoped ``as_of()`` query, the
+    historical record keeps the scope under ``_history_scope``.  Chasing a
+    ``HistoricForeignKey`` from that instance must keep the same restriction,
+    otherwise the relation would silently fall back to the whole history table.
+    """
+    scope = getattr(history, SIMPLE_HISTORY_SCOPE_ATTR_NAME, None)
+    if scope is not None and isinstance(queryset, HistoricalQuerySet):
+        queryset = queryset.restrict_to(scope)
+    return queryset
+
+
 class HistoricDescriptorMixin:
 
     def get_queryset(self, **hints):
@@ -864,7 +880,10 @@ class HistoricDescriptorMixin:
                 None,
             )
             if history and histmgr:
-                return histmgr.as_of(getattr(history, "_as_of", history.history_date))
+                queryset = histmgr.as_of(
+                    getattr(history, "_as_of", history.history_date)
+                )
+                return _apply_carried_scope(queryset, history)
         return super().get_queryset(**hints)
 
 
@@ -915,9 +934,10 @@ class HistoricReverseManyToOneDescriptor(ReverseManyToOneDescriptor):
                     None,
                 )
                 if history and histmgr:
-                    return histmgr.as_of(
+                    queryset = histmgr.as_of(
                         getattr(history, "_as_of", history.history_date)
                     )
+                    return _apply_carried_scope(queryset, history)
                 return super().get_queryset()
 
         return create_reverse_many_to_one_manager(

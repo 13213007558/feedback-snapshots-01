@@ -1,3 +1,4 @@
+import contextvars
 import datetime
 import uuid
 
@@ -177,6 +178,61 @@ class PollWithQuerySetCustomizations(models.Model):
     history = HistoricalRecords(
         history_manager=PollManager, historical_queryset=PollQuerySet
     )
+
+
+# --- Scoped history test models -------------------------------------------
+# ``WorkspaceScopedRecords`` is a request/caller scoped policy used by the
+# tests to prove that a history queryset restriction survives the conversion
+# to business instances and does not fall back to the whole history table.
+
+
+workspace_scope = contextvars.ContextVar("workspace_scope", default=None)
+
+
+class ScopedHistoryManager(HistoryManager):
+    def get_history_scope(self):
+        workspace_ids = workspace_scope.get()
+        if workspace_ids is None:
+            return None
+
+        def scope(queryset):
+            model = queryset.model.instance_type
+            if any(field.name == "workspace" for field in model._meta.fields):
+                return queryset.filter(workspace_id__in=workspace_ids)
+            return queryset.filter(document__workspace_id__in=workspace_ids)
+
+        return scope
+
+
+class Workspace(models.Model):
+    name = models.CharField(max_length=100)
+
+
+class ScopedDocument(models.Model):
+    """Same-named documents in different workspaces, with full history."""
+
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
+    name = models.CharField(max_length=100)
+
+    history = HistoricalRecords(history_manager=ScopedHistoryManager)
+
+
+class ScopedChoice(models.Model):
+    document = HistoricForeignKey(
+        ScopedDocument,
+        on_delete=models.CASCADE,
+        related_name="choices",
+    )
+    label = models.CharField(max_length=100)
+
+    history = HistoricalRecords(history_manager=ScopedHistoryManager)
+
+
+class ScopedDocumentWithChoices(ScopedDocument):
+    """``ScopedDocument`` with a reverse ``HistoricForeignKey`` accessor."""
+
+    class Meta:
+        proxy = True
 
 
 class HistoricalRecordsWithExtraFieldM2M(HistoricalRecords):

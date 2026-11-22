@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import FieldError
 from django.db import models
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils import timezone
@@ -11,6 +12,100 @@ from simple_history.utils import (
 # when converting a historical record to an instance, this attribute is added
 # to the instance so that code can reverse the instance to its historical record
 SIMPLE_HISTORY_REVERSE_ATTR_NAME = "_history"
+
+# when a history queryset is restricted to an application-provided object scope,
+# this attribute is added to the resulting historical records (and is also
+# available on the queryset itself) so that the scope survives the conversion
+# to business instances and can be reused when chasing historical relations.
+SIMPLE_HISTORY_SCOPE_ATTR_NAME = "_history_scope"
+
+
+def _normalize_history_scope(scope):
+    """Return a scope usable with :func:`apply_history_scope`."""
+    if isinstance(scope, dict):
+        return Q(**scope)
+    return scope
+
+
+def _scope_as_q(queryset, scope):
+    """Convert ``scope`` to a ``Q`` object for ``queryset``'s model if possible."""
+    if isinstance(scope, Q):
+        return scope
+    if isinstance(scope, dict):
+        return Q(**scope)
+    if isinstance(scope, QuerySet):
+        if queryset is None:
+            return None
+        # A queryset of the history-tracked model (or anything else exposing
+        # the same primary key) is treated as the set of allowed objects.
+        target_pk = getattr(queryset, "_pk_attr", None)
+        if target_pk is None:
+            target_pk = queryset.model.instance_type._meta.pk.attname
+        source_model = getattr(scope.model, "instance_type", scope.model)
+        source_pk = source_model._meta.pk.attname
+        return Q(**{f"{target_pk}__in": scope.values(source_pk)})
+    return None
+
+
+def apply_history_scope(queryset, scope):
+    """
+    Restrict ``queryset`` to ``scope``.
+
+    ``scope`` may be a ``Q`` object, a mapping of query lookups, a queryset of
+    allowed objects, a callable accepting and returning a queryset, or ``None``.
+    A callable is useful when the same application scope must be applied to
+    several related history models (for example, each model may use a
+    different lookup path to the owning workspace).
+
+    If a scope names a field that does not exist on the queryset's model, the
+    scope is treated as a denial instead of silently falling back to
+    unrestricted history.  This matters when a scope is carried across a
+    historical relation: a relation that cannot be proven to be in scope must
+    not expose its full history.
+    """
+    if scope is None:
+        return queryset
+    if callable(scope):
+        return scope(queryset)
+    scope_q = _scope_as_q(queryset, scope)
+    if scope_q is None:
+        raise TypeError("Unsupported history scope type: %s" % type(scope).__name__)
+    try:
+        return queryset.filter(scope_q)
+    except FieldError:
+        return queryset.none()
+
+
+def combine_history_scopes(*scopes):
+    """
+    Combine several scopes with logical AND.
+
+    ``None`` scopes are ignored.  The combined scope is applied in the order
+    given, which keeps callable scopes composable.
+    """
+    if not scopes:
+        return None
+    if len(scopes) == 1:
+        return scopes[0]
+    if all(not callable(scope) for scope in scopes):
+        combined = scopes[0]
+        mergeable = True
+        for scope in scopes[1:]:
+            left = _scope_as_q(None, combined)
+            right = _scope_as_q(None, scope)
+            if left is None or right is None:
+                mergeable = False
+                break
+            combined = left & right
+        if mergeable:
+            return combined
+
+    def combined_scope(queryset):
+        for scope in scopes:
+            queryset = apply_history_scope(queryset, scope)
+        return queryset
+
+    return combined_scope
 
 
 class HistoricalQuerySet(QuerySet):
@@ -27,6 +122,7 @@ class HistoricalQuerySet(QuerySet):
         super().__init__(*args, **kwargs)
         self._as_instances = False
         self._as_of = None
+        self._history_scope = None
         self._pk_attr = self.model.instance_type._meta.pk.attname
 
     def as_instances(self) -> "HistoricalQuerySet":
@@ -41,6 +137,53 @@ class HistoricalQuerySet(QuerySet):
         else:
             result = self._clone()
         return result
+
+    def as_of(self, date, scope=None) -> "HistoricalQuerySet":
+        """
+        Return the instances that existed at ``date`` for this queryset.
+
+        This is the ``QuerySet`` equivalent of ``HistoryManager.as_of()``.  Any
+        restriction already applied to the queryset (for example with
+        :meth:`restrict_to`) is preserved, so the snapshot cannot expand to the
+        full history table.  An additional ``scope`` may be supplied for this
+        call only.
+        """
+        queryset = self
+        if scope is not None:
+            queryset = queryset.restrict_to(scope)
+        queryset = queryset.filter(history_date__lte=date)
+        queryset._as_of = date
+        return queryset.latest_of_each().as_instances()
+
+    def restrict_to(self, scope) -> "HistoricalQuerySet":
+        """
+        Return a queryset restricted to the application-provided object scope.
+
+        ``scope`` may be a ``Q`` object, a mapping of query lookups or a callable
+        that accepts and returns a queryset.  The restriction is applied to the
+        database query, so ``filter()``, ``order_by()``, ``latest_of_each()``,
+        ``as_instances()`` and ``as_of()`` all continue to see only the objects
+        in scope instead of falling back to the whole history table.
+
+        Calling this repeatedly combines the scopes with AND.  Passing ``None``
+        is a no-op.
+        """
+        if scope is None:
+            return self
+        scope = _normalize_history_scope(scope)
+        result = apply_history_scope(self, scope)
+        result._history_scope = combine_history_scopes(
+            getattr(result, "_history_scope", None), scope
+        )
+        return result
+
+    def _clone(self) -> "HistoricalQuerySet":
+        c = super()._clone()
+        c._as_instances = self._as_instances
+        c._as_of = self._as_of
+        c._history_scope = self._history_scope
+        c._pk_attr = self._pk_attr
+        return c
 
     def filter(self, *args, **kwargs) -> "HistoricalQuerySet":
         """
@@ -84,13 +227,6 @@ class HistoricalQuerySet(QuerySet):
         ]
         return self.select_related(*field_names)
 
-    def _clone(self) -> "HistoricalQuerySet":
-        c = super()._clone()
-        c._as_instances = self._as_instances
-        c._as_of = self._as_of
-        c._pk_attr = self._pk_attr
-        return c
-
     def _fetch_all(self) -> None:
         super()._fetch_all()
         self._instanceize()
@@ -106,6 +242,13 @@ class HistoricalQuerySet(QuerySet):
             and self._as_instances
             and isinstance(self._result_cache[0], self.model)
         ):
+            # Attach the scope to each historical record before converting to
+            # business instances.  ``instance`` copies the historical record's
+            # extra attributes (including this one), so historic relations keep
+            # honouring the same restriction.
+            if getattr(self, "_history_scope", None) is not None:
+                for item in self._result_cache:
+                    setattr(item, SIMPLE_HISTORY_SCOPE_ATTR_NAME, self._history_scope)
             self._result_cache = [item.instance for item in self._result_cache]
             for item in self._result_cache:
                 historic = getattr(item, SIMPLE_HISTORY_REVERSE_ATTR_NAME)
@@ -121,13 +264,44 @@ class HistoryManager(models.Manager):
     def get_super_queryset(self):
         return super().get_queryset()
 
+    def get_history_scope(self):
+        """
+        Return the application-defined object scope for this history queryset.
+
+        Override this in a custom ``HistoryManager`` (configured with
+        ``HistoricalRecords(history_manager=...)``) to restrict every history
+        query to the objects the current caller is allowed to see.  The scope is
+        applied to the database query before any ``latest_of_each()``,
+        ``as_instances()`` or ``as_of()`` processing, so it cannot be bypassed by
+        filtering or by converting records to business instances, and it is also
+        carried across historic relations.
+
+        The return value may be a ``Q`` object, a mapping of query lookups, a
+        callable that accepts and returns a queryset, or ``None`` for no
+        restriction.
+        """
+        return None
+
     def get_queryset(self):
         qs = self.get_super_queryset()
+        if isinstance(qs, HistoricalQuerySet):
+            scope = self.get_history_scope()
+            if scope is not None:
+                qs = qs.restrict_to(scope)
         if self.instance is None:
             return qs
 
         key_name = get_app_model_primary_key_name(self.instance)
-        return self.get_super_queryset().filter(**{key_name: self.instance.pk})
+        return qs.filter(**{key_name: self.instance.pk})
+
+    def restrict_to(self, scope):
+        """
+        Return the manager's queryset restricted to ``scope``.
+
+        This is a convenience wrapper around ``HistoricalQuerySet.restrict_to()``
+        and accepts the same scope values.
+        """
+        return self.get_queryset().restrict_to(scope)
 
     def most_recent(self):
         """
@@ -155,7 +329,7 @@ class HistoryManager(models.Manager):
             )
         return self.instance.__class__(**values)
 
-    def as_of(self, date):
+    def as_of(self, date, scope=None):
         """
         Get a snapshot as of a specific date.
 
@@ -176,6 +350,11 @@ class HistoryManager(models.Manager):
         after which point one can add filters, values - anything a normal
         queryset would support.
 
+        An optional ``scope`` may be passed to restrict this snapshot to the
+        application's object scope (see ``HistoricalQuerySet.restrict_to()``).
+        A scope returned by ``get_history_scope()`` is applied as well; the two
+        are combined with AND.
+
         To retrieve historical records, query the model's history directly;
         for example:
             `qs = <Model>.history.filter(history_date__lte=date, pk=...)`
@@ -184,13 +363,26 @@ class HistoryManager(models.Manager):
         you could then use:
             `qs = qs.latest_of_each()`
         """
-        queryset = self.get_queryset().filter(history_date__lte=date)
-        if not self.instance:
-            if isinstance(queryset, HistoricalQuerySet):
-                queryset._as_of = date
-            queryset = queryset.latest_of_each().as_instances()
-            return queryset
+        if self.instance:
+            return self._as_of_instance(date, scope=scope)
 
+        queryset = self.get_queryset()
+        if isinstance(queryset, HistoricalQuerySet):
+            queryset = queryset.as_of(date, scope=scope)
+        else:
+            if scope is not None:
+                queryset = apply_history_scope(queryset, scope)
+            queryset = (
+                queryset.filter(history_date__lte=date).latest_of_each().as_instances()
+            )
+        return queryset
+
+    def _as_of_instance(self, date, scope=None):
+        """Return the instance snapshot for a single instance's history."""
+        queryset = self.get_queryset()
+        if scope is not None:
+            queryset = apply_history_scope(queryset, scope)
+        queryset = queryset.filter(history_date__lte=date)
         try:
             # historical records are sorted in reverse chronological order
             history_obj = queryset[0]
@@ -204,7 +396,10 @@ class HistoryManager(models.Manager):
             )
         result = history_obj.instance
         historic = getattr(result, SIMPLE_HISTORY_REVERSE_ATTR_NAME)
-        setattr(historic, "_as_of", date)
+        historic._as_of = date
+        scope = getattr(queryset, "_history_scope", None)
+        if scope is not None:
+            setattr(historic, SIMPLE_HISTORY_SCOPE_ATTR_NAME, scope)
         return result
 
     def bulk_history_create(

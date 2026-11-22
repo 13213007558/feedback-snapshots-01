@@ -251,3 +251,54 @@ You can also prefetch the objects with this relationship using something like th
 
     Poll.objects.filter(something).prefetch_related(Prefetch('history', queryset=Poll.history.order_by('-history_date'),
                                                 to_attr='ordered_histories')
+
+Scoping history queries to application objects
+----------------------------------------------
+
+Applications that expose history through their own APIs or read-only pages
+often have to restrict which objects a user may see.  Override
+``HistoryManager.get_history_scope()`` in a custom history manager (configured
+with ``HistoricalRecords(history_manager=...)`` to return the allowed object
+scope.  The scope is applied to the database query before ``latest_of_each()``,
+``as_instances()`` and ``as_of()`` run, so it cannot be bypassed by filtering or
+by converting historical records into business instances.  It is also carried
+across ``HistoricForeignKey`` and ``HistoricOneToOneField`` relationships.
+
+.. code-block:: python
+
+    from django.db.models import Q
+    from simple_history.manager import HistoryManager
+    from simple_history.models import HistoricalRecords
+
+
+    class WorkspaceHistoryManager(HistoryManager):
+        def get_history_scope(self):
+            workspace_ids = current_request_workspace_ids()
+            if workspace_ids is None:
+                return None  # unrestricted, e.g. for internal tooling
+            return Q(workspace_id__in=workspace_ids)
+
+
+    class Document(models.Model):
+        workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
+        history = HistoricalRecords(history_manager=WorkspaceHistoryManager)
+
+A scope may also be a mapping of query lookups, a queryset of allowed objects,
+or a callable that receives the history queryset and returns a filtered
+queryset.  A callable is useful when the same policy must be reused for several
+related historical models with different lookup paths.
+
+Scopes can be applied directly to a queryset as well::
+
+    Document.history.restrict_to(Q(workspace_id__in=[workspace.pk]))
+    Document.history.as_of(t1, scope=Q(workspace_id__in=[workspace.pk]))
+
+Attempting to apply a lookup that does not exist on the historical model
+results in an empty queryset rather than an unrestricted fallback, so a
+relation that cannot be proven to be in scope never exposes its full history.
+
+The admin history pages use the same hook through
+``SimpleHistoryAdmin.get_history_scope()`` (by default it delegates to the
+model's history manager, so a single policy covers both API and admin).  An
+object outside the scope is rendered as a missing object (HTTP 404), matching
+the result of a missing object and not revealing whether it exists.

@@ -12,7 +12,7 @@ from django.contrib.auth import get_permission_codename, get_user_model
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import QuerySet
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import render
 from django.urls import re_path, reverse
 from django.utils.encoding import force_str
 from django.utils.html import mark_safe
@@ -22,7 +22,7 @@ from django.utils.translation import gettext as _
 from .manager import HistoricalQuerySet, HistoryManager
 from .models import HistoricalChanges
 from .template_utils import HistoricalRecordContextHelper
-from .utils import get_history_manager_for_model, get_history_model_for_model
+from .utils import get_history_model_for_model
 
 SIMPLE_HISTORY_EDIT = getattr(settings, "SIMPLE_HISTORY_EDIT", False)
 
@@ -63,6 +63,13 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             request, history, pk_name, object_id
         )
         history_list_display = self.get_history_list_display(request)
+
+        # A scope that excludes the object must not reveal whether the object
+        # or its history exists.  Treat it exactly like a missing object so
+        # that list and single-object lookups share one authorization result.
+        if self.is_history_out_of_scope(request, history, pk_name, object_id):
+            raise http.Http404
+
         # If no history was found, see whether this object even exists.
         try:
             obj = self.get_queryset(request).get(**{pk_name: object_id})
@@ -134,12 +141,67 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         :param object_id: The primary key of the object whose history is listed.
         """
         qs: HistoricalQuerySet = history_manager.filter(**{pk_name: object_id})
+        scope = self.get_history_scope(request)
+        if scope is not None and isinstance(qs, HistoricalQuerySet):
+            qs = qs.restrict_to(scope)
         if not isinstance(history_manager.model.history_user, property):
             # Only select_related when history_user is a ForeignKey (not a property)
             qs = qs.select_related("history_user")
         # Prefetch related objects to reduce the number of DB queries when diffing
         qs = qs._select_related_history_tracked_objs()
         return qs
+
+    def get_history_scope(self, request):
+        """
+        Return the application-defined object scope for the history pages.
+
+        Override this in a ``SimpleHistoryAdmin`` subclass to restrict both the
+        history list and the historical version pages to objects the current
+        request is allowed to see.  It accepts the same values as
+        ``HistoryManager.get_history_scope()``: a ``Q`` object, a mapping of
+        query lookups, a callable that accepts and returns a queryset, or
+        ``None`` for no restriction.
+
+        By default the scope configured on the model's ``HistoryManager`` is
+        used (see ``HistoryManager.get_history_scope()``), so API and admin
+        queries share a single policy.
+
+        An object outside the scope is rendered as if it did not exist (HTTP
+        404), matching a missing object and avoiding disclosure through a
+        distinguishing error.
+        """
+        history_manager = getattr(
+            self.model, self.model._meta.simple_history_manager_attribute, None
+        )
+        if history_manager is None:
+            return None
+        return history_manager.get_history_scope()
+
+    def is_history_out_of_scope(
+        self, request, history_manager: HistoryManager, pk_name: str, object_id: Any
+    ) -> bool:
+        """
+        Return whether ``object_id`` is excluded by the configured scope.
+
+        ``get_history_queryset()`` already contains both the manager's
+        restrictions and the admin's scope.  If it is empty while the
+        unrestricted history table has records for the same object, the object
+        (or all of its versions) was filtered out by a scope.  Reporting that
+        as "not found" keeps the list and the single object pages consistent
+        and prevents a caller from probing which workspaces exist.
+
+        When there is no restriction at all, an object with no historical
+        records keeps its existing behavior (an empty history page).
+        """
+        scoped_records = self.get_history_queryset(
+            request, history_manager, pk_name, object_id
+        )
+        if scoped_records.exists():
+            return False
+        unscoped_records = history_manager.get_super_queryset().filter(
+            **{pk_name: object_id}
+        )
+        return unscoped_records.exists()
 
     def get_history_list_display(self, request) -> Sequence[str]:
         """
@@ -213,12 +275,22 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
     def history_form_view(self, request, object_id, version_id, extra_context=None):
         request.current_app = self.admin_site.name
         original_opts = self.model._meta
-        model = getattr(
+        history_manager = getattr(
             self.model, self.model._meta.simple_history_manager_attribute
-        ).model
-        obj = get_object_or_404(
-            model, **{original_opts.pk.attname: object_id, "history_id": version_id}
-        ).instance
+        )
+        # Resolve the historical version through the scoped queryset.  A version
+        # outside the caller's scope is indistinguishable from a missing version.
+        scoped_records = self.get_history_queryset(
+            request,
+            history_manager,
+            original_opts.pk.attname,
+            unquote(object_id) if isinstance(object_id, str) else object_id,
+        )
+        try:
+            history_obj = scoped_records.get(history_id=version_id)
+        except scoped_records.model.DoesNotExist:
+            raise http.Http404
+        obj = history_obj.instance
         obj._state.adding = False
 
         if not self.has_view_history_or_change_history_permission(request, obj):
@@ -230,8 +302,8 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             change_history = False
 
         if "_change_history" in request.POST and SIMPLE_HISTORY_EDIT:
-            history = get_history_manager_for_model(obj)
-            obj = history.get(pk=version_id).instance
+            obj = scoped_records.get(history_id=version_id).instance
+            obj._state.adding = False
 
         formsets = []
         form_class = self.get_form(request, obj)
@@ -287,7 +359,7 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             "has_file_field": True,
             "has_absolute_url": False,
             "form_url": "",
-            "opts": model._meta,
+            "opts": history_manager.model._meta,
             "content_type_id": self.content_type_model_cls.objects.get_for_model(
                 self.model
             ).id,
