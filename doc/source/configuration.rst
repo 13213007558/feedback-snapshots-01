@@ -217,6 +217,33 @@ take priority.
 
 .. _ratelimit-string:
 
+Runtime configuration changes
+-----------------------------
+
+Most applications configure their limits once at startup. Applications that
+receive limit updates at runtime (for example from an admin console) can use
+:meth:`~flask_limiter.Limiter.update_limits` to switch the complete
+**default** and **application wide** limits without recreating the
+extension::
+
+    limiter.update_limits(
+        default_limits=["100/minute", "5000/hour"],
+        application_limits=["50000/hour"],
+    )
+
+All statically declared limit strings are parsed **before** the new
+configuration is installed. If any of them is invalid a
+:class:`~limits.errors.ConfigurationError` is raised, the previously active
+limits stay in effect and no storage call is made - an update never applies
+partially. Dynamic limit providers (callables) are still evaluated per request
+as before and are not invoked during the switch.
+
+Passing ``None`` for a group leaves it unchanged; passing an empty sequence
+clears it.
+
+.. note:: Replacing a limit resets nothing in the storage. A new limit string
+   identifies a new counter, and the previous counters simply expire.
+
 Rate limit string notation
 --------------------------
 

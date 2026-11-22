@@ -3,6 +3,17 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Feature
+
+  * Add :meth:`Limiter.update_limits <flask_limiter.Limiter.update_limits>`
+    to atomically replace the default and application wide limits of an
+    initialized extension. The complete payload is validated before anything
+    is installed, so an update that contains an invalid limit leaves the
+    previous configuration (and the storage) untouched.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

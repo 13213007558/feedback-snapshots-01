@@ -18,7 +18,7 @@ from typing import overload
 
 import flask
 import flask.wrappers
-from limits import RateLimitItem, WindowStats
+from limits import RateLimitItem, WindowStats, parse_many
 from limits.errors import ConfigurationError
 from limits.storage import MemoryStorage, Storage, storage_from_string
 from limits.strategies import STRATEGIES, RateLimiter
@@ -494,6 +494,121 @@ class Limiter:
             app.teardown_request(self.__release_context)
         app.extensions["limiter"].add(self)
         self.initialized = True
+
+    @staticmethod
+    def __validate_limit_payload(
+        limits: Sequence[str | Callable[[], str] | Limit],
+    ) -> None:
+        """
+        Validate every statically known limit string of a configuration payload.
+
+        Dynamic limit providers (callables) are intentionally not invoked here:
+        they keep being evaluated for each request as before. Only values that
+        are already known at configuration time are parsed, so that an invalid
+        payload is rejected before any state is mutated.
+        """
+        for limit in limits:
+            provider = limit.limit_provider if isinstance(limit, Limit) else limit
+
+            if callable(provider) or not provider:
+                continue
+
+            try:
+                parse_many(provider)
+            except ValueError as err:
+                raise ConfigurationError(
+                    f"Invalid rate limit definition {provider!r}: {err}"
+                ) from err
+
+    def update_limits(
+        self,
+        default_limits: Sequence[str | Callable[[], str] | Limit] | None = None,
+        application_limits: Sequence[str | Callable[[], str] | ApplicationLimit] | None = None,
+    ) -> None:
+        """
+        Atomically replace the default and/or application wide limits at runtime.
+
+        This is intended for control planes that publish a new configuration for
+        an already initialized extension. The complete payload is validated
+        before anything is installed: if any statically known limit is invalid a
+        :class:`~limits.errors.ConfigurationError` is raised and the previously
+        active configuration stays in effect. No storage operation is performed
+        while validating, and a request never observes a state where only one
+        of the two groups was replaced.
+
+        Passing ``None`` for a group leaves it unchanged; passing an empty
+        sequence clears it.
+
+        :param default_limits: the new default limits.
+        :param application_limits: the new application wide limits.
+
+        .. versionadded:: 4.2.0
+        """
+        if not self.initialized or not self.enabled:
+            raise ConfigurationError("The limiter must be initialized and enabled")
+
+        # Validate the payload as received, before building any definition.
+        # This is what guarantees an all-or-nothing switch: an invalid entry
+        # aborts here, while the active configuration and the storage are
+        # still untouched.
+        if default_limits is not None:
+            self.__validate_limit_payload(default_limits)
+        if application_limits is not None:
+            self.__validate_limit_payload(application_limits)
+
+        default_per_method = bool(self._default_limits_per_method)
+        application_per_method = bool(self._application_limits_per_method)
+
+        new_defaults: list[Limit] | None = None
+        new_application_limits: list[ApplicationLimit] | None = None
+
+        if default_limits is not None:
+            new_defaults = [
+                Limit(
+                    limit_provider=limit,
+                    key_function=self._key_func,
+                    per_method=default_per_method,
+                    exempt_when=self._default_limits_exempt_when,
+                    deduct_when=self._default_limits_deduct_when,
+                    cost=self._default_limits_cost,
+                ).bind(self)
+                if not isinstance(limit, Limit)
+                else limit.bind(self)
+                for limit in default_limits
+            ]
+            for default_group in new_defaults:
+                if not default_group.finalized:
+                    default_group.cost = self._default_limits_cost
+                    default_group.per_method = default_per_method
+                    default_group.exempt_when = self._default_limits_exempt_when
+                    default_group.deduct_when = self._default_limits_deduct_when
+                    default_group.finalized = True
+
+        if application_limits is not None:
+            new_application_limits = [
+                ApplicationLimit(
+                    limit_provider=limit,
+                    per_method=application_per_method,
+                    exempt_when=self._application_limits_exempt_when,
+                    deduct_when=self._application_limits_deduct_when,
+                    cost=self._application_limits_cost,
+                ).bind(self)
+                if not isinstance(limit, Limit)
+                else limit.bind(self)
+                for limit in application_limits
+            ]
+            for application_group in new_application_limits:
+                if not application_group.finalized:
+                    application_group.cost = self._application_limits_cost
+                    application_group.per_method = application_per_method
+                    application_group.exempt_when = self._application_limits_exempt_when
+                    application_group.deduct_when = self._application_limits_deduct_when
+                    application_group.finalized = True
+
+        self.limit_manager.set_limits(
+            application_limits=new_application_limits,
+            default_limits=new_defaults,
+        )
 
     @property
     def context(self) -> LimiterContext:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import threading
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -33,21 +34,61 @@ class LimitManager:
         self._route_exemptions = route_exemptions
         self._blueprint_exemptions = blueprint_exemptions
         self._endpoint_hints: dict[str, OrderedSet[str]] = {}
+        self._limits_lock = threading.RLock()
         self._logger = logging.getLogger("flask-limiter")
 
     @property
     def application_limits(self) -> list[RuntimeLimit]:
-        return list(itertools.chain(*self._application_limits))
+        with self._limits_lock:
+            return list(itertools.chain(*self._application_limits))
 
     @property
     def default_limits(self) -> list[RuntimeLimit]:
-        return list(itertools.chain(*self._default_limits))
+        with self._limits_lock:
+            return list(itertools.chain(*self._default_limits))
 
     def set_application_limits(self, limits: list[ApplicationLimit]) -> None:
-        self._application_limits = limits
+        with self._limits_lock:
+            self._application_limits = limits
 
     def set_default_limits(self, limits: list[Limit]) -> None:
-        self._default_limits = limits
+        with self._limits_lock:
+            self._default_limits = limits
+
+    def set_limits(
+        self,
+        application_limits: list[ApplicationLimit] | None = None,
+        default_limits: list[Limit] | None = None,
+    ) -> None:
+        """
+        Replace the application and/or default limits as a single operation.
+
+        A group passed as ``None`` is retained. Both groups that are provided
+        are swapped while holding the same lock that guards reads in
+        :meth:`snapshot_limit_groups`, so a request can never observe a state
+        in which only one of the two groups was replaced.
+
+        :meta private:
+        """
+        with self._limits_lock:
+            if application_limits is not None:
+                self._application_limits = application_limits
+            if default_limits is not None:
+                self._default_limits = default_limits
+
+    def snapshot_limit_groups(self) -> tuple[list[ApplicationLimit], list[Limit]]:
+        """
+        Capture both limit groups from the same configuration generation.
+
+        The groups are materialized (and dynamic providers evaluated) by the
+        caller, outside the lock. This keeps the evaluation semantics of
+        dynamic limits unchanged while guaranteeing that a single request is
+        resolved against one consistent generation of the configuration.
+
+        :meta private:
+        """
+        with self._limits_lock:
+            return list(self._application_limits), list(self._default_limits)
 
     def add_decorated_limit(self, route: str, limit: Limit | None, override: bool = False) -> None:
         if limit:
@@ -103,9 +144,12 @@ class LimitManager:
             ):
                 decorated_limits.extend(self.blueprint_limits(app, blueprint))
         exemption_scope = self.exemption_scope(app, endpoint, blueprint)
+        application_groups, default_groups = self.snapshot_limit_groups()
+        application_limits = list(itertools.chain(*application_groups))
+        default_limits = list(itertools.chain(*default_groups))
 
         all_limits = (
-            self.application_limits
+            application_limits
             if in_middleware and not (exemption_scope & ExemptionScope.APPLICATION)
             else []
         )
@@ -127,7 +171,7 @@ class LimitManager:
             (explicit_limits_exempt or combined_defaults)
             and (not (before_request_context or exemption_scope & ExemptionScope.DEFAULT))
         ) or hinted_limits_request_defaults:
-            all_limits += self.default_limits
+            all_limits += default_limits
         return all_limits, decorated_limits
 
     def exemption_scope(
