@@ -6,6 +6,10 @@ Unreleased
 
 **New features:**
 
+- Added ``SimpleHistoryAdmin.has_revert_permission()`` as an explicit
+  authorization entry point for reverting, re-evaluated on every ``POST``.
+- Added ``SimpleHistoryAdmin.get_revert_locked_fields()`` to keep governed
+  fields at their current value during a revert.
 
 **Breaking changes:**
 

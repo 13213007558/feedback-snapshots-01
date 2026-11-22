@@ -142,6 +142,55 @@ When ``SIMPLE_HISTORY_REVERT_DISABLED`` is set to ``True``, the revert button is
 
 .. image:: screens/10_revert_disabled.png
 
+Controlling who may revert, and which fields a revert may change
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``SimpleHistoryAdmin`` exposes two hooks that let an application plug in its own
+revert policy:
+
+- ``has_revert_permission(request, obj=None)`` decides whether this request may
+  revert the object at all. It is consulted when the history form is rendered and
+  again for every ``POST`` to the revert URL; a direct request cannot bypass it.
+  By default it requires change permission on the history model and returns
+  ``False`` when ``SIMPLE_HISTORY_REVERT_DISABLED`` is set.
+
+- ``get_revert_locked_fields(request, obj=None)`` returns the names of fields
+  that governance rules keep locked. Locked fields are shown read-only with
+  their current database value, their posted values are ignored, and the
+  current value is copied back onto the object immediately before the write.
+  The hook is called again on ``POST``, so a policy that changes after the form
+  was rendered still protects the write. For a static policy you can also set
+  the ``revert_locked_fields`` class attribute to a sequence of field names.
+  Many-to-many fields cannot be locked; locking applies to concrete fields.
+
+A policy that lets support staff read history, allows some of them to revert,
+and locks a governed field looks like this:
+
+.. code-block:: python
+
+    from django.contrib import admin
+    from simple_history.admin import SimpleHistoryAdmin
+
+
+    class PollHistoryAdmin(SimpleHistoryAdmin):
+        def has_revert_permission(self, request, obj=None):
+            return request.user.groups.filter(name="History Reverters").exists()
+
+        def get_revert_locked_fields(self, request, obj=None):
+            return ("status",)
+
+    admin.site.register(Poll, PollHistoryAdmin)
+
+With this class, users without the ``History Reverters`` group can still open the
+history form and inspect the version, but the revert button is hidden and a
+direct ``POST`` is refused with ``403 Permission denied``. When an authorized
+user reverts, every field except ``status`` is restored from the selected
+version; ``status`` keeps its value from the live row, and the historical record
+created by the revert shows the same value.
+
+Existing overrides of ``revert_disabled()`` keep working. The default
+implementation now delegates to ``has_revert_permission()``.
+
 Enforcing history model permissions in Admin
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

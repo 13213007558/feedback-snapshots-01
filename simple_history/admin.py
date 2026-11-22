@@ -6,10 +6,10 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.contrib import admin
 from django.contrib.admin import helpers
-from django.contrib.admin.utils import unquote
+from django.contrib.admin.utils import flatten_fieldsets, unquote
 from django.contrib.admin.views.main import PAGE_VAR
 from django.contrib.auth import get_permission_codename, get_user_model
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import FieldDoesNotExist, PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import QuerySet
 from django.shortcuts import get_object_or_404, render
@@ -29,6 +29,9 @@ SIMPLE_HISTORY_EDIT = getattr(settings, "SIMPLE_HISTORY_EDIT", False)
 
 class SimpleHistoryAdmin(admin.ModelAdmin):
     history_list_display = []
+    #: Fields a governance rule keeps at their current value during a revert.
+    #: Can also be provided per request by ``get_revert_locked_fields()``.
+    revert_locked_fields = ()
 
     object_history_template = "simple_history/object_history.html"
     object_history_list_template = "simple_history/object_history_list.html"
@@ -224,39 +227,50 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         if not self.has_view_history_or_change_history_permission(request, obj):
             raise PermissionDenied
 
-        if SIMPLE_HISTORY_EDIT:
-            change_history = True
-        else:
-            change_history = False
+        change_history = bool(
+            SIMPLE_HISTORY_EDIT and self.has_change_history_permission(request, obj)
+        )
+        edit_history = "_change_history" in request.POST and change_history
 
-        if "_change_history" in request.POST and SIMPLE_HISTORY_EDIT:
+        if edit_history:
             history = get_history_manager_for_model(obj)
             obj = history.get(pk=version_id).instance
+            obj._state.adding = False
 
-        formsets = []
-        form_class = self.get_form(request, obj)
+        # Authorization is re-evaluated on every POST: the rendered form, or a
+        # hand-crafted request, is never treated as proof that a write may
+        # happen. A denied request must not reach the save path.
+        can_revert = self.has_revert_permission(request, obj)
+        self.check_history_write_allowed(request, obj, can_revert, edit_history)
+
+        # Governance rules can change between rendering the form and submitting
+        # it, so the locked fields and their current values are resolved again
+        # for the write itself. Locking applies to both a revert and an
+        # edit-history write, so neither path can restore a governed field.
+        can_write = can_revert or change_history
+        locked_fields = self.get_history_write_locked_fields(
+            request, obj, can_write
+        )
+        locked_values = self.get_revert_locked_values_for_form(
+            request, obj, locked_fields
+        )
+
+        form_class = self.get_history_form_class(request, obj, locked_fields)
         if request.method == "POST":
             form = form_class(request.POST, request.FILES, instance=obj)
             if form.is_valid():
-                new_object = self.save_form(request, form, change=True)
-                self.save_model(request, new_object, form, change=True)
-                form.save_m2m()
-
-                self.log_change(
-                    request,
-                    new_object,
-                    self.construct_change_message(request, form, formsets),
-                )
-                return self.response_change(request, new_object)
-
+                return self.save_history_form(request, form, locked_values)
         else:
             form = form_class(instance=obj)
 
+        readonly_fields = self.get_history_form_readonly_fields(
+            request, obj, can_write, locked_fields
+        )
         admin_form = helpers.AdminForm(
             form,
             self.get_fieldsets(request, obj),
             self.prepopulated_fields,
-            self.get_readonly_fields(request, obj),
+            readonly_fields,
             model_admin=self,
         )
 
@@ -269,7 +283,7 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             "original": obj,
             "is_popup": False,
             "media": mark_safe(self.media + admin_form.media),
-            "errors": helpers.AdminErrorList(form, formsets),
+            "errors": helpers.AdminErrorList(form, []),
             "app_label": original_opts.app_label,
             "original_opts": original_opts,
             "changelist_url": reverse("%s:%s_%s_changelist" % url_triplet),
@@ -324,13 +338,148 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
 
     def revert_disabled(self, request, obj=None):
         """If `True`, hides the "Revert" button in the `submit_line.html` template."""
+        return not self.has_revert_permission(request, obj)
+
+    def has_revert_permission(self, request, obj=None):
+        """
+        Return whether ``request.user`` may revert ``obj`` to a historical
+        version.
+
+        This is the authorization entry point for the revert feature. It is
+        consulted when rendering the history form and again for every POST, so
+        overriding it with application-specific policy (groups, object-level
+        rules, an approval workflow, ...) also protects direct requests.
+
+        The default allows reverting only for users with change permission on
+        the history model, and never when ``SIMPLE_HISTORY_REVERT_DISABLED`` is
+        set.
+        """
         if getattr(settings, "SIMPLE_HISTORY_REVERT_DISABLED", False):
-            return True
-        elif self.has_view_history_permission(
-            request, obj
-        ) and not self.has_change_history_permission(request, obj):
-            return True
-        return False
+            return False
+        return self.has_change_history_permission(request, obj)
+
+    def get_revert_locked_fields(self, request, obj=None):
+        """
+        Return the names of model fields that governance rules keep locked
+        during a revert.
+
+        Locked fields are rendered read-only with their current value,
+        removed from the form's input, and re-read from the current database
+        row when the revert is written. The hook is called again on POST, so a
+        policy that changed after the form was rendered still protects the
+        write. The default returns the ``revert_locked_fields`` attribute.
+        """
+        return tuple(self.revert_locked_fields)
+
+    def get_history_write_locked_fields(self, request, obj, can_write):
+        """Resolve locked fields for a request that may write history."""
+        if not can_write:
+            return ()
+        return tuple(self.get_revert_locked_fields(request, obj))
+
+    def check_history_write_allowed(self, request, obj, can_revert, edit_history):
+        """Refuse a POST that the current policy no longer authorizes."""
+        if request.method != "POST":
+            return
+        if not (can_revert or edit_history):
+            raise PermissionDenied
+
+    def get_revert_locked_field_values(self, obj, locked_fields):
+        """
+        Return ``{field_name: current_value}`` for ``locked_fields``, taken
+        from the live database row. Refuse the revert if there is no current
+        row to preserve.
+        """
+        fields = []
+        for name in locked_fields:
+            try:
+                field = self.model._meta.get_field(name)
+            except FieldDoesNotExist:
+                raise ValueError(
+                    f"{self.model._meta.label}: unknown revert-locked field {name!r}"
+                )
+            if field.many_to_many:
+                raise ValueError(
+                    f"{self.model._meta.label}: many-to-many field {name!r} "
+                    "cannot be revert-locked"
+                )
+            fields.append(name)
+
+        if not fields:
+            return {}
+
+        try:
+            current = self.model._base_manager.get(pk=obj.pk)
+        except self.model.DoesNotExist:
+            raise PermissionDenied(
+                "Cannot restore an object whose governance-locked fields no "
+                "longer have a current value."
+            )
+        return {name: getattr(current, name) for name in fields}
+
+    def get_revert_locked_values_for_form(self, request, obj, locked_fields):
+        """
+        Resolve the values to show and write for the locked fields.
+
+        The current database value is applied to ``obj`` so the read-only
+        display and the saved row agree. A deleted object can still be
+        inspected, but a write is refused because there is no value to keep.
+        """
+        try:
+            values = self.get_revert_locked_field_values(obj, locked_fields)
+        except PermissionDenied:
+            if request.method == "POST":
+                raise
+            return {}
+        self.preserve_revert_locked_fields(obj, values)
+        return values
+
+    def get_history_form_readonly_fields(
+        self, request, obj, can_write, locked_fields
+    ):
+        readonly_fields = list(self.get_readonly_fields(request, obj))
+        if can_write:
+            field_names = locked_fields
+        else:
+            field_names = flatten_fieldsets(self.get_fieldsets(request, obj))
+        for field_name in field_names:
+            if field_name not in readonly_fields:
+                readonly_fields.append(field_name)
+        return readonly_fields
+
+    def save_history_form(self, request, form, locked_values):
+        new_object = self.save_form(request, form, change=True)
+        # Keep the guarantee even if ``save_form()`` was overridden.
+        self.preserve_revert_locked_fields(new_object, locked_values)
+        self.save_model(request, new_object, form, change=True)
+        form.save_m2m()
+
+        self.log_change(
+            request,
+            new_object,
+            self.construct_change_message(request, form, []),
+        )
+        return self.response_change(request, new_object)
+
+    @staticmethod
+    def preserve_revert_locked_fields(instance, locked_values):
+        """Copy current values of governance-locked fields onto ``instance``."""
+        for name, value in locked_values.items():
+            setattr(instance, name, value)
+        return instance
+
+    def get_history_form_class(self, request, obj, locked_fields):
+        """
+        Return the form class used by the history form view.
+
+        Locked fields are removed from the form so posted values for them are
+        ignored and cannot make an otherwise valid revert fail validation.
+        """
+        if not locked_fields:
+            return self.get_form(request, obj)
+        fields = flatten_fieldsets(self.get_fieldsets(request, obj))
+        fields = [name for name in fields if name not in locked_fields]
+        return self.get_form(request, obj, fields=fields)
 
     def has_view_permission(self, request, obj=None):
         return super().has_view_permission(request, obj)

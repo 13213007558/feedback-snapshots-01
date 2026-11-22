@@ -1211,3 +1211,194 @@ class AdminSiteTest(TestCase):
 
     def test_permission_combos__default(self):
         self._test_permission_combos_with_enforce_history_permissions(enforced=False)
+
+
+REVERT_TEST_URLCONF = "simple_history.tests.revert_urls"
+
+
+def revert_url(obj, history_index=0, site="revert_full"):
+    history = obj.history.order_by("history_id")[history_index]
+    return reverse(
+        f"{site}:tests_poll_simple_history",
+        args=[quote(obj.pk), quote(history.pk)],
+    )
+
+
+@override_settings(ROOT_URLCONF=REVERT_TEST_URLCONF)
+class RevertAuthorizationTest(TestCase):
+    """End-to-end revert authorization through the Django admin test client.
+
+    Every assertion is made against the persisted row and the historical
+    records in the database, not only against the HTTP response.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            "reverter", "r@example.com", "pass"
+        )
+        self.client.force_login(self.user)
+        self.poll = Poll.objects.create(question="original", pub_date=today)
+        self.poll.question = "current"
+        self.poll.pub_date = tomorrow
+        self.poll.save()
+
+    def assert_poll_unchanged(self, history_count):
+        poll = Poll.objects.get(pk=self.poll.pk)
+        self.assertEqual(poll.question, "current")
+        self.assertEqual(poll.pub_date, tomorrow)
+        self.assertEqual(self.poll.history.count(), history_count)
+        self.assertEqual(Poll.history.order_by("-history_id")[0].question, "current")
+
+    def test_read_only_viewer_cannot_revert(self):
+        viewer = User.objects.create_user(
+            "viewer", "v@example.com", "pass", is_staff=True
+        )
+        viewer.user_permissions.add(
+            Permission.objects.get(
+                codename="view_poll", content_type__app_label="tests"
+            ),
+            Permission.objects.get(
+                codename="view_historicalpoll", content_type__app_label="tests"
+            ),
+        )
+        self.client.force_login(User.objects.get(pk=viewer.pk))
+
+        response = self.client.get(revert_url(self.poll))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "View Poll")
+        self.assertNotContains(response, 'value="Revert"')
+        form = response.context["adminform"].form
+        self.assertEqual(form["question"].value(), "original")
+
+        history_count = self.poll.history.count()
+        response = self.client.post(
+            revert_url(self.poll),
+            data={
+                "question": "hijacked",
+                "pub_date_0": "2021-01-02",
+                "pub_date_1": "10:00",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assert_poll_unchanged(history_count)
+
+    def test_full_revert_updates_row_and_creates_history(self):
+        history_count = self.poll.history.count()
+
+        response = self.client.post(
+            revert_url(self.poll),
+            data={
+                "question": "original",
+                "pub_date_0": "2021-01-01",
+                "pub_date_1": "10:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("revert_full:tests_poll_changelist"))
+
+        poll = Poll.objects.get(pk=self.poll.pk)
+        self.assertEqual(poll.question, "original")
+        self.assertEqual(poll.pub_date, today)
+
+        self.assertEqual(self.poll.history.count(), history_count + 1)
+        latest = self.poll.history.order_by("-history_id")[0]
+        self.assertEqual(latest.history_type, "~")
+        self.assertEqual(latest.question, "original")
+        self.assertEqual(latest.pub_date, today)
+        self.assertEqual(latest.history_user, self.user)
+
+    def test_explicit_deny_does_not_write(self):
+        history_count = self.poll.history.count()
+        response = self.client.post(
+            revert_url(self.poll, site="revert_denied"),
+            data={
+                "question": "original",
+                "pub_date_0": "2021-01-01",
+                "pub_date_1": "10:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assert_poll_unchanged(history_count)
+
+    def test_permission_rechecked_when_writing(self):
+        """The rendered form is not proof of authorization for the POST."""
+        url = revert_url(self.poll, site="revert_revoked")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="Revert"')
+
+        history_count = self.poll.history.count()
+        response = self.client.post(
+            url,
+            data={
+                "question": "original",
+                "pub_date_0": "2021-01-01",
+                "pub_date_1": "10:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assert_poll_unchanged(history_count)
+
+    def test_locked_field_keeps_current_value(self):
+        """A governance-locked field is not restored from the historical row."""
+        url = revert_url(self.poll, site="revert_locked")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        admin_form = response.context["adminform"]
+        self.assertEqual(admin_form.form.instance.question, "current")
+        self.assertIn("question", admin_form.readonly_fields)
+        self.assertEqual(
+            admin_form.form.initial["pub_date"], datetime(2021, 1, 1, 10, 0)
+        )
+        self.assertContains(
+            response,
+            '<div class="readonly">current</div>',
+            html=True,
+        )
+
+        history_count = self.poll.history.count()
+        response = self.client.post(
+            url,
+            data={
+                "question": "tampered",
+                "pub_date_0": "2021-01-01",
+                "pub_date_1": "10:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        poll = Poll.objects.get(pk=self.poll.pk)
+        self.assertEqual(poll.question, "current")
+        self.assertEqual(poll.pub_date, today)
+
+        self.assertEqual(self.poll.history.count(), history_count + 1)
+        latest = self.poll.history.order_by("-history_id")[0]
+        self.assertEqual(latest.question, "current")
+        self.assertEqual(latest.pub_date, today)
+        self.assertEqual(latest.history_user, self.user)
+
+    def test_locked_field_policy_rechecked_when_writing(self):
+        """A field locked only at write time still keeps its current value."""
+        url = revert_url(self.poll, site="revert_late_locked")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        form = response.context["adminform"].form
+        self.assertEqual(form["question"].value(), "original")
+
+        history_count = self.poll.history.count()
+        response = self.client.post(
+            url,
+            data={
+                "question": "tampered",
+                "pub_date_0": "2021-01-01",
+                "pub_date_1": "10:00:00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        poll = Poll.objects.get(pk=self.poll.pk)
+        self.assertEqual(poll.question, "current")
+        self.assertEqual(poll.pub_date, today)
+        self.assertEqual(self.poll.history.count(), history_count + 1)
+        latest = self.poll.history.order_by("-history_id")[0]
+        self.assertEqual(latest.question, "current")
