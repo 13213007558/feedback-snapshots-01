@@ -81,13 +81,17 @@ def default_jmespath():
 @pytest.fixture
 def expected_params_update_item(serialized_lambda_response, hashed_idempotency_key):
     return {
+        "ConditionExpression": "#status = :inprogress AND #in_progress_expiry = :in_progress_expiry",
         "ExpressionAttributeNames": {
             "#expiry": "expiration",
+            "#in_progress_expiry": "in_progress_expiration",
             "#response_data": "data",
             "#status": "status",
         },
         "ExpressionAttributeValues": {
             ":expiry": {"N": stub.ANY},
+            ":in_progress_expiry": {"N": stub.ANY},
+            ":inprogress": {"S": "INPROGRESS"},
             ":response_data": {"S": serialized_lambda_response},
             ":status": {"S": "COMPLETED"},
         },
@@ -104,14 +108,18 @@ def expected_params_update_item_with_validation(
     hashed_validation_key,
 ):
     return {
+        "ConditionExpression": "#status = :inprogress AND #in_progress_expiry = :in_progress_expiry",
         "ExpressionAttributeNames": {
             "#expiry": "expiration",
+            "#in_progress_expiry": "in_progress_expiration",
             "#response_data": "data",
             "#status": "status",
             "#validation_key": "validation",
         },
         "ExpressionAttributeValues": {
             ":expiry": {"N": stub.ANY},
+            ":in_progress_expiry": {"N": stub.ANY},
+            ":inprogress": {"S": "INPROGRESS"},
             ":response_data": {"S": serialized_lambda_response},
             ":status": {"S": "COMPLETED"},
             ":validation_key": {"S": hashed_validation_key},

@@ -87,6 +87,9 @@ class BasePersistenceLayer(ABC):
         self.use_local_cache = False
         self.hash_function = hashlib.md5
         self._config_settings: tuple | None = None
+        # Lease (in-progress expiry timestamp) this execution wrote per idempotency key, so that
+        # save_success can prove it still owns the record before marking it COMPLETED.
+        self._in_progress_leases: dict[str, int | None] = {}
 
     def configure(
         self,
@@ -347,6 +350,7 @@ class BasePersistenceLayer(ABC):
             idempotency_key=idempotency_key,
             status=STATUS_CONSTANTS["COMPLETED"],
             expiry_timestamp=self._get_expiry_timestamp(),
+            in_progress_expiry_timestamp=self._in_progress_leases.pop(idempotency_key, None),
             response_data=response_data,
             payload_hash=self._get_hashed_payload(data=data),
         )
@@ -405,6 +409,10 @@ class BasePersistenceLayer(ABC):
 
         self._put_record(data_record=data_record)
 
+        # The put succeeded, so this execution owns the record until its in-progress expiry.
+        # Remember the lease so save_success can fence off stale executions that lost ownership.
+        self._in_progress_leases[data_record.idempotency_key] = data_record.in_progress_expiry_timestamp
+
     def delete_record(self, data: dict[str, Any], exception: Exception):
         """
         Delete record from the persistence store
@@ -432,6 +440,7 @@ class BasePersistenceLayer(ABC):
         self._delete_record(data_record=data_record)
 
         self._delete_from_cache(idempotency_key=data_record.idempotency_key)
+        self._in_progress_leases.pop(data_record.idempotency_key, None)
 
     def get_record(self, data: dict[str, Any]) -> DataRecord | None:
         """

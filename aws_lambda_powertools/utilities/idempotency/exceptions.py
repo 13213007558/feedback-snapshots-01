@@ -77,6 +77,12 @@ class IdempotencyInconsistentStateError(BaseError):
     """
 
 
+class IdempotencyStaleExecutionError(BaseError):
+    """
+    Execution lost its lease on the idempotency record because a newer execution took it over
+    """
+
+
 class IdempotencyPersistenceLayerError(BaseError):
     """
     Unrecoverable error from the data store

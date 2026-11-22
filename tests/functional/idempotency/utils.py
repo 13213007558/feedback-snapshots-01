@@ -63,13 +63,17 @@ def build_idempotency_update_item_stub(
     )
     serialized_lambda_response = json_serialize(handler_response)
     return {
+        "ConditionExpression": "#status = :inprogress AND #in_progress_expiry = :in_progress_expiry",
         "ExpressionAttributeNames": {
             "#expiry": "expiration",
+            "#in_progress_expiry": "in_progress_expiration",
             "#response_data": "data",
             "#status": "status",
         },
         "ExpressionAttributeValues": {
             ":expiry": {"N": stub.ANY},
+            ":in_progress_expiry": {"N": stub.ANY},
+            ":inprogress": {"S": "INPROGRESS"},
             ":response_data": {"S": serialized_lambda_response},
             ":status": {"S": "COMPLETED"},
         },

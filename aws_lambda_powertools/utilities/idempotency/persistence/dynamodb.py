@@ -14,6 +14,7 @@ from aws_lambda_powertools.utilities.idempotency import BasePersistenceLayer
 from aws_lambda_powertools.utilities.idempotency.exceptions import (
     IdempotencyItemAlreadyExistsError,
     IdempotencyItemNotFoundError,
+    IdempotencyStaleExecutionError,
     IdempotencyValidationError,
 )
 from aws_lambda_powertools.utilities.idempotency.persistence.datarecord import (
@@ -314,13 +315,38 @@ class DynamoDBPersistenceLayer(BasePersistenceLayer):
             expression_attr_values[":validation_key"] = {"S": data_record.payload_hash}
             expression_attr_names["#validation_key"] = self.validation_key_attr
 
-        self.client.update_item(
-            TableName=self.table_name,
-            Key=self._get_key(data_record.idempotency_key),
-            UpdateExpression=update_expression,
-            ExpressionAttributeNames=expression_attr_names,
-            ExpressionAttributeValues=expression_attr_values,
-        )
+        update_kwargs: dict[str, Any] = {}
+        if data_record.in_progress_expiry_timestamp is not None:
+            # Lease fencing: only the execution that wrote the current INPROGRESS record may complete it.
+            # If the function timed out and a newer execution took the record over, the in-progress
+            # expiry no longer matches and the stale execution is rejected instead of overwriting it.
+            update_kwargs["ConditionExpression"] = (
+                "#status = :inprogress AND #in_progress_expiry = :in_progress_expiry"
+            )
+            expression_attr_names["#in_progress_expiry"] = self.in_progress_expiry_attr
+            expression_attr_values[":inprogress"] = {"S": STATUS_CONSTANTS["INPROGRESS"]}
+            expression_attr_values[":in_progress_expiry"] = {"N": str(data_record.in_progress_expiry_timestamp)}
+
+        try:
+            self.client.update_item(
+                TableName=self.table_name,
+                Key=self._get_key(data_record.idempotency_key),
+                UpdateExpression=update_expression,
+                ExpressionAttributeNames=expression_attr_names,
+                ExpressionAttributeValues=expression_attr_values,
+                **update_kwargs,
+            )
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            if error_code == "ConditionalCheckFailedException":
+                logger.debug(
+                    f"Failed to update record for idempotency key: {data_record.idempotency_key} "
+                    "because a newer execution has taken it over",
+                )
+                raise IdempotencyStaleExecutionError(
+                    f"Record for idempotency key: {data_record.idempotency_key} is owned by a newer execution",
+                ) from exc
+            raise
 
     def _delete_record(self, data_record: DataRecord) -> None:
         logger.debug(f"Deleting record for idempotency key: {data_record.idempotency_key}")

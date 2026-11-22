@@ -411,6 +411,8 @@ To prevent extended failures, use **`register_lambda_context`** function from yo
 
     This means that if an invocation expired during execution, it will be quickly executed again on the next retry.
 
+    The in-progress expiry also acts as a **lease**: only the execution that wrote the current `INPROGRESS` record can mark it as `COMPLETED`. If a timed-out invocation finishes late after a newer invocation took the record over, its write is rejected and the newer execution's result is preserved.
+
 ### Handling exceptions
 
 There are three failure modes that can cause new invocations to execute your code again despite having the same payload:
