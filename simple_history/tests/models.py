@@ -1082,3 +1082,12 @@ class TestHistoricParticipantToHistoricOrganizationOneToOne(
         related_name="historic_participant",
     )
     history = HistoricalRecords()
+
+
+class SensitiveArchive(models.Model):
+    """Synthetic model used to audit access to historical versions."""
+
+    title = models.CharField(max_length=200)
+    contents = models.TextField()
+
+    history = HistoricalRecords()

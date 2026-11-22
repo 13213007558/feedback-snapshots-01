@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from unittest.mock import ANY, patch
 
+from django.contrib import admin
 from django.contrib.admin import AdminSite
 from django.contrib.admin.utils import quote
 from django.contrib.admin.views.main import PAGE_VAR
@@ -1211,3 +1212,153 @@ class AdminSiteTest(TestCase):
 
     def test_permission_combos__default(self):
         self._test_permission_combos_with_enforce_history_permissions(enforced=False)
+
+
+class HistoryAccessRecordingTest(TestCase):
+    def setUp(self):
+        from simple_history.tests import admin as tests_admin
+        from simple_history.tests.models import SensitiveArchive
+
+        self.tests_admin = tests_admin
+        self.SensitiveArchive = SensitiveArchive
+        tests_admin.recorded_history_access_events.clear()
+        self.admin_user = User.objects.create_superuser(
+            "admin_user", "admin@example.com", "pass"
+        )
+        self.staff_user = User.objects.create_user(
+            "staff_user", "staff@example.com", "pass", is_staff=True
+        )
+        self.archive = SensitiveArchive.objects.create(
+            title="classified", contents="top secret contents"
+        )
+        self.archive.title = "classified (updated)"
+        self.archive.save()
+
+    @property
+    def events(self):
+        return self.tests_admin.recorded_history_access_events
+
+    def test_two_views_and_one_revert_are_recorded(self):
+        from simple_history.access import (
+            HistoryAccessEvent,
+            HistoryAccessEventType,
+            HistoryAccessStatus,
+        )
+
+        self.client.force_login(self.admin_user)
+
+        list_url = get_history_url(self.archive)
+        form_url = get_history_url(self.archive, 0)
+
+        response = self.client.get(list_url)
+        self.assertEqual(response.status_code, 200)
+        response = self.client.get(form_url)
+        self.assertEqual(response.status_code, 200)
+
+        revert_data = {
+            "title": "classified (reverted)",
+            "contents": "top secret contents",
+        }
+        response = self.client.post(form_url, data=revert_data)
+        self.assertEqual(response.status_code, 302)
+
+        self.assertEqual(len(self.events), 3)
+        list_event, form_event, revert_event = self.events
+
+        self.assertIsInstance(list_event, HistoryAccessEvent)
+        self.assertEqual(list_event.event_type, HistoryAccessEventType.VIEW)
+        self.assertEqual(list_event.status, HistoryAccessStatus.GRANTED)
+        self.assertEqual(list_event.object_id, str(self.archive.pk))
+        self.assertEqual(list_event.app_label, "tests")
+        self.assertEqual(list_event.model_name, "sensitivearchive")
+        self.assertIsNone(list_event.history_id)
+        self.assertEqual(list_event.user_id, self.admin_user.pk)
+        self.assertIsNone(list_event.denial_reason)
+
+        self.assertEqual(form_event.event_type, HistoryAccessEventType.VIEW)
+        self.assertEqual(form_event.status, HistoryAccessStatus.GRANTED)
+        self.assertEqual(form_event.object_id, str(self.archive.pk))
+        self.assertEqual(
+            form_event.history_id,
+            str(self.archive.history.order_by("history_id")[0].history_id),
+        )
+        self.assertEqual(form_event.user_id, self.admin_user.pk)
+        self.assertIsNone(form_event.denial_reason)
+
+        self.assertEqual(revert_event.event_type, HistoryAccessEventType.REVERT)
+        self.assertEqual(revert_event.status, HistoryAccessStatus.GRANTED)
+        self.assertEqual(revert_event.object_id, str(self.archive.pk))
+        self.assertEqual(
+            revert_event.history_id,
+            str(self.archive.history.order_by("history_id")[0].history_id),
+        )
+        self.assertEqual(revert_event.user_id, self.admin_user.pk)
+        self.assertIsNone(revert_event.denial_reason)
+
+        serialized = " ".join(str(event) for event in self.events)
+        self.assertNotIn("top secret contents", serialized)
+        self.assertNotIn("classified", serialized)
+
+    def test_denied_access_is_recorded_with_reason(self):
+        from simple_history.access import (
+            HistoryAccessDenialReason,
+            HistoryAccessEventType,
+            HistoryAccessStatus,
+        )
+
+        self.client.force_login(self.staff_user)
+
+        response = self.client.get(get_history_url(self.archive))
+        self.assertEqual(response.status_code, 403)
+        response = self.client.get(get_history_url(self.archive, 0))
+        self.assertEqual(response.status_code, 403)
+
+        self.assertEqual(len(self.events), 2)
+        for event in self.events:
+            self.assertEqual(event.event_type, HistoryAccessEventType.VIEW)
+            self.assertEqual(event.status, HistoryAccessStatus.DENIED)
+            self.assertEqual(event.object_id, str(self.archive.pk))
+            self.assertEqual(event.app_label, "tests")
+            self.assertEqual(event.model_name, "sensitivearchive")
+            self.assertEqual(
+                event.denial_reason,
+                HistoryAccessDenialReason.PERMISSION_DENIED,
+            )
+            self.assertEqual(event.user_id, self.staff_user.pk)
+
+        self.assertEqual(self.events[0].history_id, None)
+        self.assertEqual(
+            self.events[1].history_id,
+            str(self.archive.history.order_by("history_id")[0].history_id),
+        )
+        self.assertNotIn(
+            HistoryAccessStatus.GRANTED,
+            [event.status for event in self.events],
+        )
+
+
+class HistoryAccessRecordingDisabledTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser("user_login", "u@example.com", "pass")
+        self.client.force_login(self.user)
+
+    def test_admin_without_recorder_records_nothing(self):
+        poll = Poll.objects.create(question="why?", pub_date=today)
+        model_admin = SimpleHistoryAdmin(Poll, admin.site)
+        request = RequestFactory().get("/")
+        request.user = self.user
+        self.assertIsNone(model_admin.get_history_access_recorder(request))
+
+        response = self.client.get(get_history_url(poll))
+        self.assertEqual(response.status_code, 200)
+        response = self.client.get(get_history_url(poll, 0))
+        self.assertEqual(response.status_code, 200)
+        response = self.client.post(
+            get_history_url(poll, 0),
+            data={
+                "pub_date_0": "2021-01-02",
+                "pub_date_1": "10:00:00",
+                "question": "what?",
+            },
+        )
+        self.assertEqual(response.status_code, 302)

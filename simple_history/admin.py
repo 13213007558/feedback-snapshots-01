@@ -19,6 +19,12 @@ from django.utils.html import mark_safe
 from django.utils.text import capfirst
 from django.utils.translation import gettext as _
 
+from .access import (
+    HistoryAccessDenialReason,
+    HistoryAccessEvent,
+    HistoryAccessEventType,
+    HistoryAccessStatus,
+)
 from .manager import HistoricalQuerySet, HistoryManager
 from .models import HistoricalChanges
 from .template_utils import HistoricalRecordContextHelper
@@ -70,10 +76,31 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
             try:
                 obj = historical_records.latest("history_date").instance
             except historical_records.model.DoesNotExist:
+                self.record_history_access(
+                    request,
+                    event_type=HistoryAccessEventType.VIEW,
+                    status=HistoryAccessStatus.DENIED,
+                    object_id=object_id,
+                    denial_reason=HistoryAccessDenialReason.NOT_FOUND,
+                )
                 raise http.Http404
 
         if not self.has_view_history_or_change_history_permission(request, obj):
+            self.record_history_access(
+                request,
+                event_type=HistoryAccessEventType.VIEW,
+                status=HistoryAccessStatus.DENIED,
+                object_id=object_id,
+                denial_reason=HistoryAccessDenialReason.PERMISSION_DENIED,
+            )
             raise PermissionDenied
+
+        self.record_history_access(
+            request,
+            event_type=HistoryAccessEventType.VIEW,
+            status=HistoryAccessStatus.GRANTED,
+            object_id=object_id,
+        )
 
         # Use the same pagination as in Django admin, with history_list_per_page items
         paginator = Paginator(historical_records, self.history_list_per_page)
@@ -213,6 +240,10 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
     def history_form_view(self, request, object_id, version_id, extra_context=None):
         request.current_app = self.admin_site.name
         original_opts = self.model._meta
+        if isinstance(object_id, str):
+            object_id = unquote(object_id)
+        if isinstance(version_id, str):
+            version_id = unquote(version_id)
         model = getattr(
             self.model, self.model._meta.simple_history_manager_attribute
         ).model
@@ -222,7 +253,24 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         obj._state.adding = False
 
         if not self.has_view_history_or_change_history_permission(request, obj):
+            self.record_history_access(
+                request,
+                event_type=HistoryAccessEventType.VIEW,
+                status=HistoryAccessStatus.DENIED,
+                object_id=object_id,
+                history_id=version_id,
+                denial_reason=HistoryAccessDenialReason.PERMISSION_DENIED,
+            )
             raise PermissionDenied
+
+        if request.method != "POST":
+            self.record_history_access(
+                request,
+                event_type=HistoryAccessEventType.VIEW,
+                status=HistoryAccessStatus.GRANTED,
+                object_id=object_id,
+                history_id=version_id,
+            )
 
         if SIMPLE_HISTORY_EDIT:
             change_history = True
@@ -246,6 +294,13 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
                     request,
                     new_object,
                     self.construct_change_message(request, form, formsets),
+                )
+                self.record_history_access(
+                    request,
+                    event_type=HistoryAccessEventType.REVERT,
+                    status=HistoryAccessStatus.GRANTED,
+                    object_id=object_id,
+                    history_id=version_id,
                 )
                 return self.response_change(request, new_object)
 
@@ -311,6 +366,43 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
     def render_history_view(self, request, template, context, **kwargs):
         """Catch call to render, to allow overriding."""
         return render(request, template, context, **kwargs)
+
+    def get_history_access_recorder(self, request):
+        """
+        Return a callable that receives a ``HistoryAccessEvent`` for every
+        authorized or denied access to a historical version through the admin.
+
+        Return ``None`` (the default) to disable access recording. Override
+        this method to plug in an application-specific recorder, for example
+        one that writes the event to an audit log.
+        """
+        return None
+
+    def record_history_access(
+        self,
+        request,
+        event_type,
+        status,
+        object_id,
+        history_id=None,
+        denial_reason=None,
+    ):
+        """Build a ``HistoryAccessEvent`` and hand it to the configured recorder."""
+        recorder = self.get_history_access_recorder(request)
+        if recorder is None:
+            return
+        opts = self.model._meta
+        event = HistoryAccessEvent(
+            event_type=event_type,
+            status=status,
+            object_id=force_str(object_id),
+            app_label=opts.app_label,
+            model_name=opts.model_name,
+            history_id=None if history_id is None else force_str(history_id),
+            user_id=getattr(request.user, "pk", None),
+            denial_reason=denial_reason,
+        )
+        recorder(event)
 
     def save_model(self, request, obj, form, change):
         """Set special model attribute to user for reference after save"""

@@ -216,3 +216,39 @@ the admin application index page, nor the ``Poll`` changelist.
     user.user_permissions.add(
         Permission.objects.get(codename="view_historicalpoll"),
     )
+
+
+Recording access to historical versions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For sensitive models you may need an audit trail of who opened or restored a
+historical version. ``SimpleHistoryAdmin`` offers an optional access recording
+hook. Override ``get_history_access_recorder()`` to return a callable that
+accepts a ``HistoryAccessEvent``; returning ``None`` (the default) keeps access
+recording disabled.
+
+Each event only carries administrative metadata - the event type
+(``view``/``revert``), the processing status (``granted``/``denied``), the
+object and historical record identifiers, the acting user, and a denial reason
+when applicable. The historical record's field contents are never included, so
+sensitive data does not leak into the access log.
+
+.. code-block:: python
+
+    from django.contrib import admin
+    from simple_history.admin import SimpleHistoryAdmin
+    from .models import SensitiveDocument
+
+
+    class SensitiveDocumentAdmin(SimpleHistoryAdmin):
+        def get_history_access_recorder(self, request):
+            return write_history_access_event_to_audit_log
+
+
+    admin.site.register(SensitiveDocument, SensitiveDocumentAdmin)
+
+Denied requests are recorded as well, with the denial reason set to
+``permission_denied`` or ``not_found``. The available constants live in
+``simple_history.access`` (``HistoryAccessEventType``,
+``HistoryAccessStatus``, ``HistoryAccessDenialReason`` and
+``HistoryAccessEvent``).

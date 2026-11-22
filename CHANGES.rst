@@ -6,6 +6,11 @@ Unreleased
 
 **New features:**
 
+- Added an optional access recording hook to ``SimpleHistoryAdmin``. Overriding
+  ``get_history_access_recorder()`` lets an application record granted and
+  denied reads (``view``) and restores (``revert``) of historical versions,
+  including the denial reason, without logging any historical field contents
+
 
 **Breaking changes:**
 

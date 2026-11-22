@@ -18,7 +18,16 @@ from .models import (
     Planet,
     Poll,
     PollWithManyToMany,
+    SensitiveArchive,
 )
+
+
+recorded_history_access_events = []
+
+
+class SensitiveArchiveAdmin(SimpleHistoryAdmin):
+    def get_history_access_recorder(self, request):
+        return recorded_history_access_events.append
 
 
 @admin.register(Person)
@@ -80,3 +89,4 @@ admin.site.register(Employee, SimpleHistoryAdmin)
 admin.site.register(ExternalModelWithCustomUserIdField, SimpleHistoryAdmin)
 admin.site.register(Paper, SimpleHistoryAdmin)
 admin.site.register(Poll, SimpleHistoryAdmin)
+admin.site.register(SensitiveArchive, SensitiveArchiveAdmin)
