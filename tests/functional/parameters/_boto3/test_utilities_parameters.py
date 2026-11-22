@@ -2205,6 +2205,101 @@ def test_ssm_provider_get_multiple_recursive_does_not_reuse_non_recursive_cache(
         stubber.deactivate()
 
 
+def test_ssm_provider_interleaved_identities_do_not_share_decrypt_cache():
+    # GIVEN one warm execution environment (a single shared provider) serving two identities:
+    # one allowed to decrypt SecureString values, one only allowed to read public values
+    secret_name = "/app/db/password"
+    public_name = "/app/config/region"
+
+    class FakeSSMClient:
+        """In-memory SSM where SecureString only yields plaintext with WithDecryption=True"""
+
+        def __init__(self):
+            # name -> (type, plaintext, ciphertext)
+            self.registry = {
+                secret_name: ("SecureString", "plaintext-secret", "ciphertext-blob"),
+                public_name: ("String", "us-east-1", "us-east-1"),
+            }
+            self.get_parameter_calls: list[tuple] = []
+            self.get_by_path_calls: list[tuple] = []
+
+        def _value(self, name, with_decryption):
+            parameter_type, plaintext, ciphertext = self.registry[name]
+            if parameter_type == "SecureString" and not with_decryption:
+                return ciphertext
+            return plaintext
+
+        def get_parameter(self, Name, WithDecryption=False, **kwargs):
+            self.get_parameter_calls.append((Name, WithDecryption))
+            return {
+                "Parameter": {
+                    "Name": Name,
+                    "Value": self._value(Name, WithDecryption),
+                    "Type": self.registry[Name][0],
+                    "Version": 1,
+                },
+            }
+
+        def put_parameter(self, Name, Value, Overwrite=False, Type="String", **kwargs):
+            ciphertext = f"ciphertext({Value})" if Type == "SecureString" else Value
+            self.registry[Name] = (Type, Value, ciphertext)
+            return {"Version": 2}
+
+        def get_paginator(self, operation):
+            assert operation == "get_parameters_by_path"
+            client = self
+
+            class Paginator:
+                def paginate(self, Path, WithDecryption=False, Recursive=False, **kwargs):
+                    client.get_by_path_calls.append((Path, WithDecryption, Recursive))
+                    parameters = [
+                        {
+                            "Name": name,
+                            "Value": client._value(name, WithDecryption),
+                            "Type": registered[0],
+                            "Version": 1,
+                        }
+                        for name, registered in client.registry.items()
+                        if name.startswith(f"{Path}/") and (Recursive or "/" not in name[len(Path) + 1 :])
+                    ]
+                    yield {"Parameters": parameters}
+
+            return Paginator()
+
+    client = FakeSSMClient()
+    provider = parameters.SSMProvider(boto3_client=client)
+
+    # WHEN both identities interleave single reads of the same SecureString parameter
+    decrypted = provider.get(secret_name, decrypt=True)
+    public = provider.get(secret_name)
+    decrypted_cached = provider.get(secret_name, decrypt=True)
+    public_cached = provider.get(secret_name)
+
+    # THEN each identity only gets what its decrypt configuration allows, and cache hits
+    # are only served to the identical decrypt configuration (exactly two SDK calls)
+    assert decrypted == "plaintext-secret"
+    assert decrypted_cached == "plaintext-secret"
+    assert public == "ciphertext-blob"
+    assert public_cached == "ciphertext-blob"
+    assert client.get_parameter_calls == [(secret_name, True), (secret_name, False)]
+
+    # WHEN both identities read the whole path
+    decrypted_path = provider.get_multiple("/app", decrypt=True, recursive=True)
+    public_path = provider.get_multiple("/app", recursive=True)
+
+    # THEN the public response contains no value that requires decryption
+    assert decrypted_path["db/password"] == "plaintext-secret"
+    assert public_path == {"db/password": "ciphertext-blob", "config/region": "us-east-1"}
+    assert client.get_by_path_calls == [("/app", True, True), ("/app", False, True)]
+
+    # WHEN the registered parameter is updated
+    provider.set(secret_name, "rotated-secret", overwrite=True, parameter_type="SecureString", kms_key_id="alias/key")
+
+    # THEN the next read of each identity reflects the update instead of a stale cache entry
+    assert provider.get(secret_name, decrypt=True) == "rotated-secret"
+    assert provider.get(secret_name) == "ciphertext(rotated-secret)"
+
+
 def test_secrets_provider_get_different_sdk_options_are_cached_separately(mock_name, config):
     # GIVEN a secret fetched at one version stage and cached
     provider = parameters.SecretsProvider(boto_config=config)
