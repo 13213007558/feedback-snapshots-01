@@ -1010,6 +1010,55 @@ module Rodauth
       false
     end
 
+    # The principal registered for an internal request.  This is nil for
+    # normal Rack requests.
+    def internal_request_principal
+      nil
+    end
+
+    # Whether this internal request was approved by the
+    # internal_request_permissions feature.
+    def internal_request_permissions_allowed?
+      false
+    end
+
+    # The internal request operation being performed.  This is nil for
+    # normal Rack requests.
+    def internal_request_operation
+      nil
+    end
+
+    # The feature handling the internal request operation.  This is nil
+    # for normal Rack requests.
+    def internal_request_feature
+      nil
+    end
+
+    # Whether this internal request has been authorized by the
+    # internal_request_permissions feature.  This is always false for
+    # normal Rack requests.
+    def internal_request_authorized?
+      false
+    end
+
+    # The principal authorized for this internal request, when the
+    # internal_request_permissions feature is enabled.
+    def internal_request_permissions_principal
+      nil
+    end
+
+    # The operation authorized for this internal request, when the
+    # internal_request_permissions feature is enabled.
+    def internal_request_permissions_operation
+      nil
+    end
+
+    # Hook for the internal_request_permissions feature.  Normal requests
+    # and configurations without that feature do not authorize internal
+    # requests.
+    def authorize_internal_request!(_route)
+    end
+
     def valid_return_to_path?(path)
       path[0] == "/" &&
         (c = path[1]) != "/" &&

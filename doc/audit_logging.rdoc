@@ -33,6 +33,8 @@ audit_logging_message_column :: The message column in the +audit_logging_table+,
 audit_logging_metadata_column :: The metadata column in the +audit_logging_table+, storing metadata for the log (if any).
 audit_logging_table :: The name of the audit logging table.
 audit_log_metadata_default :: The default metadata to use for logs that do not have custom metadata specified by +audit_log_metadata_for+.
+audit_log_internal_request_principal_key :: The metadata key to use for the approved principal when logging an event during an internal request authorized by the internal_request_permissions feature (default: +"internal_request_principal"+).
+audit_log_internal_request_operation_key :: The metadata key to use for the approved operation when logging an event during an internal request authorized by the internal_request_permissions feature (default: +"internal_request_operation"+).
 
 == Auth Methods
 

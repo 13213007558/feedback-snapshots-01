@@ -7,6 +7,8 @@ module Rodauth
     auth_value_method :audit_logging_metadata_column, :metadata
     auth_value_method :audit_logging_table, :account_authentication_audit_logs
     auth_value_method :audit_log_metadata_default, nil
+    auth_value_method :audit_log_internal_request_principal_key, 'internal_request_principal'
+    auth_value_method :audit_log_internal_request_operation_key, 'internal_request_operation'
 
     auth_methods(
       :add_audit_log,
@@ -74,11 +76,21 @@ module Rodauth
 
     def audit_log_metadata(action)
       meth = :"audit_log_metadata_for_#{action}"
-      if respond_to?(meth, true)
+      metadata = if respond_to?(meth, true)
         send(meth)
       else
         audit_log_metadata_default
       end
+
+      if internal_request_permissions_allowed? && (metadata.nil? || metadata.is_a?(Hash))
+        metadata = (metadata || {}).dup
+        metadata[audit_log_internal_request_principal_key] = internal_request_permissions_principal
+        if operation = internal_request_permissions_operation
+          metadata[audit_log_internal_request_operation_key] = operation
+        end
+      end
+
+      metadata
     end
 
     private

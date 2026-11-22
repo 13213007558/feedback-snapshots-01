@@ -76,6 +76,22 @@ module Rodauth
 
   FEATURES = {}
 
+  # Return the feature that handles the given internal request operation,
+  # or nil if no loaded feature handles it.  If features are given,
+  # only consider those features.
+  def self.internal_request_feature_for_operation(operation, features=nil)
+    operation = operation.to_sym
+    features = FEATURES.keys unless features
+    features.each do |feature_name|
+      feature = FEATURES[feature_name]
+      next unless feature
+      if (methods = feature.internal_request_methods) && methods.include?(operation)
+        return feature_name
+      end
+    end
+    nil
+  end
+
   class FeatureConfiguration < Module
     def def_configuration_methods(feature)
       private_methods = feature.private_instance_methods
@@ -417,6 +433,7 @@ module Rodauth
     @routes = []
     @route_hash = {}
     @configuration = Configuration.new(self)
+    @internal_request_permissions = {}
 
     class << self
       attr_accessor :roda_class
@@ -425,6 +442,45 @@ module Rodauth
       attr_accessor :route_hash
       attr_reader :configuration_name
       attr_reader :configuration
+      attr_reader :internal_request_permissions
+
+      # Register allowed internal request operations for the given principal.
+      # The operations can be internal request method names (such as
+      # :account_exists?) or feature names (such as :verify_account).
+      #
+      #   internal_request_permission :account_reader, :account_exists?
+      #   internal_request_permission :notifier, :verify_account_resend
+      #   internal_request_permission :notifier, :verify_account
+      #
+      # A principal registered without operations is not allowed to
+      # perform any internal requests.
+      def internal_request_permission(principal, *operations)
+        permissions = (@internal_request_permissions ||= {})
+        permissions[principal] = (permissions[principal] || []) | operations.map(&:to_sym)
+        if internal_request = @internal_request
+          internal_request.internal_request_permission(principal, *operations)
+        end
+        permissions[principal]
+      end
+
+      # Remove all registered internal request permissions for the principal.
+      def remove_internal_request_permission(principal)
+        @internal_request_permissions.delete(principal) if @internal_request_permissions
+        if internal_request = @internal_request
+          internal_request.remove_internal_request_permission(principal)
+        end
+        nil
+      end
+
+      def internal_request_permission_for(principal)
+        klass = self
+        while klass <= Auth
+          permissions = klass.instance_variable_get(:@internal_request_permissions)
+          return permissions[principal] if permissions && permissions.key?(principal)
+          klass = klass.superclass
+        end
+        nil
+      end
 
       private
 
@@ -491,6 +547,9 @@ module Rodauth
         @route_hash = superclass.route_hash.clone
         @configuration = superclass.configuration.clone
         @configuration.instance_variable_set(:@auth, self)
+        @internal_request_permissions = superclass.internal_request_permissions.
+          each_with_object({}){|(principal, operations), hash| hash[principal] = operations.dup}
+        @internal_request = nil
       end
     end
 

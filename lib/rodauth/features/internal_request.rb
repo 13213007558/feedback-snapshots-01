@@ -32,11 +32,123 @@ module Rodauth
     end
   end
 
+  # Raised when an internal request is not authorized by the
+  # internal_request_permissions feature.  This is raised before
+  # the feature operation is attempted.
+  class InternalRequestNotAuthorized < InternalRequestError
+    attr_reader :principal
+    attr_reader :operation
+    attr_reader :feature
+    attr_reader :denial_reason
+
+    def initialize(principal, operation, feature, denial_reason, attrs)
+      @principal = principal
+      @operation = operation
+      @feature = feature
+      @denial_reason = denial_reason
+      super(attrs)
+    end
+  end
+
+  # Handles authorization and identity tracking for internal requests.
+  # This is included in the internal request class when the
+  # internal_request_permissions feature is enabled.
+  module InternalRequestPermissionsMethods
+    def internal_request_permissions_enabled?
+      true
+    end
+
+    # Return whether the principal is allowed the given internal request
+    # operation.  Returns false by default, so applications must explicitly
+    # register allowed operations for each principal.
+    def internal_request_operation_allowed?(principal, operation, feature=nil)
+      operations = self.class.internal_request_permission_for(principal)
+      return false unless operations
+
+      operations.include?(operation.to_sym) || (feature && operations.include?(feature.to_sym))
+    end
+
+    # Whether the current request is an internal request that was authorized
+    # by the internal_request_permissions feature.
+    def internal_request_permissions_allowed?
+      internal_request? && internal_request_authorized?
+    end
+
+    # The principal allowed to perform the current internal request.  This
+    # is nil for normal Rack requests.
+    def internal_request_permissions_principal
+      internal_request? ? internal_request_principal : nil
+    end
+
+    # The operation that the current internal request is authorized for.
+    def internal_request_permissions_operation
+      internal_request? ? internal_request_operation : nil
+    end
+
+    # The feature that handles the current internal request operation.
+    def internal_request_permissions_feature
+      internal_request? ? internal_request_feature : nil
+    end
+
+    private
+
+    def authorize_internal_request!(route)
+      set_internal_request_operation(route)
+
+      principal = internal_request_principal
+      operation = internal_request_operation
+      feature = internal_request_feature
+
+      if principal.nil?
+        deny_internal_request(principal, operation, feature, :no_internal_request_principal)
+      end
+
+      unless internal_request_operation_allowed?(principal, operation, feature)
+        deny_internal_request(principal, operation, feature, :operation_not_allowed)
+      end
+
+      @internal_request_authorized = true
+    end
+
+    def deny_internal_request(principal, operation, feature, denial_reason)
+      @internal_request_authorized = false
+      raise InternalRequestNotAuthorized.new(
+        principal,
+        operation,
+        feature,
+        denial_reason,
+        flash: "Internal request not authorized",
+        reason: :internal_request_not_authorized
+      )
+    end
+  end
+
   module InternalRequestMethods
     attr_accessor :session
     attr_accessor :params
     attr_reader :flash
     attr_accessor :internal_request_block
+    attr_reader :internal_request_principal
+    attr_reader :internal_request_operation
+    attr_reader :internal_request_feature
+    attr_writer :internal_request_authorized
+
+    def internal_request_principal=(principal)
+      @internal_request_principal = normalize_internal_request_principal(principal)
+    end
+
+    # Whether the internal request was authorized.  This is always false
+    # for normal Rack requests, and is set by the
+    # internal_request_permissions feature for internal requests.
+    def internal_request_authorized?
+      !!@internal_request_authorized
+    end
+
+    # Whether the internal_request_permissions feature is enabled for
+    # this internal request class.
+    def internal_request_permissions_enabled?
+      false
+    end
 
     def domain
       d = super
@@ -124,11 +236,21 @@ module Rodauth
 
     private
 
-    def allow_param_fallback_for_session_param?
-      true
+    def normalize_internal_request_principal(principal)
+      principal
+    end
+
+    def set_internal_request_operation(route)
+      operation = route.to_s.sub(/\A_handle_/, '').to_sym
+      @internal_request_operation = operation
+      @internal_request_feature = Rodauth.internal_request_feature_for_operation(operation, [:base] + self.class.features)
     end
 
     def internal_request?
+      true
+    end
+
+    def allow_param_fallback_for_session_param?
       true
     end
 
@@ -353,6 +475,13 @@ module Rodauth
       rodauth.session = session
       rodauth.params = params
       rodauth.internal_request_block = block
+      if rodauth.internal_request_permissions_enabled?
+        rodauth.internal_request_principal = opts.delete(:principal)
+      end
+
+      handle_meth = :"_handle_#{route}"
+      rodauth.send(:set_internal_request_operation, handle_meth)
+      rodauth.send(:authorize_internal_request!, handle_meth)
 
       unless account_id = opts.delete(:account_id)
         if (account_login = opts.delete(:account_login))
@@ -386,7 +515,7 @@ module Rodauth
         warn "unhandled options passed to #{route}: #{opts.inspect}"
       end
 
-      rodauth.handle_internal_request(:"_handle_#{route}")
+      rodauth.handle_internal_request(handle_meth)
     end
   end
 
@@ -396,6 +525,14 @@ module Rodauth
         @auth.instance_exec do
           (@internal_request_configuration_blocks ||= []) << block
         end
+      end
+
+      def internal_request_permission(principal, *operations)
+        @auth.internal_request_permission(principal, *operations)
+      end
+
+      def remove_internal_request_permission(principal)
+        @auth.remove_internal_request_permission(principal)
       end
     end
 
@@ -426,6 +563,9 @@ module Rodauth
 
       internal_class.send(:extend, InternalRequestClassMethods)
       internal_class.send(:include, InternalRequestMethods)
+      if internal_class.features.include?(:internal_request_permissions)
+        internal_class.send(:include, InternalRequestPermissionsMethods)
+      end
       internal_class.send(:make_shape_friendly)
       internal_class.allocate.post_configure
 
@@ -440,6 +580,7 @@ module Rodauth
 
       klass.const_set(:InternalRequest, internal_class)
       klass.private_constant :InternalRequest
+      klass.instance_variable_set(:@internal_request, internal_class)
     end
   end
 end
