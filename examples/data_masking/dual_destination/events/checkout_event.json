@@ -1,0 +1,48 @@
+{
+  "version": "0",
+  "id": "evt-0001",
+  "detail-type": "checkout.completed",
+  "source": "checkout.service",
+  "account": "111122223333",
+  "time": "2026-11-19T08:30:00Z",
+  "region": "sa-east-1",
+  "resources": [],
+  "detail": {
+    "schema_version": "1.0",
+    "event_id": "evt-0001",
+    "occurred_at": "2026-11-19T08:30:00Z",
+    "event_type": "checkout.completed",
+    "tenant": {
+      "tenant_id": "tenant-42",
+      "plan": "business"
+    },
+    "payload": {
+      "order": {
+        "order_id": "ord-9001",
+        "amount": 129.9,
+        "currency": "BRL",
+        "item_count": 2
+      },
+      "customer": {
+        "customer_id": "cus-7788",
+        "full_name": "Ada Lovelace",
+        "email": "ada@example.com",
+        "document": "123.456.789-00",
+        "address": {
+          "street": "12 Analytical Engine Way",
+          "postcode": "01000-000",
+          "country": "BR"
+        }
+      },
+      "payment": {
+        "method": "credit_card",
+        "card_number": "4111 1111 1111 1111",
+        "card_holder": "ADA LOVELACE"
+      }
+    },
+    "metrics": {
+      "checkout_duration_ms": 1840,
+      "payment_attempts": 1
+    }
+  }
+}

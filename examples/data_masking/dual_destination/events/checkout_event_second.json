@@ -1,0 +1,48 @@
+{
+  "version": "0",
+  "id": "evt-0002",
+  "detail-type": "checkout.completed",
+  "source": "checkout.service",
+  "account": "111122223333",
+  "time": "2026-11-19T09:05:00Z",
+  "region": "sa-east-1",
+  "resources": [],
+  "detail": {
+    "schema_version": "1.0",
+    "event_id": "evt-0002",
+    "occurred_at": "2026-11-19T08:30:00Z",
+    "event_type": "checkout.completed",
+    "tenant": {
+      "tenant_id": "tenant-42",
+      "plan": "business"
+    },
+    "payload": {
+      "order": {
+        "order_id": "ord-9002",
+        "amount": 89.5,
+        "currency": "BRL",
+        "item_count": 1
+      },
+      "customer": {
+        "customer_id": "cus-9900",
+        "full_name": "Grace Hopper",
+        "email": "grace@example.com",
+        "document": "987.654.321-00",
+        "address": {
+          "street": "1 Compiler Lane",
+          "postcode": "20000-000",
+          "country": "BR"
+        }
+      },
+      "payment": {
+        "method": "credit_card",
+        "card_number": "5500 0000 0000 0004",
+        "card_holder": "GRACE HOPPER"
+      }
+    },
+    "metrics": {
+      "checkout_duration_ms": 920,
+      "payment_attempts": 1
+    }
+  }
+}
