@@ -6,3 +6,17 @@
 #
 # Modifications Copyright OpenSearch Contributors. See
 # GitHub history for details.
+
+from .scroll import (
+    AsyncOwnedScroll,
+    AsyncScrollRegistry,
+    aiter_owned_scroll,
+    async_scroll_registry,
+)
+
+__all__ = [
+    "AsyncOwnedScroll",
+    "AsyncScrollRegistry",
+    "async_scroll_registry",
+    "aiter_owned_scroll",
+]

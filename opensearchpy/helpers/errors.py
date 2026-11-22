@@ -43,3 +43,34 @@ class ScanError(OpenSearchException):
     def __init__(self, scroll_id: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.scroll_id = scroll_id
+
+
+class ScrollError(OpenSearchException):
+    """Base class for errors raised by owned scroll pagination contexts."""
+
+
+class ScrollOwnershipError(ScrollError):
+    """
+    Raised when a scroll context is used by an owner that does not match the
+    owner that started it, or when the context is unknown or already released.
+    """
+
+    scroll_id: Any
+    owner: Any
+
+    def __init__(
+        self, scroll_id: Any = None, *args: Any, owner: Any = None
+    ) -> None:
+        super().__init__(*args)
+        self.scroll_id = scroll_id
+        self.owner = owner
+
+
+class ScrollClosedError(ScrollError):
+    """Raised when more pages are requested from a closed scroll context."""
+
+    scroll_id: Any
+
+    def __init__(self, scroll_id: Any = None, *args: Any) -> None:
+        super().__init__(*args)
+        self.scroll_id = scroll_id

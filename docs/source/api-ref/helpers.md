@@ -16,6 +16,7 @@ helpers/function
 helpers/index
 helpers/mapping
 helpers/query
+helpers/scroll
 helpers/search
 helpers/update_by_query
 helpers/wrappers

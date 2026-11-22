@@ -57,6 +57,14 @@
 ```
 
 ```{eval-rst}
+.. autoclass:: opensearchpy.helpers.ScrollOwnershipError
+```
+
+```{eval-rst}
+.. autoclass:: opensearchpy.helpers.ScrollClosedError
+```
+
+```{eval-rst}
 .. autoclass:: opensearchpy.OpenSearchDslException
 ```
 

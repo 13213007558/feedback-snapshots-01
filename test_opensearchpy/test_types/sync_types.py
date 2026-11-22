@@ -28,7 +28,14 @@
 from typing import Any, Dict, Generator
 
 from opensearchpy import ConnectionPool, OpenSearch, RequestsHttpConnection, Transport
-from opensearchpy.helpers import bulk, reindex, scan, streaming_bulk
+from opensearchpy.helpers import (
+    OwnedScroll,
+    bulk,
+    iter_owned_scroll,
+    reindex,
+    scan,
+    streaming_bulk,
+)
 
 client = OpenSearch(
     [{"host": "localhost", "port": 9443}],
@@ -110,3 +117,17 @@ def reindex_types() -> None:
         scan_kwargs={"request_timeout": 10},
         bulk_kwargs={"request_timeout": 10},
     )
+
+
+def owned_scroll_types(response: Any) -> None:
+    cursor = OwnedScroll.from_response(
+        response, using=client, actor="alice", scroll="1m"
+    )
+    state: Dict[Any, Any] = cursor.pagination_state()
+    for _ in iter_owned_scroll(cursor):
+        pass
+    resumed = OwnedScroll.resume(
+        context_id=state["context_id"], using=client, actor="alice"
+    )
+    resumed.next_page()
+    resumed.close()

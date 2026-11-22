@@ -42,12 +42,19 @@ from .actions import (
     streaming_bulk,
 )
 from .asyncsigner import AWSV4SignerAsyncAuth
-from .errors import BulkIndexError, ScanError
+from .errors import BulkIndexError, ScanError, ScrollClosedError, ScrollOwnershipError
+from .scroll import OwnedScroll, ScrollRegistry, iter_owned_scroll, scroll_registry
 from .signer import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
 
 __all__ = [
     "BulkIndexError",
     "ScanError",
+    "ScrollClosedError",
+    "ScrollOwnershipError",
+    "OwnedScroll",
+    "ScrollRegistry",
+    "scroll_registry",
+    "iter_owned_scroll",
     "expand_action",
     "streaming_bulk",
     "bulk",

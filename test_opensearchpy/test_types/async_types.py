@@ -33,6 +33,10 @@ from opensearchpy import (
     AsyncTransport,
     ConnectionPool,
 )
+from opensearchpy._async.helpers.scroll import (
+    AsyncOwnedScroll,
+    aiter_owned_scroll,
+)
 from opensearchpy.helpers import (
     async_bulk,
     async_reindex,
@@ -120,3 +124,17 @@ async def async_reindex_types() -> None:
         scan_kwargs={"request_timeout": 10},
         bulk_kwargs={"request_timeout": 10},
     )
+
+
+async def async_owned_scroll_types(response: Any) -> None:
+    cursor = await AsyncOwnedScroll.from_response(
+        response, using=client, actor="alice", scroll="1m"
+    )
+    state: Dict[Any, Any] = cursor.pagination_state()
+    async for _ in aiter_owned_scroll(cursor):
+        pass
+    resumed = AsyncOwnedScroll.resume(
+        context_id=state["context_id"], using=client, actor="alice"
+    )
+    await resumed.next_page()
+    await resumed.close()

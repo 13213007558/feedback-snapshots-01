@@ -4,6 +4,7 @@
     - [Basic Search](#basic-search)
     - [Basic Pagination](#basic-pagination)
     - [Pagination with Scroll](#pagination-with-scroll)
+    - [Pagination with Owned Scroll](#pagination-with-owned-scroll)
     - [Pagination with Point in Time](#pagination-with-point-in-time)
   - [Cleanup](#cleanup)
 
@@ -245,6 +246,55 @@ hits_page_1 = page_1['hits']['hits']
 hits_page_2 = page_2['hits']['hits']
 hits_page_3 = page_3['hits']['hits']
 ```
+
+### Pagination with Owned Scroll
+
+The plain scroll example above has no notion of who started a search. When a
+service keeps the `_scroll_id` in its own pagination state, another operator
+could attach to that state and continue somebody else's search. The optional
+`OwnedScroll` helper binds a scroll context to one client and, optionally, one
+owner:
+
+```python
+from opensearchpy.helpers import OwnedScroll, ScrollOwnershipError
+
+page_1 = client.search(index='movies', scroll='1m', body={'size': 2})
+
+cursor = OwnedScroll.from_response(
+    page_1,
+    using=client,        # every later scroll/clear goes back to this client
+    actor=request.user,  # opt-in ownership; omit for an open context
+    scroll='1m',
+)
+
+# Persist the backend's search context identifier in your pagination state.
+state = cursor.pagination_state()   # {"context_id": ..., "scroll_id": ...}
+
+while cursor.hits:
+    handle(cursor.hits)
+    cursor.next_page()
+
+cursor.close()                       # actively end the search
+```
+
+Later, resume from the persisted state. A different `actor` is rejected before
+any request is sent, and routing stays pinned to the client that opened the
+context even if another alias is passed in:
+
+```python
+cursor = OwnedScroll.resume(
+    context_id=state['context_id'], using=some_other_client, actor=request.user
+)
+cursor.next_page()
+cursor.close()
+```
+
+`cursor.close()` is idempotent: a closed context refuses further
+`next_page()` calls and sends no more scroll requests, while the clear request
+still goes to the originating connection. `iter_owned_scroll(cursor)` drains
+the remaining pages and closes the context automatically. Async applications
+use `opensearchpy._async.helpers.scroll.AsyncOwnedScroll` with the same
+surface.
 
 ### Pagination with Point in Time
 
