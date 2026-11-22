@@ -32,6 +32,52 @@ class S3ManifestStaticStorageTestStorage(s3.S3ManifestStaticStorage):
         return None
 
 
+class FakeS3Object:
+    def __init__(self, bucket, key):
+        self.bucket = bucket
+        self.key = key
+
+    def delete(self):
+        self.bucket.delete_calls.append(self.key)
+        if self.key in self.bucket.failures:
+            raise self.bucket.failures[self.key]
+        state = self.bucket.objects.get(self.key)
+        if state is None:
+            raise ClientError(
+                {
+                    "Error": {"Code": "NoSuchKey", "Message": "Not found"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "DeleteObject",
+            )
+        if state["retained"]:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "AccessDenied",
+                        "Message": (
+                            "Access Denied because object protected by object lock"
+                        ),
+                    },
+                    "ResponseMetadata": {"HTTPStatusCode": 403},
+                },
+                "DeleteObject",
+            )
+        del self.bucket.objects[self.key]
+
+
+class FakeS3Bucket:
+    """Minimal in-memory stand-in for a boto3 S3 Bucket resource."""
+
+    def __init__(self, objects=None, failures=None):
+        self.objects = objects if objects is not None else {}
+        self.failures = failures if failures is not None else {}
+        self.delete_calls = []
+
+    def Object(self, key):
+        return FakeS3Object(self, key)
+
+
 class S3StorageTests(TestCase):
     def setUp(self):
         self.storage = s3.S3Storage()
@@ -559,6 +605,77 @@ class S3StorageTests(TestCase):
             cm.exception.response["ResponseMetadata"]["HTTPStatusCode"], 403
         )
 
+    def _use_fake_bucket(self, objects=None, failures=None):
+        bucket = FakeS3Bucket(objects, failures)
+        self.storage._bucket = bucket
+        return bucket
+
+    def test_storage_delete_with_result_deleted(self):
+        bucket = self._use_fake_bucket({"file.txt": {"retained": False}})
+
+        result = self.storage.delete_with_result("file.txt")
+
+        self.assertEqual(result, s3.DeleteResult.DELETED)
+        self.assertEqual(bucket.delete_calls, ["file.txt"])
+        self.assertNotIn("file.txt", bucket.objects)
+
+    def test_storage_delete_with_result_not_found(self):
+        bucket = self._use_fake_bucket()
+
+        result = self.storage.delete_with_result("file.txt")
+
+        self.assertEqual(result, s3.DeleteResult.NOT_FOUND)
+        self.assertEqual(bucket.delete_calls, ["file.txt"])
+
+    def test_storage_delete_with_result_retained(self):
+        objects = {"locked.txt": {"retained": True}}
+        bucket = self._use_fake_bucket(objects)
+
+        result = self.storage.delete_with_result("locked.txt")
+
+        self.assertEqual(result, s3.DeleteResult.RETAINED)
+        # A retained object must not trigger extra modifications: exactly
+        # one delete attempt and the object is left untouched.
+        self.assertEqual(bucket.delete_calls, ["locked.txt"])
+        self.assertEqual(bucket.objects, {"locked.txt": {"retained": True}})
+
+    def test_storage_delete_with_result_retry_after_retention_expires(self):
+        objects = {"locked.txt": {"retained": True}}
+        bucket = self._use_fake_bucket(objects)
+
+        self.assertEqual(
+            self.storage.delete_with_result("locked.txt"), s3.DeleteResult.RETAINED
+        )
+
+        # Retention period expires; a later retry deletes the object.
+        objects["locked.txt"]["retained"] = False
+        self.assertEqual(
+            self.storage.delete_with_result("locked.txt"), s3.DeleteResult.DELETED
+        )
+
+        self.assertEqual(bucket.delete_calls, ["locked.txt", "locked.txt"])
+        self.assertNotIn("locked.txt", bucket.objects)
+
+    def test_storage_delete_with_result_other_error_reraise(self):
+        self._use_fake_bucket(
+            failures={
+                "file.txt": ClientError(
+                    {
+                        "Error": {"Code": "AccessDenied", "Message": "Access Denied"},
+                        "ResponseMetadata": {"HTTPStatusCode": 403},
+                    },
+                    "DeleteObject",
+                )
+            }
+        )
+
+        with self.assertRaises(ClientError) as cm:
+            self.storage.delete_with_result("file.txt")
+
+        self.assertEqual(
+            cm.exception.response["ResponseMetadata"]["HTTPStatusCode"], 403
+        )
+
     def test_storage_listdir_base(self):
         # Files:
         #   some/path/1.txt
@@ -731,8 +848,7 @@ class S3StorageTests(TestCase):
     def test_storage_url_custom_domain_signed_urls(self, dt):
         key_id = "test-key"
         filename = "file.txt"
-        pem = dedent(
-            """\
+        pem = dedent("""\
             -----BEGIN RSA PRIVATE KEY-----
             MIICWwIBAAKBgQCXVuwcMk+JmVSKuQ1K4dZx4Z1dEcRQgTlqvhAyljIpttXlZh2/
             fD3GkJCiqfwEmo+cdNK/LFzRj/CX8Wz1z1lH2USONpG6sAkotkatCbejiItDu5y6
@@ -747,8 +863,7 @@ class S3StorageTests(TestCase):
             waxahrRxQOKSr20c4wAzWnGddIUSO9I/VHs/al5EKsbBHrnOlQkwizSfuwqZtfZ7
             csNf8FeCFRiNELoLJwJAZxWBE2+8J9VW9AQ0SE7j4FyM/B8FvRhF5PLAAsw/OxHO
             SxiFP7Ptdac1tm5H5zOqaqSHWphI19HNNilXKmxuCA==
-            -----END RSA PRIVATE KEY-----"""
-        ).encode("ascii")
+            -----END RSA PRIVATE KEY-----""").encode("ascii")
 
         url = "https://mock.cloudfront.net/file.txt"
         signed_url = (
@@ -867,8 +982,7 @@ class S3StorageTests(TestCase):
         self.assertIsNone(storage.cloudfront_signer)
 
         key_id = "test-id"
-        pem = dedent(
-            """\
+        pem = dedent("""\
             -----BEGIN RSA PRIVATE KEY-----
             MIICWwIBAAKBgQCXVuwcMk+JmVSKuQ1K4dZx4Z1dEcRQgTlqvhAyljIpttXlZh2/
             fD3GkJCiqfwEmo+cdNK/LFzRj/CX8Wz1z1lH2USONpG6sAkotkatCbejiItDu5y6
@@ -883,8 +997,7 @@ class S3StorageTests(TestCase):
             waxahrRxQOKSr20c4wAzWnGddIUSO9I/VHs/al5EKsbBHrnOlQkwizSfuwqZtfZ7
             csNf8FeCFRiNELoLJwJAZxWBE2+8J9VW9AQ0SE7j4FyM/B8FvRhF5PLAAsw/OxHO
             SxiFP7Ptdac1tm5H5zOqaqSHWphI19HNNilXKmxuCA==
-            -----END RSA PRIVATE KEY-----"""
-        ).encode("ascii")
+            -----END RSA PRIVATE KEY-----""").encode("ascii")
 
         with override_settings(AWS_CLOUDFRONT_KEY_ID=key_id, AWS_CLOUDFRONT_KEY=pem):
             storage = s3.S3Storage()

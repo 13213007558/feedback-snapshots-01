@@ -9,6 +9,14 @@ General
 
 - Add support for Django 5.2
 
+S3
+--
+
+- Add ``S3Storage.delete_with_result()`` returning a ``DeleteResult``
+  (``DELETED``/``NOT_FOUND``/``RETAINED``) so cleanup jobs on buckets with
+  Object Lock retention can distinguish outcomes without parsing SDK error
+  text. ``delete()`` keeps its existing idempotent behavior.
+
 1.14.6 (2025-04-01)
 *******************
 

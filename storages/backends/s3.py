@@ -7,6 +7,7 @@ import threading
 import warnings
 from datetime import datetime
 from datetime import timedelta
+from enum import Enum
 from urllib.parse import urlencode
 
 from django.contrib.staticfiles.storage import ManifestFilesMixin
@@ -96,6 +97,25 @@ def _filter_download_params(params):
         for (key, value) in params.items()
         if key in s3transfer.constants.ALLOWED_DOWNLOAD_ARGS
     }
+
+
+class DeleteResult(Enum):
+    """
+    Outcome of :meth:`S3Storage.delete_with_result`.
+
+    This lets callers distinguish, without inspecting SDK error text,
+    between an object that was deleted, one that did not exist and one
+    that is still protected by an Object Lock retention policy.
+    """
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    RETAINED = "retained"
+
+
+def _is_object_lock_error(err):
+    message = err.response.get("Error", {}).get("Message", "")
+    return "object lock" in message.lower()
 
 
 @deconstructible
@@ -578,6 +598,33 @@ class S3Storage(CompressStorageMixin, BaseStorage):
 
             # Some other error was encountered. Re-raise it
             raise
+
+    def delete_with_result(self, name):
+        """
+        Delete the specified file and report the outcome as a DeleteResult.
+
+        This is an opt-in alternative to delete() for callers such as
+        cleanup jobs running against buckets with an Object Lock retention
+        policy. It distinguishes between an object that did not exist
+        (DeleteResult.NOT_FOUND), one that was deleted (DeleteResult.DELETED)
+        and one that cannot be deleted yet because a retention rule still
+        protects it (DeleteResult.RETAINED). A retained object is left
+        untouched; no further modification is attempted.
+
+        Errors unrelated to missing objects or retention are re-raised.
+        Callers that treat deletion as idempotent can keep using delete().
+        """
+        name = self._normalize_name(clean_name(name))
+        try:
+            self.bucket.Object(name).delete()
+        except ClientError as err:
+            status = err.response["ResponseMetadata"]["HTTPStatusCode"]
+            if status == 404:
+                return DeleteResult.NOT_FOUND
+            if status == 403 and _is_object_lock_error(err):
+                return DeleteResult.RETAINED
+            raise
+        return DeleteResult.DELETED
 
     def exists(self, name):
         name = self._normalize_name(clean_name(name))

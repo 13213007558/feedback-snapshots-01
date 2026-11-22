@@ -267,6 +267,27 @@ Settings
 .. _ManifestStaticFilesStorage: https://docs.djangoproject.com/en/3.1/ref/contrib/staticfiles/#manifeststaticfilesstorage
 .. _Botocore docs: https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html#botocore.config.Config
 
+Deletion results
+----------------
+
+``delete()`` treats deletion as idempotent: a missing object is not an
+error and any other failure is raised. Applications that already rely on
+this behavior can keep using it unchanged.
+
+Cleanup jobs running against buckets with an Object Lock retention policy
+usually need to know *why* a deletion did not remove anything, without
+parsing SDK error text. For those cases the backend offers an opt-in
+alternative, ``delete_with_result()``, which returns a
+``storages.backends.s3.DeleteResult``:
+
+- ``DeleteResult.DELETED`` -- the object was deleted.
+- ``DeleteResult.NOT_FOUND`` -- the object did not exist.
+- ``DeleteResult.RETAINED`` -- the object is still protected by a
+  retention rule and was left untouched; no further modification is
+  attempted. Retry once the retention period has expired.
+
+Errors unrelated to missing objects or retention are still raised.
+
 .. _cloudfront-signed-url-header:
 
 CloudFront Signed URLs
