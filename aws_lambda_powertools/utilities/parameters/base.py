@@ -204,8 +204,24 @@ class BaseProvider(ABC):
         """
         raise NotImplementedError()
 
-    def clear_cache(self):
-        self.store.clear()
+    def clear_cache(self, name: str | None = None):
+        """Clear cached parameter values
+
+        Parameters
+        ----------
+        name: str, optional
+            Parameter or secret name to evict. When given, only cached values for
+            that exact name are removed, across all transforms and SDK options;
+            every other cached value keeps being served. Grouped entries created
+            by ``get_multiple`` hold values for many names under one key, so they
+            are kept intact — use ``force_fetch=True`` on the next ``get_multiple``
+            call to refresh them. When omitted, the entire cache is cleared.
+        """
+        if name is None:
+            self.store.clear()
+            return
+
+        self._invalidate_cache(name)
 
     def _invalidate_cache(self, name: str) -> None:
         """Remove cached values for a single parameter or secret name, across all transforms

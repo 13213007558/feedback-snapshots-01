@@ -55,6 +55,26 @@ def mock_binary_value() -> str:
     return "ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5LmV5SnpkV0lpT2lJeE1qTTBOVFkzT0Rrd0lpd2libUZ0WlNJNklrcHZhRzRnUkc5bElpd2lhV0YwSWpveE5URTJNak01TURJeWZRLlNmbEt4d1JKU01lS0tGMlFUNGZ3cE1lSmYzNlBPazZ5SlZfYWRRc3N3NWMK"  # noqa: E501
 
 
+class FakeClock:
+    """Controllable stand-in for the datetime class used by the parameters base module"""
+
+    def __init__(self, start: datetime):
+        self._now = start
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, seconds: int) -> None:
+        self._now += timedelta(seconds=seconds)
+
+
+@pytest.fixture(scope="function")
+def fake_clock(monkeypatch):
+    clock = FakeClock(datetime(2026, 1, 1))
+    monkeypatch.setattr("aws_lambda_powertools.utilities.parameters.base.datetime", clock)
+    return clock
+
+
 class GetParametersStub(dict):
     """
     GetParameters response where an omitted `InvalidParameters` key reads as an empty list.
@@ -101,6 +121,19 @@ def build_get_parameters_stub(
         stub["InvalidParameters"] = invalid_parameters
 
     return stub
+
+
+def build_get_parameter_stub(name: str, value: str, version: int = 1) -> dict:
+    return {
+        "Parameter": {
+            "Name": name,
+            "Type": "String",
+            "Value": value,
+            "Version": version,
+            "LastModifiedDate": datetime(2015, 1, 1),
+            "ARN": f"arn:aws:ssm:us-east-2:111122223333:parameter/{name.lstrip('/')}",
+        },
+    }
 
 
 def test_dynamodb_provider_get(mock_name, mock_value, config):
@@ -974,6 +1007,229 @@ def test_ssm_provider_set_parameter_invalidates_get_parameters_by_name_cache(moc
 
         # THEN the next batch read must hit SSM again and return the new value
         assert provider.get_parameters_by_name(parameters=parameters_batch)[mock_name] == new_value
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+
+
+def test_ssm_provider_clear_cache_by_name_invalidates_every_transform(mock_version, config, fake_clock):
+    """
+    Test SSMProvider.clear_cache(name=...) evicts every cached transform of that exact name,
+    forcing a fresh read even though the TTL has not expired, while unrelated parameters
+    keep being served from cache
+    """
+    # GIVEN a provider with a parameter cached under every transform and an unrelated cached parameter
+    provider = parameters.SSMProvider(boto_config=config)
+    revoked_name = "/revoked/api-key"
+    other_name = "/shared/parameter"
+    max_age = 300
+    revoked_params = {"Name": revoked_name, "WithDecryption": False}
+
+    binary_v1 = base64.b64encode(b"v1-binary").decode()
+    binary_v2 = base64.b64encode(b"v2-binary").decode()
+
+    stubber = stub.Stubber(provider.client)
+    stubber.add_response(
+        "get_parameter", build_get_parameter_stub(revoked_name, "v1-raw", mock_version), revoked_params,
+    )
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, '{"key": "v1"}', mock_version),
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_parameter", build_get_parameter_stub(revoked_name, binary_v1, mock_version), revoked_params,
+    )
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(other_name, "other-v1", mock_version),
+        {"Name": other_name, "WithDecryption": False},
+    )
+    # Responses served after the revocation
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, "v2-raw", mock_version + 1),
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, '{"key": "v2"}', mock_version + 1),
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, binary_v2, mock_version + 1),
+        revoked_params,
+    )
+    stubber.activate()
+
+    try:
+        assert provider.get(revoked_name, max_age=max_age) == "v1-raw"
+        assert provider.get(revoked_name, max_age=max_age, transform="json") == {"key": "v1"}
+        assert provider.get(revoked_name, max_age=max_age, transform="binary") == b"v1-binary"
+        assert provider.get(other_name, max_age=max_age) == "other-v1"
+
+        # AND time passes without any cached entry expiring; reads still hit the cache
+        fake_clock.advance(seconds=max_age - 1)
+        assert provider.get(revoked_name, max_age=max_age) == "v1-raw"
+
+        # WHEN the parameter is explicitly revoked
+        provider.clear_cache(name=revoked_name)
+
+        # THEN reading it again must not return the revoked value, in any transform
+        assert provider.get(revoked_name, max_age=max_age) == "v2-raw"
+        assert provider.get(revoked_name, max_age=max_age, transform="json") == {"key": "v2"}
+        assert provider.get(revoked_name, max_age=max_age, transform="binary") == b"v2-binary"
+
+        # AND the unrelated parameter is still served from cache (no SDK call is stubbed for it)
+        assert provider.get(other_name, max_age=max_age) == "other-v1"
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+
+
+def test_ssm_provider_clear_cache_by_name_keeps_grouped_entries(mock_version, config, fake_clock):
+    """
+    Test SSMProvider.clear_cache(name=...) evicts single cached values for that name while
+    grouped get_multiple entries stay intact, so parameters sharing the group keep hitting
+    the cache until an explicit force refresh
+    """
+    # GIVEN a provider with a cached get_multiple group and a singly cached member of it
+    provider = parameters.SSMProvider(boto_config=config)
+    path = "/revoked-group"
+    revoked_name = f"{path}/A"
+    max_age = 300
+    by_path_params = {"Path": path, "Recursive": False, "WithDecryption": False}
+
+    def group_response(value_a: str, value_b: str, version: int) -> dict:
+        return {
+            "Parameters": [
+                {
+                    "Name": f"{path}/{name}",
+                    "Type": "String",
+                    "Value": value,
+                    "Version": version,
+                    "LastModifiedDate": datetime(2015, 1, 1),
+                    "ARN": f"arn:aws:ssm:us-east-2:111122223333:parameter{path}/{name}",
+                }
+                for name, value in (("A", value_a), ("B", value_b))
+            ],
+        }
+
+    stubber = stub.Stubber(provider.client)
+    stubber.add_response("get_parameters_by_path", group_response("a-v1", "b-v1", mock_version), by_path_params)
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, "a-v1", mock_version),
+        {"Name": revoked_name, "WithDecryption": False},
+    )
+    # Responses served after the revocation
+    stubber.add_response(
+        "get_parameter",
+        build_get_parameter_stub(revoked_name, "a-v2", mock_version + 1),
+        {"Name": revoked_name, "WithDecryption": False},
+    )
+    stubber.add_response("get_parameters_by_path", group_response("a-v2", "b-v2", mock_version + 1), by_path_params)
+    stubber.activate()
+
+    try:
+        assert provider.get_multiple(path, max_age=max_age) == {"A": "a-v1", "B": "b-v1"}
+        assert provider.get(revoked_name, max_age=max_age) == "a-v1"
+
+        # AND time passes without any cached entry expiring
+        fake_clock.advance(seconds=max_age - 1)
+
+        # WHEN the member parameter is revoked
+        provider.clear_cache(name=revoked_name)
+
+        # THEN its single read must not return the revoked value
+        assert provider.get(revoked_name, max_age=max_age) == "a-v2"
+
+        # AND the grouped entry is untouched: every parameter in it keeps being served from cache
+        assert provider.get_multiple(path, max_age=max_age) == {"A": "a-v1", "B": "b-v1"}
+
+        # AND an explicit force refresh picks up the new group values
+        assert provider.get_multiple(path, max_age=max_age, force_fetch=True) == {"A": "a-v2", "B": "b-v2"}
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+
+
+def test_secrets_provider_clear_cache_by_name_invalidates_and_set_refetches(config, fake_clock):
+    """
+    Test SecretsProvider.clear_cache(name=...) evicts every cached transform of that secret only,
+    and a legitimate update through set() is returned on the next read
+    """
+    # GIVEN a provider with a secret cached under two transforms and an unrelated cached secret
+    provider = parameters.SecretsProvider(boto_config=config)
+    revoked_name = "revoked-secret"
+    other_name = "shared-secret"
+    max_age = 300
+    revoked_arn = f"arn:aws:secretsmanager:us-east-1:132456789012:secret/{revoked_name}"
+    other_arn = f"arn:aws:secretsmanager:us-east-1:132456789012:secret/{other_name}"
+    revoked_params = {"SecretId": revoked_name}
+
+    stubber = stub.Stubber(provider.client)
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name, "SecretString": "s-v1"},
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name, "SecretString": '{"token": "v1"}'},
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": other_arn, "Name": other_name, "SecretString": "other-v1"},
+        {"SecretId": other_name},
+    )
+    # Responses served after the revocation
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name, "SecretString": "s-v2"},
+        revoked_params,
+    )
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name, "SecretString": '{"token": "v2"}'},
+        revoked_params,
+    )
+    # Responses served after the legitimate update
+    stubber.add_response(
+        "put_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name},
+        {"SecretId": revoked_name, "SecretString": "s-v3"},
+    )
+    stubber.add_response(
+        "get_secret_value",
+        {"ARN": revoked_arn, "Name": revoked_name, "SecretString": "s-v3"},
+        revoked_params,
+    )
+    stubber.activate()
+
+    try:
+        assert provider.get(revoked_name, max_age=max_age) == "s-v1"
+        assert provider.get(revoked_name, max_age=max_age, transform="json") == {"token": "v1"}
+        assert provider.get(other_name, max_age=max_age) == "other-v1"
+
+        # AND time passes without any cached entry expiring
+        fake_clock.advance(seconds=max_age - 1)
+
+        # WHEN the secret is explicitly revoked
+        provider.clear_cache(name=revoked_name)
+
+        # THEN reading it again must not return the revoked value, in any transform
+        assert provider.get(revoked_name, max_age=max_age) == "s-v2"
+        assert provider.get(revoked_name, max_age=max_age, transform="json") == {"token": "v2"}
+
+        # AND the unrelated secret is still served from cache (no SDK call is stubbed for it)
+        assert provider.get(other_name, max_age=max_age) == "other-v1"
+
+        # AND a legitimate update is stored and returned on the next read
+        provider.set(name=revoked_name, value="s-v3")
+        assert provider.get(revoked_name, max_age=max_age) == "s-v3"
         stubber.assert_no_pending_responses()
     finally:
         stubber.deactivate()

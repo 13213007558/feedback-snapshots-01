@@ -612,6 +612,14 @@ Parameters utility caches all parameter values for performance and cost reasons.
 
 Within your tests, you can use `clear_cache` method available in [every provider](#built-in-provider-class). When using multiple providers or higher level functions like `get_parameter`, use `clear_caches` standalone function to clear cache globally.
 
+To revoke a single parameter or secret — for example, when a credential must be rotated immediately — pass its name to `clear_cache`. This evicts every cached representation of that exact name (all transforms and SDK options) while every other cached value keeps being served:
+
+```python
+provider.clear_cache(name="/my/revoked/parameter")
+```
+
+Values cached by `get_multiple` are stored as a group under their path, so they are left untouched; use `force_fetch=True` on the next `get_multiple` call to refresh them.
+
 === "test_clear_cache_method.py"
     ```python hl_lines="8"
     --8<-- "examples/parameters/tests/test_clear_cache_method.py"
