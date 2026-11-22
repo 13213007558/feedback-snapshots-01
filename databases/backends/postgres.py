@@ -99,15 +99,26 @@ class PostgresConnection(ConnectionBackend):
         self._connection = await self._database._pool.release(self._connection)
         self._connection = None
 
-    async def fetch_all(self, query: ClauseElement) -> typing.List[RecordInterface]:
+    async def fetch_all(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.List[RecordInterface]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns = self._compile(query)
         rows = await self._connection.fetch(query_str, *args)
         dialect = self._dialect
         column_maps = create_column_maps(result_columns)
-        return [Record(row, result_columns, dialect, column_maps) for row in rows]
+        return [
+            Record(row, result_columns, dialect, column_maps, allow_columns)
+            for row in rows
+        ]
 
-    async def fetch_one(self, query: ClauseElement) -> typing.Optional[RecordInterface]:
+    async def fetch_one(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.Optional[RecordInterface]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns = self._compile(query)
         row = await self._connection.fetchrow(query_str, *args)
@@ -118,10 +129,14 @@ class PostgresConnection(ConnectionBackend):
             result_columns,
             self._dialect,
             create_column_maps(result_columns),
+            allow_columns,
         )
 
     async def fetch_val(
-        self, query: ClauseElement, column: typing.Any = 0
+        self,
+        query: ClauseElement,
+        column: typing.Any = 0,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Any:
         # we are not calling self._connection.fetchval here because
         # it does not convert all the types, e.g. JSON stays string
@@ -130,7 +145,7 @@ class PostgresConnection(ConnectionBackend):
         # https://github.com/encode/databases/pull/131
         # https://github.com/encode/databases/pull/132
         # https://github.com/encode/databases/pull/246
-        row = await self.fetch_one(query)
+        row = await self.fetch_one(query, allow_columns=allow_columns)
         if row is None:
             return None
         return row[column]
@@ -150,13 +165,15 @@ class PostgresConnection(ConnectionBackend):
             await self._connection.execute(single_query, *args)
 
     async def iterate(
-        self, query: ClauseElement
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns = self._compile(query)
         column_maps = create_column_maps(result_columns)
         async for row in self._connection.cursor(query_str, *args):
-            yield Record(row, result_columns, self._dialect, column_maps)
+            yield Record(row, result_columns, self._dialect, column_maps, allow_columns)
 
     def transaction(self) -> TransactionBackend:
         return PostgresTransaction(connection=self)

@@ -169,26 +169,35 @@ class Database:
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.List[Record]:
         async with self.connection() as connection:
-            return await connection.fetch_all(query, values)
+            return await connection.fetch_all(
+                query, values, allow_columns=allow_columns
+            )
 
     async def fetch_one(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Optional[Record]:
         async with self.connection() as connection:
-            return await connection.fetch_one(query, values)
+            return await connection.fetch_one(
+                query, values, allow_columns=allow_columns
+            )
 
     async def fetch_val(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
         column: typing.Any = 0,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Any:
         async with self.connection() as connection:
-            return await connection.fetch_val(query, values, column=column)
+            return await connection.fetch_val(
+                query, values, column=column, allow_columns=allow_columns
+            )
 
     async def execute(
         self,
@@ -208,9 +217,12 @@ class Database:
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Mapping, None]:
         async with self.connection() as connection:
-            async for record in connection.iterate(query, values):
+            async for record in connection.iterate(
+                query, values, allow_columns=allow_columns
+            ):
                 yield record
 
     def connection(self) -> "Connection":
@@ -284,29 +296,38 @@ class Connection:
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.List[Record]:
         built_query = self._build_query(query, values)
         async with self._query_lock:
-            return await self._connection.fetch_all(built_query)
+            return await self._connection.fetch_all(
+                built_query, allow_columns=allow_columns
+            )
 
     async def fetch_one(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Optional[Record]:
         built_query = self._build_query(query, values)
         async with self._query_lock:
-            return await self._connection.fetch_one(built_query)
+            return await self._connection.fetch_one(
+                built_query, allow_columns=allow_columns
+            )
 
     async def fetch_val(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
         column: typing.Any = 0,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Any:
         built_query = self._build_query(query, values)
         async with self._query_lock:
-            return await self._connection.fetch_val(built_query, column)
+            return await self._connection.fetch_val(
+                built_query, column, allow_columns=allow_columns
+            )
 
     async def execute(
         self,
@@ -328,11 +349,14 @@ class Connection:
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
         built_query = self._build_query(query, values)
         async with self.transaction():
             async with self._query_lock:
-                async for record in self._connection.iterate(built_query):
+                async for record in self._connection.iterate(
+                    built_query, allow_columns=allow_columns
+                ):
                     yield record
 
     def transaction(

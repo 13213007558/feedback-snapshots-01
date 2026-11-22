@@ -22,16 +22,27 @@ class ConnectionBackend:
     async def release(self) -> None:
         raise NotImplementedError()  # pragma: no cover
 
-    async def fetch_all(self, query: ClauseElement) -> typing.List["Record"]:
+    async def fetch_all(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.List["Record"]:
         raise NotImplementedError()  # pragma: no cover
 
-    async def fetch_one(self, query: ClauseElement) -> typing.Optional["Record"]:
+    async def fetch_one(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.Optional["Record"]:
         raise NotImplementedError()  # pragma: no cover
 
     async def fetch_val(
-        self, query: ClauseElement, column: typing.Any = 0
+        self,
+        query: ClauseElement,
+        column: typing.Any = 0,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.Any:
-        row = await self.fetch_one(query)
+        row = await self.fetch_one(query, allow_columns=allow_columns)
         return None if row is None else row[column]
 
     async def execute(self, query: ClauseElement) -> typing.Any:
@@ -41,7 +52,9 @@ class ConnectionBackend:
         raise NotImplementedError()  # pragma: no cover
 
     async def iterate(
-        self, query: ClauseElement
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Mapping, None]:
         raise NotImplementedError()  # pragma: no cover
         # mypy needs async iterators to contain a `yield`

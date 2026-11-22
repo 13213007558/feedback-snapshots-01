@@ -29,8 +29,7 @@ class SQLiteBackend(DatabaseBackend):
         self._dialect.supports_native_decimal = False
         self._pool = SQLitePool(self._database_url, **self._options)
 
-    async def connect(self) -> None:
-        ...
+    async def connect(self) -> None: ...
 
     async def disconnect(self) -> None:
         # if it extsis, remove reference to connection to cached in-memory database on disconnect
@@ -89,7 +88,11 @@ class SQLiteConnection(ConnectionBackend):
         await self._pool.release(self._connection)
         self._connection = None
 
-    async def fetch_all(self, query: ClauseElement) -> typing.List[Record]:
+    async def fetch_all(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.List[Record]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
         column_maps = create_column_maps(result_columns)
@@ -107,9 +110,16 @@ class SQLiteConnection(ConnectionBackend):
                 )
                 for row in rows
             ]
-            return [Record(row, result_columns, dialect, column_maps) for row in rows]
+            return [
+                Record(row, result_columns, dialect, column_maps, allow_columns)
+                for row in rows
+            ]
 
-    async def fetch_one(self, query: ClauseElement) -> typing.Optional[Record]:
+    async def fetch_one(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.Optional[Record]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
         column_maps = create_column_maps(result_columns)
@@ -126,7 +136,7 @@ class SQLiteConnection(ConnectionBackend):
                 metadata._keymap,
                 row,
             )
-            return Record(row, result_columns, dialect, column_maps)
+            return Record(row, result_columns, dialect, column_maps, allow_columns)
 
     async def execute(self, query: ClauseElement) -> typing.Any:
         assert self._connection is not None, "Connection is not acquired"
@@ -143,7 +153,9 @@ class SQLiteConnection(ConnectionBackend):
             await self.execute(single_query)
 
     async def iterate(
-        self, query: ClauseElement
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
@@ -159,7 +171,9 @@ class SQLiteConnection(ConnectionBackend):
                     metadata._keymap,
                     row,
                 )
-                yield Record(record, result_columns, dialect, column_maps)
+                yield Record(
+                    record, result_columns, dialect, column_maps, allow_columns
+                )
 
     def transaction(self) -> TransactionBackend:
         return SQLiteTransaction(self)

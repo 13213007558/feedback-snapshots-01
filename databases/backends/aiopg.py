@@ -118,7 +118,11 @@ class AiopgConnection(ConnectionBackend):
         await self._database._pool.release(self._connection)
         self._connection = None
 
-    async def fetch_all(self, query: ClauseElement) -> typing.List[RecordInterface]:
+    async def fetch_all(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.List[RecordInterface]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
         column_maps = create_column_maps(result_columns)
@@ -138,11 +142,18 @@ class AiopgConnection(ConnectionBackend):
                 )
                 for row in rows
             ]
-            return [Record(row, result_columns, dialect, column_maps) for row in rows]
+            return [
+                Record(row, result_columns, dialect, column_maps, allow_columns)
+                for row in rows
+            ]
         finally:
             cursor.close()
 
-    async def fetch_one(self, query: ClauseElement) -> typing.Optional[RecordInterface]:
+    async def fetch_one(
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
+    ) -> typing.Optional[RecordInterface]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
         column_maps = create_column_maps(result_columns)
@@ -160,7 +171,7 @@ class AiopgConnection(ConnectionBackend):
                 metadata._keymap,
                 row,
             )
-            return Record(row, result_columns, dialect, column_maps)
+            return Record(row, result_columns, dialect, column_maps, allow_columns)
         finally:
             cursor.close()
 
@@ -185,7 +196,9 @@ class AiopgConnection(ConnectionBackend):
             cursor.close()
 
     async def iterate(
-        self, query: ClauseElement
+        self,
+        query: ClauseElement,
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
         assert self._connection is not None, "Connection is not acquired"
         query_str, args, result_columns, context = self._compile(query)
@@ -202,7 +215,9 @@ class AiopgConnection(ConnectionBackend):
                     metadata._keymap,
                     row,
                 )
-                yield Record(record, result_columns, dialect, column_maps)
+                yield Record(
+                    record, result_columns, dialect, column_maps, allow_columns
+                )
         finally:
             cursor.close()
 

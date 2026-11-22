@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Add optional `allow_columns` argument to `fetch_all()`, `fetch_one()`,
+  `fetch_val()` and `iterate()`, restricting which result columns records
+  expose. Non-permitted columns raise `KeyError` on access and do not appear
+  in any other representation of the record.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed

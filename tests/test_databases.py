@@ -430,6 +430,179 @@ async def test_result_values_allow_duplicate_names(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_allow_columns_fetch_all(database_url):
+    """
+    `allow_columns` should restrict which columns `fetch_all()` records expose,
+    while permitted plain columns, aliases and expressions keep their values.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            query = notes.insert()
+            values = {"text": "example1", "completed": True}
+            await database.execute(query, values)
+
+            query = sqlalchemy.select(
+                notes.c.id,
+                notes.c.text,
+                notes.c.completed.label("is_completed"),
+                (notes.c.id + 1).label("id_plus_one"),
+            )
+
+            # Old usage without `allow_columns` is left untouched.
+            results = await database.fetch_all(query=query)
+            assert len(results[0]) == 4
+
+            results = await database.fetch_all(
+                query=query, allow_columns=["text", "is_completed"]
+            )
+            assert len(results) == 1
+            row = results[0]
+
+            # Permitted columns still return values.
+            assert row["text"] == "example1"
+            assert row["is_completed"] == True
+
+            # Denied columns are not accessible.
+            with pytest.raises(KeyError):
+                row["id"]
+            with pytest.raises(KeyError):
+                row["id_plus_one"]
+            with pytest.raises(KeyError):
+                row[0]
+
+            # Denied columns do not reappear in other representations.
+            assert sorted(row.keys()) == ["is_completed", "text"]
+            assert sorted(row._mapping.keys()) == ["is_completed", "text"]
+            assert dict(row) == {"text": "example1", "is_completed": True}
+            assert len(row) == 2
+            assert "id" not in row._mapping
+            assert "id_plus_one" not in row._mapping
+
+            # Permitting an unknown column is an error.
+            with pytest.raises(KeyError):
+                await database.fetch_all(query=query, allow_columns=["unknown"])
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_allow_columns_fetch_one(database_url):
+    """
+    `allow_columns` on `fetch_one()` accepts column names, positions
+    and Column objects.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            query = notes.insert()
+            values = {"text": "example1", "completed": True}
+            await database.execute(query, values)
+
+            query = sqlalchemy.select(
+                notes.c.id,
+                notes.c.text,
+                (notes.c.id + 1).label("id_plus_one"),
+            )
+            row = await database.fetch_one(query=query, allow_columns=[notes.c.text, 2])
+
+            assert row["text"] == "example1"
+            assert row[notes.c.text] == "example1"
+            assert row[2] == row["id_plus_one"]
+            with pytest.raises(KeyError):
+                row["id"]
+            assert sorted(row._mapping.keys()) == ["id_plus_one", "text"]
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_allow_columns_fetch_val(database_url):
+    """
+    `fetch_val()` should only return values for permitted columns.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            query = notes.insert()
+            values = {"text": "example1", "completed": True}
+            await database.execute(query, values)
+
+            query = sqlalchemy.select(notes.c.id, notes.c.text)
+
+            value = await database.fetch_val(
+                query=query, column="text", allow_columns=["text"]
+            )
+            assert value == "example1"
+
+            with pytest.raises(KeyError):
+                await database.fetch_val(
+                    query=query, column="id", allow_columns=["text"]
+                )
+
+            # Old usage without `allow_columns` is left untouched.
+            value = await database.fetch_val(query=query, column="id")
+            assert isinstance(value, int)
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_allow_columns_iterate(database_url):
+    """
+    `allow_columns` should also restrict records produced by `iterate()`.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            query = notes.insert()
+            values = {"text": "example1", "completed": True}
+            await database.execute(query, values)
+
+            query = sqlalchemy.select(
+                notes.c.id,
+                notes.c.text,
+                notes.c.completed.label("is_completed"),
+            )
+            iterate_results = []
+            async for row in database.iterate(query=query, allow_columns=["text"]):
+                iterate_results.append(row)
+
+            assert len(iterate_results) == 1
+            assert list(iterate_results[0].keys()) == ["text"]
+            assert dict(iterate_results[0]) == {"text": "example1"}
+            assert list(iterate_results[0]._mapping.keys()) == ["text"]
+            with pytest.raises(KeyError):
+                iterate_results[0]["is_completed"]
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_allow_columns_raw_query(database_url):
+    """
+    `allow_columns` should also apply to raw queries, which do not
+    expose result-column metadata.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            query = notes.insert()
+            values = {"text": "example1", "completed": True}
+            await database.execute(query, values)
+
+            query = "SELECT id, text, id + 1 AS id_plus_one FROM notes"
+            row = await database.fetch_one(
+                query=query, allow_columns=["text", "id_plus_one"]
+            )
+
+            assert row["text"] == "example1"
+            assert row["id_plus_one"] == row[2]
+            with pytest.raises(KeyError):
+                row["id"]
+            with pytest.raises(KeyError):
+                row[0]
+            assert sorted(row._mapping.keys()) == ["id_plus_one", "text"]
+            assert dict(row) == {"text": "example1", "id_plus_one": row["id_plus_one"]}
+            assert len(row) == 2
+
+            with pytest.raises(KeyError):
+                await database.fetch_one(query=query, allow_columns=["unknown"])
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_fetch_one_returning_no_results(database_url):
     """
     fetch_one should return `None` when no results match.

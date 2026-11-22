@@ -116,6 +116,34 @@ await database.disconnect()
 Connections are managed as a task-local state, with driver implementations
 transparently using connection pooling behind the scenes.
 
+## Restricting result columns
+
+Queries sometimes need to return columns that are only used for internal
+computation and should not be exposed to the code consuming the results.
+The result-consuming methods accept an optional `allow_columns` argument
+listing the columns that may be exposed. Columns can be referenced by name
+(or alias), by position, or by SQLAlchemy `Column` objects:
+
+```python
+# Only the "text" column and the "word_count" expression are exposed.
+query = sqlalchemy.select(
+    notes.c.id,
+    notes.c.text,
+    sqlalchemy.func.length(notes.c.text).label("word_count"),
+)
+rows = await database.fetch_all(query=query, allow_columns=["text", "word_count"])
+row = await database.fetch_one(query=query, allow_columns=["text", "word_count"])
+value = await database.fetch_val(query=query, column="text", allow_columns=["text"])
+async for row in database.iterate(query=query, allow_columns=["text"]):
+    ...
+```
+
+Columns that are not permitted raise `KeyError` when accessed, and do not
+appear in any other representation of the record, such as `dict(row)`,
+`row.keys()`, `row._mapping` or `len(row)`. Permitting a column that does
+not exist in the result also raises `KeyError`. When `allow_columns` is not
+given, all columns are exposed, exactly as before.
+
 ## Raw queries
 
 In addition to SQLAlchemy core queries, you can also perform raw SQL queries:

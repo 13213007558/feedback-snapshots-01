@@ -22,6 +22,7 @@ class Record(RecordInterface):
         "_column_map",
         "_column_map_int",
         "_column_map_full",
+        "_allowed_indexes",
     )
 
     def __init__(
@@ -34,14 +35,93 @@ class Record(RecordInterface):
             typing.Mapping[int, typing.Tuple[int, TypeEngine]],
             typing.Mapping[str, typing.Tuple[int, TypeEngine]],
         ],
+        allow_columns: typing.Optional[typing.Iterable[typing.Any]] = None,
     ) -> None:
         self._row = row
         self._result_columns = result_columns
         self._dialect = dialect
-        self._column_map, self._column_map_int, self._column_map_full = column_maps
+        column_map, column_map_int, column_map_full = column_maps
+        self._allowed_indexes: typing.Optional[typing.Tuple[int, ...]] = None
+        if allow_columns is not None:
+            allowed_indexes: typing.Set[int] = set()
+            for key in allow_columns:
+                allowed_indexes.update(
+                    self._resolve_allowed_indexes(
+                        key, column_map, column_map_int, column_map_full
+                    )
+                )
+            self._allowed_indexes = tuple(
+                idx for idx in range(len(row)) if idx in allowed_indexes
+            )
+            permitted = set(self._allowed_indexes)
+            column_map = {
+                key: value for key, value in column_map.items() if value[0] in permitted
+            }
+            column_map_int = {
+                key: value
+                for key, value in column_map_int.items()
+                if value[0] in permitted
+            }
+            column_map_full = {
+                key: value
+                for key, value in column_map_full.items()
+                if value[0] in permitted
+            }
+        self._column_map = column_map
+        self._column_map_int = column_map_int
+        self._column_map_full = column_map_full
+
+    def _resolve_allowed_indexes(
+        self,
+        key: typing.Any,
+        column_map: typing.Mapping[typing.Any, typing.Tuple[int, TypeEngine]],
+        column_map_int: typing.Mapping[int, typing.Tuple[int, TypeEngine]],
+        column_map_full: typing.Mapping[str, typing.Tuple[int, TypeEngine]],
+    ) -> typing.Tuple[int, ...]:
+        if isinstance(key, Column):
+            return (column_map_full[str(key)][0],)
+        if isinstance(key, int):
+            if len(column_map) == 0:
+                row_length = len(self._row)
+                if not -row_length <= key < row_length:
+                    raise KeyError(key)
+                return (key % row_length,)
+            return (column_map_int[key][0],)
+        if len(column_map) == 0:
+            # Raw queries do not expose result-column metadata,
+            # so resolve names against the row itself.
+            row_keys = list(self._row.keys())
+            indexes = tuple(idx for idx, name in enumerate(row_keys) if name == key)
+            if not indexes:
+                raise KeyError(key)
+            return indexes
+        return (column_map[key][0],)
+
+    def _resolve_permitted_row_index(self, key: typing.Any) -> int:
+        assert self._allowed_indexes is not None
+        if isinstance(key, int):
+            row_length = len(self._row)
+            if -row_length <= key < row_length:
+                idx = key % row_length
+                if idx in self._allowed_indexes:
+                    return idx
+            raise KeyError(key)
+        if isinstance(key, Column):
+            raise KeyError(str(key))
+        row_keys = list(self._row.keys())
+        for idx in self._allowed_indexes:
+            if row_keys[idx] == key:
+                return idx
+        raise KeyError(key)
 
     @property
     def _mapping(self) -> typing.Mapping:
+        if self._allowed_indexes is not None:
+            row_keys = list(self._row.keys())
+            return _FilteredMapping(
+                [row_keys[idx] for idx in self._allowed_indexes],
+                [self._row[idx] for idx in self._allowed_indexes],
+            )
         return self._row
 
     def keys(self) -> typing.KeysView:
@@ -52,6 +132,8 @@ class Record(RecordInterface):
 
     def __getitem__(self, key: typing.Any) -> typing.Any:
         if len(self._column_map) == 0:
+            if self._allowed_indexes is not None:
+                return self._row[self._resolve_permitted_row_index(key)]
             return self._row[key]
         elif isinstance(key, Column):
             idx, datatype = self._column_map_full[str(key)]
@@ -70,10 +152,10 @@ class Record(RecordInterface):
         return raw
 
     def __iter__(self) -> typing.Iterator:
-        return iter(self._row.keys())
+        return iter(self._mapping.keys())
 
     def __len__(self) -> int:
-        return len(self._row)
+        return len(self._mapping)
 
     def __getattr__(self, name: str) -> typing.Any:
         try:
@@ -100,6 +182,38 @@ class Row(SQLRow):
 
     def values(self):
         return self._mapping.values()
+
+
+class _FilteredMapping(typing.Mapping):
+    """
+    Mapping view exposing only a permitted subset of a row's columns.
+
+    Keys and values are stored as parallel tuples so that duplicate
+    column names keep all of their values.
+    """
+
+    __slots__ = ("_keys", "_values")
+
+    def __init__(
+        self, keys: typing.Iterable[typing.Any], values: typing.Iterable[typing.Any]
+    ) -> None:
+        self._keys = tuple(keys)
+        self._values = tuple(values)
+
+    def __getitem__(self, key: typing.Any) -> typing.Any:
+        for item_key, value in zip(self._keys, self._values):
+            if item_key == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> typing.Iterator:
+        return iter(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __repr__(self) -> str:
+        return repr(dict(zip(self._keys, self._values)))
 
 
 def create_column_maps(
