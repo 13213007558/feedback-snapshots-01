@@ -117,3 +117,9 @@ class IdempotencyPersistenceConsistencyError(BaseError):
     """
     Idempotency persistency consistency error, needs to be removed
     """
+
+
+class IdempotencyPermissionDeniedError(BaseError):
+    """
+    Caller is no longer authorized to receive the response stored for a completed idempotency record
+    """

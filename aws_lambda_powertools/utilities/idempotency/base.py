@@ -17,6 +17,7 @@ from aws_lambda_powertools.utilities.idempotency.exceptions import (
     IdempotencyItemAlreadyExistsError,
     IdempotencyItemNotFoundError,
     IdempotencyKeyError,
+    IdempotencyPermissionDeniedError,
     IdempotencyPersistenceLayerError,
     IdempotencyValidationError,
 )
@@ -248,6 +249,8 @@ class IdempotencyHandler:
             A function execution is already in progress
         IdempotencyInconsistentStateError
             The persistence store reports inconsistent states across different requests. Retryable.
+        IdempotencyPermissionDeniedError
+            A configured response permission check rejects the replay of the stored response.
         """
         # This code path will only be triggered if the record becomes expired between the save_inprogress call and here
         if data_record.status == STATUS_CONSTANTS["EXPIRED"]:
@@ -272,6 +275,14 @@ class IdempotencyHandler:
 
         response_dict = data_record.response_json_as_dict()
         serialized_response = self.output_serializer.from_dict(response_dict) if response_dict is not None else None
+
+        if self.config.response_permission_check is not None:
+            logger.debug("Response permission check configured, verifying caller authorization for stored response")
+            if not self.config.response_permission_check(serialized_response, data_record):
+                raise IdempotencyPermissionDeniedError(
+                    "Caller is not authorized to receive the stored idempotent response "
+                    f"for idempotency key: {data_record.idempotency_key}",
+                )
 
         if self.config.response_hook:
             logger.debug("Response hook configured, invoking function")

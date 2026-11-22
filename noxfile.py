@@ -134,6 +134,7 @@ def test_with_boto3_sdk_as_required_package(session: nox.Session):
             f"{PREFIX_TESTS_UNIT}/data_classes/_boto3/",
             f"{PREFIX_TESTS_FUNCTIONAL}/streaming/_boto3/",
             f"{PREFIX_TESTS_FUNCTIONAL}/idempotency/_boto3/",
+            f"{PREFIX_TESTS_FUNCTIONAL}/idempotency/_memory/",
         ],
         extras="aws-sdk",
         pytest_args=("-m", "not requires_validation"),

@@ -1,0 +1,5 @@
+{
+  "payment_id": "pay-123",
+  "caller_id": "merchant-a",
+  "amount": 129.99
+}

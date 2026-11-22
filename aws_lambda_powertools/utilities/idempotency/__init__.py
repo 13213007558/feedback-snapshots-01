@@ -2,8 +2,12 @@
 Utility for adding idempotency to lambda functions
 """
 
+from aws_lambda_powertools.utilities.idempotency.exceptions import (
+    IdempotencyPermissionDeniedError,
+)
 from aws_lambda_powertools.utilities.idempotency.hook import (
     IdempotentHookFunction,
+    IdempotentResponsePermissionCheck,
 )
 from aws_lambda_powertools.utilities.idempotency.persistence.base import (
     BasePersistenceLayer,
@@ -21,4 +25,6 @@ __all__ = (
     "idempotent_function",
     "IdempotencyConfig",
     "IdempotentHookFunction",
+    "IdempotentResponsePermissionCheck",
+    "IdempotencyPermissionDeniedError",
 )

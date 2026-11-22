@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from aws_lambda_powertools.utilities.idempotency import IdempotentHookFunction
+    from aws_lambda_powertools.utilities.idempotency import IdempotentHookFunction, IdempotentResponsePermissionCheck
     from aws_lambda_powertools.utilities.typing import LambdaContext
 
 
@@ -20,6 +20,7 @@ class IdempotencyConfig:
         hash_function: str = "md5",
         lambda_context: LambdaContext | None = None,
         response_hook: IdempotentHookFunction | None = None,
+        response_permission_check: IdempotentResponsePermissionCheck | None = None,
     ):
         """
         Initialize the base persistence layer
@@ -44,6 +45,10 @@ class IdempotencyConfig:
             Lambda Context containing information about the invocation, function and execution environment.
         response_hook: IdempotentHookFunction, optional
             Hook function to be called when an idempotent response is returned from the idempotent store.
+        response_permission_check: IdempotentResponsePermissionCheck, optional
+            Hook function invoked before replaying a completed idempotent response, to verify the
+            caller is still authorized to receive it. Return a falsy value to block the replay; the
+            stored response is not returned and the wrapped function is not executed again.
         """
         self.event_key_jmespath = event_key_jmespath
         self.payload_validation_jmespath = payload_validation_jmespath
@@ -55,6 +60,7 @@ class IdempotencyConfig:
         self.hash_function = hash_function
         self.lambda_context: LambdaContext | None = lambda_context
         self.response_hook: IdempotentHookFunction | None = response_hook
+        self.response_permission_check: IdempotentResponsePermissionCheck | None = response_permission_check
 
     def register_lambda_context(self, lambda_context: LambdaContext):
         """Captures the Lambda context, to calculate the remaining time before the invocation times out"""

@@ -874,6 +874,7 @@ You can override and further extend idempotency behavior via **`IdempotencyConfi
 | **local_cache_max_items**       | 256     | Max number of items to store in local cache                                                                                                                                                                                                |
 | **hash_function**               | `md5`   | Function to use for calculating hashes, as provided by [hashlib](https://docs.python.org/3/library/hashlib.html){target="_blank" rel="nofollow"} in the standard library.                                                                  |
 | **response_hook**               | `None`  | Function to use for processing the stored Idempotent response. This function hook is called when an existing idempotent response is found. See [Manipulating The Idempotent Response](idempotency.md#manipulating-the-idempotent-response) |
+| **response_permission_check**   | `None`  | Function invoked before replaying a completed idempotent response, to verify the caller is still authorized to receive it. Returning a falsy value blocks the replay with `IdempotencyPermissionDeniedError`. See [Authorizing Idempotent Replays](idempotency.md#authorizing-idempotent-replays) |
 
 !!! warning "Use one persistence layer instance per `IdempotencyConfig`"
     A persistence layer applies the settings of the first `IdempotencyConfig` it is used with. If functions with different configs share the same persistence layer instance, the later ones use the first config's settings, and we emit a `PowertoolsUserWarning`.
@@ -1023,6 +1024,29 @@ When using response hooks to manipulate returned data from idempotent operations
 2. **Catch and Handle Exceptions.** Your response hook code should catch and handle any exceptions that may arise from your logic. Unhandled exceptions will cause the Lambda function to fail unexpectedly.
 
 3. **Keep Hook Logic Simple** Response hooks should consist of minimal and straightforward logic for manipulating response data. Avoid complex conditional branching and aim for hooks that are easy to reason about.
+
+### Authorizing Idempotent Replays
+
+A completed idempotency record proves that an operation already ran, but it says nothing about whether the caller of a **replay** is still allowed to receive its result. For example, a payment callback may have stored a receipt for a merchant whose permissions were later revoked.
+
+Set up a `response_permission_check` in `IdempotencyConfig` to re-verify the caller's current authorization before a cached response is returned. The function receives the deserialized response that would be replayed and the idempotency `DataRecord`, and must return a truthy value to allow the replay.
+
+If it returns a falsy value, the utility raises **`IdempotencyPermissionDeniedError`**. The stored response is not returned, and the wrapped function is **not** executed again — the original business action remains protected by idempotency. The check only runs on replays of `COMPLETED` records; the first execution of an operation always runs your function.
+
+=== "Authorizing an Idempotent Replay"
+
+    ```python hl_lines="21 24 28 33 47"
+    --8<-- "examples/idempotency/src/working_with_response_permission_check.py"
+    ```
+
+=== "Sample event"
+
+    ```json
+    --8<-- "examples/idempotency/src/working_with_response_permission_check_payload.json"
+    ```
+
+???+ tip "Permission check vs response_hook"
+    `response_permission_check` decides **whether** a stored response may be delivered and runs first, including before `response_hook`. Use `response_hook` only to transform an already-authorized response. When authorization is denied, neither the stored response nor the response hook result reaches the caller.
 
 ## Compatibility with other utilities
 
