@@ -518,6 +518,30 @@ an error.
 requests. See :class:`~jwt.PyJWKClient` in the API reference for details on
 the caching parameters.
 
+Monitoring JWK Set changes
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To audit rotations and removals, register an observer with
+``PyJWKClient``. The observer runs only for JWK Sets the client actually
+accepted, so a malformed or unusable response is never reported as a removal.
+The first accepted set establishes a baseline and is not reported; afterwards
+each observer runs at most once per accepted set whose contents changed.
+
+.. code-block:: python
+
+    from jwt import PyJWKClient
+
+    def on_jwk_set_change(update):
+        logger.warning("JWKS changed: %s", update.to_dict())
+
+    jwks_client = PyJWKClient(url, jwk_set_observer=on_jwk_set_change)
+
+Each :class:`~jwt.JWKSetUpdate` contains ``added``, ``removed``, and
+``replaced`` entries for individual keys. A ``replaced`` entry has the same
+``kid`` in both sets but different key material. Entries expose only the
+``kid`` and an RFC 7638 SHA-256 ``fingerprint`` (prefixed with ``sha256:``),
+never the JWK members themselves, so ``to_dict()`` is safe to log.
+
 OIDC Login Flow
 ---------------
 

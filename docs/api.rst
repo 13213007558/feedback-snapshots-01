@@ -34,6 +34,15 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: JWKSetUpdate
+    :members:
+
+.. autoclass:: JWKSetKeyChange
+    :members:
+
+.. autoclass:: JWKSetChangeType
+    :members:
+
 .. note:: TODO: Finish documenting PyJWS class
 .. module:: jwt.api_jws
 

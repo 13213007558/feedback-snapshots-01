@@ -1,5 +1,7 @@
+import base64
 import contextlib
 import copy
+import hashlib
 import http.client
 import io
 import json
@@ -18,6 +20,7 @@ import pytest
 import jwt
 from jwt import PyJWKClient
 from jwt.jwks_client import _NoRedirectHandler
+from jwt.jwk_set_change import JWKSetChangeType
 from jwt.api_jwk import PyJWK, PyJWKSet
 from jwt.exceptions import (
     DecodeError,
@@ -809,3 +812,306 @@ class TestPyJWKClient:
                 jwks_client.get_jwk_set()
 
             assert http_error.closed
+
+
+@crypto_required
+class TestPyJWKClientJWKSetObserver:
+    def _key(self, kid: str, material: str) -> dict[str, Any]:
+        # Derive a distinct, valid 2048-bit RSA modulus from *material* so
+        # each key either matches or differs by actual key material.
+        modulus = bytearray(hashlib.sha512(material.encode()).digest() * 4)
+        modulus[0] |= 0x80
+        modulus[-1] |= 1
+        encoded = base64.urlsafe_b64encode(bytes(modulus)).rstrip(b"=").decode()
+        return {
+            "alg": "RS256",
+            "kty": "RSA",
+            "use": "sig",
+            "n": encoded,
+            "e": "AQAB",
+            "kid": kid,
+        }
+
+    def _set(self, *keys: dict[str, Any]) -> dict[str, Any]:
+        return {"keys": list(keys)}
+
+    @contextlib.contextmanager
+    def _serving(
+        self, *responses: object, **kwargs: Any
+    ) -> Iterator[tuple[PyJWKClient, mock.Mock]]:
+        with mock.patch("urllib.request.build_opener") as build_opener_mock:
+            opener = mock.Mock()
+            build_opener_mock.return_value = opener
+            response = mock.Mock()
+            response.__enter__ = mock.Mock(return_value=response)
+            response.__exit__ = mock.Mock()
+            response.read.side_effect = [json.dumps(item) for item in responses]
+            opener.open.return_value = response
+
+            client = PyJWKClient("https://example.test/.well-known/jwks.json", **kwargs)
+            yield client, opener
+
+    def test_first_accepted_set_establishes_baseline_without_notifying(self) -> None:
+        url = "https://dev-87evx9ru.auth0.com/.well-known/jwks.json"
+        updates: list[Any] = []
+
+        with mocked_success_response(RESPONSE_DATA_WITH_MATCHING_KID):
+            client = PyJWKClient(url, jwk_set_observer=updates.append)
+            client.get_jwk_set()
+
+        assert updates == []
+
+    def test_observes_added_removed_and_replaced_keys(self) -> None:
+        updates: list[Any] = []
+
+        first = self._set(self._key("steady", "first"), self._key("rotating", "old"))
+        second = self._set(self._key("steady", "first"), self._key("rotating", "new"))
+        third = self._set(self._key("rotating", "new"), self._key("brand-new", "fresh"))
+
+        with self._serving(
+            first, second, third, cache_jwk_set=False, jwk_set_observer=updates.append
+        ) as (client, _):
+            client.get_jwk_set()
+            client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert len(updates) == 2
+
+        replacement = updates[0]
+        assert replacement.added == ()
+        assert replacement.removed == ()
+        assert [change.kind for change in replacement.replaced] == [
+            JWKSetChangeType.REPLACED
+        ]
+        assert replacement.replaced[0].kid == "rotating"
+        assert (
+            replacement.replaced[0].previous_fingerprint
+            != replacement.replaced[0].fingerprint
+        )
+
+        last = updates[1]
+        assert [change.kid for change in last.added] == ["brand-new"]
+        assert [change.kid for change in last.removed] == ["steady"]
+        assert last.replaced == ()
+
+    def test_observer_is_not_called_twice_for_same_accepted_set(self) -> None:
+        updates: list[Any] = []
+        data = self._set(self._key("key-1", "n-1"))
+
+        with self._serving(
+            data, data, cache_jwk_set=False, jwk_set_observer=updates.append
+        ) as (client, _):
+            client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert updates == []
+
+    def test_rejected_set_does_not_notify_or_advance_baseline(self) -> None:
+        updates: list[Any] = []
+
+        first = self._set(self._key("key-1", "n-1"))
+        broken = {"keys": "not-a-list"}
+        recovered = self._set(self._key("key-1", "n-1"), self._key("key-2", "n-2"))
+
+        with self._serving(
+            first,
+            broken,
+            recovered,
+            cache_jwk_set=False,
+            jwk_set_observer=updates.append,
+        ) as (client, _):
+            client.get_jwk_set()
+            with pytest.raises(PyJWKSetError):
+                client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert len(updates) == 1
+        assert [change.kid for change in updates[0].added] == ["key-2"]
+        assert updates[0].removed == ()
+
+    def test_incomplete_set_does_not_notify_or_advance_baseline(self) -> None:
+        # A syntactically valid response with no usable keys is rejected by
+        # the client; it must not be reported as a removal of every key.
+        updates: list[Any] = []
+
+        first = self._set(self._key("key-1", "n-1"))
+        unusable = {"keys": [{"kty": "unsupported", "kid": "key-1"}]}
+        recovered = self._set(self._key("key-1", "n-1"))
+
+        with self._serving(
+            first,
+            unusable,
+            recovered,
+            cache_jwk_set=False,
+            jwk_set_observer=updates.append,
+        ) as (client, _):
+            client.get_jwk_set()
+            with pytest.raises(PyJWKSetError):
+                client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert updates == []
+
+    def test_observer_failure_does_not_break_key_loading(self) -> None:
+        first = self._set(self._key("key-1", "n-1"))
+        second = self._set(self._key("key-2", "n-2"))
+
+        def broken_observer(update: Any) -> None:
+            raise RuntimeError("monitoring is down")
+
+        with self._serving(first, second, cache_jwk_set=False) as (client, _):
+            client.add_jwk_set_observer(broken_observer)
+            client.get_jwk_set()
+            jwk_set = client.get_jwk_set()
+
+        assert [key.key_id for key in jwk_set.keys] == ["key-2"]
+
+    def test_update_dict_contains_only_allowed_identifiers_and_fingerprints(
+        self,
+    ) -> None:
+        updates: list[Any] = []
+        first = self._set(self._key("key-1", "secret-key-1"))
+        second = self._set(self._key("key-1", "secret-key-2"))
+
+        with self._serving(
+            first, second, cache_jwk_set=False, jwk_set_observer=updates.append
+        ) as (client, _):
+            client.get_jwk_set()
+            client.get_jwk_set()
+
+        payload = updates[0].to_dict()
+        serialized = json.dumps(payload)
+
+        assert "secret-key" not in serialized
+        assert payload["replaced"][0]["key_id"] == "key-1"
+        assert payload["replaced"][0]["fingerprint"].startswith("sha256:")
+        assert payload["fingerprint"].startswith("sha256:")
+        assert set(payload) == {
+            "fingerprint",
+            "previous_fingerprint",
+            "added",
+            "removed",
+            "replaced",
+        }
+
+    def test_observer_registration_is_idempotent_and_removable(self) -> None:
+        client = PyJWKClient("https://example.test/.well-known/jwks.json")
+        calls: list[Any] = []
+
+        def observer(update: Any) -> None:
+            calls.append(update)
+
+        assert client.add_jwk_set_observer(observer) is observer
+        client.add_jwk_set_observer(observer)
+        assert client.jwk_set_observers == (observer,)
+
+        client.remove_jwk_set_observer(observer)
+        assert client.jwk_set_observers == ()
+        client.remove_jwk_set_observer(observer)
+
+    def test_observer_rejects_non_callable(self) -> None:
+        client = PyJWKClient("https://example.test/.well-known/jwks.json")
+
+        with pytest.raises(TypeError, match="callable"):
+            client.add_jwk_set_observer("nope")  # type: ignore[arg-type]
+
+    def test_log_record_contains_no_key_material(self, caplog: Any) -> None:
+        first = self._set(self._key("key-1", "secret-key-1"))
+        second = self._set(self._key("key-1", "secret-key-2"))
+
+        with caplog.at_level("INFO", logger="jwt.jwks_client"):
+            with self._serving(
+                first, second, cache_jwk_set=False, jwk_set_observer=lambda _: None
+            ) as (client, _):
+                client.get_jwk_set()
+                client.get_jwk_set()
+
+        assert "secret-key" not in caplog.text
+        assert "key-1" in caplog.text
+        assert "sha256:" in caplog.text
+
+    def test_end_to_end_rotation_invalid_and_recovery(self) -> None:
+        first = self._set(self._key("key-1", "material-1"))
+        rotated = self._set(
+            self._key("key-1", "material-1b"), self._key("key-2", "material-2")
+        )
+        updates: list[Any] = []
+        responses = [first, rotated, {"keys": "invalid"}, rotated]
+        served: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+                body = json.dumps(responses[min(len(served), len(responses) - 1)])
+                served.append(body)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, _format: str, *args: object) -> None:
+                return
+
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        except PermissionError:
+            pytest.skip("sandbox does not allow binding a local TCP port")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = PyJWKClient(
+                f"http://127.0.0.1:{server.server_port}/jwks.json",
+                cache_jwk_set=False,
+                jwk_set_observer=updates.append,
+            )
+            client.get_jwk_set()
+            client.get_jwk_set()
+            with pytest.raises(PyJWKSetError):
+                client.get_jwk_set()
+            client.get_jwk_set()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        assert served[0] == json.dumps(first)
+        assert len(updates) == 2
+        assert [change.kid for change in updates[1].added] == ["key-2"]
+        assert updates[1].replaced[0].kid == "key-1"
+        assert "material" not in json.dumps([update.to_dict() for update in updates])
+
+    def test_kid_absent_or_malformed_is_reported_safely(self) -> None:
+        updates: list[Any] = []
+        missing_kid = self._key("temporary", "material-1")
+        del missing_kid["kid"]
+        malformed_kid = self._key("temporary", "material-2")
+        malformed_kid["kid"] = ["not", "a", "string"]
+
+        with self._serving(
+            self._set(missing_kid),
+            self._set(malformed_kid),
+            cache_jwk_set=False,
+            jwk_set_observer=updates.append,
+        ) as (client, _):
+            client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert len(updates) == 1
+        assert updates[0].removed[0].kid is None
+        assert updates[0].added[0].kid == '["not","a","string"]'
+        json.dumps(updates[0].to_dict())
+
+    def test_metadata_only_changes_are_not_reported(self) -> None:
+        updates: list[Any] = []
+        first = self._set(self._key("key-1", "material-1"))
+        relabeled = self._set(self._key("key-1", "material-1"))
+        relabeled["keys"][0]["use"] = "sig"
+        relabeled["keys"][0]["alg"] = "RS256"
+
+        with self._serving(
+            first, relabeled, cache_jwk_set=False, jwk_set_observer=updates.append
+        ) as (client, _):
+            client.get_jwk_set()
+            client.get_jwk_set()
+
+        assert updates == []

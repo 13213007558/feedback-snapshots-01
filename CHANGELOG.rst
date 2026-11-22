@@ -7,6 +7,18 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.1...HEAD>`__
 -------------------------------------------------------------------------
 
+Added
+~~~~~
+
+- ``PyJWKClient`` accepts an optional ``jwk_set_observer`` callback (also
+  manageable with ``add_jwk_set_observer()`` and
+  ``remove_jwk_set_observer()``) that is notified once for each accepted JWK
+  Set whose keys differ from the previously accepted set. The emitted
+  ``JWKSetUpdate`` distinguishes added, removed, and replaced keys, including
+  material changes under an unchanged ``kid``. Updates contain only key IDs and
+  stable RFC 7638 SHA-256 fingerprints, never key material, and rejected or
+  unchanged sets are not reported.
+
 Changed
 ~~~~~~~
 

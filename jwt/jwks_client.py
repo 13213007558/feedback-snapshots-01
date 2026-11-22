@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import math
 import threading
 import time
@@ -16,6 +17,16 @@ from .api_jwk import PyJWK, PyJWKSet
 from .api_jwt import decode_complete as decode_token
 from .exceptions import PyJWKClientConnectionError, PyJWKClientError
 from .jwk_set_cache import JWKSetCache
+from .jwk_set_change import (
+    JWKSetObserver,
+    JWKSetUpdate,
+    diff_jwk_sets,
+    observer_identifier,
+    set_fingerprint,
+    snapshot_jwk_set,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -43,6 +54,7 @@ class PyJWKClient:
         timeout: float = 30,
         ssl_context: SSLContext | None = None,
         cooldown_duration: float = 30,
+        jwk_set_observer: JWKSetObserver | None = None,
     ):
         """A client for retrieving signing keys from a JWKS endpoint.
 
@@ -96,6 +108,12 @@ class PyJWKClient:
         :param cooldown_duration: Minimum time in seconds between forced
             refreshes after an unknown key ID. Defaults to ``30``.
         :type cooldown_duration: float
+        :param jwk_set_observer: Optional callback invoked once for each
+            accepted JWK Set whose keys differ from the previously accepted
+            set. The first accepted set only establishes a baseline. The
+            callback receives a :class:`~jwt.JWKSetUpdate` that contains
+            key IDs and stable fingerprints, never the key material itself.
+        :type jwk_set_observer: collections.abc.Callable or None
         """
         if headers is None:
             headers = {}
@@ -126,6 +144,12 @@ class PyJWKClient:
         self.cooldown_duration = cooldown_duration
         self._last_successful_fetch: float | None = None
         self._client_lock = threading.RLock()
+        self._observer_lock = threading.RLock()
+        self._jwk_set_observers: list[tuple[JWKSetObserver, str]] = []
+        self._jwk_set_snapshot: dict[str | None, frozenset[str]] | None = None
+        self._jwk_set_fingerprint: str | None = None
+        if jwk_set_observer is not None:
+            self.add_jwk_set_observer(jwk_set_observer)
 
         if cache_jwk_set:
             # Init jwt set cache with default or given lifespan.
@@ -222,7 +246,102 @@ class PyJWKClient:
         if fetched and self.jwk_set_cache is not None:
             self.jwk_set_cache.put(jwk_set)
 
+        self._observe_jwk_set(jwk_set)
         return jwk_set
+
+    def add_jwk_set_observer(self, observer: JWKSetObserver) -> JWKSetObserver:
+        """Register *observer* to be notified of accepted JWK Set changes.
+
+        Observers are called once per accepted set whose contents differ from
+        the previously accepted set. Registering the same observer more than
+        once has no additional effect.
+
+        :param observer: A callable accepting a :class:`~jwt.JWKSetUpdate`.
+        :returns: The registered observer, so this method can also be used as
+            a decorator.
+        """
+        if not callable(observer):
+            raise TypeError("JWK Set observer must be callable")
+
+        with self._observer_lock:
+            if all(item[0] is not observer for item in self._jwk_set_observers):
+                self._jwk_set_observers.append(
+                    (observer, observer_identifier(observer))
+                )
+
+        return observer
+
+    def remove_jwk_set_observer(self, observer: JWKSetObserver) -> None:
+        """Unregister *observer*; unknown observers are ignored."""
+        with self._observer_lock:
+            self._jwk_set_observers = [
+                item for item in self._jwk_set_observers if item[0] is not observer
+            ]
+
+    @property
+    def jwk_set_observers(self) -> tuple[JWKSetObserver, ...]:
+        """The currently registered JWK Set observers."""
+        with self._observer_lock:
+            return tuple(observer for observer, _ in self._jwk_set_observers)
+
+    def _observe_jwk_set(self, jwk_set: PyJWKSet) -> None:
+        with self._observer_lock:
+            if not self._jwk_set_observers:
+                # Without observers there is nothing to report, so skip the
+                # fingerprinting work entirely.
+                return
+
+        snapshot = snapshot_jwk_set(jwk_set)
+        fingerprint = set_fingerprint(snapshot)
+
+        with self._observer_lock:
+            previous = self._jwk_set_snapshot
+            previous_fingerprint = self._jwk_set_fingerprint
+            self._jwk_set_snapshot = snapshot
+            self._jwk_set_fingerprint = fingerprint
+
+            if previous is None or previous_fingerprint is None:
+                return
+
+            if fingerprint == previous_fingerprint:
+                return
+
+            added, removed, replaced = diff_jwk_sets(previous, snapshot)
+            if not (added or removed or replaced):
+                return
+
+            update = JWKSetUpdate(
+                fingerprint=fingerprint,
+                previous_fingerprint=previous_fingerprint,
+                added=added,
+                removed=removed,
+                replaced=replaced,
+            )
+            observers = tuple(self._jwk_set_observers)
+
+        logger.info(
+            "JWK Set updated (previous %s, current %s): %s",
+            previous_fingerprint,
+            fingerprint,
+            update.to_dict(),
+        )
+
+        # Observers run outside the lock so a slow callback cannot serialize
+        # unrelated JWKS reads. The baseline has already advanced, so each
+        # accepted change is still reported exactly once.
+        for observer, observer_id in observers:
+            try:
+                observer(update)
+            except Exception:
+                # Observation is auxiliary: a broken monitoring callback must
+                # not turn a usable key set into an authentication failure.
+                # ``exc_info`` is deliberately omitted because an arbitrary
+                # callback traceback can contain key material.
+                logger.error(
+                    "JWK Set observer %s raised an exception; change details: %s",
+                    observer_id,
+                    update.to_dict(),
+                )
 
     @staticmethod
     def _as_jwk_set_payload(data: Any) -> dict[str, Any]:

@@ -25,6 +25,11 @@ from .exceptions import (
     PyJWKSetError,
     PyJWTError,
 )
+from .jwk_set_change import (
+    JWKSetChangeType,
+    JWKSetKeyChange,
+    JWKSetUpdate,
+)
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
 
@@ -49,6 +54,9 @@ __all__ = [
     "PyJWKClient",
     "PyJWK",
     "PyJWKSet",
+    "JWKSetChangeType",
+    "JWKSetKeyChange",
+    "JWKSetUpdate",
     "decode",
     "decode_complete",
     "encode",
