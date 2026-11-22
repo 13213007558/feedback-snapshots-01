@@ -47,6 +47,98 @@ RSpec.describe Pundit::Authorization do
     it "is false when not authorized" do
       expect(controller.pundit_policy_authorized?).to be false
     end
+
+    it "remains true when a denied attempt is rescued" do
+      controller.dispatch(:capture_denial, post)
+      expect(controller.pundit_policy_authorized?).to be true
+    end
+  end
+
+  describe "#pundit_authorization_state" do
+    it "is :not_attempted when neither authorize nor skip_authorization ran" do
+      expect(controller.pundit_authorization_state).to eq :not_attempted
+    end
+
+    it "is :authorized after a passing check" do
+      controller.authorize(post, :show?)
+      expect(controller.pundit_authorization_state).to eq :authorized
+    end
+
+    it "is :attempted after a denied check" do
+      expect { controller.authorize(post, :destroy?) }.to raise_error(Pundit::NotAuthorizedError)
+      expect(controller.pundit_authorization_state).to eq :attempted
+    end
+
+    it "is :skipped after an explicit bypass" do
+      controller.skip_authorization
+      expect(controller.pundit_authorization_state).to eq :skipped
+    end
+
+    it "is :not_attempted again after pundit_reset!" do
+      controller.authorize(post, :show?)
+      controller.pundit_reset!
+      expect(controller.pundit_authorization_state).to eq :not_attempted
+    end
+  end
+
+  describe "#pundit_policy_denied?" do
+    it "is false before any check" do
+      expect(controller).not_to be_pundit_policy_denied
+    end
+
+    it "is false after a passing check" do
+      controller.authorize(post, :show?)
+      expect(controller).not_to be_pundit_policy_denied
+    end
+
+    it "stays true after a denied check is retried and passes" do
+      controller.dispatch(:deny_then_authorize, post)
+
+      expect(controller.pundit_authorization_state).to eq :authorized
+      expect(controller).to be_pundit_policy_denied
+    end
+
+    it "is cleared by pundit_reset!" do
+      controller.dispatch(:capture_denial, post)
+      controller.pundit_reset!
+
+      expect(controller).not_to be_pundit_policy_denied
+    end
+  end
+
+  describe "authorization state across controller requests" do
+    it "keeps :authorized when a denial is retried with a passing check" do
+      result = controller.dispatch(:deny_then_authorize, post)
+
+      expect(result).to eq :full_page
+      expect(controller.restricted).to be_nil
+      expect(controller.pundit_authorization_state).to eq :authorized
+      expect(controller).to be_pundit_policy_denied
+      expect(controller).not_to be_pundit_policy_skipped
+      expect { controller.verify_authorized }.not_to raise_error
+    end
+
+    it "stays :attempted when the action rescues the denial" do
+      result = controller.dispatch(:capture_denial, post)
+
+      expect(result).to eq :restricted_page
+      expect(controller.restricted).to be true
+      expect(controller.pundit_authorization_state).to eq :attempted
+      expect(controller).to be_pundit_policy_denied
+      expect(controller).not_to be_pundit_policy_skipped
+      expect { controller.verify_authorized }.not_to raise_error
+    end
+
+    it "records :skipped for an explicit bypass" do
+      result = controller.dispatch(:explicit_skip, post)
+
+      expect(result).to eq :skipped_page
+      expect(controller.restricted).to be_nil
+      expect(controller.pundit_authorization_state).to eq :skipped
+      expect(controller).to be_pundit_policy_skipped
+      expect(controller).not_to be_pundit_policy_denied
+      expect { controller.verify_authorized }.not_to raise_error
+    end
   end
 
   describe "#pundit_policy_scoped?" do

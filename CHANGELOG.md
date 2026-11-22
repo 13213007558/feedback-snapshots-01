@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `Pundit::Authorization#pundit_authorization_state`, `#pundit_policy_denied?` and `#pundit_policy_skipped?` to tell a denied attempt (`:attempted`) apart from a granted check (`:authorized`) and an explicit bypass (`:skipped`). A denial stays visible through `pundit_policy_denied?` even when the action retries and succeeds. `verify_authorized` and `pundit_policy_authorized?` keep their existing behaviour.
 - Add support for `params.expect` using `expected_parameters` and `expected_parameters_for`. [#855](https://github.com/varvet/pundit/pull/855)
 
 ### Deprecated

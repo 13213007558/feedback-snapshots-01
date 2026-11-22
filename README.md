@@ -408,6 +408,39 @@ def show
 end
 ```
 
+### Tracking the authorization outcome
+
+`pundit_policy_authorized?` only tells you that a check ran; it is true both for
+a granted check and for an explicit skip. When an action rescues
+`Pundit::NotAuthorizedError` (for example to render a restricted page), the
+request still counts as verified, so the boolean alone cannot tell a denied
+attempt from a granted permission.
+
+Use `pundit_authorization_state` when you need to distinguish these outcomes,
+for example for auditing:
+
+| State | Meaning |
+| --- | --- |
+| `:not_attempted` | neither `authorize` nor `skip_authorization` ran |
+| `:attempted` | a check ran and was denied; the action continued after rescuing the error |
+| `:authorized` | the most recent check passed |
+| `:skipped` | the action explicitly bypassed authorization |
+
+```ruby
+def show
+  authorize @post
+rescue Pundit::NotAuthorizedError
+  audit("show denied", state: pundit_authorization_state) # => :attempted
+  render :restricted, status: :forbidden
+end
+```
+
+The state reflects the most recent check in the request: a denial that is
+retried with a passing check ends in `:authorized`. `pundit_policy_denied?`
+records whether any check in the request was denied, so that failed retry is
+still visible to audit, and `pundit_policy_skipped?` reports an explicit bypass.
+`pundit_reset!` clears the state and denial flag along with the policy caches.
+
 ## Manually specifying policy classes
 
 Sometimes you might want to explicitly declare which policy to use for a given

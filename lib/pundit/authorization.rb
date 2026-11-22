@@ -68,6 +68,7 @@ module Pundit
       @_pundit_policies = nil
       @_pundit_policy_scopes = nil
       @_pundit_policy_authorized = nil
+      @_pundit_policy_denied = nil
       @_pundit_policy_scoped = nil
     end
 
@@ -77,6 +78,16 @@ module Pundit
     # and current user and finally throwing an error if the user is not
     # authorized to perform the given action.
     #
+    # The authorization state is recorded as `:attempted` before the policy is
+    # checked and only promoted to `:authorized` once the check passes. If the
+    # check is denied and the controller rescues the error (for example to
+    # render a restricted page), the state stays `:attempted` so it cannot be
+    # mistaken for a successful authorization.
+    #
+    # A denial also sets a flag that survives later checks in the same request,
+    # so retrying with a permission that passes still leaves evidence of the
+    # failed attempt for auditing.
+    #
     # @param record [Object, Array] the object we're checking permissions of
     # @param query [Symbol, String] the predicate method to check on the policy (e.g. `:show?`).
     #   If omitted then this defaults to the Rails controller action name.
@@ -84,32 +95,96 @@ module Pundit
     # @raise [NotAuthorizedError] if the given query method returned false
     # @return [record] Always returns the passed object record
     # @see Pundit::Context#authorize
+    # @see #pundit_authorization_state
+    # @see #pundit_policy_denied?
     # @see #verify_authorized
     # @since v0.1.0
     def authorize(record, query = nil, policy_class: nil)
       query ||= "#{action_name}?"
 
-      @_pundit_policy_authorized = true
+      @_pundit_policy_authorized = :attempted
 
-      pundit.authorize(record, query: query, policy_class: policy_class)
+      result = pundit.authorize(record, query: query, policy_class: policy_class)
+
+      @_pundit_policy_authorized = :authorized
+
+      result
+    rescue NotAuthorizedError
+      @_pundit_policy_denied = true
+      raise
     end
 
     # Allow this action not to perform authorization.
     #
+    # This records `:skipped`, which is distinct from `:authorized`, so audit
+    # code can tell a deliberate bypass from a granted permission.
+    #
     # @see https://github.com/varvet/pundit#ensuring-policies-and-scopes-are-used
     # @return [void]
+    # @see #pundit_authorization_state
     # @see #verify_authorized
     # @since v1.0.0
     def skip_authorization
       @_pundit_policy_authorized = :skipped
     end
 
-    # @return [Boolean] wether or not authorization has been performed
+    # The outcome of the most recent authorization check in this request.
+    #
+    # - `:not_attempted` - neither {#authorize} nor {#skip_authorization} ran.
+    # - `:attempted` - a check ran but did not pass; this stays the state when
+    #   {NotAuthorizedError} is rescued by the controller.
+    # - `:authorized` - the most recent check passed.
+    # - `:skipped` - the action explicitly bypassed authorization.
+    #
+    # A successful check after an earlier denied attempt ends in
+    # `:authorized`, whereas a denied attempt that is rescued and not retried
+    # ends in `:attempted`.
+    #
+    # @return [Symbol] one of `:not_attempted`, `:attempted`, `:authorized`, `:skipped`
     # @see #authorize
     # @see #skip_authorization
+    # @see #pundit_policy_authorized?
+    # @since v2.6.0
+    def pundit_authorization_state
+      @_pundit_policy_authorized || :not_attempted
+    end
+
+    # @return [Boolean] whether authorization has been performed
+    #
+    # This keeps the historical meaning used by {#verify_authorized}: a check
+    # that ran (whether it passed or was rescued after being denied) and an
+    # explicit skip both count as performed. Use {#pundit_authorization_state}
+    # or {#pundit_policy_skipped?} when audit needs to distinguish a granted
+    # permission from a failed attempt or a deliberate bypass.
+    #
+    # @see #authorize
+    # @see #skip_authorization
+    # @see #pundit_authorization_state
     # @since v1.0.0
     def pundit_policy_authorized?
-      !!@_pundit_policy_authorized
+      pundit_authorization_state != :not_attempted
+    end
+
+    # @return [Boolean] whether a check was denied during this request
+    #
+    # Unlike {#pundit_authorization_state}, which reflects the most recent
+    # check, this stays true once any {#authorize} call has been denied. That
+    # keeps a failed attempt visible to audit even when the action rescues it
+    # and retries with a permission that passes.
+    #
+    # @see #authorize
+    # @see #pundit_authorization_state
+    # @since v2.6.0
+    def pundit_policy_denied?
+      !!@_pundit_policy_denied
+    end
+
+    # @return [Boolean] whether the action explicitly bypassed authorization
+    # @see #skip_authorization
+    # @see #pundit_authorization_state
+    # @since v2.6.0
+    def pundit_policy_skipped?
+      pundit_authorization_state == :skipped
     end
 
     # Raises an error if authorization has not been performed.
