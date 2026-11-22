@@ -36,6 +36,35 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("databases")
 
 
+async def _run_to_completion(coro: typing.Coroutine) -> None:
+    """
+    Run cleanup code to completion, even if the surrounding task is
+    cancelled while the cleanup is in progress.
+
+    Cancellation requests arriving during the cleanup are deferred and
+    re-raised once the cleanup has finished, so that connection rollback
+    and release always run fully and in the correct order.
+    """
+    task = asyncio.ensure_future(coro)
+    deferred_cancel: typing.Optional[asyncio.CancelledError] = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            if task.done():
+                # The cleanup task itself was cancelled or failed.
+                if not task.cancelled():
+                    exception = task.exception()
+                    if exception is not None:
+                        raise exception
+                raise
+            if deferred_cancel is None:
+                deferred_cancel = exc
+    if deferred_cancel is not None:
+        raise deferred_cancel
+
+
 _ACTIVE_TRANSACTIONS: ContextVar[
     typing.Optional["weakref.WeakKeyDictionary['Transaction', 'TransactionBackend']"]
 ] = ContextVar("databases:active_transactions", default=None)
@@ -277,8 +306,37 @@ class Connection:
             assert self._connection is not None
             self._connection_counter -= 1
             if self._connection_counter == 0:
-                await self._connection.release()
-                self._database._connection = None
+                try:
+                    # The connection exit owns the recovery flow: any
+                    # transactions left open by a cancelled or failed task
+                    # are rolled back, then the raw connection is released.
+                    # The cleanup runs to completion even if this task is
+                    # being cancelled.
+                    await _run_to_completion(self._dispose_connection())
+                finally:
+                    # Whatever happens, this Connection is never handed out
+                    # again, so the next task gets a clean connection or an
+                    # explicit failure rather than a connection in an
+                    # unknown transaction state.
+                    self._database._connection = None
+
+    async def _dispose_connection(self) -> None:
+        """
+        Roll back any leftover transactions and release the raw connection.
+
+        Rollback always happens before release, so a connection never
+        re-enters the pool with an active transaction. If the rollback
+        fails, the connection is in an unknown transaction state: it is
+        abandoned rather than released back into the pool, and the error
+        propagates to make the failure explicit.
+        """
+        while self._transaction_stack:
+            transaction = self._transaction_stack.pop()
+            backend_transaction = transaction._transaction
+            transaction._transaction = None
+            if backend_transaction is not None:
+                await backend_transaction.rollback()
+        await self._connection.release()
 
     async def fetch_all(
         self,
@@ -451,29 +509,50 @@ class Transaction:
         async with self._connection._transaction_lock:
             is_root = not self._connection._transaction_stack
             await self._connection.__aenter__()
-            await self._transaction.start(
-                is_root=is_root, extra_options=self._extra_options
-            )
+            try:
+                await self._transaction.start(
+                    is_root=is_root, extra_options=self._extra_options
+                )
+            except BaseException:
+                # Balance the connection acquire above, otherwise the
+                # connection leaks when the task is cancelled here.
+                await self._connection.__aexit__()
+                self._transaction = None
+                raise
             self._connection._transaction_stack.append(self)
         return self
 
     async def commit(self) -> None:
         async with self._connection._transaction_lock:
             assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
             assert self._transaction is not None
-            await self._transaction.commit()
-            await self._connection.__aexit__()
-            self._transaction = None
+            try:
+                await self._transaction.commit()
+            except BaseException:
+                # Leave the failed transaction on the stack so that the
+                # connection's exit recovery rolls it back before release.
+                raise
+            else:
+                self._connection._transaction_stack.pop()
+                self._transaction = None
+            finally:
+                await self._connection.__aexit__()
 
     async def rollback(self) -> None:
         async with self._connection._transaction_lock:
             assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
             assert self._transaction is not None
-            await self._transaction.rollback()
-            await self._connection.__aexit__()
-            self._transaction = None
+            try:
+                await self._transaction.rollback()
+            except BaseException:
+                # Leave the failed transaction on the stack so that the
+                # connection's exit recovery rolls it back before release.
+                raise
+            else:
+                self._connection._transaction_stack.pop()
+                self._transaction = None
+            finally:
+                await self._connection.__aexit__()
 
 
 class _EmptyNetloc(str):

@@ -151,4 +151,19 @@ async with database.transaction(isolation="serializable"):
     ...
 ```
 
+## Task cancellation
+
+If a task is cancelled while it holds a connection — for example when a
+query timeout cancels the surrounding `asyncio` task — the connection's
+exit flow takes care of recovery before the connection can be reused:
+
+* Any transactions still open on the connection are rolled back first.
+* The raw connection is only released back to the pool afterwards, so it
+  never re-enters the pool with an active transaction.
+* The cleanup runs to completion even if further cancellation arrives
+  while it is in progress.
+* If the cleanup itself fails, the error is raised explicitly and the
+  connection is discarded instead of being released, so the next task
+  gets a fresh connection rather than one in an unknown state.
+
 [starlette]: https://github.com/encode/starlette

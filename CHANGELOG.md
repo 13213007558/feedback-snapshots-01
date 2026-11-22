@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Fixed
+
+* Recover connections deterministically when a task is cancelled: leftover
+  transactions are rolled back before the connection is released, the
+  cleanup runs to completion under cancellation, and a connection whose
+  cleanup fails is discarded with an explicit error instead of being
+  reused by the next task.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed
