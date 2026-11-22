@@ -171,6 +171,42 @@ The `erase` method also supports additional flags for more advanced and flexible
     --8<-- "examples/data_masking/src/output_custom_masking.json"
     ```
 
+#### Combining whole-field erases with approved sub-field rules
+
+When a rule erases a whole dictionary or array, you can still register approved masking rules on
+sub-fields underneath it. The rules are resolved against the original data in a single pass, so the
+public result does not depend on the order the rules are registered in.
+
+The conflict policy is:
+
+- **Most specific rule wins.** A rule on a nested field overrides a broader rule on an ancestor
+  container for that field only. The broader rule still erases every other value underneath.
+- **Structure is preserved.** The container keeps its shape; approved sub-fields surface with their
+  own masking while the remaining values are replaced by `*****`. Arrays are handled element by
+  element, including `[*]` and filter expressions.
+- **Failures are explicit and non-destructive.** An invalid path, a missing field (when
+  `raise_on_missing_field` is enabled) or a rule the provider cannot execute raises a
+  `DataMaskingError` before any masked output is returned, and the input data is left untouched.
+  Catch the error and route the original record to a dead-letter queue instead of publishing it.
+
+=== "conflict_resolution_masking.py"
+
+    ```python hl_lines="11 12 13 14 22 26"
+    --8<-- "examples/data_masking/src/conflict_resolution_masking.py"
+    ```
+
+=== "Input example"
+
+    ```json
+    --8<-- "examples/data_masking/src/conflict_resolution_input.json"
+    ```
+
+=== "Public result (identical for any rule registration order)"
+
+    ```json hl_lines="5 6 11 15 20"
+    --8<-- "examples/data_masking/src/conflict_resolution_output.json"
+    ```
+
 ### Encrypting data
 
 ???+ note "About static typing and encryption"

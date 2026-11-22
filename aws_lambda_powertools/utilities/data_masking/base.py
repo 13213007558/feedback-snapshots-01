@@ -450,6 +450,11 @@ class DataMasking:
         """
         Apply masking rules to data, supporting both simple field names and complex path expressions.
 
+        Rules are resolved against the original data first and applied in a single pass, so the
+        result does not depend on the order rules are registered in. When several rules match the
+        same node (for example a whole-field erase and an approved masking rule on a sub-field),
+        the most specific rule wins and broader rules leave the subtree owned by that rule alone.
+
         Args:
             data: The dictionary containing data to mask
             masking_rules: Dictionary mapping field names or path expressions to masking rules
@@ -460,6 +465,9 @@ class DataMasking:
         # Same as the fields path: JSON strings are parsed so path expressions can be resolved
         result = deepcopy(self._normalize_data_to_parse(data) if isinstance(data, str) else data)
 
+        # Resolve every rule against the original data and pick a single owner per concrete path.
+        # Ownership is decided by specificity (depth of the matched node), not by iteration order.
+        owners: dict[str, tuple[Any, int, str]] = {}
         for path, rule in masking_rules.items():
             try:
                 jsonpath_expr = parse(f"$.{path}")
@@ -475,20 +483,64 @@ class DataMasking:
                 continue
 
             for match in matches:
-                value = match.value
-                if value is None:
-                    continue
+                concrete_path = str(match.full_path)
+                rule_depth = concrete_path.count(".")
+                current = owners.get(concrete_path)
+                if current is None or rule_depth > current[1] or (rule_depth == current[1] and path < current[2]):
+                    owners[concrete_path] = (rule, rule_depth, path)
 
-                try:
-                    # the provider recurses into dicts and lists; str() here would mask the Python repr instead
-                    masked_value = self.provider.erase(value, **rule)
-                    match.full_path.update(result, masked_value)
-                except DataMaskingError:
-                    raise
-                except Exception as exc:
-                    raise DataMaskingError(f"Failed to mask field at path: {path}") from exc
-
+        result = self._apply_rule_owners(result, owners, inherited=None)
         return result
+
+    def _apply_rule_owners(
+        self,
+        data: Any,
+        owners: dict[str, tuple[Any, int, str]],
+        inherited: tuple[Any, int, str] | None,
+        path: str = "",
+    ) -> Any:
+        """
+        Recursively apply the resolved rule owners to a node.
+
+        A rule matching a node becomes the active rule for its whole subtree; a more specific rule
+        on a descendant overrides it for that descendant only. Containers keep their structure and
+        the active rule reaches the leaves underneath, so a whole-field erase still masks every
+        value while approved sub-field rules surface in the same public result.
+        """
+        active = owners.get(path, inherited)
+
+        if isinstance(data, dict):
+            return {
+                key: self._apply_rule_owners(
+                    value,
+                    owners,
+                    active,
+                    f"{path}.{key}" if path else key,
+                )
+                for key, value in data.items()
+            }
+
+        if isinstance(data, list):
+            return [
+                self._apply_rule_owners(item, owners, active, f"{path}.[{index}]" if path else f"[{index}]")
+                for index, item in enumerate(data)
+            ]
+
+        if data is None or active is None:
+            return data
+
+        rule = active[0]
+        return self._call_provider_erase(data, rule, path)
+
+    def _call_provider_erase(self, value: Any, rule: dict, path: str) -> Any:
+        """Run one resolved rule on a value, turning any provider failure into a DataMaskingError."""
+        try:
+            # the provider recurses into dicts and lists; str() here would mask the Python repr instead
+            return self.provider.erase(value, **rule)
+        except DataMaskingError:
+            raise
+        except Exception as exc:
+            raise DataMaskingError(f"Failed to mask field at path: {path}") from exc
 
     def _mask_nested_field(self, data: dict, field_path: str, mask_function):
         keys = field_path.split(".")

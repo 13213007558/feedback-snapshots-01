@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import enum
 import json
 
@@ -657,3 +658,105 @@ def test_erase_enum_value(data_masker):
     # THEN only the member value is considered and masked, no class internals leak into the output
     assert result == {"status": DATA_MASKING_STRING, "other": "keep"}
     assert prepare_data(data) == {"status": "active-token", "other": "keep"}
+
+
+def _support_ticket_data():
+    return {
+        "ticket_id": "T-1001",
+        "customer": {
+            "name": "Jane Doe",
+            "contact": {"email": "jane@example.com", "phone": "555-1234"},
+        },
+        "notes": [
+            {"id": 1, "text": "login issue", "author_email": "agent1@example.com"},
+            {"id": 2, "text": "resolved", "author_email": "agent2@example.com"},
+        ],
+    }
+
+
+def _support_ticket_rules():
+    # Whole-field erase rules plus a few approved, more specific masking rules
+    return {
+        "customer": {},
+        "notes": {},
+        "customer.contact.email": {"regex_pattern": r"(.)(.*)(@.*)", "mask_format": r"\1****\3"},
+        "notes[*].author_email": {"custom_mask": "****@example.com"},
+    }
+
+
+def test_erase_masking_rules_conflict_specific_rule_wins_on_nested_object_and_arrays(data_masker):
+    # GIVEN a work order with nested objects and arrays, and erase rules on whole containers
+    # AND approved masking rules on a few sub-fields underneath them
+    data = _support_ticket_data()
+
+    # WHEN the rules are applied
+    result = data_masker.erase(data, masking_rules=_support_ticket_rules())
+
+    # THEN the container structure is kept, unapproved leaves are erased, and the approved
+    # sub-fields surface with their own masking instead of being erased by the parent rule
+    assert result == {
+        "ticket_id": "T-1001",
+        "customer": {
+            "name": DATA_MASKING_STRING,
+            "contact": {"email": "j****@example.com", "phone": DATA_MASKING_STRING},
+        },
+        "notes": [
+            {"id": DATA_MASKING_STRING, "text": DATA_MASKING_STRING, "author_email": "****@example.com"},
+            {"id": DATA_MASKING_STRING, "text": DATA_MASKING_STRING, "author_email": "****@example.com"},
+        ],
+    }
+
+
+def test_erase_masking_rules_result_is_independent_of_registration_order(data_masker):
+    # GIVEN the same input and the same rules
+    data = _support_ticket_data()
+    rules = _support_ticket_rules()
+
+    # WHEN the rules are registered in opposite orders (broad rules first vs specific rules first)
+    broad_first = data_masker.erase(copy.deepcopy(data), masking_rules=rules)
+    specific_first = data_masker.erase(copy.deepcopy(data), masking_rules=dict(reversed(list(rules.items()))))
+
+    # THEN both runs return the identical public result
+    assert broad_first == specific_first
+    assert broad_first == {
+        "ticket_id": "T-1001",
+        "customer": {
+            "name": DATA_MASKING_STRING,
+            "contact": {"email": "j****@example.com", "phone": DATA_MASKING_STRING},
+        },
+        "notes": [
+            {"id": DATA_MASKING_STRING, "text": DATA_MASKING_STRING, "author_email": "****@example.com"},
+            {"id": DATA_MASKING_STRING, "text": DATA_MASKING_STRING, "author_email": "****@example.com"},
+        ],
+    }
+
+
+def test_erase_masking_rules_failure_keeps_original_data_untouched(data_masker):
+    # GIVEN work order data and an invalid rule that the provider cannot execute
+    data = _support_ticket_data()
+    original = copy.deepcopy(data)
+    rules = {
+        "customer": {},
+        "customer.contact.email": {"regex_pattern": r"[", "mask_format": r"\1"},
+    }
+
+    # WHEN applying the rules
+    with pytest.raises(DataMaskingError, match="Invalid regex pattern"):
+        data_masker.erase(data, masking_rules=rules)
+
+    # THEN the failure is explicit and the input data is preserved unchanged
+    assert data == original
+
+
+def test_erase_masking_rules_missing_field_failure_preserves_original_data(data_masker):
+    # GIVEN work order data and a rule pointing at a field that does not exist
+    data = _support_ticket_data()
+    original = copy.deepcopy(data)
+    rules = {"customer": {}, "customer.missing.secret": {"custom_mask": "X"}}
+
+    # WHEN applying the rules
+    with pytest.raises(DataMaskingFieldNotFoundError, match=r"Field or expression customer.missing.secret not found"):
+        data_masker.erase(data, masking_rules=rules)
+
+    # THEN nothing is masked and the caller keeps the original data
+    assert data == original

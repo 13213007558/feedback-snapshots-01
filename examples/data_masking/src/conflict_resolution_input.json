@@ -1,0 +1,22 @@
+{
+    "ticket_id": "T-1001",
+    "customer": {
+        "name": "Jane Doe",
+        "contact": {
+            "email": "jane@example.com",
+            "phone": "555-1234"
+        }
+    },
+    "notes": [
+        {
+            "id": 1,
+            "text": "login issue",
+            "author_email": "agent1@example.com"
+        },
+        {
+            "id": 2,
+            "text": "resolved",
+            "author_email": "agent2@example.com"
+        }
+    ]
+}

@@ -1,0 +1,22 @@
+{
+    "ticket_id": "T-1001",
+    "customer": {
+        "name": "*****",
+        "contact": {
+            "email": "j****@example.com",
+            "phone": "*****"
+        }
+    },
+    "notes": [
+        {
+            "id": "*****",
+            "text": "*****",
+            "author_email": "****@example.com"
+        },
+        {
+            "id": "*****",
+            "text": "*****",
+            "author_email": "****@example.com"
+        }
+    ]
+}
