@@ -52,6 +52,8 @@
 
         .. autoattribute:: do_restore
 
+        .. autoattribute:: requeue_message_callback
+
         .. autoattribute:: exchange_types
 
         .. automethod:: exchange_declare
@@ -119,3 +121,37 @@
         :members:
         :undoc-members:
         :inherited-members:
+
+Redefining requeued messages
+----------------------------
+
+When a message is redelivered -- after ``Message.requeue``,
+``basic_recover(requeue=True)`` or the restore of unacked messages -- the
+``requeue_message_callback`` transport option lets the application decide
+which headers and properties the redelivered message keeps. The callback
+receives the :class:`~kombu.message.Message` being requeued and may return a
+mapping with the optional keys ``headers`` and ``properties``; a returned
+section replaces the corresponding section of the requeued message. The body,
+content type, routing information and tracing attributes such as the
+``correlation_id`` are preserved unless the callback replaces them.
+
+This makes it possible to keep one-shot troubleshooting fields on the first
+delivery only, while the normal correlation id still tracks the task across
+redeliveries:
+
+.. code-block:: python
+
+    TEMPORARY_DEBUG_HEADER = 'x-debug-temp'
+
+    def requeue_message(message):
+        return {
+            'headers': {
+                key: value for key, value in message.headers.items()
+                if key != TEMPORARY_DEBUG_HEADER
+            },
+        }
+
+    connection = Connection(
+        transport='memory',
+        transport_options={'requeue_message_callback': requeue_message},
+    )

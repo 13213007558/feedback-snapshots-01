@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from uuid import uuid4
 
 import pytest
 
@@ -182,3 +183,221 @@ class test_MemoryTransport:
 
         assert self.q3(self.c).get().payload == {'hello': 'on return'}
         assert self.q3(self.c).get() is None
+
+
+TEMPORARY_DEBUG_HEADER = 'x-debug-temp'
+
+
+def _drop_temporary_header(message):
+    return {
+        'headers': {
+            key: value for key, value in message.headers.items()
+            if key != TEMPORARY_DEBUG_HEADER
+        },
+    }
+
+
+class test_RequeueMessageCallback:
+    """Application defined requeue message properties."""
+
+    def setup_method(self):
+        self.connection = Connection(
+            transport='memory',
+            transport_options={
+                'requeue_message_callback': _drop_temporary_header,
+            },
+        )
+        self.channel = self.connection.channel()
+        self.queue_name = f'test_requeue_properties_{uuid4()}'
+        self.exchange = Exchange(self.queue_name)
+        self.queue = Queue(
+            self.queue_name,
+            exchange=self.exchange,
+            routing_key=self.queue_name,
+        )
+        self.queue(self.channel).declare()
+
+    def teardown_method(self):
+        self.connection.close()
+
+    def _publish(self, channel=None, correlation_id='correlation-1'):
+        Producer(channel or self.channel).publish(
+            {'task': 'retry-me'},
+            exchange=self.exchange,
+            routing_key=self.queue_name,
+            headers={
+                TEMPORARY_DEBUG_HEADER: 'first-attempt-only',
+                'x-trace': 'persisted',
+            },
+            correlation_id=correlation_id,
+        )
+
+    def test_first_delivery_keeps_temporary_header(self):
+        self._publish()
+
+        message = self.queue(self.channel).get()
+
+        assert message.headers[TEMPORARY_DEBUG_HEADER] == 'first-attempt-only'
+        assert message.headers['x-trace'] == 'persisted'
+        assert message.properties['correlation_id'] == 'correlation-1'
+        assert message.payload == {'task': 'retry-me'}
+
+    def test_requeue_applies_callback_and_keeps_tracing(self):
+        self._publish()
+
+        first = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER in first.headers
+        first.requeue()
+
+        redelivered = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER not in redelivered.headers
+        assert redelivered.headers == {'x-trace': 'persisted'}
+        assert redelivered.properties['correlation_id'] == 'correlation-1'
+        assert redelivered.payload == {'task': 'retry-me'}
+        assert redelivered.delivery_info['routing_key'] == self.queue_name
+
+    def test_requeue_does_not_mutate_the_original_message(self):
+        self._publish()
+
+        first = self.queue(self.channel).get()
+        first.requeue()
+
+        assert first.headers[TEMPORARY_DEBUG_HEADER] == 'first-attempt-only'
+
+    def test_temporary_header_stays_gone_across_repeated_redeliveries(self):
+        self._publish()
+
+        message = self.queue(self.channel).get()
+        for _ in range(3):
+            message.requeue()
+            message = self.queue(self.channel).get()
+            assert TEMPORARY_DEBUG_HEADER not in message.headers
+            assert message.headers == {'x-trace': 'persisted'}
+            assert message.properties['correlation_id'] == 'correlation-1'
+        message.ack()
+
+    def test_recovery_redelivery_uses_requeue_properties(self):
+        self._publish()
+
+        first = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER in first.headers
+
+        # A broker/connection recovery redelivers the unacked messages.
+        errors = self.channel.basic_recover(requeue=True)
+        assert errors == []
+
+        redelivered = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER not in redelivered.headers
+        assert redelivered.headers == {'x-trace': 'persisted'}
+        assert redelivered.properties['correlation_id'] == 'correlation-1'
+        assert redelivered.payload == {'task': 'retry-me'}
+
+    def test_unacked_restore_uses_requeue_properties(self):
+        self._publish()
+
+        first = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER in first.headers
+
+        # The QoS layer restores every unacked message, e.g. when the
+        # connection is lost and the channel is torn down.
+        errors = self.channel.qos.restore_unacked()
+        assert errors == []
+
+        redelivered = self.queue(self.channel).get()
+        assert TEMPORARY_DEBUG_HEADER not in redelivered.headers
+        assert redelivered.headers == {'x-trace': 'persisted'}
+        assert redelivered.properties['correlation_id'] == 'correlation-1'
+        assert redelivered.payload == {'task': 'retry-me'}
+
+    def test_callback_can_redefine_properties(self):
+        def redefine_properties(message):
+            properties = dict(message.properties)
+            properties['type'] = 'retried-task'
+            return {'properties': properties}
+
+        connection = Connection(
+            transport='memory',
+            transport_options={
+                'requeue_message_callback': redefine_properties,
+            },
+        )
+        channel = connection.channel()
+        queue_name = f'test_requeue_properties_{uuid4()}'
+        exchange = Exchange(queue_name)
+        queue = Queue(queue_name, exchange=exchange, routing_key=queue_name)
+        queue(channel).declare()
+        Producer(channel).publish(
+            {'task': 'retry-me'},
+            exchange=exchange,
+            routing_key=queue_name,
+            correlation_id='correlation-2',
+        )
+
+        first = queue(channel).get()
+        assert first.properties.get('type') is None
+        first.requeue()
+
+        redelivered = queue(channel).get()
+        assert redelivered.properties['type'] == 'retried-task'
+        assert redelivered.properties['correlation_id'] == 'correlation-2'
+        assert redelivered.properties['delivery_info']['routing_key'] == \
+            queue_name
+        assert redelivered.payload == {'task': 'retry-me'}
+        connection.close()
+
+    def test_callback_returning_none_preserves_the_whole_message(self):
+        connection = Connection(
+            transport='memory',
+            transport_options={'requeue_message_callback': lambda m: None},
+        )
+        channel = connection.channel()
+        queue_name = f'test_requeue_properties_{uuid4()}'
+        exchange = Exchange(queue_name)
+        queue = Queue(queue_name, exchange=exchange, routing_key=queue_name)
+        queue(channel).declare()
+        Producer(channel).publish(
+            {'task': 'retry-me'},
+            exchange=exchange,
+            routing_key=queue_name,
+            headers={TEMPORARY_DEBUG_HEADER: 'first-attempt-only'},
+            correlation_id='correlation-1',
+        )
+
+        first = queue(channel).get()
+        first.requeue()
+
+        redelivered = queue(channel).get()
+        assert redelivered.headers[TEMPORARY_DEBUG_HEADER] == \
+            'first-attempt-only'
+        assert redelivered.properties['correlation_id'] == 'correlation-1'
+        assert redelivered.payload == {'task': 'retry-me'}
+        connection.close()
+
+    def test_without_callback_requeue_preserves_the_whole_message(self):
+        connection = Connection(transport='memory')
+        channel = connection.channel()
+        queue_name = f'test_requeue_properties_{uuid4()}'
+        exchange = Exchange(queue_name)
+        queue = Queue(queue_name, exchange=exchange, routing_key=queue_name)
+        queue(channel).declare()
+        Producer(channel).publish(
+            {'task': 'retry-me'},
+            exchange=exchange,
+            routing_key=queue_name,
+            headers={
+                TEMPORARY_DEBUG_HEADER: 'first-attempt-only',
+                'x-trace': 'persisted',
+            },
+            correlation_id='correlation-1',
+        )
+
+        first = queue(channel).get()
+        first.requeue()
+
+        redelivered = queue(channel).get()
+        assert redelivered.headers[TEMPORARY_DEBUG_HEADER] == \
+            'first-attempt-only'
+        assert redelivered.headers['x-trace'] == 'persisted'
+        assert redelivered.properties['correlation_id'] == 'correlation-1'
+        assert redelivered.payload == {'task': 'retry-me'}
+        connection.close()

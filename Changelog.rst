@@ -5,6 +5,23 @@
 ================
 
 
+.. _version-5.7.1:
+
+5.7.1
+=====
+:release-date: TBA
+:release-by:
+
+What's Changed
+~~~~~~~~~~~~~~
+- Virtual transports: add the ``requeue_message_callback`` transport option
+  so applications can define the headers and properties of a requeued
+  message. The callback runs on every redelivery (``Message.requeue``,
+  ``basic_recover(requeue=True)`` and the restore of unacked messages),
+  allowing one-shot troubleshooting fields to be dropped on redelivery while
+  the body and tracing attributes such as the correlation id are preserved.
+
+
 .. _version-5.7.0:
 
 5.7.0

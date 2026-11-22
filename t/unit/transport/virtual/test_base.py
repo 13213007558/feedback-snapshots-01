@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import logging
 import pickle
@@ -416,6 +417,98 @@ class test_Channel:
         assert r3
         assert r3.body == b'nthex quick brown fox...'
         assert c.basic_get(n) is None
+
+    def test_requeue_message_callback_loaded_from_transport_options(self):
+        callback = Mock()
+        connection = client(transport_options={
+            'requeue_message_callback': callback,
+        })
+        channel = connection.channel()
+        try:
+            assert channel.requeue_message_callback is callback
+        finally:
+            channel.qos._on_collect.cancel()
+
+    def test_requeue_payload_without_callback_preserves_message(self):
+        c = memory_client().channel()
+        message = self._message_for_requeue(c)
+
+        payload = c._requeue_payload(message)
+
+        assert payload['redelivered'] is True
+        assert payload['headers'] == message.headers
+        assert payload['properties'] == message.properties
+        assert payload['body'] == message.serializable()['body']
+
+    def test_requeue_payload_callback_replaces_headers(self):
+        c = memory_client().channel()
+        message = self._message_for_requeue(c)
+        c.requeue_message_callback = Mock(return_value={
+            'headers': {'kept': 'yes'},
+        })
+
+        payload = c._requeue_payload(message)
+
+        c.requeue_message_callback.assert_called_once_with(message)
+        assert payload['headers'] == {'kept': 'yes'}
+        assert payload['properties']['correlation_id'] == 'corr-1'
+
+    def test_requeue_payload_callback_replaces_properties(self):
+        c = memory_client().channel()
+        message = self._message_for_requeue(c)
+
+        def callback(_message):
+            properties = dict(_message.properties)
+            properties.pop('priority', None)
+            properties['type'] = 'retried'
+            return {'properties': properties}
+
+        c.requeue_message_callback = callback
+        payload = c._requeue_payload(message)
+
+        assert 'priority' not in payload['properties']
+        assert payload['properties']['type'] == 'retried'
+        assert payload['properties']['correlation_id'] == 'corr-1'
+        assert payload['properties']['delivery_info'] == \
+            message.delivery_info
+        assert payload['properties']['delivery_tag'] == message.delivery_tag
+
+    def test_requeue_payload_callback_does_not_mutate_message(self):
+        c = memory_client().channel()
+        message = self._message_for_requeue(c)
+        original_headers = dict(message.headers)
+        original_properties = dict(message.properties)
+
+        def callback(_message):
+            return {
+                'headers': {'kept': 'yes'},
+                'properties': {
+                    **copy.deepcopy(_message.properties),
+                    'type': 'retried',
+                },
+            }
+
+        payload = c._requeue_payload(message)
+        payload['headers']['kept'] = 'changed'
+        payload['properties']['type'] = 'changed'
+
+        assert message.headers == original_headers
+        assert message.properties == original_properties
+
+    @staticmethod
+    def _message_for_requeue(channel):
+        raw = channel.prepare_message(
+            'requeue me',
+            content_type='text/plain',
+            content_encoding='utf-8',
+            headers={'x-debug-temp': 'trouble'},
+            properties={
+                'correlation_id': 'corr-1',
+                'delivery_info': {'exchange': 'ex', 'routing_key': 'rk'},
+            },
+        )
+        channel._inplace_augment_message(raw, 'ex', 'rk')
+        return channel.Message(raw, channel=channel)
 
     def test_basic_ack(self):
 

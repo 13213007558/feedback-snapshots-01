@@ -6,6 +6,7 @@ Emulates the AMQ API for non-AMQ transports.
 from __future__ import annotations
 
 import base64
+import copy
 import socket
 import warnings
 from array import array
@@ -467,8 +468,19 @@ class Channel(AbstractChannel, base.StdChannel):
     #: Set by ``transport_options['deadletter_queue']``.
     deadletter_queue = None
 
+    #: Optional callback applied to every message while it is requeued
+    #: (reject with requeue, ``basic_recover`` or the restore of unacked
+    #: messages).  It receives the redelivered
+    #: :class:`~kombu.message.Message` and may return a mapping with the
+    #: optional keys ``headers`` and ``properties`` to replace the
+    #: corresponding sections of the requeued message.  Set by
+    #: ``transport_options['requeue_message_callback']``.
+    requeue_message_callback = None
+
     # List of options to transfer from :attr:`transport_options`.
-    from_transport_options = ('body_encoding', 'deadletter_queue')
+    from_transport_options = (
+        'body_encoding', 'deadletter_queue', 'requeue_message_callback',
+    )
 
     # Priority defaults
     default_priority = 0
@@ -746,15 +758,49 @@ class Channel(AbstractChannel, base.StdChannel):
     def _restore(self, message):
         """Redeliver message to its original destination."""
         delivery_info = message.delivery_info
-        message = message.serializable()
-        message['redelivered'] = True
+        payload = self._requeue_payload(message)
         for queue in self._lookup(
             delivery_info['exchange'],
                 delivery_info['routing_key']):
-            self._put(queue, message)
+            self._put(queue, copy.deepcopy(payload))
 
     def _restore_at_beginning(self, message):
         return self._restore(message)
+
+    def _requeue_payload(self, message):
+        """Build the stored payload for a redelivered message.
+
+        The message is deep copied first, so requeuing never mutates the
+        message instance the application is still holding.  When a
+        :attr:`requeue_message_callback` is configured it is given the
+        message being requeued and may return a mapping containing the
+        optional keys ``headers`` and ``properties``; either section that
+        is returned replaces the original one on the requeued message.
+        Everything else (the body, content type and routing information)
+        is preserved, so tracing attributes such as the correlation id
+        keep working across redeliveries.
+        """
+        payload = copy.deepcopy(message.serializable())
+        payload['redelivered'] = True
+        callback = self.requeue_message_callback
+        if callback is None:
+            return payload
+        requeue_attrs = callback(message) or {}
+        if 'headers' in requeue_attrs:
+            payload['headers'] = copy.deepcopy(requeue_attrs['headers'])
+        if 'properties' in requeue_attrs:
+            properties = copy.deepcopy(requeue_attrs['properties'])
+            properties.setdefault(
+                'delivery_info', payload['properties']['delivery_info'],
+            )
+            properties.setdefault(
+                'delivery_tag', payload['properties']['delivery_tag'],
+            )
+            properties.setdefault(
+                'body_encoding', payload['properties'].get('body_encoding'),
+            )
+            payload['properties'] = properties
+        return payload
 
     def drain_events(self, timeout=None, callback=None):
         callback = callback or self.connection._deliver
