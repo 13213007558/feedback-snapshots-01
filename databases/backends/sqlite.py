@@ -152,7 +152,14 @@ class SQLiteConnection(ConnectionBackend):
 
         async with self._connection.execute(query_str, args) as cursor:
             metadata = CursorResultMetaData(context, cursor.description)
-            async for row in cursor:
+            # Fetch a single row at a time so that iteration can be paused or
+            # abandoned without reading beyond the rows delivered to the
+            # caller.  aiosqlite's chunked cursor iterator would otherwise
+            # prefetch up to `iter_chunk_size` rows.
+            while True:
+                row = await cursor.fetchone()
+                if row is None:
+                    break
                 record = Row(
                     metadata,
                     metadata._processors,

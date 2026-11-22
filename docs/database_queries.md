@@ -104,10 +104,15 @@ row = await database.fetch_one(query=query)
 query = notes.select()
 value = await database.fetch_val(query=query)
 
-# Fetch multiple rows without loading them all into memory at once
+# Fetch multiple rows without loading them all into memory at once.
+# Use `aclose()` (or `async with`) to stop early without draining the cursor.
 query = notes.select()
-async for row in database.iterate(query=query):
-    ...
+stream = database.iterate(query=query)
+try:
+    async for row in stream:
+        ...
+finally:
+    await stream.aclose()
 
 # Close all connections in the connection pool
 await database.disconnect()
@@ -164,3 +169,45 @@ result._mapping['id']  # Access field via mapping
 ```
 
 [sqlalchemy-mapping-changes]: https://docs.sqlalchemy.org/en/14/changelog/migration_14.html#rowproxy-is-no-longer-a-proxy-is-now-called-row-and-behaves-like-an-enhanced-named-tuple
+
+
+## Streaming query audit
+
+`iterate()` accepts an optional `audit=` hook.  It receives exactly one
+value-free record per streamed query, describing the query template, elapsed
+time, and the number of rows actually delivered to the caller:
+
+```python
+from databases import Database, QueryAudit
+
+async def report(event: QueryAudit) -> None:
+    # event.query has placeholders, not bound values.
+    print(event.query, event.duration, event.row_count, event.outcome.value)
+
+async with database.iterate(notes.select(), audit=report) as rows:
+    async for row in rows:
+        if row["completed"]:
+            break
+```
+
+The record never contains bound parameter values or result values.  Collecting
+it never reads the remainder of the cursor, so an early exit does not load the
+rest of the result set.
+
+The outcome is one of:
+
+| Outcome | Meaning |
+| --- | --- |
+| `IterationOutcome.COMPLETED` | The caller consumed every row. |
+| `IterationOutcome.CLOSED` | The caller stopped early (break, `aclose()`, cancellation). |
+| `IterationOutcome.FAILED` | Starting or advancing the query raised an error. |
+
+`row_count` counts rows handed to the caller, not rows fetched by the driver.
+A plain `break` is classified as `CLOSED` as soon as the `async for` loop ends.
+For deterministic cleanup of the connection and transaction, prefer
+`async with database.iterate(...) as rows:` or call `await rows.aclose()`.
+
+The hook can be a callable, an object with a `record(event)` method (sync or
+async), a list, a `logging.Logger`, or `True` to use the built-in
+`LoggingAuditRecorder`.  `Database(..., audit=hook)` sets a default for all
+`iterate()` calls on that instance.

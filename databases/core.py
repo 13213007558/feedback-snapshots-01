@@ -11,6 +11,12 @@ from urllib.parse import SplitResult, parse_qsl, unquote, urlsplit
 from sqlalchemy import text
 from sqlalchemy.sql import ClauseElement
 
+from databases.audit import (
+    AuditHook,
+    QueryIteration,
+    close_async_iterator,
+    query_template,
+)
 from databases.importer import import_from_string
 from databases.interfaces import DatabaseBackend, Record, TransactionBackend
 
@@ -58,12 +64,14 @@ class Database:
         url: typing.Union[str, "DatabaseURL"],
         *,
         force_rollback: bool = False,
+        audit: typing.Optional[AuditHook] = None,
         **options: typing.Any,
     ):
         self.url = DatabaseURL(url)
         self.options = options
         self.is_connected = False
         self._connection_map = weakref.WeakKeyDictionary()
+        self._audit = audit
 
         self._force_rollback = force_rollback
 
@@ -204,14 +212,47 @@ class Database:
         async with self.connection() as connection:
             return await connection.execute_many(query, values)
 
-    async def iterate(
+    def iterate(
+        self,
+        query: typing.Union[ClauseElement, str],
+        values: typing.Optional[dict] = None,
+        *,
+        audit: typing.Optional[AuditHook] = None,
+    ) -> QueryIteration:
+        """Stream query results, optionally recording a value-free audit.
+
+        Pass ``audit=`` to receive a single :class:`QueryAudit` describing the
+        query template, elapsed time, delivered row count, and whether the
+        stream completed, was closed early, or failed.  The audit never
+        contains bound parameters or result values, and recording it never
+        reads from the cursor.
+
+        The returned object can be used directly with ``async for``.  For
+        deterministic cleanup after a partial read, either break inside
+        ``async with database.iterate(...) as rows:`` or call
+        ``await rows.aclose()``.
+        """
+        if audit is None:
+            audit = self._audit
+        return QueryIteration(
+            self._iterate_stream(query, values),
+            query_template(query),
+            audit,
+        )
+
+    async def _iterate_stream(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
     ) -> typing.AsyncGenerator[typing.Mapping, None]:
         async with self.connection() as connection:
-            async for record in connection.iterate(query, values):
-                yield record
+            # The outer QueryIteration is responsible for auditing.
+            stream = connection._iterate_stream(query, values)
+            try:
+                async for record in stream:
+                    yield record
+            finally:
+                await close_async_iterator(stream)
 
     def connection(self) -> "Connection":
         if self._global_connection is not None:
@@ -324,7 +365,23 @@ class Connection:
         async with self._query_lock:
             await self._connection.execute_many(queries)
 
-    async def iterate(
+    def iterate(
+        self,
+        query: typing.Union[ClauseElement, str],
+        values: typing.Optional[dict] = None,
+        *,
+        audit: typing.Optional[AuditHook] = None,
+    ) -> QueryIteration:
+        if audit is None:
+            audit = self._database._audit
+        built_query = self._build_query(query, values)
+        return QueryIteration(
+            self._iterate_stream(built_query),
+            query_template(built_query),
+            audit,
+        )
+
+    async def _iterate_stream(
         self,
         query: typing.Union[ClauseElement, str],
         values: typing.Optional[dict] = None,
@@ -332,8 +389,13 @@ class Connection:
         built_query = self._build_query(query, values)
         async with self.transaction():
             async with self._query_lock:
-                async for record in self._connection.iterate(built_query):
-                    yield record
+                iterator = self._connection.iterate(built_query)
+                try:
+                    async for record in iterator:
+                        yield record
+                finally:
+                    # Closing does not read: the remaining rows are dropped.
+                    await close_async_iterator(iterator)
 
     def transaction(
         self, *, force_rollback: bool = False, **kwargs: typing.Any
