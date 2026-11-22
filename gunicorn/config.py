@@ -52,6 +52,7 @@ class Config:
         self.settings = make_settings()
         self._forwarded_allow_networks = None
         self._proxy_allow_networks = None
+        self._http2_cleartext_networks = None
         self.usage = usage
         self.prog = prog or os.path.basename(sys.argv[0])
         self.env_orig = os.environ.copy()
@@ -221,6 +222,16 @@ class Config:
                 if addr != "*"
             ]
         return self._proxy_allow_networks
+
+    def http2_cleartext_listener_networks(self):
+        """Cached networks for http2_cleartext_listeners (internal use)."""
+        if self._http2_cleartext_networks is None:
+            self._http2_cleartext_networks = [
+                ipaddress.ip_network(addr)
+                for addr in self.http2_cleartext_listeners
+                if addr != "*"
+            ]
+        return self._http2_cleartext_networks
 
     @property
     def ssl_options(self):
@@ -2614,6 +2625,40 @@ class HTTP2Cleartext(Setting):
         there HTTP/2 is negotiated by ALPN.
 
         .. versionadded:: 26.2.0
+        """
+
+
+class HTTP2CleartextListeners(Setting):
+    name = "http2_cleartext_listeners"
+    section = "HTTP/2"
+    cli = ["--http2-cleartext-listeners"]
+    meta = "STRING"
+    validator = validate_string_to_addr_list
+    default = "127.0.0.1,::1"
+    desc = """\
+        Restrict cleartext HTTP/2 (h2c) to the local listeners whose address
+        matches this list (comma-separated IP addresses or CIDR networks).
+
+        Cleartext HTTP/2 is only ever meant for the internal, trusted side of
+        a deployment (the link to a TLS-terminating proxy or a loopback
+        debugging port). This setting scopes it to the listeners gunicorn
+        actually binds, independently of which peer connects: a listener on a
+        public or otherwise unlisted address never negotiates h2c, even when
+        ``http2_cleartext`` is enabled and the peer is in
+        ``forwarded_allow_ips``. Connections there are served HTTP/1.x
+        exactly as if cleartext HTTP/2 were off.
+
+        The default, ``127.0.0.1,::1``, limits h2c to loopback listeners.
+        UNIX domain socket listeners are always allowed: they carry no IP
+        address and are local IPC, not a network interface. Set to ``*`` to
+        permit h2c on every listener, for example when a private network
+        address is firewalled by other means; prefer an explicit list.
+
+        Applies to both prior-knowledge and ``Upgrade: h2c`` negotiation. It
+        does not affect TLS: with ``certfile`` configured, HTTP/2 continues
+        to be negotiated by ALPN on every listener regardless of this list.
+
+        .. versionadded:: 27.1.0
         """
 
 

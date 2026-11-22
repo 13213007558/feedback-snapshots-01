@@ -82,6 +82,47 @@ class TestHttpProtocolsConfig:
             c.set("http_protocols", "h1,invalid,h2")
 
 
+class TestHttp2CleartextListeners:
+    """Test the http2_cleartext_listeners setting."""
+
+    def test_default_is_loopback(self):
+        c = Config()
+        assert c.http2_cleartext_listeners == ["127.0.0.1", "::1"]
+
+    def test_set_single_address(self):
+        c = Config()
+        c.set("http2_cleartext_listeners", "127.0.0.1")
+        assert c.http2_cleartext_listeners == ["127.0.0.1"]
+
+    def test_set_addresses_and_networks(self):
+        c = Config()
+        c.set("http2_cleartext_listeners", "127.0.0.1,10.0.0.0/8,::1")
+        assert c.http2_cleartext_listeners == [
+            "127.0.0.1", "10.0.0.0/8", "::1"]
+
+    def test_wildcard_is_accepted(self):
+        c = Config()
+        c.set("http2_cleartext_listeners", "*")
+        assert c.http2_cleartext_listeners == ["*"]
+
+    def test_malformed_entry_raises(self):
+        c = Config()
+        with pytest.raises(ValueError):
+            c.set("http2_cleartext_listeners", "not-an-address")
+
+    def test_network_with_host_bits_raises(self):
+        c = Config()
+        with pytest.raises(ValueError):
+            c.set("http2_cleartext_listeners", "192.168.1.1/24")
+
+    def test_cached_networks_exclude_wildcard(self):
+        c = Config()
+        c.set("http2_cleartext_listeners", "10.0.0.0/8,*")
+        import ipaddress
+        assert c.http2_cleartext_listener_networks() == [
+            ipaddress.ip_network("10.0.0.0/8")]
+
+
 class TestHttp2MaxConcurrentStreams:
     """Test http2_max_concurrent_streams configuration setting."""
 

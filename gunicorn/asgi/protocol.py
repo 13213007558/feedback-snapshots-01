@@ -718,10 +718,13 @@ class ASGIProtocol(asyncio.Protocol):
                 return
 
         peername = transport.get_extra_info('peername')
-        if negotiation.prior_knowledge_allowed(self.cfg, peername):
+        sockname = transport.get_extra_info('sockname')
+        if negotiation.prior_knowledge_allowed(self.cfg, peername, sockname):
             # Cleartext HTTP/2 with prior knowledge. Unlike the sync workers
             # we cannot read here, so commit to neither protocol yet: buffer
             # in data_received() until the preface either matches or cannot.
+            # Listeners outside http2_cleartext_listeners take the HTTP/1
+            # path below instead, regardless of the peer.
             self._is_ssl = False
             self.writer = transport
             self._flow_control = FlowControl(transport)
@@ -763,12 +766,13 @@ class ASGIProtocol(asyncio.Protocol):
         self._request_ready = asyncio.Event()
         self._setup_callback_parser()
         peername = self.transport.get_extra_info('peername')
+        sockname = self.transport.get_extra_info('sockname')
         # Decided once per connection: upgrade needs a parser that can hand
         # back the bytes pipelined behind the request, which gunicorn_h1c
         # gained in 0.6.9. The pip floor is not enforced at runtime, so an
         # older parser means no upgrade rather than silently dropped frames.
         self._h2c_upgrade_ok = (
-            negotiation.upgrade_allowed(self.cfg, peername)
+            negotiation.upgrade_allowed(self.cfg, peername, sockname)
             and hasattr(self._callback_parser, 'remaining')
         )
         self._task = self.worker.loop.create_task(self._handle_connection())

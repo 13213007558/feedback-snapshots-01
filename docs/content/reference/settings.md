@@ -461,6 +461,36 @@ there HTTP/2 is negotiated by ALPN.
 
 !!! info "Added in 26.2.0"
 
+### `http2_cleartext_listeners`
+
+**Command line:** `--http2-cleartext-listeners STRING`
+
+**Default:** `'127.0.0.1,::1'`
+
+Restrict cleartext HTTP/2 (h2c) to the local listeners whose address
+matches this list (comma-separated IP addresses or CIDR networks).
+
+Cleartext HTTP/2 is only ever meant for the internal, trusted side of
+a deployment (the link to a TLS-terminating proxy or a loopback
+debugging port). This setting scopes it to the listeners gunicorn
+actually binds, independently of which peer connects: a listener on a
+public or otherwise unlisted address never negotiates h2c, even when
+``http2_cleartext`` is enabled and the peer is in
+``forwarded_allow_ips``. Connections there are served HTTP/1.x
+exactly as if cleartext HTTP/2 were off.
+
+The default, ``127.0.0.1,::1``, limits h2c to loopback listeners.
+UNIX domain socket listeners are always allowed: they carry no IP
+address and are local IPC, not a network interface. Set to ``*`` to
+permit h2c on every listener, for example when a private network
+address is firewalled by other means; prefer an explicit list.
+
+Applies to both prior-knowledge and ``Upgrade: h2c`` negotiation. It
+does not affect TLS: with ``certfile`` configured, HTTP/2 continues
+to be negotiated by ALPN on every listener regardless of this list.
+
+!!! info "Added in 27.1.0"
+
 ### `http2_max_concurrent_streams`
 
 **Command line:** `--http2-max-concurrent-streams INT`

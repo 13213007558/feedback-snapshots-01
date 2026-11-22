@@ -91,12 +91,15 @@ class TConn:
                     self.parser.initiate_connection()
                     return
 
-            elif negotiation.prior_knowledge_allowed(self.cfg, self.client):
+            elif negotiation.prior_knowledge_allowed(
+                self.cfg, self.client, self.server
+            ):
                 # HTTP/2 cleartext with prior knowledge (RFC 9113 section
                 # 3.4): the client opens a plain TCP connection and sends the
                 # connection preface immediately. Peers outside
-                # forwarded_allow_ips never reach here and are served HTTP/1.x
-                # as if the setting were off.
+                # forwarded_allow_ips, and listeners not in
+                # http2_cleartext_listeners, never reach here and are served
+                # HTTP/1.x as if the setting were off.
                 matched, buf = negotiation.read_preface_blocking(self.sock)
                 if matched:
                     self.is_http2 = True
@@ -544,7 +547,9 @@ class ThreadWorker(base.Worker):
                 return False
 
             settings = None
-            if negotiation.upgrade_allowed(self.cfg, conn.client):
+            if negotiation.upgrade_allowed(
+                self.cfg, conn.client, conn.server
+            ):
                 settings = negotiation.upgrade_settings(req)
             if settings is not None:
                 return self.handle_h2c_upgrade(conn, req, settings)

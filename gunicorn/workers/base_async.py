@@ -52,10 +52,13 @@ class AsyncWorker(base.Worker):
                 self.handle_http2(listener, client, addr)
                 return
 
-            if negotiation.prior_knowledge_allowed(self.cfg, addr):
+            if negotiation.prior_knowledge_allowed(
+                self.cfg, addr, listener.getsockname()
+            ):
                 # HTTP/2 cleartext with prior knowledge (RFC 9113 section
-                # 3.4). Peers outside forwarded_allow_ips never reach here
-                # and are served HTTP/1.x as if the setting were off.
+                # 3.4). Peers outside forwarded_allow_ips, and listeners not
+                # in http2_cleartext_listeners, never reach here and are
+                # served HTTP/1.x as if the setting were off.
                 matched, buf = negotiation.read_preface_blocking(client)
                 if matched:
                     self.handle_http2(listener, client, addr, preface=buf)
@@ -141,7 +144,9 @@ class AsyncWorker(base.Worker):
         taking the buffer before draining it would feed the payload to the
         HTTP/2 state machine as if it were frames.
         """
-        if not negotiation.upgrade_allowed(self.cfg, addr):
+        if not negotiation.upgrade_allowed(
+            self.cfg, addr, listener.getsockname()
+        ):
             return False
         settings = negotiation.upgrade_settings(req)
         if settings is None:

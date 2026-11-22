@@ -106,6 +106,24 @@ preface) is rejected with a 400 rather than silently downgraded, so a
 misconfigured proxy fails loudly instead of quietly losing HTTP/2.
 Untrusted peers are served HTTP/1.1 exactly as if the flag were off.
 
+The peer trust list says *who* may use h2c; `http2_cleartext_listeners` says
+*where* it is offered at all. It names the local listener addresses (IP
+addresses or CIDR networks) on which h2c is negotiated, and defaults to
+loopback (`127.0.0.1,::1`). With several listeners bound - for example a
+loopback debugging port and a public interface - a connection to a listener
+not on the list is served HTTP/1.1 even from a trusted peer, so the
+cleartext protocol cannot appear on the public side. UNIX socket listeners
+are always allowed, and setting the value to `*` permits every listener:
+
+```bash
+gunicorn myapp:app -k gthread --http-protocols h2,h1 \
+    --http2-cleartext prior-knowledge \
+    --http2-cleartext-listeners 127.0.0.1,10.0.0.0/8
+```
+
+This scoping applies to cleartext only. With TLS configured, HTTP/2 is
+negotiated by ALPN on every listener regardless of this list.
+
 Both mechanisms are served by the `gthread`, `gevent` and `asgi`
 workers. Note that with `prior-knowledge` alone a trusted peer sending
 anything else is refused with 400, while with `upgrade` or `both` an

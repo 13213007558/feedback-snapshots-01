@@ -53,6 +53,29 @@ def peer_trusted_for_h2c(cfg, peer_addr):
     )
 
 
+def listener_allows_h2c(cfg, listener_addr):
+    """Whether the listener that accepted this connection permits h2c.
+
+    The peer check in :func:`peer_trusted_for_h2c` says who may speak
+    cleartext HTTP/2; this says where it may be spoken at all. A cleartext
+    HTTP/2 port is an internal facility and must not come up on a public
+    interface just because a trusted proxy happens to connect there. The
+    ``http2_cleartext_listeners`` setting names the local addresses (the
+    result of ``getsockname``) on which h2c is offered.
+
+    A non-tuple address is a UNIX domain socket: local IPC with no network
+    interface, so it is always allowed. A tuple is matched as an IP address or
+    network, with ``*`` permitting every listener.
+    """
+    if not isinstance(listener_addr, tuple):
+        return True
+    return _ip_in_allow_list(
+        listener_addr[0],
+        cfg.http2_cleartext_listeners,
+        cfg.http2_cleartext_listener_networks(),
+    )
+
+
 def _h2c_available(cfg):
     """Whether cleartext HTTP/2 could apply to this server at all.
 
@@ -66,13 +89,17 @@ def _h2c_available(cfg):
     )
 
 
-def prior_knowledge_allowed(cfg, peer_addr):
+def prior_knowledge_allowed(cfg, peer_addr, listener_addr=None):
     """Whether to sniff for the connection preface from this peer.
 
     Deliberately separate from :func:`upgrade_allowed`: enabling one mechanism
-    must not quietly enable the other.
+    must not quietly enable the other. The connection has to arrive on a
+    listener that offers h2c (see :func:`listener_allows_h2c`) as well as
+    from a trusted peer.
     """
     if cfg.http2_cleartext not in ("prior-knowledge", "both"):
+        return False
+    if not listener_allows_h2c(cfg, listener_addr):
         return False
     return _h2c_available(cfg) and peer_trusted_for_h2c(cfg, peer_addr)
 
@@ -88,9 +115,15 @@ def mismatch_is_error(cfg):
     return cfg.http2_cleartext == "prior-knowledge"
 
 
-def upgrade_allowed(cfg, peer_addr):
-    """Whether to honour an ``Upgrade: h2c`` request from this peer."""
+def upgrade_allowed(cfg, peer_addr, listener_addr=None):
+    """Whether to honour an ``Upgrade: h2c`` request from this peer.
+
+    As with prior knowledge, the listener must offer h2c before the peer's
+    trust is even considered.
+    """
     if cfg.http2_cleartext not in ("upgrade", "both"):
+        return False
+    if not listener_allows_h2c(cfg, listener_addr):
         return False
     return _h2c_available(cfg) and peer_trusted_for_h2c(cfg, peer_addr)
 
