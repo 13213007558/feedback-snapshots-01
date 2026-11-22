@@ -709,4 +709,337 @@ describe "hmac_paths plugin" do
     body('/namespace/2/widget/1').must_equal "/0e1e748860d4fd17fe9b7c8259b1e26996502c38e465f802c2c9a0a13000087c/n/widget/1"
     body('/all/widget/get/foo/bar/1/1').must_equal "/widget/c14c78a81d34d766cf334a3ddbb7a6b231bc2092ef50a77ded0028586027b14e/mpn/1?foo=bar"
   end
+
+  it "plugin accepts scopes as a hash of resource to action or actions" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read'], 'export'=>['submit']}
+    end
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: [['invoice', 'read'], ['export', 'submit']]
+    end
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>:read, 'export'=>['submit']}
+    end
+
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read']}
+      route do |r|
+        r.get('read'){hmac_path('/1', resource: 'invoice', action: 'read').inspect}
+        r.get('write'){hmac_path('/1', resource: 'invoice', action: 'write').inspect}
+      end
+    end
+    body('/read').wont_equal 'nil'
+    body('/write').must_equal 'nil'
+  end
+
+  it "plugin requires scopes argument be a hash or array of resource/action pairs" do
+    proc{app(:bare){plugin :hmac_paths, secret: '1'*32, scopes: 'invoice'}}.must_raise Roda::RodaError
+    proc{app(:bare){plugin :hmac_paths, secret: '1'*32, scopes: ['invoice']}}.must_raise Roda::RodaError
+    proc{app(:bare){plugin :hmac_paths, secret: '1'*32, scopes: [['invoice', 'read', 'extra']]}}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path requires resource and action arguments be provided together" do
+    hmac_paths_app{|r| hmac_path('/1', resource: 'invoice')}
+    proc{body}.must_raise Roda::RodaError
+    hmac_paths_app{|r| hmac_path('/1', action: 'read')}
+    proc{body}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path requires resource and action arguments be non-empty strings without null bytes" do
+    hmac_paths_app{|r| hmac_path('/1', resource: '', action: 'read')}
+    proc{body}.must_raise Roda::RodaError
+    hmac_paths_app{|r| hmac_path('/1', resource: 'invoice', action: '')}
+    proc{body}.must_raise Roda::RodaError
+    hmac_paths_app{|r| hmac_path('/1', resource: "in\0voice", action: 'read')}
+    proc{body}.must_raise Roda::RodaError
+    hmac_paths_app{|r| hmac_path('/1', resource: 'invoice', action: "re\0ad")}
+    proc{body}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path does not allow scope argument with resource or action arguments" do
+    hmac_paths_app{|r| hmac_path('/1', scope: ['invoice', 'read'], resource: 'invoice')}
+    proc{body}.must_raise Roda::RodaError
+    hmac_paths_app{|r| hmac_path('/1', scope: ['invoice', 'read'], action: 'read')}
+    proc{body}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path accepts scope argument as an array or hash, equivalent to resource and action" do
+    hmac_paths_app do |r|
+      [
+        hmac_path('/1', scope: ['invoice', 'read']),
+        hmac_path('/1', scope: {resource: 'invoice', action: 'read'}),
+        hmac_path('/1', resource: 'invoice', action: 'read'),
+      ].uniq.join("\n")
+    end
+    body.split("\n").length.must_equal 1
+  end
+
+  it "hmac_path with resource and action sets s flag and changes the HMAC" do
+    hmac_paths_app do |r|
+      [
+        hmac_path('/1'),
+        hmac_path('/1', resource: 'invoice', action: 'read'),
+      ].join("\n")
+    end
+    unsigned, signed = body.split("\n")
+    unsigned.must_equal "/1dd95fe7d0dbe409f852e81a7c2cc4c93971c04542a150c6baefe00876e28f13/0/1"
+    signed.must_match %r{\A/[0-9a-f]{64}/s/1\z}
+  end
+
+  it "hmac_path HMAC for a resource/action depends on both resource and action" do
+    hmac_paths_app do |r|
+      r.get 'path', String, String do |resource, action|
+        hmac_path('/1', resource: resource, action: action)
+      end
+    end
+    paths = ["invoice/read", "invoice/write", "export/read"].map{|p| body("/path/#{p}")}
+    paths.uniq.length.must_equal 3
+  end
+
+  it "r.hmac_path only yields for a path signed for the same resource and action" do
+    hmac_paths_app do |r|
+      r.get 'sign', String, Integer do |resource, id|
+        hmac_path("/#{id}", root: "/#{resource}", resource: resource, action: (resource == 'invoice' ? 'read' : 'submit'))
+      end
+
+      r.on 'invoice' do
+        r.hmac_path(resource: 'invoice', action: 'read'){'invoice'}
+      end
+
+      r.on 'export' do
+        r.hmac_path(resource: 'export', action: 'submit'){'export'}
+      end
+    end
+
+    body(body('/sign/invoice/1')).must_equal 'invoice'
+    body(body('/sign/export/1')).must_equal 'export'
+    status(body('/sign/invoice/1').sub('/invoice', '/export')).must_equal 404
+  end
+
+  it "r.hmac_path does not match a resource/action path when the receiver does not specify the resource/action" do
+    hmac_paths_app do |r|
+      r.get 'invoice', Integer do |id|
+        hmac_path("/#{id}", resource: 'invoice', action: 'read')
+      end
+      r.hmac_path{'generic'}
+    end
+
+    status(body('/invoice/1')).must_equal 404
+  end
+
+  it "r.hmac_path does not match a path signed without resource and action when the receiver specifies a resource/action" do
+    hmac_paths_app do |r|
+      r.get 'invoice', Integer do |id|
+        hmac_path("/#{id}")
+      end
+      r.hmac_path(resource: 'invoice', action: 'read'){'scoped'}
+    end
+
+    status(body('/invoice/1')).must_equal 404
+  end
+
+  it "r.hmac_path distinguishes invoice download and export submit links with the same path suffix" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read'], 'export'=>['submit']}
+
+      route do |r|
+        r.on 'sign' do
+          r.get 'invoice', Integer do |id|
+            hmac_path("/download/#{id}", root: '/invoices', resource: 'invoice', action: 'read')
+          end
+          r.get 'export', Integer do |id|
+            hmac_path("/download/#{id}", root: '/exports', resource: 'export', action: 'submit')
+          end
+        end
+
+        r.on 'invoices' do
+          r.hmac_path(resource: 'invoice', action: 'read'){'invoice-read'}
+        end
+
+        r.on 'exports' do
+          r.hmac_path(resource: 'export', action: 'submit'){'export-submit'}
+        end
+      end
+    end
+
+    invoice_path = body('/sign/invoice/7')
+    export_path = body('/sign/export/7')
+
+    # The two signed links differ by the resource/action bound into the HMAC,
+    # even though both end with the same path suffix.
+    invoice_path.sub(%r{\A/invoices/[0-9a-f]{64}}, '').must_equal export_path.sub(%r{\A/exports/[0-9a-f]{64}}, '')
+    invoice_path.sub(%r{\A/invoices/}, '').wont_equal export_path.sub(%r{\A/exports/}, '')
+
+    body(invoice_path).must_equal 'invoice-read'
+    body(export_path).must_equal 'export-submit'
+  end
+
+  it "hmac_path returns nil instead of generating a link when the resource/action is not allowed by scopes" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read'], 'export'=>['submit']}
+      route do |r|
+        r.get 'invoice', Integer do |id|
+          hmac_path("/#{id}", resource: 'invoice', action: 'read').inspect
+        end
+        r.get 'invoice-write', Integer do |id|
+          hmac_path("/#{id}", resource: 'invoice', action: 'write').inspect
+        end
+        r.get 'export', Integer do |id|
+          hmac_path("/#{id}", resource: 'export', action: 'submit').inspect
+        end
+        r.get 'export-read', Integer do |id|
+          hmac_path("/#{id}", resource: 'export', action: 'read').inspect
+        end
+        r.get 'unsigned-scope' do
+          hmac_path('/1').inspect
+        end
+      end
+    end
+
+    body('/invoice/1').must_match %r{\A"/[0-9a-f]{64}/s/1"\z}
+    body('/export/1').must_match %r{\A"/[0-9a-f]{64}/s/1"\z}
+    body('/invoice-write/1').must_equal 'nil'
+    body('/export-read/1').must_equal 'nil'
+    body('/unsigned-scope').must_equal '"/1dd95fe7d0dbe409f852e81a7c2cc4c93971c04542a150c6baefe00876e28f13/0/1"'
+  end
+
+  it "hmac_path does not apply scopes to paths signed without resource and action" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read']}
+      route do |r|
+        hmac_path(r.remaining_path)
+      end
+    end
+    body('/1').must_equal "/1dd95fe7d0dbe409f852e81a7c2cc4c93971c04542a150c6baefe00876e28f13/0/1"
+  end
+
+  it "hmac_path returns nil when hmac_path_scope_authorized? returns false" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, scopes: {'invoice'=>['read'], 'export'=>['submit']}
+      define_method(:hmac_path_scope_authorized?) do |resource, action|
+        !(resource == 'export' && action == 'submit' && request.GET['approved'] != '1')
+      end
+      route do |r|
+        r.on 'invoice', Integer do |id|
+          hmac_path("/#{id}", resource: 'invoice', action: 'read').inspect
+        end
+        r.on 'export', Integer do |id|
+          hmac_path("/#{id}", resource: 'export', action: 'submit').inspect
+        end
+      end
+    end
+
+    body('/invoice/1').must_match %r{\A"/[0-9a-f]{64}/s/1"\z}
+    body('/export/1').must_equal 'nil'
+    body('/export/1', 'QUERY_STRING'=>'approved=1').must_match %r{\A"/[0-9a-f]{64}/s/1"\z}
+  end
+
+  it "r.hmac_path does not match when hmac_path_scope_authorized? returns false" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32
+      define_method(:hmac_path_scope_authorized?) do |_resource, _action|
+        request.GET['sign'] == '1' || request.GET['approved'] == '1'
+      end
+      route do |r|
+        r.get 'sign', Integer do |id|
+          hmac_path("/#{id}", root: '/exports', resource: 'export', action: 'submit')
+        end
+        r.on 'exports' do
+          r.hmac_path(resource: 'export', action: 'submit'){'export'}
+        end
+      end
+    end
+
+    path = body('/sign/1', 'QUERY_STRING'=>'sign=1')
+    status(path).must_equal 404
+    body(path, 'QUERY_STRING'=>'approved=1').must_equal 'export'
+  end
+
+  it "r.hmac_path rejects tampered resource/action signed paths" do
+    hmac_paths_app do |r|
+      r.get 'invoice', Integer do |id|
+        hmac_path("/#{id}", resource: 'invoice', action: 'read')
+      end
+      r.hmac_path(resource: 'invoice', action: 'read'){'invoice'}
+    end
+
+    path = body('/invoice/1')
+    status(path.sub('/s/', '/0/')).must_equal 404
+  end
+
+  it "r.hmac_path works with method, params, and resource/action arguments" do
+    hmac_paths_app do |r|
+      r.get 'sign' do
+        hmac_path('/1', root: '/exports', method: 'post', resource: 'export', action: 'submit', params: {a: 'b'})
+      end
+
+      r.on 'exports' do
+        r.hmac_path(resource: 'export', action: 'submit'){r.remaining_path}
+      end
+    end
+
+    path, qs = body('/sign').split('?', 2)
+    body(path, 'REQUEST_METHOD'=>'POST', 'QUERY_STRING'=>qs).must_equal '/1'
+    status(path, 'QUERY_STRING'=>qs).must_equal 404
+    status(path, 'REQUEST_METHOD'=>'POST', 'QUERY_STRING'=>'a=c').must_equal 404
+  end
+
+  it "r.hmac_path works with root, method, and resource/action arguments" do
+    hmac_paths_app do |r|
+      r.get 'path', String, String do |root, method|
+        hmac_path('/1', root: "/#{root}", method: method, resource: 'invoice', action: 'read')
+      end
+
+      r.on String do |root|
+        r.hmac_path(resource: 'invoice', action: 'read'){r.remaining_path}
+      end
+    end
+
+    get_path = body('/path/foo/get')
+    body(get_path).must_equal '/1'
+    status(get_path, 'REQUEST_METHOD'=>'POST').must_equal 404
+    status(get_path.sub('/foo/', '/bar/')).must_equal 404
+  end
+
+  it "r.hmac_path accepts the scope keyword form" do
+    hmac_paths_app do |r|
+      r.get 'invoice', Integer do |id|
+        hmac_path("/#{id}", scope: ['invoice', 'read'])
+      end
+      r.hmac_path(scope: ['invoice', 'read']){'invoice'}
+    end
+
+    body(body('/invoice/1')).must_equal 'invoice'
+  end
+
+  it "r.hmac_path handles secret rotation for resource/action signed paths" do
+    hmac_paths_app do |r|
+      r.get 'invoice', Integer do |id|
+        hmac_path("/#{id}", resource: 'invoice', action: 'read')
+      end
+      r.hmac_path(resource: 'invoice', action: 'read'){'invoice'}
+    end
+
+    path = body('/invoice/1')
+    body(path).must_equal 'invoice'
+    app.plugin :hmac_paths, secret: '2'*32
+    status(path).must_equal 404
+    app.plugin :hmac_paths, secret: '2'*32, old_secret: '1'*32
+    body(path).must_equal 'invoice'
+  end
+
+  it "r.hmac_path works with namespace and resource/action arguments" do
+    hmac_paths_app do |r|
+      r.get 'path', String do |ns|
+        hmac_path('/1', namespace: ns, resource: 'invoice', action: 'read')
+      end
+
+      r.hmac_path(namespace: r.GET['ns'], resource: 'invoice', action: 'read'){r.remaining_path}
+    end
+
+    path = body('/path/1')
+    body(path, 'QUERY_STRING'=>'ns=1').must_equal '/1'
+    status(path, 'QUERY_STRING'=>'ns=2').must_equal 404
+    status(path).must_equal 404
+  end
 end

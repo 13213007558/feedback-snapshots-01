@@ -160,6 +160,52 @@ class Roda
     # This gives you a path only valid for a GET request with a root of <tt>/widget</tt> and
     # a query string of <tt>foo=bar</tt>, using namespace +1+.
     #
+    # The +resource+ and +action+ arguments bind a signed path to an application resource
+    # and action.  They can be given as separate arguments, or together using the +scope+
+    # argument with a two element array (or a hash with +resource+ and +action+ keys):
+    #
+    #   hmac_path('/invoices/1', resource: 'invoice', action: 'read')
+    #   hmac_path('/invoices/1', scope: ['invoice', 'read'])
+    #   # => "/<hmac>/s/invoices/1"
+    #
+    # A path signed with a resource and action can only be matched by an +r.hmac_path+
+    # call that specifies the same resource and action.  Conversely, paths signed without
+    # a resource and action are only matched by +r.hmac_path+ calls that do not specify
+    # them.  This allows a receiver to distinguish signed paths for different resources
+    # or actions, even when the signed paths use the same root and request method.
+    #
+    # The +scopes+ plugin argument can restrict the resource/action pairs the application
+    # is allowed to sign.  It accepts a hash with resource keys and action (or array of
+    # action) values, or an array of resource/action pairs:
+    #
+    #   plugin :hmac_paths, secret: 'some-secret-value-with-at-least-32-bytes',
+    #                       scopes: {
+    #                         'invoice' => 'read',
+    #                         'export' => ['submit'],
+    #                       }
+    #
+    # If +scopes+ is provided, +hmac_path+ returns +nil+ without generating a link
+    # when asked to sign a path for a resource/action pair that is not configured.
+    # Routes that do not use the +resource+ or +action+ arguments are unaffected by
+    # the +scopes+ option, so existing signed paths continue to work.
+    #
+    # In addition to the configured +scopes+, an application can override the
+    # +hmac_path_scope_authorized?+ instance method to decide whether the current
+    # request is authorized to sign a link for a resource/action pair.  If it
+    # returns false, +hmac_path+ returns +nil+ and no link is generated.  The same
+    # method is checked when matching a signed path in +r.hmac_path+, so a request
+    # that is not authorized for the resource/action will not match the signed path:
+    #
+    #   def hmac_path_scope_authorized?(resource, action)
+    #     current_user.can?(resource, action)
+    #   end
+    #
+    # Note that +r.hmac_path+ requires the matching +resource+ and +action+ to be
+    # given for a signed path with the +s+ flag, including paths signed for a
+    # +resource+ and +action+ in the past.  Existing paths signed without a
+    # +resource+ and +action+ are matched by +r.hmac_path+ calls that also do not
+    # specify them, so existing routing trees keep their current behavior.
+    #
     # To handle secret rotation, you can provide an +old_secret+ argument when loading the
     # plugin.
     #
@@ -210,11 +256,18 @@ class Roda
     # 
     #  r.hmac_path('/1', namespace: '2')
     #  HMAC_hex(HMAC_hex(HMAC(secret, '2'), ''), '/n/1')
+    #
+    # The +resource+ and +action+ arguments bind the signed path to a resource and
+    # action, and are included in the HMAC calculation:
+    #
+    #  r.hmac_path('/1', resource: 'invoice', action: 'read')
+    #  HMAC_hex(HMAC_hex(secret, ''), "invoice\0read:/s/1")
     module HmacPaths
       def self.configure(app, opts=(no_positional_opts = true; OPTS),
           secret: opts[:secret],
           old_secret: opts[:old_secret],
           namespace_session_key: opts[:namespace_session_key],
+          scopes: opts[:scopes],
           **kw)
         RodaPlugins.check_keywords("the content_for plugin", no_positional_opts, opts, kw)
         unless secret.is_a?(String) && secret.bytesize >= 32
@@ -230,15 +283,102 @@ class Roda
         app.opts[:hmac_paths_secret] = secret
         app.opts[:hmac_paths_old_secret] = old_secret
 
+        if scopes
+          app.opts[:hmac_paths_scopes] = hmac_paths_normalize_scopes(scopes)
+        end
+
         if namespace_session_key
           app.opts[:hmac_paths_namespace_session_key] = namespace_session_key
         end
+      end
+
+      # Convert the plugin +scopes+ argument into a frozen hash with resource
+      # string keys and frozen arrays of action string values.
+      def self.hmac_paths_normalize_scopes(scopes) # :nodoc:
+        normalized = {}
+
+        add_scope = proc do |resource, action|
+          actions = (normalized[resource.to_s] ||= [])
+          action = action.to_s
+          actions << action unless actions.include?(action)
+        end
+
+        case scopes
+        when Hash
+          scopes.each do |resource, actions|
+            Array(actions).each{|action| add_scope.call(resource, action)}
+          end
+        when Array
+          scopes.each do |scope|
+            unless scope.is_a?(Array) && scope.length == 2
+              raise RodaError, "hmac_paths plugin scopes array must contain resource/action arrays"
+            end
+            add_scope.call(*scope)
+          end
+        else
+          raise RodaError, "hmac_paths plugin scopes argument must be a hash or array of resource/action pairs"
+        end
+
+        normalized.each_value(&:freeze)
+        normalized.freeze
+      end
+
+      # Normalize a resource/action pair.  The pair can be provided using a +scope+
+      # array or hash, or using separate +resource+ and +action+ keywords.
+      def self.hmac_paths_scope_values(scope=nil, resource: nil, action: nil) # :nodoc:
+        if scope
+          if resource || action
+            raise RodaError, "cannot use scope argument with resource or action arguments"
+          end
+
+          case scope
+          when Array
+            unless scope.length == 2
+              raise RodaError, "scope array must contain exactly resource and action"
+            end
+            resource, action = scope
+          when Hash
+            unless scope.keys.sort == [:action, :resource]
+              raise RodaError, "scope hash must contain only resource and action keys"
+            end
+            resource, action = scope.values_at(:resource, :action)
+          else
+            raise RodaError, "scope argument must be an array or hash"
+          end
+        end
+
+        if resource.nil? || action.nil?
+          raise RodaError, "resource and action arguments must be provided together"
+        end
+
+        resource = resource.to_s
+        action = action.to_s
+
+        if resource.empty? || action.empty?
+          raise RodaError, "resource and action arguments must be non-empty strings"
+        end
+
+        if resource.include?("\0") || action.include?("\0")
+          raise RodaError, "resource and action arguments must not contain null bytes"
+        end
+
+        [resource, action]
+      end
+
+      # Whether the given resource/action pair is allowed by the +scopes+ plugin
+      # argument.  If +scopes+ is not configured, all pairs are allowed.
+      def self.hmac_paths_scope_allowed?(scopes, resource, action) # :nodoc:
+        return true unless scopes
+
+        actions = scopes[resource]
+        !!(actions && actions.include?(action))
       end
 
       module ClassMethods
         RodaPlugins.opt_attr_reader(self, :hmac_paths_secret)
         RodaPlugins.opt_attr_reader(self, :hmac_paths_old_secret)
         RodaPlugins.opt_attr_reader(self, :hmac_paths_namespace_session_key)
+        RodaPlugins.opt_attr_reader(self, :hmac_paths_scopes)
       end
 
       module InstanceMethods
@@ -253,6 +393,13 @@ class Roda
         #                namespace when there is a default namespace, pass a nil value.
         # +params+ :: Includes parameters in the query string of the returned path, and
         #             limits the returned path to only be valid for that exact query string.
+        # +resource+ :: Binds the returned path to the given application resource.  The
+        #               path will only be valid for an +r.hmac_path+ call that specifies
+        #               the same resource and action.
+        # +action+ :: Binds the returned path to the given application action.
+        # +scope+ :: Specify the resource and action together as a two element array
+        #            (+[resource, action]+) or a hash with +resource+ and +action+ keys.
+        #            Cannot be used together with the +resource+ or +action+ arguments.
         # +root+ :: Should be an empty string or string starting with +/+. This will be
         #           the already matched path of the routing tree using r.hmac_path. Defaults
         #           to the empty string, which will returns paths valid for r.hmac_path at
@@ -263,6 +410,9 @@ class Roda
             method: opts[:method],
             namespace: opts.fetch(:namespace){hmac_path_default_namespace},
             params: opts[:params],
+            resource: opts[:resource],
+            action: opts[:action],
+            scope: opts[:scope],
             root: opts[:root] || '',
             seconds: opts[:seconds],
             valid_until: opts[:until],
@@ -282,6 +432,11 @@ class Roda
 
           unless root.is_a?(String) && ((root_byte = root.getbyte(0)) == 47 || root_byte == nil)
             raise RodaError, "root must be empty string or string starting with /"
+          end
+
+          if resource || action || scope
+            resource, action = HmacPaths.hmac_paths_scope_values(scope, resource: resource, action: action)
+            return unless hmac_path_scope_allowed?(resource, action)
           end
 
           if valid_until
@@ -306,17 +461,21 @@ class Roda
             flags << 'n'
           end
 
+          if resource
+            flags << 's'
+          end
+
           if valid_until
             flags << 't'
             path = "/#{valid_until}#{path}"
           end
 
           flags << '0' if flags.empty?
-          
+
           hmac_path = if method
-            "#{method.to_s.upcase}:/#{flags}#{path}"
+            "#{method.to_s.upcase}:#{hmac_path_scope_prefix(resource, action)}/#{flags}#{path}"
           else
-            "/#{flags}#{path}"
+            "#{hmac_path_scope_prefix(resource, action)}/#{flags}#{path}"
           end
 
           "#{root}/#{hmac_path_hmac(root, hmac_path, namespace: namespace)}/#{flags}#{path}"
@@ -337,7 +496,28 @@ class Roda
           opts.fetch(:namespace){hmac_path_default_namespace}
         end
 
+        # Whether signing (and matching) a path for the given resource and action is
+        # allowed.  Checks both the +scopes+ plugin argument and the
+        # +hmac_path_scope_authorized?+ hook.  If either denies the pair, no link is
+        # generated and no signed path will match.
+        def hmac_path_scope_allowed?(resource, action)
+          HmacPaths.hmac_paths_scope_allowed?(self.class.hmac_paths_scopes, resource, action) &&
+            hmac_path_scope_authorized?(resource, action)
+        end
+
+        # Application hook that can deny signing and matching a path for the given
+        # resource and action.  Returns true by default.
+        def hmac_path_scope_authorized?(resource, action)
+          true
+        end
+
         private
+
+        # The prefix used for the HMAC calculation for a given resource and action.
+        # Returns an empty string if no resource is used.
+        def hmac_path_scope_prefix(resource, action)
+          resource ? "#{resource}\0#{action}" : ''
+        end
 
         # The secret used to calculate the HMAC in hmac_path. This is itself an HMAC, created
         # using the secret given in the plugin, for the given root, namespace, and secret.
@@ -374,10 +554,26 @@ class Roda
         # rest of the path considering the flags in the second segment and the namespace, the
         # block matches and is yielded to, and the result of the block is returned. Otherwise, the
         # block does not matches and routing continues after the call.
+        #
+        # If +resource+ and +action+ are given (or +scope+ with a two element array or hash),
+        # only matches a path that was signed for the same resource and action.  Paths signed
+        # without a resource and action are only matched when no resource and action are given.
         def hmac_path(opts=(no_positional_opts = true; OPTS),
             namespace: opts.fetch(:namespace){scope.send(:hmac_path_default_namespace)},
+            resource: opts[:resource],
+            action: opts[:action],
+            scope: opts[:scope],
             **kw, &block)
           RodaPlugins.check_keywords(__callee__, no_positional_opts, opts, kw)
+
+          request_scope = @scope
+
+          if resource || action || scope
+            resource, action = HmacPaths.hmac_paths_scope_values(scope, resource: resource, action: action)
+            unless request_scope.send(:hmac_path_scope_allowed?, resource, action)
+              return
+            end
+          end
 
           orig_path = remaining_path
           mpath = matched_path
@@ -394,9 +590,17 @@ class Roda
                   return
                 end
 
-                if flags.include?('m')
-                  rpath = "#{env['REQUEST_METHOD'].to_s.upcase}:#{rpath}"
+                if flags.include?('s') ^ !resource.nil?
+                  # Resource/action required and not provided, or provided and not required.
+                  # Bail early to avoid unnecessary HMAC calculation.
+                  @remaining_path = orig_path
+                  return
                 end
+
+                method_prefix = flags.include?('m') ? "#{env['REQUEST_METHOD'].to_s.upcase}:" : ''
+                scope_prefix = resource ? request_scope.send(:hmac_path_scope_prefix, resource, action) : ''
+
+                rpath = "#{method_prefix}#{scope_prefix}#{rpath}"
 
                 if flags.include?('p')
                   rpath = "#{rpath}?#{env["QUERY_STRING"]}"
