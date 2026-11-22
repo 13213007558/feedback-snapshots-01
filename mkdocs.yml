@@ -48,6 +48,7 @@ nav:
           - utilities/data_masking.md
           - utilities/feature_flags.md
           - utilities/metadata.md
+          - utilities/restricted_context.md
           - utilities/streaming.md
           - utilities/middleware_factory.md
           - utilities/jmespath_functions.md
@@ -271,6 +272,7 @@ plugins:
           - utilities/data_masking.md
           - utilities/feature_flags.md
           - utilities/metadata.md
+          - utilities/restricted_context.md
           - utilities/streaming.md
           - utilities/middleware_factory.md
           - utilities/jmespath_functions.md
