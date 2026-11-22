@@ -1263,6 +1263,66 @@ class Env(Setting):
         """
 
 
+class WorkerEnvAllowlist(Setting):
+    name = "worker_env_allowlist"
+    action = "append"
+    section = "Server Mechanics"
+    cli = ["--worker-env-allowlist"]
+    meta = "PATTERN"
+    validator = validate_list_string
+    default = []
+
+    desc = """\
+        Environment variable patterns that workers are allowed to inherit.
+
+        Should be a list of variable names or glob patterns matched against
+        variable names, for example ``["APP_*", "PATH"]``. Matching is case
+        sensitive and uses the same rules as :py:mod:`fnmatch`.
+
+        Empty by default, which passes every variable through. When set to a
+        non-empty list, workers only inherit variables matching one of the
+        patterns; the master process keeps its full environment and is not
+        affected. The :ref:`worker_env_denylist` is evaluated after the
+        allowlist, so a denylist match always wins.
+
+        The rules are applied before the worker application is loaded,
+        including to variables set through :ref:`raw-env`.
+        """
+
+
+class WorkerEnvDenylist(Setting):
+    name = "worker_env_denylist"
+    action = "append"
+    section = "Server Mechanics"
+    cli = ["--worker-env-denylist"]
+    meta = "PATTERN"
+    validator = validate_list_string
+    default = []
+
+    desc = """\
+        Environment variable patterns that must never reach workers.
+
+        Should be a list of variable names or glob patterns matched against
+        variable names, for example ``["*SECRET*", "*KEY*", "*TOKEN*"]``.
+        Matching is case sensitive and uses the same rules as
+        :py:mod:`fnmatch`.
+
+        Variables matching a pattern are removed from the worker environment
+        before the worker application is loaded, including variables set
+        through :ref:`raw-env`. The master process keeps the variables for
+        its own initialization: they are stripped from its environment only
+        after it has started, right before the first worker is forked, and
+        re-checked before every later fork, so a reload applies changed
+        rules without restarting the master. The denylist wins over
+        :ref:`worker_env_allowlist` when both match.
+
+        Stripping ``os.environ`` does not rewrite the initial environment
+        the kernel exposes through ``/proc``; use an allowlist or restart
+        the master with a clean environment when that file is exposed to
+        the application.
+        """
+
+
 class Pidfile(Setting):
     name = "pidfile"
     section = "Server Mechanics"

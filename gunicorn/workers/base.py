@@ -13,6 +13,7 @@ from random import randint
 from ssl import SSLError
 
 from gunicorn import util
+from gunicorn.envfilter import strip_worker_environ
 from gunicorn.http.errors import (
     ChunkMissingTerminator, ForbiddenProxyRequest,
     InvalidChunkExtension, InvalidChunkSize, InvalidHeader,
@@ -96,6 +97,10 @@ class Worker:
         if self.cfg.env:
             for k, v in self.cfg.env.items():
                 os.environ[k] = v
+
+        # raw_env runs in the worker after the master stripped its own
+        # environment, so filter again before the application is loaded
+        strip_worker_environ(self.cfg)
 
         util.set_owner_process(self.cfg.uid, self.cfg.gid,
                                initgroups=self.cfg.initgroups)

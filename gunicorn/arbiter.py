@@ -12,6 +12,7 @@ import traceback
 import socket
 
 from gunicorn.errors import HaltServer, AppImportError
+from gunicorn.envfilter import strip_worker_environ
 from gunicorn.pidfile import Pidfile
 from gunicorn import sock, systemd, util
 
@@ -221,6 +222,16 @@ class Arbiter:
         # to avoid fork deadlocks with asyncio
 
         self.cfg.when_ready(self)
+
+        # Master initialization is finished and no worker has forked yet, so
+        # the variables workers must not see are no longer needed here.
+        self._strip_worker_env()
+
+    def _strip_worker_env(self):
+        removed = strip_worker_environ(self.cfg)
+        if removed:
+            self.log.debug("Hiding environment variables from workers: %s",
+                           ", ".join(removed))
 
     def init_signals(self):
         """\
@@ -729,6 +740,10 @@ class Arbiter:
                                    self.app, self.timeout / 2.0,
                                    self.cfg, self.log)
         self.cfg.pre_fork(self, worker)
+
+        # Reapply the rules here as well: a reload may have changed them or
+        # brought stripped variables back into the master environment.
+        self._strip_worker_env()
 
         pid = os.fork()
         if pid != 0:

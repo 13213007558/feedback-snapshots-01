@@ -65,6 +65,8 @@ REF_MAP = {
     "worker-class": ("reference/settings.md", "worker_class"),
     "reload": ("reference/settings.md", "reload"),
     "raw-env": ("reference/settings.md", "raw_env"),
+    "worker_env_allowlist": ("reference/settings.md", "worker_env_allowlist"),
+    "worker_env_denylist": ("reference/settings.md", "worker_env_denylist"),
     "check-config": ("reference/settings.md", "check_config"),
     "errorlog": ("reference/settings.md", "errorlog"),
     "logconfig": ("reference/settings.md", "logconfig"),

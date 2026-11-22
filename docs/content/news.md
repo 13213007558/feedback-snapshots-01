@@ -1,6 +1,16 @@
 <span id="news"></span>
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- Add the `worker_env_allowlist` and `worker_env_denylist` settings to control
+  which environment variables workers inherit. The master keeps every
+  variable for its own initialization; forbidden variables are stripped from
+  the worker environment before the application is loaded, and the rules are
+  re-applied on reload.
+
 ## 27.0.1 - 2026-11-12
 
 ### Bug Fixes
