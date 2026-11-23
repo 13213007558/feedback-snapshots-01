@@ -67,6 +67,9 @@ OpenID Connect (OIDC). Workload identity federation is recommended for
 non-Google Cloud environments as it avoids the need to download, manage and
 store service account private keys locally.
 
+If you need to explain which credential and project source were actually
+selected, see :doc:`adc-provenance-diagnostics`.
+
 .. _Google Application Default Credentials:
     https://developers.google.com/identity/protocols/
     application-default-credentials
@@ -1065,8 +1068,9 @@ credentials one of three ways:
 
    Then, use :ref:`application default credentials <application-default>`.
    :func:`default` checks for the ``GOOGLE_APPLICATION_CREDENTIALS``
-   environment variable before all other checks, so this will always use the
-   credentials you explicitly specify.
+   environment variable before all other checks. An empty value is treated as
+   unset, and a value equal to the Cloud SDK's own ADC path delegates to the
+   Cloud SDK flow so the project ID can still be resolved.
 
 2. Use :meth:`service_account.Credentials.from_service_account_file
    <google.oauth2.service_account.Credentials.from_service_account_file>`::

@@ -1462,3 +1462,62 @@ def test_get_explicit_environ_credentials_suppresses_deprecation_warning(monkeyp
             and "load_credentials_from_file" in str(w.message)
             for w in caught_warnings
         )
+
+
+def test_default_explicit_path_matching_sdk_path_uses_sdk_project_lookup(
+    monkeypatch, tmpdir
+):
+    """An explicit path equal to the SDK default path keeps gcloud as the
+    project source for authorized_user credentials, because the file has no
+    project_id of its own."""
+
+    # Use the real library code, but keep the SDK config directory synthetic.
+    sdk_dir = tmpdir.mkdir("gcloud")
+    adc_file = sdk_dir.join("application_default_credentials.json")
+    adc_file.write(json.dumps(AUTHORIZED_USER_FILE_DATA))
+    monkeypatch.setenv(environment_vars.CLOUD_SDK_CONFIG_DIR, str(sdk_dir))
+    monkeypatch.setenv(environment_vars.CREDENTIALS, str(adc_file))
+    monkeypatch.delenv(environment_vars.PROJECT, raising=False)
+    monkeypatch.delenv(environment_vars.LEGACY_PROJECT, raising=False)
+
+    with mock.patch(
+        "google.auth._cloud_sdk.get_project_id",
+        return_value="synthetic-gcloud-project",
+        autospec=True,
+    ) as get_project_id:
+        credentials, project_id = _default.default()
+
+    assert isinstance(credentials, google.oauth2.credentials.Credentials)
+    assert project_id == "synthetic-gcloud-project"
+    get_project_id.assert_called_once_with()
+    assert credentials._cred_file_path == str(adc_file)
+
+
+def test_default_explicit_path_matching_sdk_path_missing_continues(
+    monkeypatch, tmpdir
+):
+    """A missing file at the SDK default path is treated as "not configured"
+    rather than as a fatal explicit-path error."""
+
+    sdk_dir = tmpdir.mkdir("gcloud")
+    monkeypatch.setenv(environment_vars.CLOUD_SDK_CONFIG_DIR, str(sdk_dir))
+    monkeypatch.setenv(
+        environment_vars.CREDENTIALS,
+        str(sdk_dir.join("application_default_credentials.json")),
+    )
+    monkeypatch.delenv(environment_vars.PROJECT, raising=False)
+    monkeypatch.delenv(environment_vars.LEGACY_PROJECT, raising=False)
+
+    with mock.patch(
+        "google.auth.compute_engine._metadata.is_on_gce",
+        return_value=True,
+        autospec=True,
+    ), mock.patch(
+        "google.auth.compute_engine._metadata.get_project_id",
+        return_value="synthetic-metadata-project",
+        autospec=True,
+    ):
+        credentials, project_id = _default.default()
+
+    assert isinstance(credentials, compute_engine.Credentials)
+    assert project_id == "synthetic-metadata-project"
