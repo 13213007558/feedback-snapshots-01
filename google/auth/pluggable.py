@@ -35,7 +35,9 @@ try:
 # Python 2.7 compatibility
 except ImportError:  # pragma: NO COVER
     from collections import Mapping  # type: ignore
+import hashlib
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -46,6 +48,8 @@ from google.auth import _helpers
 from google.auth import exceptions
 from google.auth import external_account
 
+_LOGGER = logging.getLogger(__name__)
+
 # The max supported executable spec version.
 EXECUTABLE_SUPPORTED_MAX_VERSION = 1
 
@@ -55,6 +59,45 @@ EXECUTABLE_TIMEOUT_MILLIS_UPPER_BOUND = 120 * 1000  # 2 minutes
 
 EXECUTABLE_INTERACTIVE_TIMEOUT_MILLIS_LOWER_BOUND = 30 * 1000  # 30 seconds
 EXECUTABLE_INTERACTIVE_TIMEOUT_MILLIS_UPPER_BOUND = 30 * 60 * 1000  # 30 minutes
+
+# Suffix of the sidecar file recording which approved provider configuration
+# the cached subject token was generated under.
+PROVENANCE_FILE_SUFFIX = ".provenance"
+PROVENANCE_SCHEMA_VERSION = 1
+
+
+class _AdmissionDecision(object):
+    """The single admission decision for one subject-token retrieval.
+
+    The same decision governs both which subject token is returned to the
+    caller and which token reaches the STS backend exchange, so an identity
+    switch during a configuration change can never mix the cached identity of
+    one provider with the exchange of another.
+
+    Attributes:
+        source (str): Where the admitted subject token came from. One of
+            ``"cache"`` (an unexpired output file bound to the current
+            configuration) or ``"executable"`` (a freshly executed provider
+            command).
+        subject_token (str): The admitted subject token.
+        config_fingerprint (str): Fingerprint of the approved provider
+            configuration the decision was made against.
+        rebuilt_cache (bool): Whether the executable had to rebuild a cache
+            that was missing, expired, or bound to another configuration.
+    """
+
+    CACHE = "cache"
+    EXECUTABLE = "executable"
+
+    def __init__(self, source, subject_token, config_fingerprint, rebuilt_cache):
+        self.source = source
+        self.subject_token = subject_token
+        self.config_fingerprint = config_fingerprint
+        self.rebuilt_cache = rebuilt_cache
+
+    @property
+    def admitted_from_cache(self):
+        return self.source == self.CACHE
 
 
 class Credentials(external_account.Credentials):
@@ -146,6 +189,11 @@ class Credentials(external_account.Credentials):
         # Dummy value. This variable is only used via injection, not exposed to ctor
         self._tokeninfo_username = ""
 
+        # The admission decision of the most recent subject-token retrieval.
+        # It is reset on every retrieval so the STS exchange that follows can
+        # rely on the same decision instead of re-evaluating the cache.
+        self._admission_decision = None
+
         if not self._credential_source_executable_command:
             raise exceptions.MalformedError(
                 "Missing command field. Executable command must be provided."
@@ -173,34 +221,157 @@ class Credentials(external_account.Credentials):
                     "Interactive timeout must be between 30 seconds and 30 minutes."
                 )
 
+    @property
+    def admission_decision(self):
+        """The admission decision of the most recent subject-token retrieval.
+
+        Returns:
+            Optional[google.auth.pluggable._AdmissionDecision]: The decision
+            recorded by the last :meth:`retrieve_subject_token` call, or
+            ``None`` before the first retrieval.
+        """
+        return self._admission_decision
+
+    @property
+    def config_fingerprint(self):
+        """Stable fingerprint of the approved provider configuration.
+
+        Two credential configurations produce the same fingerprint only when
+        they point at the same STS audience, subject token type, and provider
+        executable. It is used to tell which approved provider configuration a
+        cache entry was generated for.
+
+        Returns:
+            str: The hex-encoded SHA-256 fingerprint of the configuration.
+        """
+        fingerprint_material = json.dumps(
+            {
+                "audience": self._audience,
+                "subject_token_type": self._subject_token_type,
+                "command": self._credential_source_executable_command,
+                "output_file": (
+                    str(self._credential_source_executable_output_file)
+                    if self._credential_source_executable_output_file is not None
+                    else None
+                ),
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(fingerprint_material.encode("utf-8")).hexdigest()
+
     @_helpers.copy_docstring(external_account.Credentials)
     def retrieve_subject_token(self, request):
-        self._validate_running_mode()
+        # A single admission decision is computed for this retrieval and reused
+        # by the downstream STS exchange so both sides observe the same
+        # identity during a configuration change.
+        self._admission_decision = None
+        config_fingerprint = self.config_fingerprint
+        execution_allowed = self._is_execution_allowed()
 
-        # Check output file.
+        # Check the offline cache first. It is only admissible when it is
+        # unexpired and carries provenance binding it to this exact approved
+        # provider configuration.
         if self._credential_source_executable_output_file is not None:
-            try:
-                with open(
-                    self._credential_source_executable_output_file, encoding="utf-8"
-                ) as output_file:
-                    response = json.load(output_file)
-            except Exception:
-                pass
-            else:
-                try:
-                    # If the cached response is expired, _parse_subject_token will raise an error which will be ignored and we will call the executable again.
-                    subject_token = self._parse_subject_token(response)
-                    if (
-                        "expiration_time" not in response
-                    ):  # Always treat missing expiration_time as expired and proceed to executable run.
-                        raise exceptions.RefreshError
-                except (exceptions.MalformedError, exceptions.InvalidValue):
-                    raise
-                except exceptions.RefreshError:
-                    pass
-                else:
-                    return subject_token
+            cached_decision = self._admit_cached_subject_token(config_fingerprint)
+            if cached_decision is not None:
+                self._admission_decision = cached_decision
+                _LOGGER.info(
+                    "Admitted cached subject token from provider configuration "
+                    "%s without running the executable.",
+                    config_fingerprint,
+                )
+                return cached_decision.subject_token
 
+            if not execution_allowed:
+                # No executable may be run in the locked-down mode and the
+                # cache has no clearly attributable, still-valid entry. Stop
+                # before any executable run or STS exchange.
+                _LOGGER.warning(
+                    "Rejecting unattributable or stale cached subject token for "
+                    "provider configuration %s; executable execution is disabled.",
+                    config_fingerprint,
+                )
+                self._validate_running_mode()
+
+        # Reaching this point means the cache must be rebuilt through the
+        # executable, which requires execution to be explicitly allowed.
+        self._validate_running_mode()
+        subject_token = self._run_executable_for_subject_token()
+
+        rebuilt_cache = self._credential_source_executable_output_file is not None
+        self._admission_decision = _AdmissionDecision(
+            source=_AdmissionDecision.EXECUTABLE,
+            subject_token=subject_token,
+            config_fingerprint=config_fingerprint,
+            rebuilt_cache=rebuilt_cache,
+        )
+        if rebuilt_cache:
+            self._write_provenance(config_fingerprint)
+            _LOGGER.info(
+                "Rebuilt subject token cache and admitted the new subject token "
+                "from provider configuration %s.",
+                config_fingerprint,
+            )
+        else:
+            _LOGGER.info(
+                "Admitted a freshly executed subject token from provider "
+                "configuration %s.",
+                config_fingerprint,
+            )
+        return subject_token
+
+    def _is_execution_allowed(self):
+        return (
+            os.environ.get("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES") == "1"
+        )
+
+    def _admit_cached_subject_token(self, config_fingerprint):
+        """Returns a cache-sourced admission decision, or ``None``.
+
+        The cache is admitted only when the output file parses into an
+        unexpired subject token and its provenance sidecar binds it to the
+        current approved provider configuration. Any mismatch, missing
+        provenance, malformed content, or expiration results in ``None`` so
+        the caller can either rebuild the cache or fail closed.
+        """
+        try:
+            with open(
+                self._credential_source_executable_output_file, encoding="utf-8"
+            ) as output_file:
+                response = json.load(output_file)
+        except Exception:
+            return None
+
+        try:
+            subject_token = self._parse_subject_token(response)
+            if "expiration_time" not in response:
+                # Always treat missing expiration_time as expired.
+                raise exceptions.RefreshError
+        except (exceptions.MalformedError, exceptions.InvalidValue):
+            raise
+        except exceptions.RefreshError:
+            return None
+
+        provenance = self._read_provenance()
+        if provenance is None:
+            return None
+        if provenance.get("config_fingerprint") != config_fingerprint:
+            _LOGGER.warning(
+                "Cached subject token is bound to provider configuration %s but "
+                "%s is now active; the cache is not admissible.",
+                provenance.get("config_fingerprint"),
+                config_fingerprint,
+            )
+            return None
+
+        return _AdmissionDecision(
+            source=_AdmissionDecision.CACHE,
+            subject_token=subject_token,
+            config_fingerprint=config_fingerprint,
+            rebuilt_cache=False,
+        )
+
+    def _run_executable_for_subject_token(self):
         # Inject env vars.
         env = os.environ.copy()
         self._inject_env_variables(env)
@@ -238,8 +409,37 @@ class Credentials(external_account.Credentials):
                 open(self._credential_source_executable_output_file, encoding="utf-8")
             )
 
-        subject_token = self._parse_subject_token(response)
-        return subject_token
+        return self._parse_subject_token(response)
+
+    def _provenance_file_path(self):
+        return (
+            self._credential_source_executable_output_file + PROVENANCE_FILE_SUFFIX
+        )
+
+    def _read_provenance(self):
+        try:
+            with open(
+                self._provenance_file_path(), encoding="utf-8"
+            ) as provenance_file:
+                provenance = json.load(provenance_file)
+        except Exception:
+            return None
+        if not isinstance(provenance, Mapping):
+            return None
+        return provenance
+
+    def _write_provenance(self, config_fingerprint):
+        provenance = {
+            "version": PROVENANCE_SCHEMA_VERSION,
+            "config_fingerprint": config_fingerprint,
+            "audience": self._audience,
+            "subject_token_type": self._subject_token_type,
+            "command": self._credential_source_executable_command,
+        }
+        with open(
+            self._provenance_file_path(), "w", encoding="utf-8"
+        ) as provenance_file:
+            json.dump(provenance, provenance_file)
 
     def revoke(self, request):
         """Revokes the subject token using the credential_source object.

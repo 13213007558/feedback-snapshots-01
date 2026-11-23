@@ -526,7 +526,16 @@ class TestCredentials(object):
             os.remove(ACTUAL_CREDENTIAL_SOURCE_EXECUTABLE_OUTPUT_FILE)
 
     @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
-    def test_retrieve_subject_token_saml(self):
+    def test_retrieve_subject_token_saml(self, tmpdir):
+        ACTUAL_CREDENTIAL_SOURCE_EXECUTABLE_OUTPUT_FILE = tmpdir.join(
+            "actual_output_file"
+        )
+        ACTUAL_CREDENTIAL_SOURCE_EXECUTABLE = {
+            "command": self.CREDENTIAL_SOURCE_EXECUTABLE_COMMAND,
+            "timeout_millis": 30000,
+            "output_file": ACTUAL_CREDENTIAL_SOURCE_EXECUTABLE_OUTPUT_FILE,
+        }
+        ACTUAL_CREDENTIAL_SOURCE = {"executable": ACTUAL_CREDENTIAL_SOURCE_EXECUTABLE}
         with mock.patch(
             "subprocess.run",
             return_value=subprocess.CompletedProcess(
@@ -537,7 +546,7 @@ class TestCredentials(object):
                 returncode=0,
             ),
         ):
-            credentials = self.make_pluggable(credential_source=self.CREDENTIAL_SOURCE)
+            credentials = self.make_pluggable(credential_source=ACTUAL_CREDENTIAL_SOURCE)
 
             subject_token = credentials.retrieve_subject_token(None)
 
@@ -1259,3 +1268,262 @@ class TestCredentials(object):
                 stderr=subprocess.STDOUT,
                 env=mock.ANY,
             )
+
+    def _write_output_file(self, output_file, response):
+        with open(output_file, "w") as file_obj:
+            json.dump(response, file_obj)
+
+    def _make_output_file_credential_source(self, tmpdir, command="command"):
+        output_file = str(tmpdir.join("actual_output_file"))
+        credential_source = {
+            "executable": {
+                "command": command,
+                "timeout_millis": 30000,
+                "output_file": output_file,
+            }
+        }
+        return credential_source, output_file
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
+    def test_executable_run_writes_provenance_for_current_config(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        with mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                stdout=json.dumps(
+                    self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+                ).encode("UTF-8"),
+                returncode=0,
+            ),
+        ) as mock_run:
+            credentials = self.make_pluggable(credential_source=credential_source)
+            subject_token = credentials.retrieve_subject_token(None)
+
+            assert subject_token == self.EXECUTABLE_OIDC_TOKEN
+            mock_run.assert_called_once()
+
+            with open(
+                output_file + pluggable.PROVENANCE_FILE_SUFFIX
+            ) as provenance_file:
+                provenance = json.load(provenance_file)
+            assert (
+                provenance["config_fingerprint"]
+                == credentials.config_fingerprint
+            )
+            assert provenance["audience"] == AUDIENCE
+            assert provenance["command"] == "command"
+
+            decision = credentials.admission_decision
+            assert decision.source == pluggable._AdmissionDecision.EXECUTABLE
+            assert decision.rebuilt_cache is True
+            assert decision.config_fingerprint == credentials.config_fingerprint
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
+    def test_matching_provenance_cache_admitted_without_executable(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        credentials = self.make_pluggable(credential_source=credential_source)
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        self._write_output_file(
+            output_file + pluggable.PROVENANCE_FILE_SUFFIX,
+            {
+                "version": pluggable.PROVENANCE_SCHEMA_VERSION,
+                "config_fingerprint": credentials.config_fingerprint,
+                "audience": AUDIENCE,
+            },
+        )
+
+        with mock.patch("subprocess.run") as mock_run:
+            subject_token = credentials.retrieve_subject_token(None)
+            mock_run.assert_not_called()
+
+        assert subject_token == self.EXECUTABLE_OIDC_TOKEN
+        decision = credentials.admission_decision
+        assert decision.source == pluggable._AdmissionDecision.CACHE
+        assert decision.admitted_from_cache is True
+        assert decision.rebuilt_cache is False
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "0"})
+    def test_matching_provenance_cache_admitted_when_execution_disabled(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        credentials = self.make_pluggable(credential_source=credential_source)
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        self._write_output_file(
+            output_file + pluggable.PROVENANCE_FILE_SUFFIX,
+            {"config_fingerprint": credentials.config_fingerprint},
+        )
+
+        with mock.patch("subprocess.run") as mock_run:
+            subject_token = credentials.retrieve_subject_token(None)
+            mock_run.assert_not_called()
+
+        assert subject_token == self.EXECUTABLE_OIDC_TOKEN
+        assert credentials.admission_decision.admitted_from_cache is True
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "0"})
+    def test_cache_without_provenance_rejected_before_executable_when_disabled(
+        self, tmpdir
+    ):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        credentials = self.make_pluggable(credential_source=credential_source)
+
+        with mock.patch("subprocess.run") as mock_run:
+            with pytest.raises(ValueError) as excinfo:
+                credentials.retrieve_subject_token(None)
+            mock_run.assert_not_called()
+
+        assert excinfo.match(r"Executables need to be explicitly allowed")
+        assert credentials.admission_decision is None
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "0"})
+    def test_foreign_provenance_cache_rejected_when_execution_disabled(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        self._write_output_file(
+            output_file + pluggable.PROVENANCE_FILE_SUFFIX,
+            {"config_fingerprint": "another-approved-provider-fingerprint"},
+        )
+        credentials = self.make_pluggable(credential_source=credential_source)
+
+        with mock.patch("subprocess.run") as mock_run:
+            with pytest.raises(ValueError) as excinfo:
+                credentials.retrieve_subject_token(None)
+            mock_run.assert_not_called()
+
+        assert excinfo.match(r"Executables need to be explicitly allowed")
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
+    def test_foreign_provenance_cache_rebuilt_for_current_config(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        self._write_output_file(
+            output_file + pluggable.PROVENANCE_FILE_SUFFIX,
+            {"config_fingerprint": "another-approved-provider-fingerprint"},
+        )
+        new_response = dict(
+            self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN,
+            id_token="REBUILT_ID_TOKEN",
+        )
+        with mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                stdout=json.dumps(new_response).encode("UTF-8"),
+                returncode=0,
+            ),
+        ) as mock_run:
+            credentials = self.make_pluggable(credential_source=credential_source)
+            subject_token = credentials.retrieve_subject_token(None)
+            mock_run.assert_called_once()
+
+        assert subject_token == "REBUILT_ID_TOKEN"
+        with open(output_file + pluggable.PROVENANCE_FILE_SUFFIX) as provenance_file:
+            provenance = json.load(provenance_file)
+        assert provenance["config_fingerprint"] == credentials.config_fingerprint
+        decision = credentials.admission_decision
+        assert decision.source == pluggable._AdmissionDecision.EXECUTABLE
+        assert decision.rebuilt_cache is True
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
+    def test_expired_cache_rebuilt_for_current_config(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        expired_response = dict(
+            self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN, expiration_time=0
+        )
+        self._write_output_file(output_file, expired_response)
+        self._write_output_file(
+            output_file + pluggable.PROVENANCE_FILE_SUFFIX,
+            {"config_fingerprint": "stale-fingerprint"},
+        )
+        with mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                stdout=json.dumps(
+                    self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+                ).encode("UTF-8"),
+                returncode=0,
+            ),
+        ) as mock_run:
+            credentials = self.make_pluggable(credential_source=credential_source)
+            subject_token = credentials.retrieve_subject_token(None)
+            mock_run.assert_called_once()
+
+        assert subject_token == self.EXECUTABLE_OIDC_TOKEN
+        with open(output_file + pluggable.PROVENANCE_FILE_SUFFIX) as provenance_file:
+            provenance = json.load(provenance_file)
+        assert provenance["config_fingerprint"] == credentials.config_fingerprint
+
+    @mock.patch.dict(os.environ, {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"})
+    def test_corrupt_provenance_treated_as_unattributable_and_rebuilt(self, tmpdir):
+        credential_source, output_file = self._make_output_file_credential_source(
+            tmpdir
+        )
+        self._write_output_file(
+            output_file, self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+        )
+        with open(output_file + pluggable.PROVENANCE_FILE_SUFFIX, "w") as file_obj:
+            file_obj.write("{not valid json")
+
+        with mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                stdout=json.dumps(
+                    self.EXECUTABLE_SUCCESSFUL_OIDC_RESPONSE_ID_TOKEN
+                ).encode("UTF-8"),
+                returncode=0,
+            ),
+        ) as mock_run:
+            credentials = self.make_pluggable(credential_source=credential_source)
+            subject_token = credentials.retrieve_subject_token(None)
+            mock_run.assert_called_once()
+
+        assert subject_token == self.EXECUTABLE_OIDC_TOKEN
+        with open(output_file + pluggable.PROVENANCE_FILE_SUFFIX) as provenance_file:
+            provenance = json.load(provenance_file)
+        assert provenance["config_fingerprint"] == credentials.config_fingerprint
+
+    def test_config_fingerprint_distinguishes_provider_configurations(self, tmpdir):
+        source_a, _ = self._make_output_file_credential_source(
+            tmpdir, command="provider-a-command"
+        )
+        source_b, _ = self._make_output_file_credential_source(
+            tmpdir, command="provider-b-command"
+        )
+        credentials_a = self.make_pluggable(credential_source=source_a)
+        credentials_b = self.make_pluggable(credential_source=source_b)
+
+        assert (
+            credentials_a.config_fingerprint != credentials_b.config_fingerprint
+        )
+        credentials_a_copy = self.make_pluggable(credential_source=source_a)
+        assert (
+            credentials_a.config_fingerprint
+            == credentials_a_copy.config_fingerprint
+        )
