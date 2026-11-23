@@ -14,5 +14,12 @@ third party modules as long as they implement the following APIs.
    :members:
    :show-inheritance:
 
+.. automodule:: axes.attempt_identity
+   :members:
+
+.. automodule:: axes.exceptions
+   :members:
+   :show-inheritance:
+
 .. automodule:: axes.middleware
    :members:

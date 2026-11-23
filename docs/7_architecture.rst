@@ -68,6 +68,50 @@ as locked by setting a special attribute into the request.
 The ``AxesMiddleware`` then processes the request, returning
 a lockout response to the user, if the flag has been set.
 
+Deduplicating reports of one authentication attempt
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A project can have more than one login entry point for the same request:
+a login form layer and a separate call to
+``django.contrib.auth.authenticate`` can both observe the very same
+password check and emit ``user_login_failed`` twice. Counting both
+reports would make one wrong password consume several lockout score
+points.
+
+To prevent this, the ``AxesBackend`` generates a fresh attempt identity
+(an UUID) every time its ``authenticate`` method is entered. The identity
+lives in a ``contextvars.ContextVar`` and is mirrored on the request as
+``request.axes_attempt_identifier``, so it travels through the backends,
+the signal receivers and the configured handler without changing any
+signature. The ``user_login_failed`` receiver records the identities it
+has already seen on the request and skips duplicate reports:
+
+* duplicate reports carrying the **same** identity consume one lockout
+  score point in total — the password was checked only once;
+* two explicit ``authenticate`` calls on the same request generate two
+  different identities and are scored as two independent attempts;
+* failure signals sent without an attempt identity (e.g. from a legacy
+  entry point that never runs an Axes backend) keep the historical
+  behaviour and are always forwarded to the handler.
+
+Entry points which send ``user_login_failed`` manually can reuse an
+identity with ``axes.attempt_identity.set_attempt_identifier`` or leave
+the request untouched to opt out of deduplication.
+
+Business rule rejections
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Not every refused login is a wrong password. A disabled account, a
+pending e-mail verification or a similar business rule should be
+explained to the user with its own reason without consuming lockout
+score. Subclass ``AxesStandaloneBackend`` (or ``AxesBackend``) and
+override ``check_business_rules``, returning a reason string to reject
+the attempt. The backend raises ``axes.exceptions.AxesBusinessRuleDenied``
+and marks the request with ``axes_non_countable_reason``; the database
+and cache handlers then skip the failure scoring while the reason stays
+available on the request for the view layer. Returning ``None`` keeps
+the standard password and lockout checks.
+
 Axes assumes that the login views either call the ``authenticate`` method
 to log in users or otherwise take care of notifying Axes of authentication
 attempts and failures the same way Django does via authentication signals.

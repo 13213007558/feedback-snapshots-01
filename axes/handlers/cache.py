@@ -78,6 +78,21 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
             )
             return
 
+        # Business rule rejections (e.g. disabled account, pending
+        # verification) are not wrong passwords and must not consume lockout
+        # score. The reason is kept on the request so the view layer can show
+        # a specific message to the user.
+        non_countable_reason = getattr(
+            request, "axes_non_countable_reason", None
+        )
+        if non_countable_reason is not None:
+            log.info(
+                "AXES: Skipping lockout scoring for non-credential rejection: %s.",
+                non_countable_reason,
+            )
+            request.axes_credentials = credentials
+            return
+
         username = get_client_username(request, credentials)
         lockout_parameters = get_lockout_parameters(request, credentials)
         if lockout_parameters == ["username"] and username is None:

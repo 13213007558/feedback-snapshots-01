@@ -2,6 +2,28 @@
 Changes
 =======
 
+Unreleased
+----------
+
+Features and fixes
+~~~~~~~~~~~~~~~~~~
+
+- Give every real authentication attempt a stable UUID identity, generated
+  by ``AxesStandaloneBackend.authenticate`` and shared through a context
+  variable and ``request.axes_attempt_identifier``. The
+  ``user_login_failed`` receiver now ignores duplicate reports carrying the
+  same attempt identity, so a password check observed by two login entry
+  points (e.g. a form and a separate ``authenticate`` call) consumes only
+  one lockout score point, while two explicit authentication attempts on
+  the same request are still scored separately. Signals without an attempt
+  identity keep the previous behaviour.
+- Add ``AxesStandaloneBackend.check_business_rules`` and
+  ``axes.exceptions.AxesBusinessRuleDenied`` for rejections that are not
+  wrong passwords. Returning a reason string rejects the login with that
+  reason and skips Axes lockout scoring in both the database and cache
+  handlers; the reason is stored on the request as
+  ``axes_non_countable_reason``.
+
 9.0.0 (2026-10-30)
 ------------------
 

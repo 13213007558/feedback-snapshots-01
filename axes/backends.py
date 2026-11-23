@@ -3,9 +3,15 @@ from django.conf import settings
 from django.contrib.auth.backends import ModelBackend
 from django.http import HttpRequest
 
+from axes.attempt_identity import (
+    REQUEST_ATTRIBUTE,
+    begin_attempt_identifier,
+    mark_attempt_non_countable,
+)
 from axes.exceptions import (
     AxesBackendPermissionDenied,
     AxesBackendRequestParameterRequired,
+    AxesBusinessRuleDenied,
 )
 from axes.handlers.proxy import AxesProxyHandler
 from axes.helpers import get_credentials, get_lockout_message, toggleable
@@ -34,12 +40,20 @@ class AxesStandaloneBackend:
         """
         Checks user lockout status and raises an exception if user is not allowed to log in.
 
+        Every call to this method represents one real authentication attempt
+        and receives a fresh attempt identifier. The identifier is shared with
+        the ``user_login_failed`` signal receivers through a context variable
+        and the request, so duplicate failure reports for this exact password
+        check are counted only once while two explicit authenticate calls on
+        the same request get distinct identifiers and are counted separately.
+
         This method interrupts the login flow and inserts  error message directly to the
         ``response_context`` attribute that is supplied as a keyword argument.
 
         :keyword response_context: kwarg that will be have its ``error`` attribute updated with context.
         :raises AxesBackendRequestParameterRequired: if request parameter is not passed.
         :raises AxesBackendPermissionDenied: if user is already locked out.
+        :raises AxesBusinessRuleDenied: if a project business rule rejects the attempt.
         """
 
         if request is None:
@@ -47,7 +61,15 @@ class AxesStandaloneBackend:
                 "AxesBackend requires a request as an argument to authenticate"
             )
 
+        identifier = begin_attempt_identifier()
+        setattr(request, REQUEST_ATTRIBUTE, identifier)
+
         credentials = get_credentials(username=username, password=password, **kwargs)
+
+        business_rule_reason = self.check_business_rules(request, credentials)
+        if business_rule_reason is not None:
+            mark_attempt_non_countable(request, business_rule_reason)
+            raise AxesBusinessRuleDenied(business_rule_reason)
 
         if AxesProxyHandler.is_allowed(request, credentials):
             return
@@ -72,6 +94,20 @@ class AxesStandaloneBackend:
         raise AxesBackendPermissionDenied(
             "AxesBackend detected that the given user is locked out"
         )
+
+    def check_business_rules(
+        self, request: HttpRequest, credentials: dict
+    ) -> Optional[str]:
+        """
+        Hook for project specific login rules that are not password checks.
+
+        Return a human readable reason string to reject the authentication
+        without consuming Axes lockout score, or ``None`` to let the normal
+        lockout and credential checks run. Override this method in a subclass
+        to implement rules such as disabled accounts or pending verifications.
+        """
+
+        return None
 
 
 class AxesBackend(AxesStandaloneBackend, ModelBackend):
