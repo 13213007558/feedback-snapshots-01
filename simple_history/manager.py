@@ -1,16 +1,33 @@
+import datetime
+
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 from django.db.models import Exists, OuterRef, Q, QuerySet
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from simple_history.utils import (
     get_app_model_primary_key_name,
     get_change_reason_from_object,
+    get_history_recorded_at,
 )
 
 # when converting a historical record to an instance, this attribute is added
 # to the instance so that code can reverse the instance to its historical record
 SIMPLE_HISTORY_REVERSE_ATTR_NAME = "_history"
+
+# Sort key used in place of an unknown (NULL) `history_recorded_at` so that
+# rows with a known entry time always sort after legacy rows. Any real
+# recorded time is assigned by the trusted recording clock, which never
+# produces values this old.
+UNKNOWN_RECORDED_AT_SENTINEL = datetime.datetime(1970, 1, 1)
+
+
+def _recorded_at_sentinel():
+    if settings.USE_TZ:
+        return UNKNOWN_RECORDED_AT_SENTINEL.replace(tzinfo=datetime.timezone.utc)
+    return UNKNOWN_RECORDED_AT_SENTINEL
 
 
 class HistoricalQuerySet(QuerySet):
@@ -58,6 +75,8 @@ class HistoricalQuerySet(QuerySet):
         Ensures results in the queryset are the latest historical record for each
         primary key. This includes deletion records.
         """
+        if hasattr(self.model, "history_recorded_at"):
+            return self._latest_of_each_bitemporal()
         # Subquery for finding the records that belong to the same history-tracked
         # object as the record from the outer query (identified by `_pk_attr`),
         # and that have a later `history_date` than the outer record.
@@ -71,6 +90,58 @@ class HistoricalQuerySet(QuerySet):
         # Filter the records to only include those for which the `later_records`
         # subquery does not return any results.
         return self.filter(~Exists(later_records))
+
+    def _latest_of_each_bitemporal(self) -> "HistoricalQuerySet":
+        """
+        Bitemporal variant of ``latest_of_each()`` with a deterministic order
+        when several records share the same business-effective time
+        (``history_date``): the record that entered the audit store later wins,
+        records with an unknown (NULL) recorded time lose to any known one, and
+        the history primary key is the final tie-breaker.
+        """
+        history_pk_attr = self.model._meta.pk.attname
+        queryset = self.annotate(
+            _recorded_at_sort=Coalesce("history_recorded_at", _recorded_at_sentinel())
+        )
+        same_effective_time = Q(history_date=OuterRef("history_date"))
+        later_records = queryset.filter(
+            Q(**{self._pk_attr: OuterRef(self._pk_attr)}),
+            Q(history_date__gt=OuterRef("history_date"))
+            | (
+                same_effective_time
+                & Q(_recorded_at_sort__gt=OuterRef("_recorded_at_sort"))
+            )
+            | (
+                same_effective_time
+                & Q(_recorded_at_sort=OuterRef("_recorded_at_sort"))
+                & Q(**{f"{history_pk_attr}__gt": OuterRef(history_pk_attr)})
+            ),
+        )
+        return queryset.filter(~Exists(later_records))
+
+    def as_of_recorded(self, date, *, include_unknown=True) -> "HistoricalQuerySet":
+        """
+        Return the historical records the audit store actually contained at
+        ``date`` -- i.e. filtered by ``history_recorded_at`` (when each row
+        truly entered the audit store), not by the business-effective
+        ``history_date``.
+
+        Rows whose entry time is unknown (``history_recorded_at`` is NULL,
+        e.g. legacy data that predates bitemporal tracking) are included by
+        default: they are known to exist now, but no entry time may be
+        fabricated for them. Pass ``include_unknown=False`` to restrict the
+        result to rows with a known entry time.
+        """
+        if not hasattr(self.model, "history_recorded_at"):
+            raise ImproperlyConfigured(
+                "%s has no `history_recorded_at` field; audit-time queries "
+                "require `HistoricalRecords(bitemporal=True)`."
+                % self.model._meta.object_name
+            )
+        known = Q(history_recorded_at__lte=date)
+        if include_unknown:
+            known |= Q(history_recorded_at__isnull=True)
+        return self.filter(known)
 
     def _select_related_history_tracked_objs(self) -> "HistoricalQuerySet":
         """
@@ -207,6 +278,43 @@ class HistoryManager(models.Manager):
         setattr(historic, "_as_of", date)
         return result
 
+    def audit_as_of(self, date, *, include_unknown=True):
+        """
+        Reconstruct the version(s) the system actually held at a specific
+        moment, based on when records truly entered the audit store
+        (``history_recorded_at``) rather than when they took effect
+        (``history_date``).
+
+        Among the records known at ``date``, the latest one per primary key is
+        selected by business-effective time (with the deterministic bitemporal
+        tie-breaking of ``latest_of_each()``). Rows with an unknown (NULL)
+        entry time are treated as known since before any auditable moment and
+        are therefore included unless ``include_unknown=False``.
+
+        Like ``as_of()``, this returns a queryset of instances when used on a
+        model's history manager, and a single instance (or raises
+        ``DoesNotExist``) when used on an instance.
+        """
+        queryset = self.get_queryset().as_of_recorded(
+            date, include_unknown=include_unknown
+        )
+        if not self.instance:
+            return queryset.latest_of_each().as_instances()
+
+        try:
+            # historical records are sorted by effective time, then recorded
+            # time (unknown last), then history_id
+            history_obj = queryset[0]
+        except IndexError:
+            raise self.instance.DoesNotExist(
+                "%s had not yet been recorded." % self.instance._meta.object_name
+            )
+        if history_obj.history_type == "-":
+            raise self.instance.DoesNotExist(
+                "%s had already been deleted." % self.instance._meta.object_name
+            )
+        return history_obj.instance
+
     def bulk_history_create(
         self,
         objs,
@@ -228,6 +336,13 @@ class HistoryManager(models.Manager):
         history_type = "+"
         if update:
             history_type = "~"
+
+        # All rows of a controlled bulk import share one recorded-at boundary,
+        # assigned by the trusted recording side -- the same rule regular saves
+        # follow. If the import's transaction rolls back, none of these rows
+        # persist, so a failed import is never queryable as recorded.
+        has_recorded_at = hasattr(self.model, "history_recorded_at")
+        recorded_at = get_history_recorded_at() if has_recorded_at else None
 
         historical_instances = []
         for instance in objs:
@@ -252,6 +367,10 @@ class HistoryManager(models.Manager):
             )
             if hasattr(self.model, "history_relation"):
                 row.history_relation_id = instance.pk
+            if has_recorded_at:
+                # Set after construction so caller-supplied attributes
+                # (e.g. via `custom_historical_attrs`) cannot override it.
+                row.history_recorded_at = recorded_at
             historical_instances.append(row)
 
         return self.model.objects.bulk_create(

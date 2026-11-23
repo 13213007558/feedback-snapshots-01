@@ -86,6 +86,24 @@ model, will work too.
     my_poll.save()
 
 
+Bitemporal tracking with ``history_recorded_at``
+------------------------------------------------
+
+Passing ``bitemporal=True`` adds a nullable ``history_recorded_at`` field to
+the historical model, recording when each row truly entered the audit store.
+``history_date`` then purely expresses the business-effective time, while
+``history_recorded_at`` is always assigned by the trusted recording side and
+cannot be supplied by callers. Existing rows keep ``NULL`` (unknown) entry
+times after the migration that adds the column. See
+:doc:`/querying_history` for the audit queries this enables.
+
+.. code-block:: python
+
+    class Approval(models.Model):
+        status = models.CharField(max_length=20)
+        history = HistoricalRecords(bitemporal=True)
+
+
 Indexed ``history_date``
 ------------------------
 

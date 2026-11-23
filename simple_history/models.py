@@ -116,6 +116,7 @@ class HistoricalRecords:
         m2m_fields=(),
         m2m_fields_model_field_name="_history_m2m_fields",
         m2m_bases=(models.Model,),
+        bitemporal=False,
     ):
         self.user_set_verbose_name = verbose_name
         self.user_set_verbose_name_plural = verbose_name_plural
@@ -139,6 +140,7 @@ class HistoricalRecords:
         self.historical_queryset = historical_queryset
         self.m2m_fields = m2m_fields
         self.m2m_fields_model_field_name = m2m_fields_model_field_name
+        self.bitemporal = bitemporal
 
         if isinstance(no_db_index, str):
             no_db_index = [no_db_index]
@@ -588,6 +590,21 @@ class HistoricalRecords:
         extra_fields.update(self._get_history_related_field(model))
         extra_fields.update(self._get_history_user_fields())
 
+        if self.bitemporal:
+            # `history_date` is the business-effective time (when the change
+            # took effect); `history_recorded_at` is when the row actually
+            # entered the audit store. The latter is always assigned by the
+            # trusted recording side and is NULL for rows that predate
+            # bitemporal tracking -- a queryable "unknown" state, since a real
+            # entry time can never be fabricated for legacy data.
+            extra_fields["history_recorded_at"] = models.DateTimeField(
+                null=True,
+                blank=True,
+                editable=False,
+                db_index=True,
+                verbose_name=_("history recorded at"),
+            )
+
         return extra_fields
 
     @property
@@ -630,6 +647,16 @@ class HistoricalRecords:
             "ordering": ("-history_date", "-history_id"),
             "get_latest_by": ("history_date", "history_id"),
         }
+        if self.bitemporal:
+            # Deterministic order even when several rows share the same
+            # business-effective time: later-recorded rows win, rows with an
+            # unknown (NULL) recorded time sort last, and `history_id` is the
+            # final tie-breaker.
+            meta_fields["ordering"] = (
+                "-history_date",
+                models.F("history_recorded_at").desc(nulls_last=True),
+                "-history_id",
+            )
         if self.user_set_verbose_name:
             name = self.user_set_verbose_name
         else:
@@ -764,6 +791,10 @@ class HistoricalRecords:
             history_change_reason=history_change_reason,
             **attrs,
         )
+        if hasattr(manager.model, "history_recorded_at"):
+            # Assigned by the trusted recording side; any caller-supplied
+            # value is ignored.
+            history_instance.history_recorded_at = utils.get_history_recorded_at()
 
         pre_create_historical_record.send(
             sender=manager.model,

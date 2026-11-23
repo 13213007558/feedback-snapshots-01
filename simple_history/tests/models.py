@@ -1082,3 +1082,16 @@ class TestHistoricParticipantToHistoricOrganizationOneToOne(
         related_name="historic_participant",
     )
     history = HistoricalRecords()
+
+
+class Approval(models.Model):
+    """
+    Approval workflow model tracked bitemporally: `history_date` records when
+    a business action took effect, while `history_recorded_at` records when
+    the row truly entered the audit store.
+    """
+
+    name = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, default="draft")
+
+    history = HistoricalRecords(bitemporal=True)

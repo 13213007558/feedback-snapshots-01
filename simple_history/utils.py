@@ -1,8 +1,21 @@
 from django.db import transaction
 from django.db.models import Case, ForeignKey, ManyToManyField, Q, When
 from django.forms.models import model_to_dict
+from django.utils import timezone
 
 from simple_history.exceptions import AlternativeManagerError, NotHistoricalModelError
+
+
+def get_history_recorded_at():
+    """
+    Return the trusted, server-side timestamp marking when a historical record
+    enters the audit store.
+
+    Both regular saves and controlled bulk imports use this same time boundary,
+    so ``history_recorded_at`` always reflects the recording side's clock and
+    can never be supplied or overridden by the caller.
+    """
+    return timezone.now()
 
 
 def update_change_reason(instance, reason):

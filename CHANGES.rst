@@ -6,6 +6,13 @@ Unreleased
 
 **New features:**
 
+- Added opt-in bitemporal history via ``HistoricalRecords(bitemporal=True)``:
+  a trusted, recorder-assigned ``history_recorded_at`` timestamp (NULL/unknown
+  for legacy rows) complements the business-effective ``history_date``, with
+  deterministic tie-breaking for equal effective times and new audit queries
+  ``as_of_recorded()``/``audit_as_of()`` that reconstruct what the system
+  actually knew at a given moment
+
 
 **Breaking changes:**
 

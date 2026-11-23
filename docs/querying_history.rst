@@ -137,6 +137,65 @@ When the queryset is returning historical records, `pk` refers to the
 `history_id` primary key.
 
 
+Bitemporal history: effective time vs. recorded time
+----------------------------------------------------
+
+By default a historical record has a single timestamp, ``history_date``.
+Passing ``bitemporal=True`` to ``HistoricalRecords`` adds a second timestamp,
+``history_recorded_at``, so the two questions "when did this take effect?"
+and "when did the audit store learn about it?" can be answered separately:
+
+- ``history_date`` is the **business-effective time**. It may be declared by
+  the caller (e.g. via ``_history_date`` or ``default_date``), which is how
+  backfill batches record actions that took effect in the past.
+- ``history_recorded_at`` is the **entry time**. It is always assigned by the
+  trusted recording side (the server's clock) when the row is written; both
+  regular saves and controlled bulk imports
+  (``bulk_create_with_history``/``bulk_update_with_history``) use this same
+  time boundary, and a whole bulk batch shares one recorded-at timestamp.
+  Callers cannot supply or override it.
+
+Rows that predate bitemporal tracking (e.g. after migrating an existing
+history table) have ``history_recorded_at = NULL`` -- a queryable "unknown"
+state, since a real entry time can never be fabricated for them:
+
+.. code-block:: pycon
+
+    >>> Approval.history.filter(history_recorded_at__isnull=True)  # legacy rows
+
+Business queries keep using ``as_of()`` and read history by effective time.
+Audit queries use two additions:
+
+- ``<Model>.history.as_of_recorded(date)`` returns the historical records the
+  audit store actually contained at ``date``. Rows with an unknown entry time
+  are included by default (they are known to exist, but no entry time may be
+  invented for them); pass ``include_unknown=False`` to restrict the result
+  to rows with a known entry time.
+- ``<Model>.history.audit_as_of(date)`` reconstructs the version(s) the
+  system actually held at ``date``: among the records known then, the latest
+  per object by effective time. Like ``as_of()``, it returns a queryset of
+  instances on the model's history manager and a single instance (or raises
+  ``DoesNotExist``) on an instance.
+
+Because entry time and effective time are independent, the same object can
+read differently at two audit moments -- for example when a backfill batch
+enters a past-dated revocation:
+
+.. code-block:: pycon
+
+    >>> approval.history.audit_as_of(before_backfill).status
+    'approved'
+    >>> approval.history.audit_as_of(after_backfill).status
+    'revoked'
+
+When several records share the same effective time, the order is
+deterministic: the record that entered the audit store later wins, records
+with an unknown entry time sort after any known one, and ``history_id`` is
+the final tie-breaker. Failed imports are never queryable as recorded:
+``bulk_create_with_history`` writes objects and history in one transaction,
+so a rolled-back batch leaves no trace in the audit store.
+
+
 is_historic and to_historic
 ---------------------------
 
