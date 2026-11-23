@@ -1,0 +1,18 @@
+{
+  "orderType": "retail",
+  "customer": {
+    "email": 42
+  },
+  "delivery": {
+    "notes": "leave at reception"
+  },
+  "payment": {
+    "pan": 4111111111111111
+  },
+  "shipments": [
+    {
+      "carrier": 7,
+      "parcels": "not-an-array"
+    }
+  ]
+}

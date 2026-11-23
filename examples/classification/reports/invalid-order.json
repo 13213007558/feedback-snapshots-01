@@ -1,0 +1,173 @@
+{
+  "format": "jsonschema-classification/v1",
+  "schema_id": "https://audit.example/schemas/order",
+  "valid": false,
+  "validation": {
+    "valid": false,
+    "errors": [
+      {
+        "instance_path": "/customer/email",
+        "json_path": "$.customer.email",
+        "message": "42 is not of type 'string'",
+        "validator": "type",
+        "schema_path": "/properties/customer/properties/email/type"
+      },
+      {
+        "instance_path": "/shipments/0/carrier",
+        "json_path": "$.shipments[0].carrier",
+        "message": "7 is not of type 'string'",
+        "validator": "type",
+        "schema_path": "/properties/shipments/items/properties/carrier/type"
+      },
+      {
+        "instance_path": "/payment/pan",
+        "json_path": "$.payment.pan",
+        "message": "4111111111111111 is not of type 'string'",
+        "validator": "type",
+        "schema_path": "/allOf/0/then/properties/payment/properties/pan/type"
+      },
+      {
+        "instance_path": "/shipments/0/parcels",
+        "json_path": "$.shipments[0].parcels",
+        "message": "'not-an-array' is not of type 'array'",
+        "validator": "type",
+        "schema_path": "/allOf/0/then/properties/shipments/items/properties/parcels/type"
+      }
+    ]
+  },
+  "classification": {
+    "status": "withheld",
+    "approved": false,
+    "policy": {
+      "keywords": [
+        "x-classification",
+        "x-dataClassification",
+        "x-data-classification"
+      ],
+      "levels": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "unknown": "unknown"
+    },
+    "fields": [],
+    "conflicts": [],
+    "summary": {
+      "field_count": 0,
+      "classified_count": 0,
+      "unknown_count": 0,
+      "conflict_count": 0,
+      "highest_level": null,
+      "highest_level_by_root": {}
+    },
+    "reason": "instance_invalid"
+  },
+  "diagnostics": {
+    "branch_count": 8,
+    "unapproved_observations": [
+      {
+        "instance_path": "/delivery/notes",
+        "json_path": "$.delivery.notes",
+        "level": "confidential",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/freightDelivery/properties/notes/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/freightDelivery/properties/notes/x-classification",
+        "ref": "#/$defs/freightDelivery",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "else_branch_not_taken"
+      },
+      {
+        "instance_path": "/orderType",
+        "json_path": "$.orderType",
+        "level": "internal",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/properties/orderType/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/properties/orderType/x-classification",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/customer",
+        "json_path": "$.customer",
+        "level": "confidential",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/properties/customer/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/properties/customer/x-classification",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/customer/email",
+        "json_path": "$.customer.email",
+        "level": "confidential",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/customer/properties/email/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/customer/properties/email/x-classification",
+        "ref": "#/$defs/customer",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/shipments",
+        "json_path": "$.shipments",
+        "level": "restricted",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/properties/shipments/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/properties/shipments/x-classification",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/shipments/0/carrier",
+        "json_path": "$.shipments[0].carrier",
+        "level": "public",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/shipment/properties/carrier/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/shipment/properties/carrier/x-classification",
+        "ref": "#/$defs/shipment",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/payment/pan",
+        "json_path": "$.payment.pan",
+        "level": "restricted",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/cardPayment/properties/pan/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/cardPayment/properties/pan/x-classification",
+        "ref": "#/$defs/cardPayment",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      },
+      {
+        "instance_path": "/delivery/notes",
+        "json_path": "$.delivery.notes",
+        "level": "internal",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/retailDelivery/properties/notes/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/retailDelivery/properties/notes/x-classification",
+        "ref": "#/$defs/retailDelivery",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "instance_invalid"
+      }
+    ]
+  }
+}

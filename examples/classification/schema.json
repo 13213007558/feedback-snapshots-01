@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://audit.example/schemas/order",
+  "title": "Order",
+  "type": "object",
+  "required": [
+    "orderType",
+    "customer",
+    "delivery",
+    "shipments"
+  ],
+  "properties": {
+    "orderType": {
+      "type": "string",
+      "enum": [
+        "retail",
+        "wholesale"
+      ],
+      "x-classification": "internal"
+    },
+    "customer": {
+      "$ref": "#/$defs/customer",
+      "x-classification": "confidential"
+    },
+    "delivery": {
+      "type": "object",
+      "required": [
+        "notes"
+      ]
+    },
+    "shipments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/shipment"
+      },
+      "x-classification": "restricted"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "orderType": {
+            "const": "retail"
+          }
+        },
+        "required": [
+          "orderType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payment": {
+            "$ref": "#/$defs/cardPayment"
+          },
+          "delivery": {
+            "$ref": "#/$defs/retailDelivery"
+          },
+          "shipments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/retailShipment"
+            }
+          }
+        },
+        "required": [
+          "payment"
+        ]
+      },
+      "else": {
+        "properties": {
+          "invoice": {
+            "$ref": "#/$defs/invoice"
+          },
+          "delivery": {
+            "$ref": "#/$defs/freightDelivery"
+          },
+          "shipments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/freightShipment"
+            }
+          }
+        },
+        "required": [
+          "invoice"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "customer": {
+      "type": "object",
+      "required": [
+        "email"
+      ],
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "x-classification": "confidential"
+        },
+        "displayName": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "loyaltyId": {
+          "type": "string"
+        }
+      }
+    },
+    "shipment": {
+      "type": "object",
+      "required": [
+        "carrier"
+      ],
+      "properties": {
+        "carrier": {
+          "type": "string",
+          "x-classification": "public"
+        }
+      }
+    },
+    "retailShipment": {
+      "type": "object",
+      "required": [
+        "parcels"
+      ],
+      "properties": {
+        "parcels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/retailParcel"
+          }
+        }
+      }
+    },
+    "retailParcel": {
+      "type": "object",
+      "properties": {
+        "trackingCode": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "contents": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "giftWrap": {
+          "type": "boolean",
+          "x-classification": "public"
+        }
+      }
+    },
+    "freightShipment": {
+      "type": "object",
+      "required": [
+        "palletId"
+      ],
+      "properties": {
+        "palletId": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "parcels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/freightParcel"
+          }
+        }
+      }
+    },
+    "freightParcel": {
+      "type": "object",
+      "properties": {
+        "trackingCode": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "contents": {
+          "type": "string",
+          "x-classification": "restricted"
+        },
+        "hazardClass": {
+          "type": "string",
+          "x-classification": "confidential"
+        }
+      }
+    },
+    "cardPayment": {
+      "type": "object",
+      "required": [
+        "pan"
+      ],
+      "properties": {
+        "pan": {
+          "type": "string",
+          "x-classification": "restricted"
+        },
+        "last4": {
+          "type": "string",
+          "x-classification": "confidential"
+        }
+      }
+    },
+    "invoice": {
+      "type": "object",
+      "required": [
+        "account"
+      ],
+      "properties": {
+        "account": {
+          "type": "string",
+          "x-classification": "restricted"
+        },
+        "amount": {
+          "type": "number",
+          "x-classification": "confidential"
+        }
+      }
+    },
+    "retailDelivery": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "x-classification": "internal"
+        },
+        "dropOff": {
+          "type": "string",
+          "x-classification": "confidential"
+        }
+      }
+    },
+    "freightDelivery": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "x-classification": "confidential"
+        },
+        "dockCode": {
+          "type": "string",
+          "x-classification": "internal"
+        }
+      }
+    }
+  }
+}

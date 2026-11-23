@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://audit.example/schemas/order-conflict",
+  "title": "Order with competing classifications",
+  "type": "object",
+  "required": ["orderType", "customer", "delivery"],
+  "properties": {
+    "orderType": {
+      "type": "string",
+      "enum": ["retail", "wholesale"],
+      "x-classification": "public"
+    },
+    "customer": {
+      "$ref": "#/$defs/customer"
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "x-classification": "restricted"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "orderType": {
+            "const": "retail"
+          }
+        },
+        "required": ["orderType"]
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/retailDelivery"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/freightDelivery"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "customer": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "x-classification": "confidential"
+        }
+      }
+    },
+    "retailDelivery": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "x-classification": "internal"
+        }
+      }
+    },
+    "freightDelivery": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "x-classification": "internal"
+        }
+      }
+    }
+  }
+}

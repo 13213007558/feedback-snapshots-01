@@ -1,0 +1,9 @@
+{
+  "orderType": "retail",
+  "customer": {
+    "email": "ada@example.com"
+  },
+  "delivery": {
+    "notes": "leave at reception"
+  }
+}

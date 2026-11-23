@@ -12,6 +12,7 @@ Contents
 
     validate
     errors
+    classification
     referencing
     creating
     faq

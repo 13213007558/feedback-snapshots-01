@@ -1,0 +1,379 @@
+{
+  "format": "jsonschema-classification/v1",
+  "schema_id": "https://audit.example/schemas/order",
+  "valid": true,
+  "validation": {
+    "valid": true,
+    "errors": []
+  },
+  "classification": {
+    "status": "approved",
+    "approved": true,
+    "policy": {
+      "keywords": [
+        "x-classification",
+        "x-dataClassification",
+        "x-data-classification"
+      ],
+      "levels": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "unknown": "unknown"
+    },
+    "fields": [
+      {
+        "instance_path": "/orderType",
+        "json_path": "$.orderType",
+        "level": "internal",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/orderType",
+            "json_path": "$.orderType",
+            "level": "internal",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/properties/orderType/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/properties/orderType/x-classification",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/customer",
+        "json_path": "$.customer",
+        "level": "confidential",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/customer",
+            "json_path": "$.customer",
+            "level": "confidential",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/properties/customer/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/properties/customer/x-classification",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/customer/email",
+        "json_path": "$.customer.email",
+        "level": "confidential",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/customer/email",
+            "json_path": "$.customer.email",
+            "level": "confidential",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/customer/properties/email/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/customer/properties/email/x-classification",
+            "ref": "#/$defs/customer",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/customer/displayName",
+        "json_path": "$.customer.displayName",
+        "level": "internal",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/customer/displayName",
+            "json_path": "$.customer.displayName",
+            "level": "internal",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/customer/properties/displayName/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/customer/properties/displayName/x-classification",
+            "ref": "#/$defs/customer",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments",
+        "json_path": "$.shipments",
+        "level": "restricted",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments",
+            "json_path": "$.shipments",
+            "level": "restricted",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/properties/shipments/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/properties/shipments/x-classification",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments/0/carrier",
+        "json_path": "$.shipments[0].carrier",
+        "level": "public",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments/0/carrier",
+            "json_path": "$.shipments[0].carrier",
+            "level": "public",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/shipment/properties/carrier/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/shipment/properties/carrier/x-classification",
+            "ref": "#/$defs/shipment",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/invoice/account",
+        "json_path": "$.invoice.account",
+        "level": "restricted",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/invoice/account",
+            "json_path": "$.invoice.account",
+            "level": "restricted",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/invoice/properties/account/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/invoice/properties/account/x-classification",
+            "ref": "#/$defs/invoice",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/invoice/amount",
+        "json_path": "$.invoice.amount",
+        "level": "confidential",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/invoice/amount",
+            "json_path": "$.invoice.amount",
+            "level": "confidential",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/invoice/properties/amount/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/invoice/properties/amount/x-classification",
+            "ref": "#/$defs/invoice",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/delivery/notes",
+        "json_path": "$.delivery.notes",
+        "level": "confidential",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/delivery/notes",
+            "json_path": "$.delivery.notes",
+            "level": "confidential",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightDelivery/properties/notes/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightDelivery/properties/notes/x-classification",
+            "ref": "#/$defs/freightDelivery",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/delivery/dockCode",
+        "json_path": "$.delivery.dockCode",
+        "level": "internal",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/delivery/dockCode",
+            "json_path": "$.delivery.dockCode",
+            "level": "internal",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightDelivery/properties/dockCode/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightDelivery/properties/dockCode/x-classification",
+            "ref": "#/$defs/freightDelivery",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments/0/palletId",
+        "json_path": "$.shipments[0].palletId",
+        "level": "internal",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments/0/palletId",
+            "json_path": "$.shipments[0].palletId",
+            "level": "internal",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightShipment/properties/palletId/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightShipment/properties/palletId/x-classification",
+            "ref": "#/$defs/freightShipment",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments/0/parcels/0/trackingCode",
+        "json_path": "$.shipments[0].parcels[0].trackingCode",
+        "level": "internal",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments/0/parcels/0/trackingCode",
+            "json_path": "$.shipments[0].parcels[0].trackingCode",
+            "level": "internal",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightParcel/properties/trackingCode/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightParcel/properties/trackingCode/x-classification",
+            "ref": "#/$defs/freightParcel",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments/0/parcels/0/contents",
+        "json_path": "$.shipments[0].parcels[0].contents",
+        "level": "restricted",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments/0/parcels/0/contents",
+            "json_path": "$.shipments[0].parcels[0].contents",
+            "level": "restricted",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightParcel/properties/contents/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightParcel/properties/contents/x-classification",
+            "ref": "#/$defs/freightParcel",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      },
+      {
+        "instance_path": "/shipments/0/parcels/0/hazardClass",
+        "json_path": "$.shipments[0].parcels[0].hazardClass",
+        "level": "confidential",
+        "known": true,
+        "status": "classified",
+        "sources": [
+          {
+            "instance_path": "/shipments/0/parcels/0/hazardClass",
+            "json_path": "$.shipments[0].parcels[0].hazardClass",
+            "level": "confidential",
+            "configured": true,
+            "effective": true,
+            "keyword": "x-classification",
+            "schema_path": "/$defs/freightParcel/properties/hazardClass/x-classification",
+            "schema_uri": "https://audit.example/schemas/order#/$defs/freightParcel/properties/hazardClass/x-classification",
+            "ref": "#/$defs/freightParcel",
+            "resolved_uri": "https://audit.example/schemas/order"
+          }
+        ]
+      }
+    ],
+    "conflicts": [],
+    "summary": {
+      "field_count": 14,
+      "classified_count": 14,
+      "unknown_count": 0,
+      "conflict_count": 0,
+      "highest_level": "restricted",
+      "highest_level_by_root": {
+        "orderType": "internal",
+        "customer": "confidential",
+        "shipments": "restricted",
+        "invoice": "restricted",
+        "delivery": "confidential"
+      }
+    }
+  },
+  "diagnostics": {
+    "branch_count": 3,
+    "rejected_branches": [
+      {
+        "instance_path": "/delivery/notes",
+        "json_path": "$.delivery.notes",
+        "level": "internal",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/retailDelivery/properties/notes/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/retailDelivery/properties/notes/x-classification",
+        "ref": "#/$defs/retailDelivery",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "then_branch_not_taken"
+      },
+      {
+        "instance_path": "/shipments/0/parcels/0/trackingCode",
+        "json_path": "$.shipments[0].parcels[0].trackingCode",
+        "level": "internal",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/retailParcel/properties/trackingCode/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/retailParcel/properties/trackingCode/x-classification",
+        "ref": "#/$defs/retailParcel",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "then_branch_not_taken"
+      },
+      {
+        "instance_path": "/shipments/0/parcels/0/contents",
+        "json_path": "$.shipments[0].parcels[0].contents",
+        "level": "internal",
+        "configured": true,
+        "effective": false,
+        "keyword": "x-classification",
+        "schema_path": "/$defs/retailParcel/properties/contents/x-classification",
+        "schema_uri": "https://audit.example/schemas/order#/$defs/retailParcel/properties/contents/x-classification",
+        "ref": "#/$defs/retailParcel",
+        "resolved_uri": "https://audit.example/schemas/order",
+        "reason": "then_branch_not_taken"
+      }
+    ]
+  }
+}

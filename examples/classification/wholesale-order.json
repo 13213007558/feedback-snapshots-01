@@ -1,0 +1,28 @@
+{
+  "orderType": "wholesale",
+  "customer": {
+    "email": "ops@example.com",
+    "displayName": "Ops"
+  },
+  "delivery": {
+    "notes": "loading dock 3",
+    "dockCode": "D-3"
+  },
+  "invoice": {
+    "account": "ACCT-9",
+    "amount": 1200.5
+  },
+  "shipments": [
+    {
+      "carrier": "ACME",
+      "palletId": "PLT-77",
+      "parcels": [
+        {
+          "trackingCode": "TRK-2",
+          "contents": "pallets",
+          "hazardClass": "none"
+        }
+      ]
+    }
+  ]
+}

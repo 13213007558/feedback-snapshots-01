@@ -1,0 +1,28 @@
+{
+  "orderType": "retail",
+  "customer": {
+    "email": "ada@example.com",
+    "displayName": "Ada",
+    "loyaltyId": "L-100"
+  },
+  "delivery": {
+    "notes": "leave at reception",
+    "dropOff": "reception desk"
+  },
+  "payment": {
+    "pan": "4111111111111111",
+    "last4": "1111"
+  },
+  "shipments": [
+    {
+      "carrier": "ACME",
+      "parcels": [
+        {
+          "trackingCode": "TRK-1",
+          "contents": "books",
+          "giftWrap": true
+        }
+      ]
+    }
+  ]
+}
