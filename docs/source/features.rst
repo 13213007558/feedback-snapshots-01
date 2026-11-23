@@ -212,10 +212,28 @@ caching altogether, use ``use_listings_cache=False``. That would be appropriate
 when the target location is known to be volatile because it is being written
 to from other sources.
 
+The ``fields`` parameter restricts what listing entries retain. It is an
+iterable of field names that must include ``"name"``; every other field is
+dropped when a listing is stored in the cache and when it is read back out.
+This is useful when a backend returns attributes that should not be kept in a
+long-lived process cache (for example an object store's full metadata), while
+the names and the approved attributes are still answered from cache. A detailed
+query that reads the source directly returns the complete record to that
+caller, but it cannot widen the cache; the same holds when a shared instance's
+cache is changed to a narrower policy. The default, ``None``, retains every
+field.
+
 When the ``fsspec`` instance writes to the backend, the method ``invalidate_cache``
 is called, so that subsequent listing of the given paths will force a refresh. In
 addition, some methods like ``ls`` have a ``refresh`` parameter to force fetching
 the listing again.
+
+:class:`fsspec.implementations.dirfs.DirFileSystem` keeps its own listing cache.
+Because the wrapper's root may be written differently from the names the
+wrapped filesystem returns, cache updates and invalidation accept either
+spelling and affect the same entries. The wrapper applies its ``fields`` policy
+to a backend instance it creates, and narrows a supplied shared instance's cache
+to the same policy so that later users of that instance inherit it.
 
 URL chaining
 ------------

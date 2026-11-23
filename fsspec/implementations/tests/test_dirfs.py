@@ -1113,3 +1113,262 @@ def test_custom_pathlike_join_spelling(pathlike_dirfs, path):
 def test_join_bytes_still_unsupported(pathlike_dirfs):
     with pytest.raises(TypeError):
         pathlike_dirfs._join(b"file")
+
+
+class SyntheticMetadataMemoryFS(MemoryFileSystem):
+    """Memory backend whose listings carry synthetic, sensitive attributes.
+
+    It behaves like the backends that serve listings from ``self.dircache``:
+    the caller that caused the source read sees the full record, while the
+    retained entry is subject to the cache's field policy.
+    """
+
+    protocol = "synthetic-meta"
+    cachable = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.list_calls = 0
+        self.extra = {}
+
+    def _decorate(self, entries):
+        for entry in entries:
+            entry.update(
+                self.extra.get(
+                    entry["name"],
+                    {"etag": "synthetic", "owner": "synthetic-owner"},
+                )
+            )
+        return entries
+
+    def ls(self, path, detail=True, refresh=False, **kwargs):
+        path = self._strip_protocol(path)
+        if not refresh and path in self.dircache:
+            entries = list(self.dircache[path])
+        else:
+            self.list_calls += 1
+            entries = self._decorate(super().ls(path, detail=True))
+            self.dircache[path] = entries
+        if not detail:
+            return sorted(entry["name"] for entry in entries)
+        return entries
+
+    def info(self, path, **kwargs):
+        return self._decorate([super().info(path, **kwargs)])[0]
+
+    def invalidate_cache(self, path=None):
+        if path is None:
+            self.dircache.clear()
+        else:
+            path = self._strip_protocol(path).rstrip("/")
+            self.dircache.pop(path, None)
+            self.dircache.pop(self._parent(path), None)
+        super().invalidate_cache(path)
+
+
+def _synthetic_view(m, fields):
+    backend = SyntheticMetadataMemoryFS(global_store=False, skip_instance_cache=True)
+    backend.pipe({"/pool/a": b"a", "/pool/b": b"b"})
+    view = DirFileSystem("/pool", backend, skip_instance_cache=True, fields=fields)
+    return backend, view
+
+
+def _cached_entries(cache):
+    """Raw entries held by a DirCache, bypassing the read projection."""
+    return {key: list(value) for key, value in cache._cache.items()}
+
+
+def test_dirfs_field_policy_keeps_cache_narrow(m):
+    backend, view = _synthetic_view(m, ("name", "type", "size"))
+
+    # The caller that triggered the source read gets the full records.
+    first = view.ls("", detail=True)
+    assert [entry["etag"] for entry in first] == ["synthetic", "synthetic"]
+    assert backend.list_calls == 1
+
+    # What was retained is limited to the approved fields, in both caches.
+    assert _cached_entries(view.dircache)["/pool"] == [
+        {"name": "/pool/a", "type": "file", "size": 1},
+        {"name": "/pool/b", "type": "file", "size": 1},
+    ]
+    assert _cached_entries(backend.dircache)["/pool"] == [
+        {"name": "/pool/a", "type": "file", "size": 1},
+        {"name": "/pool/b", "type": "file", "size": 1},
+    ]
+
+    # Cache hits answer with the approved fields only, no backend read.
+    assert view.ls("", detail=True) == [
+        {"name": "a", "type": "file", "size": 1},
+        {"name": "b", "type": "file", "size": 1},
+    ]
+    assert backend.list_calls == 1
+
+    # An explicit detailed query by normal authorization reads the source
+    # again and is answered in full...
+    full = view.ls("", detail=True, refresh=True)
+    assert [entry["etag"] for entry in full] == ["synthetic", "synthetic"]
+    assert backend.list_calls == 2
+
+    # ...without widening the retained entries.
+    assert _cached_entries(view.dircache)["/pool"] == [
+        {"name": "/pool/a", "type": "file", "size": 1},
+        {"name": "/pool/b", "type": "file", "size": 1},
+    ]
+    assert all(
+        set(entry) <= {"name", "type", "size"}
+        for entry in _cached_entries(backend.dircache)["/pool"]
+    )
+    assert view.ls("", detail=True) == [
+        {"name": "a", "type": "file", "size": 1},
+        {"name": "b", "type": "file", "size": 1},
+    ]
+
+    # A direct single-object query is not served from the listing cache.
+    info = view.info("a")
+    assert info["etag"] == "synthetic"
+    assert set(info) >= {"name", "size", "type", "etag", "owner"}
+    assert _cached_entries(view.dircache)["/pool"] == [
+        {"name": "/pool/a", "type": "file", "size": 1},
+        {"name": "/pool/b", "type": "file", "size": 1},
+    ]
+
+
+def test_dirfs_configured_backend_cache_stays_narrow(m):
+    backend = SyntheticMetadataMemoryFS(
+        global_store=False, skip_instance_cache=True, fields=("name", "size")
+    )
+    backend.pipe({"/pool/a": b"a"})
+    full = backend.ls("/pool", detail=True)
+    assert full[0]["etag"] == "synthetic"
+    assert _cached_entries(backend.dircache)["/pool"] == [
+        {"name": "/pool/a", "size": 1}
+    ]
+
+    view = DirFileSystem("/pool", backend, skip_instance_cache=True)
+    assert view.ls("", detail=True) == [{"name": "a", "size": 1}]
+
+
+def test_dirfs_alias_invalidation_updates_narrow_cache(m):
+    backend, view = _synthetic_view(m, ("name", "type"))
+    assert view.ls("", detail=True)
+    assert backend.list_calls == 1
+
+    backend.extra["/pool/a"] = {"etag": "rotated", "owner": "synthetic-owner"}
+    backend.pipe_file("/pool/a", b"new")
+
+    # Both spellings address the same cached entry.
+    view.invalidate_cache("a")
+    assert "/pool" not in view.dircache
+    assert "/pool" not in backend.dircache
+
+    listed = view.ls("", detail=True)
+    # The miss fetched a full record from the source...
+    assert [entry["etag"] for entry in listed] == ["rotated", "synthetic"]
+    assert backend.list_calls == 2
+    # ...while the retained entries remain narrowed.
+    assert _cached_entries(view.dircache)["/pool"] == [
+        {"name": "/pool/a", "type": "file"},
+        {"name": "/pool/b", "type": "file"},
+    ]
+    # A subsequent hit answers from the narrow record.
+    assert view.ls("", detail=True) == [
+        {"name": "a", "type": "file"},
+        {"name": "b", "type": "file"},
+    ]
+    assert backend.list_calls == 2
+
+    # Invalidating with the backend spelling hits the same entries.
+    view.invalidate_cache("/pool")
+    assert "/pool" not in view.dircache
+    assert "/pool" not in backend.dircache
+
+    # A write through the wrapper also drops the wrapper's stale record, so
+    # a later listing cannot serve the previous, wider record.
+    view.ls("", detail=True)
+    view.pipe_file("a", b"data")
+    assert "/pool" not in view.dircache
+
+
+def test_dirfs_shared_instance_lifecycle_keeps_policy(m):
+    backend, view = _synthetic_view(m, ("name",))
+    assert backend.dircache.fields == ("name",)
+    view.invalidate_cache()
+    view.invalidate_cache("a")
+    # The policy survives invalidation, so a later shared use cannot widen it.
+    assert backend.dircache.fields == ("name",)
+    assert view.dircache.fields == ("name",)
+
+
+@pytest.fixture
+def synthetic_protocol():
+    from fsspec.registry import _registry
+
+    added = "synthetic-meta" not in _registry
+    if added:
+        fsspec.register_implementation("synthetic-meta", SyntheticMetadataMemoryFS)
+    try:
+        yield
+    finally:
+        if added:
+            _registry.pop("synthetic-meta", None)
+
+
+def test_dirfs_target_options_inherit_field_policy(synthetic_protocol):
+    view = DirFileSystem(
+        "/pool",
+        target_protocol="synthetic-meta",
+        target_options={"global_store": False, "skip_instance_cache": True},
+        skip_instance_cache=True,
+        fields=("name", "size"),
+    )
+    assert isinstance(view.fs, SyntheticMetadataMemoryFS)
+    assert view.fs.dircache.fields == ("name", "size")
+    assert view.dircache.fields == ("name", "size")
+
+
+def test_dirfs_does_not_widen_narrower_shared_backend(m):
+    backend = SyntheticMetadataMemoryFS(
+        global_store=False, skip_instance_cache=True, fields=("name",)
+    )
+    view = DirFileSystem(
+        "/pool", backend, skip_instance_cache=True, fields=("name", "type")
+    )
+    assert view.dircache.fields == ("name", "type")
+    assert backend.dircache.fields == ("name",)
+
+
+@pytest.mark.parametrize("spelling", ["file", "path/to/dir/file"])
+def test_dirfs_invalidate_cache_accepts_both_spellings(dirfs, spelling):
+    dirfs.dircache[f"{PATH}/file"] = [{"name": f"{PATH}/file", "type": "file"}]
+    dirfs.dircache[PATH] = [{"name": f"{PATH}/file", "type": "file"}]
+
+    dirfs.invalidate_cache(spelling)
+
+    # The wrapped entry and the listing that contains it both refresh.
+    assert dirfs.dircache._cache == {}
+    dirfs.fs.invalidate_cache.assert_called_once_with(f"{PATH}/file")
+
+
+def test_dirfs_plain_listing_is_served_from_narrow_cache(m):
+    backend, view = _synthetic_view(m, ("name",))
+    names = view.ls("", detail=False)
+    assert names == ["a", "b"]
+    assert backend.list_calls == 1
+    # The names-only reply still populated the approved record.
+    assert _cached_entries(view.dircache)["/pool"] == [
+        {"name": "/pool/a"},
+        {"name": "/pool/b"},
+    ]
+    assert view.ls("", detail=False) == ["a", "b"]
+    assert backend.list_calls == 1
+
+
+@pytest.mark.parametrize("refresh", [None, False, True])
+def test_dirfs_ls_forwards_refresh_only_when_given(dirfs, refresh):
+    dirfs.fs.ls.return_value = [{"name": f"{PATH}/file", "type": "file"}]
+    kwargs = {} if refresh is None else {"refresh": refresh}
+    dirfs.ls("file", detail=True, **kwargs)
+    expected = {"detail": True}
+    if refresh is not None:
+        expected["refresh"] = refresh
+    dirfs.fs.ls.assert_called_once_with(f"{PATH}/file", **expected)

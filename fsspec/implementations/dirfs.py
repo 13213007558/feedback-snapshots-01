@@ -1,5 +1,6 @@
 from .. import filesystem
 from ..asyn import AsyncFileSystem
+from ..dircache import DirCache
 from ..utils import stringify_path
 from .chained import ChainedFileSystem
 from .local import LocalFileSystem
@@ -51,7 +52,19 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         """
         super().__init__(**storage_options)
         if fs is None:
-            fs = filesystem(protocol=target_protocol, **(target_options or {}))
+            # Pass the listing-cache policy on to an instance this wrapper
+            # creates, so the underlying filesystem does not keep broader
+            # records than the wrapper is allowed to retain.
+            target_options = dict(target_options or {})
+            for name in (
+                "use_listings_cache",
+                "listings_expiry_time",
+                "max_paths",
+                "fields",
+            ):
+                if name not in target_options and storage_options.get(name) is not None:
+                    target_options[name] = storage_options[name]
+            fs = filesystem(protocol=target_protocol, **target_options)
         path = path or fo
 
         if self.asynchronous and not fs.async_impl:
@@ -63,6 +76,119 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         self.path = fs._strip_protocol(path)
         self.fs = fs
         self.async_impl = fs.async_impl
+
+        # A shared instance can outlive this wrapper, so its own listing cache
+        # must obey the same retention policy. Narrowing an already-shared
+        # cache is fail-closed and safe; widening it would not be, so a cache
+        # that is already narrower is left alone.
+        backend_cache = getattr(fs, "dircache", None)
+        if self.dircache.fields is not None and isinstance(backend_cache, DirCache):
+            backend_cache.fields = self._narrow_fields(
+                backend_cache.fields, self.dircache.fields
+            )
+
+    @staticmethod
+    def _narrow_fields(current, new):
+        """Return a retention policy no broader than either argument."""
+        if current is None:
+            return new
+        if new is None:
+            return current
+        return tuple(field for field in current if field in new)
+
+    @property
+    def _root(self):
+        return self._cache_key(self.path)
+
+    def _cache_key(self, backend_path):
+        """Normalise a backend path for this wrapper's own directory cache."""
+        if not backend_path:
+            return ""
+        return stringify_path(self.fs._strip_protocol(backend_path)).rstrip(self.fs.sep)
+
+    def _backend_path(self, path):
+        """Resolve either spelling of a path to the wrapped path space.
+
+        Callers may name a path relative to the wrapper root (the usual
+        form), or use the wrapped filesystem's own name for the same object
+        (as listings and ``info`` return it). Both must update and invalidate
+        the same cache entry.
+        """
+        path = self._strip_protocol(stringify_path(path))
+        root = self._root
+        if not path:
+            return self.path
+        if not root:
+            # An unrooted wrapper shares the wrapped filesystem's path space.
+            return path
+        if path == root:
+            return self.path
+        sep = self.fs.sep
+        prefix = root if root.endswith(sep) else root + sep
+        if path.startswith(prefix):
+            return path
+        # Backend names may omit a leading separator that the root carries.
+        if root.startswith(sep) and not path.startswith(sep):
+            stripped = root.lstrip(sep)
+            if path == stripped or path.startswith(stripped + sep):
+                return root + path[len(stripped) :]
+        return self._join(path)
+
+    def _ls_from_cache(self, path):
+        """Check this wrapper's cache for a listing, translating aliases.
+
+        The wrapper and the wrapped filesystem may spell the same path
+        differently, so both spellings address the same entry.
+        """
+        backend = self._backend_path(path)
+        key = self._cache_key(backend)
+        try:
+            entries = self.dircache[key]
+        except KeyError:
+            pass
+        else:
+            return self._relative_entries(entries, self._relpath)
+
+        parent = self._cache_key(self.fs._parent(backend))
+        try:
+            entries = self.dircache[parent]
+        except KeyError:
+            return None
+        matches = [entry for entry in entries if self._cache_key(entry["name"]) == key]
+        if matches:
+            return self._relative_entries(matches, self._relpath)
+        raise FileNotFoundError(path)
+
+    def _cache_after_mutation(self, *paths):
+        """Drop this wrapper's cached listings affected by a write."""
+        flat = []
+        for path in paths:
+            if isinstance(path, dict):
+                flat.extend(path)
+            elif isinstance(path, (list, tuple)):
+                flat.extend(path)
+            else:
+                flat.append(path)
+        for path in flat:
+            self._drop_cached(self._join(path))
+
+    def _drop_cached(self, backend_path):
+        """Drop cached listings for a backend path, its parent and its subtree.
+
+        A changed object also changes the listing that contains it, so the
+        parent entry must be refreshed rather than served from the cache.
+        """
+        key = self._cache_key(backend_path)
+        sep = self.fs.sep
+        prefix = key + sep
+        drop = {key}
+        parent = key.rsplit(sep, 1)[0] if sep in key else ""
+        root = self._root
+        if parent and (not root or parent == root or parent.startswith(root + sep)):
+            drop.add(parent)
+        for cached in list(self.dircache):
+            if cached in drop or cached.startswith(prefix):
+                self.dircache.pop(cached, None)
 
     def _join(self, path):
         path = stringify_path(path)
@@ -131,25 +257,39 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         return await self.fs.set_session(*args, **kwargs)
 
     async def _rm_file(self, path, **kwargs):
-        return await self.fs._rm_file(self._join(path), **kwargs)
+        ret = await self.fs._rm_file(self._join(path), **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def rm_file(self, path, **kwargs):
-        return self.fs.rm_file(self._join(path), **kwargs)
+        ret = self.fs.rm_file(self._join(path), **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     async def _rm(self, path, *args, **kwargs):
-        return await self.fs._rm(self._join(path), *args, **kwargs)
+        ret = await self.fs._rm(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def rm(self, path, *args, **kwargs):
-        return self.fs.rm(self._join(path), *args, **kwargs)
+        ret = self.fs.rm(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def delete(self, path, recursive=False, maxdepth=None):
-        return self.fs.delete(self._join(path), recursive=recursive, maxdepth=maxdepth)
+        ret = self.fs.delete(self._join(path), recursive=recursive, maxdepth=maxdepth)
+        self._cache_after_mutation(path)
+        return ret
 
     async def _cp_file(self, path1, path2, **kwargs):
-        return await self.fs._cp_file(self._join(path1), self._join(path2), **kwargs)
+        ret = await self.fs._cp_file(self._join(path1), self._join(path2), **kwargs)
+        self._cache_after_mutation(path2)
+        return ret
 
     def cp_file(self, path1, path2, **kwargs):
-        return self.fs.cp_file(self._join(path1), self._join(path2), **kwargs)
+        ret = self.fs.cp_file(self._join(path1), self._join(path2), **kwargs)
+        self._cache_after_mutation(path2)
+        return ret
 
     async def _copy(
         self,
@@ -158,37 +298,49 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         *args,
         **kwargs,
     ):
-        return await self.fs._copy(
+        ret = await self.fs._copy(
             self._join(path1),
             self._join(path2),
             *args,
             **kwargs,
         )
+        self._cache_after_mutation(path2)
+        return ret
 
     def copy(self, path1, path2, *args, **kwargs):
-        return self.fs.copy(
+        ret = self.fs.copy(
             self._join(path1),
             self._join(path2),
             *args,
             **kwargs,
         )
+        self._cache_after_mutation(path2)
+        return ret
 
     async def _pipe(self, path, *args, **kwargs):
-        return await self.fs._pipe(self._join(path), *args, **kwargs)
+        ret = await self.fs._pipe(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def pipe(self, path, *args, **kwargs):
-        return self.fs.pipe(self._join(path), *args, **kwargs)
+        ret = self.fs.pipe(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     async def _pipe_file(self, path, *args, **kwargs):
-        return await self.fs._pipe_file(self._join(path), *args, **kwargs)
+        ret = await self.fs._pipe_file(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def pipe_file(self, path, *args, **kwargs):
-        return self.fs.pipe_file(self._join(path), *args, **kwargs)
+        ret = self.fs.pipe_file(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def write_text(
         self, path, value, encoding=None, errors=None, newline=None, **kwargs
     ):
-        return self.fs.write_text(
+        ret = self.fs.write_text(
             self._join(path),
             value,
             encoding=encoding,
@@ -196,6 +348,8 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
             newline=newline,
             **kwargs,
         )
+        self._cache_after_mutation(path)
+        return ret
 
     async def _cat_file(self, path, *args, **kwargs):
         return await self.fs._cat_file(self._join(path), *args, **kwargs)
@@ -302,7 +456,13 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
     def invalidate_cache(self, path=None):
         # With no path, clear only what is cached under this directory. An
         # unrooted dirfs joins to "", which means everything on the wrapped fs.
-        self.fs.invalidate_cache(self._join(path or "") or None)
+        if path is None:
+            backend_path = self._join("") or None
+            self.dircache.clear()
+        else:
+            backend_path = self._backend_path(path)
+            self._drop_cached(backend_path)
+        self.fs.invalidate_cache(backend_path)
 
     def ukey(self, path):
         return self.fs.ukey(self._join(path))
@@ -328,27 +488,79 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         info["name"] = self._relpath(info["name"])
         return info
 
-    async def _ls(self, path, detail=True, **kwargs):
-        ret = (await self.fs._ls(self._join(path), detail=detail, **kwargs)).copy()
+    @staticmethod
+    def _relative_entries(entries, relpath):
+        out = []
+        for entry in entries:
+            entry = entry.copy()
+            entry["name"] = relpath(entry["name"])
+            out.append(entry)
+        return out
+
+    def _cache_listings(self):
+        """Whether the wrapper keeps its own listings.
+
+        Without a retention policy the wrapper stays a pass-through and lets
+        the wrapped filesystem decide about caching, as before.
+        """
+        return self.dircache.fields is not None
+
+    async def _ls(self, path, detail=True, refresh=None, **kwargs):
+        backend_path = self._join(path)
+        key = self._cache_key(backend_path)
+        cached = None
+        if self._cache_listings() and refresh is not True:
+            cached = self.dircache.get(key)
+        if cached is not None:
+            if detail:
+                return self._relative_entries(cached, self._relpath)
+            return sorted(self._relpath(entry["name"]) for entry in cached)
+
+        call_kwargs = kwargs
+        if refresh is not None:
+            call_kwargs = {**kwargs, "refresh": refresh}
+        if self._cache_listings() and not detail:
+            # Populate the approved record once, then answer names from it.
+            ret = (await self.fs._ls(backend_path, detail=True, **call_kwargs)).copy()
+            self.dircache[key] = [entry.copy() for entry in ret]
+            return sorted(self._relpath(entry["name"]) for entry in ret)
+
+        ret = (await self.fs._ls(backend_path, detail=detail, **call_kwargs)).copy()
         if detail:
-            out = []
-            for entry in ret:
-                entry = entry.copy()
-                entry["name"] = self._relpath(entry["name"])
-                out.append(entry)
-            return out
+            # The cache stores the wrapped filesystem's own names and applies
+            # the configured field-retention policy, so a full source record
+            # cannot widen what is retained; the reply is still translated to
+            # wrapper-relative names.
+            if self._cache_listings():
+                self.dircache[key] = [entry.copy() for entry in ret]
+            return self._relative_entries(ret, self._relpath)
 
         return self._relpath(ret)
 
-    def ls(self, path, detail=True, **kwargs):
-        ret = self.fs.ls(self._join(path), detail=detail, **kwargs).copy()
+    def ls(self, path, detail=True, refresh=None, **kwargs):
+        backend_path = self._join(path)
+        key = self._cache_key(backend_path)
+        cached = None
+        if self._cache_listings() and refresh is not True:
+            cached = self.dircache.get(key)
+        if cached is not None:
+            if detail:
+                return self._relative_entries(cached, self._relpath)
+            return sorted(self._relpath(entry["name"]) for entry in cached)
+
+        call_kwargs = kwargs
+        if refresh is not None:
+            call_kwargs = {**kwargs, "refresh": refresh}
+        if self._cache_listings() and not detail:
+            ret = self.fs.ls(backend_path, detail=True, **call_kwargs).copy()
+            self.dircache[key] = [entry.copy() for entry in ret]
+            return sorted(self._relpath(entry["name"]) for entry in ret)
+
+        ret = self.fs.ls(backend_path, detail=detail, **call_kwargs).copy()
         if detail:
-            out = []
-            for entry in ret:
-                entry = entry.copy()
-                entry["name"] = self._relpath(entry["name"])
-                out.append(entry)
-            return out
+            if self._cache_listings():
+                self.dircache[key] = [entry.copy() for entry in ret]
+            return self._relative_entries(ret, self._relpath)
 
         return self._relpath(ret)
 
@@ -431,29 +643,43 @@ class DirFileSystem(AsyncFileSystem, ChainedFileSystem):
         return self._relpath(self.fs.expand_path(self._join(path), *args, **kwargs))
 
     async def _mkdir(self, path, *args, **kwargs):
-        return await self.fs._mkdir(self._join(path), *args, **kwargs)
+        ret = await self.fs._mkdir(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def mkdir(self, path, *args, **kwargs):
-        return self.fs.mkdir(self._join(path), *args, **kwargs)
+        ret = self.fs.mkdir(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     async def _makedirs(self, path, *args, **kwargs):
-        return await self.fs._makedirs(self._join(path), *args, **kwargs)
+        ret = await self.fs._makedirs(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def makedirs(self, path, *args, **kwargs):
-        return self.fs.makedirs(self._join(path), *args, **kwargs)
+        ret = self.fs.makedirs(self._join(path), *args, **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def rmdir(self, path):
-        return self.fs.rmdir(self._join(path))
+        ret = self.fs.rmdir(self._join(path))
+        self._cache_after_mutation(path)
+        return ret
 
     def mv(self, path1, path2, **kwargs):
-        return self.fs.mv(
+        ret = self.fs.mv(
             self._join(path1),
             self._join(path2),
             **kwargs,
         )
+        self._cache_after_mutation(path1, path2)
+        return ret
 
     def touch(self, path, **kwargs):
-        return self.fs.touch(self._join(path), **kwargs)
+        ret = self.fs.touch(self._join(path), **kwargs)
+        self._cache_after_mutation(path)
+        return ret
 
     def created(self, path):
         return self.fs.created(self._join(path))

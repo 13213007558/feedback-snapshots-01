@@ -233,10 +233,11 @@ class AbstractFileSystem(metaclass=_Cached):
 
         Parameters
         ----------
-        use_listings_cache, listings_expiry_time, max_paths:
+        use_listings_cache, listings_expiry_time, max_paths, fields:
             passed to ``DirCache``, if the implementation supports
             directory listing caching. Pass use_listings_cache=False
-            to disable such caching.
+            to disable such caching. ``fields`` restricts the fields
+            retained in cached listing entries; see ``DirCache``.
         skip_instance_cache: bool
             If this is a cachable implementation, pass True here to force
             creating a new instance even if a matching instance exists, and prevent
@@ -377,6 +378,19 @@ class AbstractFileSystem(metaclass=_Cached):
         # See the implementation of FTPFileSystem in ftp.py
         if self._intrans:
             self._invalidated_caches_in_transaction.append(path)
+            return
+        if path is None:
+            self.dircache.clear()
+            return
+        if isinstance(path, (list, tuple)):
+            for one in path:
+                self.invalidate_cache(one)
+            return
+        path = self._strip_protocol(path)
+        prefix = path.rstrip("/") + "/"
+        for key in list(self.dircache):
+            if key == path or key.startswith(prefix):
+                self.dircache.pop(key, None)
 
     def mkdir(self, path, create_parents=True, **kwargs):
         """

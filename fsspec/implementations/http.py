@@ -266,6 +266,7 @@ class HTTPFileSystem(AsyncFileSystem):
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
         request_options.pop("listings_expiry_time", None)
         request_options.pop("max_paths", None)
+        request_options.pop("fields", None)
         request_options.pop("skip_instance_cache", None)
         self.kwargs = request_options
 

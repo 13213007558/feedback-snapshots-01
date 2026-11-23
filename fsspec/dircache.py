@@ -21,7 +21,8 @@ class DirCache(MutableMapping):
         }
 
     Parameters to this class control listing expiry or indeed turn
-    caching off.
+    caching off. A cache can additionally be restricted to a subset of the
+    fields present in each entry; see ``fields``.
     """
 
     def __init__(
@@ -29,6 +30,7 @@ class DirCache(MutableMapping):
         use_listings_cache=True,
         listings_expiry_time=None,
         max_paths=None,
+        fields=None,
         **kwargs,
     ):
         """
@@ -45,6 +47,16 @@ class DirCache(MutableMapping):
             When the cache exceeds this limit, the least recently used
             (set or accessed) listings are evicted. If None, 0, or negative,
             there is no limit.
+        fields: iterable of str (optional)
+            If given, only these fields are retained from each listing entry.
+            ``"name"`` is mandatory because it is how entries are matched in
+            the cache. ``None`` (the default) retains every field, which is
+            the historical behaviour.
+
+            The policy is applied on every write and every read, so a caller
+            that obtains a full record from the backend cannot widen the
+            cache by assigning it here. Changing ``fields`` on an existing
+            cache also discards fields that are no longer allowed.
         """
         # max_paths is normalized to be either positive or None.
         self.max_paths = max_paths if max_paths and max_paths > 0 else None
@@ -52,6 +64,54 @@ class DirCache(MutableMapping):
         self._times = {}
         self.use_listings_cache = use_listings_cache
         self.listings_expiry_time = listings_expiry_time
+        self._fields = self._normalize_fields(fields)
+
+    @staticmethod
+    def _normalize_fields(fields):
+        if fields is None:
+            return None
+        if isinstance(fields, str):
+            raise TypeError("fields must be an iterable of field names, not a string")
+        fields = tuple(fields)
+        if not fields:
+            raise ValueError("fields must contain at least one field name")
+        if not all(isinstance(field, str) for field in fields):
+            raise TypeError("field names must be strings")
+        if "name" not in fields:
+            raise ValueError(
+                "the 'name' field must be retained; it identifies cached entries"
+            )
+        return fields
+
+    @property
+    def fields(self):
+        """Fields retained in cached entries, or None for all fields."""
+        return self._fields
+
+    @fields.setter
+    def fields(self, value):
+        self._fields = self._normalize_fields(value)
+        # Re-project entries created under a previous, possibly broader policy.
+        for key in list(self._cache):
+            self._cache[key] = self._project(self._cache[key])
+
+    def _project_dict(self, value):
+        return {field: value[field] for field in self._fields if field in value}
+
+    def _project(self, value):
+        """Return a copy of ``value`` containing only the allowed fields."""
+        if self._fields is None:
+            return value
+        if isinstance(value, dict):
+            return self._project_dict(value)
+        if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], dict):
+            # Some implementations cache ``(name, details)`` pairs.
+            return value[0], self._project_dict(value[1])
+        if isinstance(value, list):
+            return [self._project(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._project(item) for item in value)
+        return value
 
     def __getitem__(self, item):
         if not self.use_listings_cache:
@@ -65,7 +125,7 @@ class DirCache(MutableMapping):
         val = self._cache[item]
         if self.max_paths:
             self._cache.move_to_end(item)
-        return val
+        return self._project(val)
 
     def clear(self):
         self._cache.clear()
@@ -89,7 +149,9 @@ class DirCache(MutableMapping):
         if not self.use_listings_cache:
             return
 
-        self._cache[key] = value
+        # Copy and project, so the cache never keeps a reference to a full
+        # record held by the caller.
+        self._cache[key] = self._project(value)
         if self.listings_expiry_time is not None:
             self._times[key] = time.time()
 
@@ -121,5 +183,10 @@ class DirCache(MutableMapping):
     def __reduce__(self):
         return (
             DirCache,
-            (self.use_listings_cache, self.listings_expiry_time, self.max_paths),
+            (
+                self.use_listings_cache,
+                self.listings_expiry_time,
+                self.max_paths,
+                self._fields,
+            ),
         )

@@ -110,3 +110,71 @@ def test_dircache_pickle_roundtrip():
     assert dc2.use_listings_cache is True
     assert dc2.listings_expiry_time == 10
     assert dc2.max_paths == 5
+
+
+def test_dircache_fields_are_projected_on_write_and_read():
+    dc = DirCache(fields=("name", "type"))
+
+    source = [
+        {"name": "a", "type": "file", "size": 3, "etag": "secret"},
+        {"name": "b", "type": "directory", "size": 0},
+    ]
+    dc["root"] = source
+
+    # The caller's full record is not referenced by the cache.
+    source[0]["etag"] = "changed"
+    assert dc["root"] == [
+        {"name": "a", "type": "file"},
+        {"name": "b", "type": "directory"},
+    ]
+    assert dc._cache["root"] == dc["root"]
+
+
+def test_dircache_fields_returned_records_are_copies():
+    dc = DirCache(fields=("name", "size"))
+    dc["root"] = [{"name": "a", "size": 1}]
+
+    returned = dc["root"]
+    returned[0]["size"] = 99
+    returned[0]["etag"] = "smuggled"
+
+    assert dc["root"] == [{"name": "a", "size": 1}]
+    assert dc._cache["root"] == [{"name": "a", "size": 1}]
+
+
+def test_dircache_fields_change_narrows_existing_entries():
+    dc = DirCache(fields=("name", "size", "etag"))
+    dc["root"] = [{"name": "a", "size": 1, "etag": "old"}]
+
+    dc.fields = ("name",)
+
+    assert dc["root"] == [{"name": "a"}]
+    assert dc._cache["root"] == [{"name": "a"}]
+
+
+def test_dircache_fields_require_name():
+    with pytest.raises(ValueError):
+        DirCache(fields=("size",))
+    with pytest.raises(ValueError):
+        DirCache(fields=())
+    with pytest.raises(TypeError):
+        DirCache(fields="name")
+
+
+def test_dircache_fields_pickle_roundtrip():
+    dc = DirCache(fields=("name", "type"))
+    dc["root"] = [{"name": "a", "type": "file", "size": 1}]
+
+    dc2 = pickle.loads(pickle.dumps(dc))
+
+    assert dc2.fields == ("name", "type")
+    dc2["root"] = [{"name": "a", "type": "file", "size": 1}]
+    assert dc2["root"] == [{"name": "a", "type": "file"}]
+
+
+def test_dircache_fields_project_pair_entries():
+    dc = DirCache(fields=("name", "type"))
+    dc["root"] = [("a", {"name": "a", "type": "file", "size": 3})]
+
+    assert dc["root"] == [("a", {"name": "a", "type": "file"})]
+    assert dc._cache["root"] == [("a", {"name": "a", "type": "file"})]

@@ -6,6 +6,12 @@ Dev
 
 Enhancements
 
+- Give ``DirCache`` a ``fields`` retention policy: cached listings keep only the
+  approved fields, cache hits still answer names and approved attributes, and a
+  detailed source query cannot widen the retained records. ``DirFileSystem``
+  applies the policy to its own and to a supplied backend cache, and accepts
+  either path spelling when updating or invalidating entries.
+
 - List TAR archive descendants from the existing directory cache without
   rescanning the full archive for each directory.
 
