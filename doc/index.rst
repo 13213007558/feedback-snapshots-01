@@ -21,6 +21,7 @@ Modules
     aws_encryption_sdk.materials_managers.base
     aws_encryption_sdk.materials_managers.caching
     aws_encryption_sdk.materials_managers.default
+    aws_encryption_sdk.streaming_admission
     aws_encryption_sdk.streaming_client
     aws_encryption_sdk.structures
     aws_encryption_sdk.internal

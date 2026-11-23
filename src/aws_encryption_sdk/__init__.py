@@ -19,6 +19,14 @@ from aws_encryption_sdk.key_providers.kms import (  # noqa
 )
 from aws_encryption_sdk.materials_managers.caching import CachingCryptoMaterialsManager  # noqa
 from aws_encryption_sdk.materials_managers.default import DefaultCryptoMaterialsManager  # noqa
+from aws_encryption_sdk.streaming_admission import (  # noqa
+    AdmissionBudgetExceeded,
+    AdmissionError,
+    AdmissionMeter,
+    AdmissionResult,
+    admit_message_stream,
+    abandon_admitted_stream,
+)
 from aws_encryption_sdk.streaming_client import (  # noqa
     DecryptorConfig,
     EncryptorConfig,
