@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import copy
 import sys
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import logging
-    from collections.abc import Mapping
 
 
 def _create_buffer_record(
@@ -60,8 +61,8 @@ def _create_buffer_record(
     # Construct and return the og record dictionary
     return {
         "level": level,
-        "msg": msg,
-        "args": args,
+        "msg": _snapshot_buffered_value(msg),
+        "args": _snapshot_buffered_value(args),
         "filename": caller_frame.f_code.co_filename,
         "line": caller_frame.f_lineno,
         "function": caller_frame.f_code.co_name,
@@ -129,3 +130,18 @@ def _check_minimum_buffer_log_level(buffer_log_level, current_log_level):
         return True
 
     return False
+
+
+def _snapshot_buffered_value(value: Any) -> Any:
+    """Copy mutable structured values so later caller mutations do not rewrite history.
+
+    Buffered logs represent the business dimensions at the moment they were
+    created. Lists, dicts, tuples and sets are copied; arbitrary objects keep
+    their reference because they may not support copying.
+    """
+    if isinstance(value, Mapping | list | tuple | set | frozenset):
+        try:
+            return copy.deepcopy(value)
+        except Exception:  # noqa: BLE001 - customer objects may not be copyable
+            return value
+    return value

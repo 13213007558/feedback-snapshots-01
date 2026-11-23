@@ -13,6 +13,7 @@ import os
 import random
 import sys
 import warnings
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import IO, TYPE_CHECKING, Any, TypeVar, cast, overload
 
@@ -46,7 +47,7 @@ from aws_lambda_powertools.utilities import jmespath_utils
 from aws_lambda_powertools.warnings import PowertoolsUserWarning
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping
+    from collections.abc import Callable, Generator, Iterable
 
     from aws_lambda_powertools.logging.buffer.config import LoggerBufferConfig
     from aws_lambda_powertools.shared.types import AnyCallableT
@@ -943,7 +944,10 @@ class Logger:
         return self._logger.setLevel(self._determine_log_level(level))
 
     def addHandler(self, handler: logging.Handler) -> None:
-        return self._logger.addHandler(handler)
+        self._logger.addHandler(handler)
+        bind_logger = getattr(handler, "bind_logger", None)
+        if callable(bind_logger):
+            bind_logger(self)
 
     def addFilter(self, filter: logging._FilterType) -> None:  # noqa: A002 # filter built-in usage
         return self._logger.addFilter(filter)
@@ -1122,6 +1126,9 @@ class Logger:
             extra=log_line["extra"],
         )
         record.created = log_line["timestamp"]
+        record._powertools_log_keys = log_line.get("_powertools_log_keys")
+        record._powertools_log_context = log_line.get("_powertools_log_context")
+        record._powertools_disclosure_snapshots = log_line.get("_powertools_disclosure_snapshots", [])
         self._logger.handle(record)
 
     def _add_log_record_to_buffer(
@@ -1180,6 +1187,9 @@ class Logger:
                 stack_info=stack_info,
                 extra=extra,
             )
+            log_record["_powertools_log_keys"] = self._buffer_log_keys()
+            log_record["_powertools_log_context"] = self._buffer_log_context()
+            log_record["_powertools_disclosure_snapshots"] = self._buffer_disclosure_snapshots()
             try:
                 self._buffer_cache.add(tracer_id, log_record)
             except BufferError:
@@ -1192,6 +1202,53 @@ class Logger:
 
                 # flush this log to avoid data loss
                 self._create_and_flush_log_record(log_record)
+
+    def _buffer_log_keys(self) -> dict[str, Any] | None:
+        """Snapshot the persistent log keys when a record enters the buffer."""
+        try:
+            keys = self.registered_formatter.get_current_keys()
+        except Exception:  # noqa: BLE001 - orphaned child loggers or custom formatters
+            return None
+        return dict(keys) if isinstance(keys, Mapping) else None
+
+    def _buffer_log_context(self) -> dict[str, Any] | None:
+        """Snapshot thread-local log keys when a record enters the buffer."""
+        try:
+            keys = self.registered_formatter.thread_safe_get_current_keys()
+        except Exception:  # noqa: BLE001 - orphaned child loggers or custom formatters
+            return None
+        return dict(keys) if isinstance(keys, Mapping) else None
+
+    def _buffer_disclosure_snapshots(self) -> list[tuple[Any, frozenset[str]]]:
+        """Snapshot every applied disclosure policy when a record enters the buffer.
+
+        The snapshot is the disclosure range at record creation time. External
+        handlers intersect it with their current approvals when the record is
+        finally sent.
+        """
+        snapshots: list[tuple[Any, frozenset[str]]] = []
+        for handler in self._effective_handlers():
+            policy = getattr(handler, "policy", None)
+            approved_fields = getattr(policy, "approved_fields", None)
+            if approved_fields is not None:
+                snapshots.append((policy, frozenset(approved_fields)))
+        return snapshots
+
+    def _effective_handlers(self) -> list[logging.Handler]:
+        """Return handlers a record from this logger reaches, including ancestors.
+
+        Child loggers keep their own buffer but their records are handled by the
+        parent's handlers. Their disclosure snapshots must therefore include the
+        policies attached to every ancestor that receives the record.
+        """
+        handlers: list[logging.Handler] = []
+        current: logging.Logger | None = self._logger
+        while current is not None:
+            handlers.extend(current.handlers)
+            if not current.propagate:
+                break
+            current = current.parent
+        return handlers
 
     def flush_buffer(self) -> None:
         """

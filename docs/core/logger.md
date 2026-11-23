@@ -708,6 +708,22 @@ sequenceDiagram
 <i>Flushing buffer when an uncaught exception happens</i>
 </center>
 
+#### Restricting what external handlers disclose
+
+When buffered logs are also sent to a third party, approvals can change while a record is still in the buffer. Use `DisclosurePolicy` with a `DisclosureHandler` to define the fields an external destination may receive. The internal handler keeps the complete record.
+
+```python hl_lines="4 12-25 32 39 42"
+--8<-- "examples/logger/src/working_with_buffering_logs_disclosure_policy.py"
+```
+
+1. Approve the fields the external destination may receive. `message.<key>` approves one business dimension of a structured message; approving only `message` does not approve its keys.
+2. Keys appended to the logger are snapshotted with the buffered record.
+3. The internal handler receives the full message, including `customer_id` and `internal_note`.
+4. Audit changes approvals at runtime with `approve` and `revoke`.
+5. On flush, the external handler only sends fields approved both when the record was created and when it is sent. Exception details are replaced by the category defined in `error_categories` or `default_error_category`.
+
+The same rule applies to real-time logs and to a log record that is too big for the buffer and is sent immediately. Caller-owned message and `extra` objects are never mutated.
+
 #### Buffering FAQs
 
 1. **Does the buffer persist across Lambda invocations?** No, each Lambda invocation has its own buffer. The buffer is initialized when the Lambda function is invoked and is cleared after the function execution completes or when flushed manually.

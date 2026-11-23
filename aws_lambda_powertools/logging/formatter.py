@@ -7,12 +7,14 @@ import os
 import time
 import traceback
 from abc import ABCMeta, abstractmethod
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from aws_lambda_powertools.logging.constants import LOGGER_INTERNAL_RECORD_ATTRS
 from aws_lambda_powertools.shared import constants
 from aws_lambda_powertools.shared.functions import powertools_dev_is_set
 
@@ -422,7 +424,20 @@ class LambdaPowertoolsFormatter(BasePowertoolsFormatter):
         """
         record_dict = log_record.__dict__.copy()
         record_dict["asctime"] = self.formatTime(record=log_record)
-        extras = {k: v for k, v in record_dict.items() if k not in RESERVED_LOG_ATTRS}
+        extras = {
+            k: v
+            for k, v in record_dict.items()
+            if k not in RESERVED_LOG_ATTRS and k not in LOGGER_INTERNAL_RECORD_ATTRS
+        }
+
+        # Buffered records carry the keys that existed when the record was created.
+        # Replaying with the live formatter state would let later removals, additions
+        # or correlation id changes rewrite an already buffered log line.
+        buffered_log_format = getattr(log_record, "_powertools_log_keys", None)
+        log_format = buffered_log_format if isinstance(buffered_log_format, Mapping) else self.log_format
+
+        buffered_log_context = getattr(log_record, "_powertools_log_context", None)
+        log_context = buffered_log_context if isinstance(buffered_log_context, Mapping) else _get_context().get()
 
         formatted_log: dict[str, Any] = {}
 
@@ -430,7 +445,7 @@ class LambdaPowertoolsFormatter(BasePowertoolsFormatter):
         # then replace any std log attribute e.g. '%(level)s' to 'INFO', '%(process)d to '4773'
         # check if the value is a str if the key is a reserved attribute, the modulo operator only supports string
         # lastly add or replace incoming keys (those added within the constructor or .structure_logs method)
-        for key, value in self.log_format.items():
+        for key, value in self._log_keys(log_format).items():
             if value and key in RESERVED_LOG_ATTRS:
                 if isinstance(value, str):
                     formatted_log[key] = value % record_dict
@@ -442,7 +457,7 @@ class LambdaPowertoolsFormatter(BasePowertoolsFormatter):
             else:
                 formatted_log[key] = value
 
-        for key, value in _get_context().get().items():
+        for key, value in self._log_keys(log_context).items():
             if value and key in RESERVED_LOG_ATTRS:
                 if isinstance(value, str):
                     formatted_log[key] = value % record_dict
@@ -456,6 +471,11 @@ class LambdaPowertoolsFormatter(BasePowertoolsFormatter):
 
         formatted_log.update(**extras)
         return formatted_log
+
+    def _log_keys(self, keys: Any) -> Any:
+        if hasattr(keys, "items"):
+            return keys
+        return {}
 
     @staticmethod
     def _strip_none_records(records: dict[str, Any]) -> dict[str, Any]:
