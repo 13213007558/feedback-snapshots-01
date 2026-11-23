@@ -44,6 +44,10 @@ __all__ = [
     "UnknownDslObject",
     "ValidationException",
     "IllegalOperation",
+    "RestorePreflightError",
+    "RestorePatternError",
+    "SnapshotIdentityError",
+    "ApprovalStaleError",
     "OpenSearchWarning",
     "OpenSearchDeprecationWarning",
 ]
@@ -186,6 +190,38 @@ class ValidationException(ValueError, OpenSearchDslException):
 
 class IllegalOperation(OpenSearchDslException):
     """Exception representing IllegalOperation"""
+
+
+class RestorePreflightError(OpenSearchException):
+    """
+    Base class for failures raised while building or re-validating a disaster
+    recovery restore contract. Anything that cannot be explained and approved
+    deterministically stops at preflight instead of issuing a restore request.
+    """
+
+
+class RestorePatternError(RestorePreflightError):
+    """
+    Raised when an index selection or rename pattern cannot be interpreted
+    deterministically (for example a wildcard in a position the contract does
+    not support).
+    """
+
+
+class SnapshotIdentityError(RestorePreflightError):
+    """
+    Raised when the approved snapshot cannot be located unambiguously, or when
+    its stored identity no longer matches the snapshot observed in the
+    repository.
+    """
+
+
+class ApprovalStaleError(RestorePreflightError):
+    """
+    Raised when the parameters captured at approval time no longer match the
+    parameters derived from the current catalog, configuration or request. The
+    affected target must be re-approved before any restore can run.
+    """
 
 
 class OpenSearchWarning(Warning):

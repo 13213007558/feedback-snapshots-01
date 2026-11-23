@@ -52,6 +52,7 @@ from .connection import (
 )
 from .connection_pool import ConnectionPool, ConnectionSelector, RoundRobinSelector
 from .exceptions import (
+    ApprovalStaleError,
     AuthenticationException,
     AuthorizationException,
     ConflictError,
@@ -65,7 +66,10 @@ from .exceptions import (
     OpenSearchException,
     OpenSearchWarning,
     RequestError,
+    RestorePatternError,
+    RestorePreflightError,
     SerializationError,
+    SnapshotIdentityError,
     SSLError,
     TransportError,
     UnknownDslObject,
@@ -164,6 +168,10 @@ __all__ = [
     "ConnectionTimeout",
     "AuthenticationException",
     "AuthorizationException",
+    "RestorePreflightError",
+    "RestorePatternError",
+    "SnapshotIdentityError",
+    "ApprovalStaleError",
     "OpenSearchWarning",
     "OpenSearchDeprecationWarning",
     "AWSV4SignerAuth",
