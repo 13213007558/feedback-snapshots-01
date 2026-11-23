@@ -14,8 +14,56 @@ from sqlalchemy.sql.ddl import DDLElement
 from databases.backends.common.records import Record, Row, create_column_maps
 from databases.core import LOG_EXTRA, DatabaseURL
 from databases.interfaces import ConnectionBackend, DatabaseBackend, TransactionBackend
+from databases.permits import get_active_permit
 
 logger = logging.getLogger("databases")
+
+
+class ExecutionRecorder:
+    """Records every statement handed to the underlying sqlite3 driver.
+
+    Each entry captures the permit that was active when the statement was
+    scheduled, so attribution can be proven down to the actual connection
+    execution rather than only at the library call boundary.
+    """
+
+    def __init__(self) -> None:
+        self.statements: typing.List[typing.Tuple[str, typing.Optional[str]]] = []
+
+    def record(self, sql: str) -> None:
+        permit = get_active_permit()
+        permit_id = permit.permit_id if permit is not None else None
+        self.statements.append((sql, permit_id))
+
+    @property
+    def sql_statements(self) -> typing.List[str]:
+        return [sql for sql, _ in self.statements]
+
+    def for_permit(self, permit_id: str) -> typing.List[str]:
+        return [
+            sql for sql, owner in self.statements if owner == permit_id
+        ]
+
+
+class RecordingSQLiteConnection(aiosqlite.core.Connection):
+    """aiosqlite connection that funnels every driver call through the recorder."""
+
+    def __init__(self, recorder: ExecutionRecorder, *args: typing.Any) -> None:
+        super().__init__(*args)
+        self._recorder = recorder
+
+    async def _execute(
+        self, fn: typing.Any, *args: typing.Any, **kwargs: typing.Any
+    ) -> typing.Any:
+        # Cursor calls pass the SQL string first; raw-connection helpers such as
+        # `self._conn.execute("BEGIN")` pass the bound method first and the SQL
+        # string second. The active permit is resolved here, on the event-loop
+        # thread where the contextvar is set, because aiosqlite runs the actual
+        # driver call on a separate worker thread.
+        sql = next((arg for arg in args if isinstance(arg, str)), None)
+        if sql is not None:
+            self._recorder.record(sql)
+        return await super()._execute(fn, *args, **kwargs)
 
 
 class SQLiteBackend(DatabaseBackend):
@@ -23,11 +71,19 @@ class SQLiteBackend(DatabaseBackend):
         self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
     ) -> None:
         self._database_url = DatabaseURL(database_url)
+        self.execution_recorder: typing.Optional[ExecutionRecorder] = options.pop(
+            "execution_recorder", None
+        )
         self._options = options
         self._dialect = pysqlite.dialect(paramstyle="qmark")
         # aiosqlite does not support decimals
         self._dialect.supports_native_decimal = False
-        self._pool = SQLitePool(self._database_url, **self._options)
+        if self.execution_recorder is not None:
+            self._pool = RecordingSQLitePool(
+                self.execution_recorder, self._database_url, **self._options
+            )
+        else:
+            self._pool = SQLitePool(self._database_url, **self._options)
 
     async def connect(self) -> None:
         ...
@@ -67,6 +123,23 @@ class SQLitePool:
 
     async def release(self, connection: aiosqlite.Connection) -> None:
         await connection.__aexit__(None, None, None)
+
+
+class RecordingSQLitePool(SQLitePool):
+    def __init__(self, recorder: ExecutionRecorder, *args: typing.Any) -> None:
+        super().__init__(*args)
+        self._recorder = recorder
+
+    async def acquire(self) -> RecordingSQLiteConnection:
+        connection = RecordingSQLiteConnection(
+            self._recorder,
+            lambda: sqlite3.connect(
+                database=self._database, isolation_level=None, **self._options
+            ),
+            64,
+        )
+        await connection.__aenter__()
+        return connection
 
 
 class CompilationContext:

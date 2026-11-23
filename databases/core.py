@@ -13,6 +13,7 @@ from sqlalchemy.sql import ClauseElement
 
 from databases.importer import import_from_string
 from databases.interfaces import DatabaseBackend, Record, TransactionBackend
+from databases.permits import QueryPermit, get_active_permit
 
 try:  # pragma: no cover
     import click
@@ -236,6 +237,21 @@ class Database:
         finally:
             self._force_rollback = initial
 
+    def permit(
+        self,
+        permit_id: str,
+        manifest: typing.Sequence[typing.Mapping[str, typing.Any]],
+        *,
+        connections: typing.Optional[typing.Sequence[str]] = None,
+    ) -> QueryPermit:
+        """
+        Grant a one-time permit for an explicit manifest of parameterized
+        queries. The permit is bound to the calling task and to the database
+        connections it may touch. Use it as an async context manager; ordinary
+        calls outside a permit keep their existing transaction conventions.
+        """
+        return QueryPermit(self, manifest, permit_id, connections=connections)
+
     def _get_backend(self) -> str:
         return self.SUPPORTED_BACKENDS.get(
             self.url.scheme, self.SUPPORTED_BACKENDS[self.url.dialect]
@@ -286,6 +302,7 @@ class Connection:
         values: typing.Optional[dict] = None,
     ) -> typing.List[Record]:
         built_query = self._build_query(query, values)
+        self._authorize(built_query)
         async with self._query_lock:
             return await self._connection.fetch_all(built_query)
 
@@ -295,6 +312,7 @@ class Connection:
         values: typing.Optional[dict] = None,
     ) -> typing.Optional[Record]:
         built_query = self._build_query(query, values)
+        self._authorize(built_query)
         async with self._query_lock:
             return await self._connection.fetch_one(built_query)
 
@@ -305,6 +323,7 @@ class Connection:
         column: typing.Any = 0,
     ) -> typing.Any:
         built_query = self._build_query(query, values)
+        self._authorize(built_query)
         async with self._query_lock:
             return await self._connection.fetch_val(built_query, column)
 
@@ -314,6 +333,7 @@ class Connection:
         values: typing.Optional[dict] = None,
     ) -> typing.Any:
         built_query = self._build_query(query, values)
+        self._authorize(built_query)
         async with self._query_lock:
             return await self._connection.execute(built_query)
 
@@ -321,6 +341,8 @@ class Connection:
         self, query: typing.Union[ClauseElement, str], values: list
     ) -> None:
         queries = [self._build_query(query, values_set) for values_set in values]
+        for built_query in queries:
+            self._authorize(built_query)
         async with self._query_lock:
             await self._connection.execute_many(queries)
 
@@ -330,10 +352,19 @@ class Connection:
         values: typing.Optional[dict] = None,
     ) -> typing.AsyncGenerator[typing.Any, None]:
         built_query = self._build_query(query, values)
+        self._authorize(built_query)
         async with self.transaction():
             async with self._query_lock:
                 async for record in self._connection.iterate(built_query):
                     yield record
+
+    @staticmethod
+    def _authorize(built_query: ClauseElement) -> None:
+        # Only an active permit triggers enforcement, so ordinary calls keep
+        # their existing transaction and connection conventions.
+        permit = get_active_permit()
+        if permit is not None:
+            permit.authorize(built_query)
 
     def transaction(
         self, *, force_rollback: bool = False, **kwargs: typing.Any

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Added
+
+* Query permits: a one-time, task- and connection-bound manifest of approved
+  parameterized queries. `Database.permit()` opens a transaction in which
+  `execute`, `execute_many`, `fetch_*` and `iterate` are checked against the
+  manifest (SQL text, parameter ranges and call counts), expose
+  `NOT_STARTED`/`EFFECTIVE`/`ROLLED_BACK` states and an audit trail, and
+  cannot be reused after commit, rollback or task cancellation. Ordinary
+  calls outside a permit are unchanged.
+* SQLite `ExecutionRecorder` option that records every statement handed to
+  the driver, attributed to the active permit.
+
 ## 0.9.0 (February 23th, 2024)
 
 ### Changed
