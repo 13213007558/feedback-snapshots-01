@@ -15,6 +15,11 @@ from axes.helpers import (
 )
 from axes.models import AccessAttempt
 from axes.signals import user_locked_out
+from axes.subjects import (
+    get_failure_event_key,
+    get_subject_for_legacy,
+    subject_cache_keys,
+)
 
 log = getLogger(__name__)
 
@@ -33,22 +38,34 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
         ip_address: Optional[str] = None,
         username: Optional[str] = None,
         ip_or_username: bool = False,
+        subject: Optional[str] = None,
     ) -> int:
         cache_keys: list = []
         count = 0
 
-        if ip_address is None and username is None:
+        if ip_address is None and username is None and subject is None:
             raise NotImplementedError("Cannot clear all entries from cache")
         if ip_or_username:
             raise NotImplementedError(
                 "Due to the cache key ip_or_username=True is not supported"
             )
 
-        cache_keys.extend(
-            get_client_cache_keys(
-                AccessAttempt(username=username, ip_address=ip_address)
+        if subject:
+            cache_keys.extend(subject_cache_keys(subject))
+        else:
+            cache_keys.extend(
+                get_client_cache_keys(
+                    AccessAttempt(username=username, ip_address=ip_address)
+                )
             )
-        )
+            # An unlock by a legacy window also covers the subject it maps to.
+            mapped_subject = (
+                get_subject_for_legacy(username, ip_address)
+                if username or ip_address
+                else None
+            )
+            if mapped_subject:
+                cache_keys.extend(subject_cache_keys(mapped_subject))
 
         for cache_key in cache_keys:
             deleted = self.cache.delete(cache_key)
@@ -110,6 +127,16 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
 
         if self.is_whitelisted(request, credentials):
             log.info("AXES: Login failed from whitelisted client %s.", client_str)
+            return
+
+        event_key = get_failure_event_key(request, credentials)
+        if event_key is not None and not self.cache.add(
+            key=f"axes-event-{event_key}", value=1, timeout=get_cache_timeout(request)
+        ):
+            log.info(
+                "AXES: Failure event %s was already recorded; not counting it again.",
+                event_key,
+            )
             return
 
         cache_keys = get_client_cache_keys(request, credentials)

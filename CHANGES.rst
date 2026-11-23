@@ -2,6 +2,28 @@
 Changes
 =======
 
+Unreleased
+----------
+
+Features and fixes
+~~~~~~~~~~~~~~~~~~
+
+- Add registered-subject lockout identity so login protection can migrate from
+  the legacy username and network-group key to a subject such as an
+  institution identifier during a rolling deployment.
+  ``AXES_SUBJECT_CALLABLE``, ``AXES_SUBJECT_FORM_FIELD`` and
+  ``AXES_SUBJECT_LEGACY_IDENTITIES`` resolve and register subjects.
+- Add ``axes_backfill_subject`` to adopt pre-migration records into their
+  subject windows without changing the failure count or cool-off deadline, and
+  ``axes_reset_subject`` (plus ``reset(subject=...)``) to unlock the complete
+  subject scope while leaving coincidentally identical usernames alone.
+- Deduplicate failed login events with ``AXES_FAILURE_EVENT_ID_CALLABLE`` so a
+  failure observed by two workers or replayed by a backfill counts once.
+  ``AccessFailureLog`` gains an ``event_key`` and ``AccessFailureEvent`` records
+  the idempotency ledger. This release adds the
+  ``axes.0011_subject_and_failure_events`` migration; run
+  ``python manage.py migrate`` after upgrading.
+
 9.0.0 (2026-10-30)
 ------------------
 

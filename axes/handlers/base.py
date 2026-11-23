@@ -185,9 +185,10 @@ class AxesBaseHandler:  # pylint: disable=unused-argument
         ip_address: Optional[str] = None,
         username: Optional[str] = None,
         ip_or_username: bool = False,
+        subject: Optional[str] = None,
     ) -> int:
         """
-        Resets access attempts that match the given IP address or username.
+        Resets access attempts that match the given IP address, username or subject.
 
         This method makes more sense for the DB backend, but as it is used by the ProxyHandler
         (via inherent), it needs to be defined here, so we get compliant with all proxy methods.

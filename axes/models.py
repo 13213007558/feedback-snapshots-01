@@ -9,6 +9,18 @@ class AccessBase(models.Model):
 
     username = models.CharField(_("Username"), max_length=255, null=True, db_index=True)
 
+    subject = models.CharField(
+        _("Subject"),
+        max_length=128,
+        default="",
+        blank=True,
+        db_index=True,
+        help_text=_(
+            "Registered subject identifier that owns this record. "
+            "Records written by pre-subject workers leave this empty."
+        ),
+    )
+
     http_accept = models.CharField(_("HTTP Accept"), max_length=1025)
 
     path_info = models.CharField(_("Path"), max_length=255)
@@ -24,6 +36,18 @@ class AccessBase(models.Model):
 class AccessFailureLog(AccessBase):
     locked_out = models.BooleanField(
         _("Access lock out"), null=False, blank=True, default=False
+    )
+
+    event_key = models.CharField(
+        _("Failure event key"),
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        help_text=_(
+            "Idempotency key for the failed login event. Used to avoid recording "
+            "the same failure twice when it is written by more than one worker."
+        ),
     )
 
     def __str__(self):
@@ -48,7 +72,45 @@ class AccessAttempt(AccessBase):
     class Meta:
         verbose_name = _("access attempt")
         verbose_name_plural = _("access attempts")
-        unique_together = [["username", "ip_address", "user_agent"]]
+        unique_together = [["subject", "username", "ip_address", "user_agent"]]
+
+
+class AccessFailureEvent(models.Model):
+    key = models.CharField(
+        _("Failure event key"),
+        max_length=64,
+        unique=True,
+        help_text=_(
+            "Idempotency key for the failed login event. A failure is counted "
+            "once even when it is processed by multiple workers or backfilled."
+        ),
+    )
+
+    subject = models.CharField(
+        _("Subject"), max_length=128, default="", blank=True, db_index=True
+    )
+
+    username = models.CharField(
+        _("Username"), max_length=255, null=True, blank=True, db_index=True
+    )
+
+    ip_address = models.GenericIPAddressField(
+        _("IP Address"), null=True, blank=True, db_index=True
+    )
+
+    user_agent = models.CharField(
+        _("User Agent"), max_length=255, blank=True, default=""
+    )
+
+    attempt_time = models.DateTimeField(_("Attempt Time"), auto_now_add=True)
+
+    def __str__(self):
+        return f"Failure event {self.key} for subject {self.subject}"
+
+    class Meta:
+        verbose_name = _("access failure event")
+        verbose_name_plural = _("access failure events")
+        ordering = ["-attempt_time"]
 
 
 class AccessAttemptExpiration(models.Model):

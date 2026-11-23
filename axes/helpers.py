@@ -14,6 +14,10 @@ from django.utils.module_loading import import_string
 
 from axes.conf import LockoutTier, settings
 from axes.models import AccessBase
+from axes.subjects import (
+    get_client_subject,
+    subject_cache_keys,
+)
 
 log = getLogger(__name__)
 
@@ -330,6 +334,46 @@ def get_lockout_parameters(
     )
 
 
+def _references_subject(lockout_parameters) -> bool:
+    for parameter in lockout_parameters:
+        if isinstance(parameter, str):
+            if parameter == "subject":
+                return True
+        elif "subject" in parameter:
+            return True
+    return False
+
+
+def _subject_aware_lockout_parameters(lockout_parameters, subject):
+    """
+    Keep the configured lockout windows compatible across the subject migration.
+
+    A request that resolved a registered subject is evaluated in the complete
+    subject scope.  The scope covers the subject's own records and the legacy
+    username/network-group windows registered to it, so an explicit
+    subject-scoped configuration is kept as-is and any other configuration is
+    mapped to the subject window.
+
+    Requests without a subject keep the configured windows.  When the
+    configuration only knows about subjects, they fall back to the legacy
+    username/network-group windows so workers that have not been migrated keep
+    their own counters.
+    """
+
+    if subject:
+        if _references_subject(lockout_parameters):
+            return lockout_parameters
+        return [["subject"]]
+
+    if _references_subject(lockout_parameters):
+        fallback = getattr(settings, "AXES_SUBJECT_FALLBACK_LOCKOUT_PARAMETERS", None)
+        if fallback:
+            return fallback
+        return [["username", "ip_address"]]
+
+    return lockout_parameters
+
+
 def get_client_parameters(
     username: str,
     ip_address: str,
@@ -347,11 +391,18 @@ def get_client_parameters(
     """
     lockout_parameters = get_lockout_parameters(request_or_attempt, credentials)
 
+    subject = get_client_subject(request_or_attempt, credentials)
+    if isinstance(subject, str):
+        subject = subject.strip() or None
+
     parameters_dict = {
         "username": username,
         "ip_address": ip_address,
         "user_agent": user_agent,
+        "subject": subject,
     }
+
+    lockout_parameters = _subject_aware_lockout_parameters(lockout_parameters, subject)
 
     filter_kwargs = []
 
@@ -413,7 +464,12 @@ def get_client_cache_keys(
         username, ip_address, user_agent, request_or_attempt, credentials
     )
 
-    return make_cache_key_list(filter_kwargs_list)
+    cache_keys = make_cache_key_list(filter_kwargs_list)
+
+    subject = get_client_subject(request_or_attempt, credentials)
+    cache_keys.extend(subject_cache_keys(subject))
+
+    return list(dict.fromkeys(cache_keys))
 
 
 def get_client_str(

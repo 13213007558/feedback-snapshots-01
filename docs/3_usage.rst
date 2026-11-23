@@ -91,6 +91,13 @@ management commands with the Django ``manage.py`` or ``django-admin`` command he
   will clear lockouts and records for the given usernames.
 - ``python manage.py axes_reset_ip_username [ip] [username]``
   will clear lockouts and records for the given IP address and username.
+- ``python manage.py axes_reset_subject [subject ...]``
+  will clear every lockout and record owned by the given registered subjects,
+  including their pre-migration username/network-group windows.
+- ``python manage.py axes_backfill_subject [subject ...]``
+  will adopt pre-migration records into their registered subject windows,
+  preserving the failure count and the cool-off deadline. It is safe to run
+  more than once, including while old and new workers are both serving.
 - ``python manage.py axes_reset_logs (age)``
   will reset (i.e. delete) AccessLog records that are older
   than the given age where the default is 30 days.
@@ -104,12 +111,43 @@ In your code, you can use the ``axes.utils.reset`` function.
 - ``reset()`` will reset all lockouts and access records.
 - ``reset(ip=ip)`` will clear lockouts and records for the given IP address.
 - ``reset(username=username)`` will clear lockouts and records for the given username.
+- ``reset(subject=subject)`` will clear every record in the subject's scope:
+  the subject window plus the pre-migration windows registered to it. Other
+  subjects with coincidentally identical usernames are not affected.
 
 .. note::
    Please note that if you give both ``username`` and ``ip`` arguments to ``reset``
    that attempts that have both the set IP and username are reset.
    The effective behaviour of ``reset`` is to ``and`` the terms instead of ``or`` ing them.
 
+
+
+Migrating lockout keys to registered subjects
+---------------------------------------------
+
+Older Axes versions key lockouts on the username plus a network group derived
+from the client IP address. New deployments can key them on a registered
+subject such as an institution identifier, supplied by
+``AXES_SUBJECT_CALLABLE``, by ``AXES_SUBJECT_FORM_FIELD``, or by the
+``X-Axes-Subject`` header.
+
+A rolling deployment serves both generations at once:
+
+- a failed login is written once, to the subject window for new workers and to
+  the username/network-group window for old workers;
+- a single failed login observed by more than one worker carries the same
+  ``AXES_FAILURE_EVENT_ID_FIELD`` and is counted once;
+- reads of a subject evaluate the whole subject scope, so a lockout reached
+  before the switch still applies after it;
+- ``axes_backfill_subject`` adopts pre-migration records into their subject
+  without changing the failure count or the cool-off deadline;
+- ``axes_reset_subject`` (or ``reset(subject=...)``) unlocks the complete
+  subject scope, while a namesake registered to another subject keeps its own
+  count.
+
+Register the pre-migration windows per subject with
+``AXES_SUBJECT_LEGACY_IDENTITIES`` (or an ``AXES_SUBJECT_REGISTRY`` object) so
+Axes can map old workers' writes and requests to the right subject.
 
 
 Data privacy and GDPR

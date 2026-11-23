@@ -34,13 +34,52 @@ settings.AXES_FAILURE_LIMIT = getattr(settings, "AXES_FAILURE_LIMIT", 3)
 # see if the user has set axes to lock out logins after failure limit
 settings.AXES_LOCK_OUT_AT_FAILURE = getattr(settings, "AXES_LOCK_OUT_AT_FAILURE", True)
 
+# resolve the registered subject (for example an institution identifier)
+# that owns a login request. Callables receive ``request, credentials``.
+settings.AXES_SUBJECT_CALLABLE = getattr(settings, "AXES_SUBJECT_CALLABLE", None)
+
+# field in credentials or request data that carries the subject identifier
+settings.AXES_SUBJECT_FORM_FIELD = getattr(
+    settings, "AXES_SUBJECT_FORM_FIELD", "subject"
+)
+
+# Map an IP address to the legacy network group used before the subject
+# migration. Callables receive the client IP address. When unset (the
+# default), the IP address itself is the network group.
+settings.AXES_SUBJECT_NETWORK_GROUP_CALLABLE = getattr(
+    settings, "AXES_SUBJECT_NETWORK_GROUP_CALLABLE", None
+)
+
+# Lockout parameters used when a request resolved no subject but the active
+# lockout configuration requires one. Keeping the old username and network
+# pair means requests handled by a legacy worker still form their own window
+# instead of collapsing into one shared subject-less bucket.
+settings.AXES_SUBJECT_FALLBACK_LOCKOUT_PARAMETERS = getattr(
+    settings, "AXES_SUBJECT_FALLBACK_LOCKOUT_PARAMETERS", [["username", "ip_address"]]
+)
+
+# Idempotency identifier for a failed login event. When a failure is written by
+# more than one worker or replayed by a backfill, the same identifier makes it
+# count only once. Callables receive ``request, credentials``.
+settings.AXES_FAILURE_EVENT_ID_CALLABLE = getattr(
+    settings, "AXES_FAILURE_EVENT_ID_CALLABLE", None
+)
+
+# Field in credentials or request headers/data that carries the failure event
+# identifier.
+settings.AXES_FAILURE_EVENT_ID_FIELD = getattr(
+    settings, "AXES_FAILURE_EVENT_ID_FIELD", "failure_id"
+)
+
 # lockout parameters
 # default value will be ["ip_address"] after removing AXES_LOCK_OUT params support
 settings.AXES_LOCKOUT_PARAMETERS = getattr(settings, "AXES_LOCKOUT_PARAMETERS", None)
 
 # TODO: remove it in future versions
 if settings.AXES_LOCKOUT_PARAMETERS is None:
-    if getattr(settings, "AXES_ONLY_USER_FAILURES", False):
+    if settings.AXES_SUBJECT_CALLABLE:
+        settings.AXES_LOCKOUT_PARAMETERS = ["subject"]
+    elif getattr(settings, "AXES_ONLY_USER_FAILURES", False):
         settings.AXES_LOCKOUT_PARAMETERS = ["username"]
     else:
         if getattr(settings, "AXES_LOCK_OUT_BY_USER_OR_IP", False):

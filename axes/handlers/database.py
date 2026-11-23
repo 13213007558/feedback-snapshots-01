@@ -2,7 +2,7 @@ from datetime import timedelta
 from logging import getLogger
 from typing import List, Optional
 
-from django.db import router, transaction
+from django.db import IntegrityError, router, transaction
 from django.db.models import F, Q, QuerySet, Sum, Value
 from django.db.models.functions import Concat
 from django.http import HttpRequest
@@ -26,10 +26,18 @@ from axes.helpers import (
 from axes.models import (
     AccessAttempt,
     AccessAttemptExpiration,
+    AccessFailureEvent,
     AccessFailureLog,
     AccessLog,
 )
 from axes.signals import user_locked_out
+from axes.subjects import (
+    filter_subject_scope,
+    get_client_subject,
+    get_failure_event_key,
+    get_subject_for_legacy,
+    subject_attempt_querysets,
+)
 
 log = getLogger(__name__)
 
@@ -47,19 +55,37 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         *,
         ip_address: Optional[str] = None,
         username: Optional[str] = None,
+        subject: Optional[str] = None,
         ip_or_username: bool = False,
     ) -> int:
-        attempts = AccessAttempt.objects.all()
-
-        if ip_or_username:
-            attempts = attempts.filter(Q(ip_address=ip_address) | Q(username=username))
+        if subject:
+            # An authorised unlock applies to the complete subject scope: the
+            # subject window and every legacy window registered to it.
+            attempts = filter_subject_scope(subject)
         else:
-            if ip_address:
-                attempts = attempts.filter(ip_address=ip_address)
-            if username:
-                attempts = attempts.filter(username=username)
+            attempts = AccessAttempt.objects.all()
+            mapped_subject = (
+                get_subject_for_legacy(username, ip_address)
+                if username or ip_address
+                else None
+            )
 
-        count, _ = attempts.delete()
+            if ip_or_username:
+                attempts = attempts.filter(
+                    Q(ip_address=ip_address) | Q(username=username)
+                )
+            else:
+                if ip_address:
+                    attempts = attempts.filter(ip_address=ip_address)
+                if username:
+                    attempts = attempts.filter(username=username)
+
+            if mapped_subject:
+                attempts = attempts | filter_subject_scope(mapped_subject)
+
+        count = 0
+        deleted_attempts, _ = attempts.delete()
+        count += deleted_attempts
         log.info("AXES: Reset %d access attempts from database.", count)
 
         return count
@@ -82,10 +108,12 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
     def reset_failure_logs(self, *, age_days: Optional[int] = None) -> int:
         if age_days is None:
             count, _ = AccessFailureLog.objects.all().delete()
+            AccessFailureEvent.objects.all().delete()
             log.info("AXES: Reset all %d access failure logs from database.", count)
         else:
             limit = timezone.now() - timedelta(days=age_days)
             count, _ = AccessFailureLog.objects.filter(attempt_time__lte=limit).delete()
+            AccessFailureEvent.objects.filter(attempt_time__lte=limit).delete()
             log.info(
                 "AXES: Reset %d access failure logs older than %d days from database.",
                 count,
@@ -111,6 +139,8 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
 
     def get_failures(self, request, credentials: Optional[dict] = None) -> int:
         attempts_list = self.get_user_attempts(request, credentials)
+        if not attempts_list:
+            return 0
         attempt_count = max(
             (
                 attempts.aggregate(Sum("failures_since_start"))[
@@ -176,78 +206,53 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
             log.info("AXES: Login failed from whitelisted client %s.", client_str)
             return
 
-        # 2. database query: Get or create access record with the new failure data
+        subject = get_client_subject(request, credentials)
+        if subject is None:
+            subject = get_subject_for_legacy(username, request.axes_ip_address)
+
+        # 2. database query: Get or create access record with the new failure data.
+        #
+        # During a rolling deployment one failed login can be observed by both a
+        # pre-migration worker and a subject-aware worker.  The failure event key
+        # makes the second observation a no-op so the failure is counted once.
         lockout_parameters = get_lockout_parameters(request, credentials)
+        event_key = get_failure_event_key(request, credentials)
+        already_recorded = False
         if lockout_parameters == ["username"] and username is None:
             log.warning(
                 "AXES: Username is None and username is the only one lockout parameter, new record will NOT be created."
             )
         else:
-            with transaction.atomic(using=router.db_for_write(AccessAttempt)):
-                (
-                    attempt,
-                    created,
-                ) = AccessAttempt.objects.select_for_update().get_or_create(
-                    username=username,
-                    ip_address=request.axes_ip_address,
-                    user_agent=request.axes_user_agent,
-                    defaults={
-                        "get_data": get_data,
-                        "post_data": post_data,
-                        "http_accept": request.axes_http_accept,
-                        "path_info": request.axes_path_info,
-                        "failures_since_start": 1,
-                        "attempt_time": request.axes_attempt_time,
-                    },
+            if event_key is not None:
+                try:
+                    with transaction.atomic(
+                        using=router.db_for_write(AccessFailureEvent)
+                    ):
+                        AccessFailureEvent.objects.create(
+                            key=event_key,
+                            subject=subject or "",
+                            username=username,
+                            ip_address=request.axes_ip_address,
+                            user_agent=request.axes_user_agent or "",
+                        )
+                except IntegrityError:
+                    already_recorded = True
+
+            if already_recorded:
+                log.info(
+                    "AXES: Failure event %s was already recorded by another worker; "
+                    "not counting it again.",
+                    event_key,
                 )
-
-                # Record failed attempt with all the relevant information.
-                # Filtering based on username, IP address and user agent handled elsewhere,
-                # and this handler just records the available information for further use.
-                if created:
-                    log.warning(
-                        "AXES: New login failure by %s. Created new record in the database.",
-                        client_str,
-                    )
-
-                # 3. database query if there were previous attempts in the database
-                # Update failed attempt information but do not touch the username, IP address, or user agent fields,
-                # because attackers can request the site with multiple different configurations
-                # in order to bypass the defense mechanisms that are used by the site.
-                else:
-                    separator = "\n---------\n"
-
-                    attempt.get_data = Concat("get_data", Value(separator + get_data))
-                    attempt.post_data = Concat(
-                        "post_data", Value(separator + post_data)
-                    )
-                    attempt.http_accept = request.axes_http_accept
-                    attempt.path_info = request.axes_path_info
-                    attempt.failures_since_start = F("failures_since_start") + 1
-                    attempt.attempt_time = request.axes_attempt_time
-                    attempt.save()
-
-                    log.warning(
-                        "AXES: Repeated login failure by %s. Updated existing record in the database.",
-                        client_str,
-                    )
-
-                if settings.AXES_USE_ATTEMPT_EXPIRATION:
-                    if not hasattr(attempt, "expiration") or attempt.expiration is None:
-                        log.debug(
-                            "AXES: Creating new AccessAttemptExpiration for %s",
-                            client_str,
-                        )
-                        attempt.expiration = AccessAttemptExpiration.objects.create(
-                            access_attempt=attempt,
-                            expires_at=get_attempt_expiration(request),
-                        )
-                    else:
-                        attempt.expiration.expires_at = max(
-                            get_attempt_expiration(request),
-                            attempt.expiration.expires_at,
-                        )
-                        attempt.expiration.save()
+            else:
+                self.record_attempt(
+                    request=request,
+                    username=username,
+                    subject=subject,
+                    get_data=get_data,
+                    post_data=post_data,
+                    client_str=client_str,
+                )
 
         # 3. or 4. database query: Calculate the current maximum failure number from the existing attempts
         failures_since_start = self.get_failures(request, credentials)
@@ -271,18 +276,142 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
             )
 
         # 5. database entry: Log for ever the attempt in the AccessFailureLog
-        if settings.AXES_ENABLE_ACCESS_FAILURE_LOG:
-            with transaction.atomic(using=router.db_for_write(AccessFailureLog)):
-                AccessFailureLog.objects.create(
-                    username=username,
-                    ip_address=request.axes_ip_address,
-                    user_agent=request.axes_user_agent,
-                    http_accept=request.axes_http_accept,
-                    path_info=request.axes_path_info,
-                    attempt_time=request.axes_attempt_time,
-                    locked_out=request.axes_locked_out,
+        if settings.AXES_ENABLE_ACCESS_FAILURE_LOG and not already_recorded:
+            try:
+                with transaction.atomic(using=router.db_for_write(AccessFailureLog)):
+                    AccessFailureLog.objects.create(
+                        username=username,
+                        subject=subject or "",
+                        ip_address=request.axes_ip_address,
+                        user_agent=request.axes_user_agent,
+                        http_accept=request.axes_http_accept,
+                        path_info=request.axes_path_info,
+                        attempt_time=request.axes_attempt_time,
+                        locked_out=request.axes_locked_out,
+                        event_key=event_key,
+                    )
+            except IntegrityError:
+                log.info(
+                    "AXES: Failure log for event %s already exists; "
+                    "not writing a duplicate.",
+                    event_key,
                 )
-                self.remove_out_of_limit_failure_logs(username=username)
+            self.remove_out_of_limit_failure_logs(username=username)
+
+    def record_attempt(
+        self,
+        *,
+        request,
+        username,
+        subject,
+        get_data: str,
+        post_data: str,
+        client_str: str,
+    ):
+        """Record one failed login in the window that owns its subject.
+
+        A subject-aware request reuses an existing row for the same real
+        subject, adopting a pre-migration row when needed, and increments it.
+        Otherwise it creates the subject row.  A request without a subject keeps
+        updating its username/network-group window.  Rows stay single-homed, so
+        a subject-scoped read counts each real failure exactly once.
+        """
+
+        with transaction.atomic(using=router.db_for_write(AccessAttempt)):
+            self._record_attempt_window(
+                request=request,
+                username=username,
+                subject=subject or "",
+                get_data=get_data,
+                post_data=post_data,
+                client_str=client_str,
+            )
+
+    def _record_attempt_window(
+        self,
+        *,
+        request,
+        username,
+        subject,
+        get_data: str,
+        post_data: str,
+        client_str: str,
+    ):
+        base = AccessAttempt.objects.select_for_update().filter(
+            username=username,
+            ip_address=request.axes_ip_address,
+            user_agent=request.axes_user_agent,
+        )
+
+        attempt = base.filter(subject=subject).first()
+        if attempt is None and subject:
+            # A pre-migration worker already recorded this same real subject.
+            # Adopt that row instead of creating a second copy, so the union
+            # read does not count the same failure twice.
+            attempt = base.filter(subject="").first()
+            if attempt is not None:
+                attempt.subject = subject
+                attempt.save(update_fields=["subject"])
+                log.info(
+                    "AXES: Adopted legacy attempt window for %s into subject %s.",
+                    client_str,
+                    subject,
+                )
+
+        if attempt is None:
+            attempt, created = AccessAttempt.objects.get_or_create(
+                subject=subject,
+                username=username,
+                ip_address=request.axes_ip_address,
+                user_agent=request.axes_user_agent,
+                defaults={
+                    "get_data": get_data,
+                    "post_data": post_data,
+                    "http_accept": request.axes_http_accept,
+                    "path_info": request.axes_path_info,
+                    "failures_since_start": 1,
+                },
+            )
+        else:
+            created = False
+
+        if created:
+            log.warning(
+                "AXES: New login failure by %s. Created new record in the database.",
+                client_str,
+            )
+        else:
+            separator = "\n---------\n"
+
+            attempt.get_data = Concat("get_data", Value(separator + get_data))
+            attempt.post_data = Concat("post_data", Value(separator + post_data))
+            attempt.http_accept = request.axes_http_accept
+            attempt.path_info = request.axes_path_info
+            attempt.failures_since_start = F("failures_since_start") + 1
+            attempt.attempt_time = request.axes_attempt_time
+            attempt.save()
+
+            log.warning(
+                "AXES: Repeated login failure by %s. Updated existing record in the database.",
+                client_str,
+            )
+
+        if settings.AXES_USE_ATTEMPT_EXPIRATION:
+            if not hasattr(attempt, "expiration") or attempt.expiration is None:
+                log.debug(
+                    "AXES: Creating new AccessAttemptExpiration for %s",
+                    client_str,
+                )
+                attempt.expiration = AccessAttemptExpiration.objects.create(
+                    access_attempt=attempt,
+                    expires_at=get_attempt_expiration(request),
+                )
+            else:
+                attempt.expiration.expires_at = max(
+                    get_attempt_expiration(request),
+                    attempt.expiration.expires_at,
+                )
+                attempt.expiration.save()
 
     def user_logged_in(self, sender, request, user, **kwargs):
         """
@@ -361,22 +490,43 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
     ) -> List[QuerySet]:
         """
         Return a list querysets of AccessAttempts that match the given request and credentials.
+
+        A request that resolved a registered subject is evaluated across the
+        complete subject scope: the subject window plus the legacy windows
+        registered to the subject.  Each window stays a separate queryset so
+        callers combine them with ``max`` semantics instead of double counting.
         """
 
+        subject = get_client_subject(request, credentials)
+        if subject is None:
+            username = get_client_username(request, credentials)
+            ip_address = request.axes_ip_address
+            subject = get_subject_for_legacy(username, ip_address)
+
+        if subject:
+            return subject_attempt_querysets(subject)
+
+        # A pre-migration request does not send a subject.  When its
+        # username/network-group window is registered to a subject, evaluate the
+        # complete subject scope so the old worker and the new worker agree on
+        # the lockout state and on administrative unlocks.
         username = get_client_username(request, credentials)
+        ip_address = request.axes_ip_address
+        mapped_subject = get_subject_for_legacy(username, ip_address)
+        if mapped_subject:
+            return subject_attempt_querysets(mapped_subject)
 
         filter_kwargs_list = get_client_parameters(
             username,
-            request.axes_ip_address,
+            ip_address,
             request.axes_user_agent,
             request,
             credentials,
         )
-        attempts_list = [
+        return [
             AccessAttempt.objects.filter(**filter_kwargs)
             for filter_kwargs in filter_kwargs_list
         ]
-        return attempts_list
 
     def get_user_attempts(
         self, request: HttpRequest, credentials: Optional[dict] = None  # noqa

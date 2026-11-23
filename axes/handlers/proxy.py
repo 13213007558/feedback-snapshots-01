@@ -53,9 +53,26 @@ class AxesProxyHandler(AbstractAxesHandler, AxesBaseHandler):
         ip_address: Optional[str] = None,
         username: Optional[str] = None,
         ip_or_username: bool = False,
+        subject: Optional[str] = None,
     ) -> int:
-        return cls.get_implementation().reset_attempts(
-            ip_address=ip_address, username=username, ip_or_username=ip_or_username
+        implementation = cls.get_implementation()
+        if subject is None:
+            # Custom handlers written against the pre-subject interface do not
+            # accept the keyword.  Never drop a non-empty subject: silently
+            # narrowing the unlock would leave part of the subject locked.
+            try:
+                return implementation.reset_attempts(
+                    ip_address=ip_address,
+                    username=username,
+                    ip_or_username=ip_or_username,
+                )
+            except TypeError:
+                pass
+        return implementation.reset_attempts(
+            ip_address=ip_address,
+            username=username,
+            ip_or_username=ip_or_username,
+            subject=subject,
         )
 
     @classmethod

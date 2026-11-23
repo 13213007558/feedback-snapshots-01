@@ -33,6 +33,7 @@ class AccessAttemptAdmin(admin.ModelAdmin):
         "ip_address",
         "user_agent",
         "username",
+        "subject",
         "path_info",
         "failures_since_start",
     ]
@@ -48,14 +49,22 @@ class AccessAttemptAdmin(admin.ModelAdmin):
         list_display.append("status")
         list_filter.append(IsLockedOutFilter)  # type: ignore[arg-type]
 
-    search_fields = ["ip_address", "username", "user_agent", "path_info"]
+    search_fields = ["ip_address", "username", "subject", "user_agent", "path_info"]
 
     date_hierarchy = "attempt_time"
 
     fieldsets = (
         (
             None,
-            {"fields": ("username", "path_info", "failures_since_start", "expiration")},
+            {
+                "fields": (
+                    "subject",
+                    "username",
+                    "path_info",
+                    "failures_since_start",
+                    "expiration",
+                )
+            },
         ),
         (_("Form Data"), {"fields": ("get_data", "post_data")}),
         (_("Meta Data"), {"fields": ("user_agent", "ip_address", "http_accept")}),
@@ -65,6 +74,7 @@ class AccessAttemptAdmin(admin.ModelAdmin):
         "user_agent",
         "ip_address",
         "username",
+        "subject",
         "http_accept",
         "path_info",
         "attempt_time",
@@ -140,6 +150,7 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
         "attempt_time",
         "ip_address",
         "username",
+        "subject",
         "user_agent",
         "path_info",
         "locked_out",
@@ -147,12 +158,12 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
 
     list_filter = ["attempt_time", "locked_out", "path_info"]
 
-    search_fields = ["ip_address", "user_agent", "username", "path_info"]
+    search_fields = ["ip_address", "user_agent", "username", "subject", "path_info"]
 
     date_hierarchy = "attempt_time"
 
     fieldsets = (
-        (None, {"fields": ("username", "path_info")}),
+        (None, {"fields": ("username", "subject", "path_info")}),
         (_("Meta Data"), {"fields": ("user_agent", "ip_address", "http_accept")}),
     )
 
@@ -160,6 +171,7 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
         "user_agent",
         "ip_address",
         "username",
+        "subject",
         "http_accept",
         "path_info",
         "attempt_time",
