@@ -42,6 +42,17 @@ SESSION_KEYS = {
     "next",
 }
 
+#: A set of session keys that make up the browser login state. Unlike
+#: SESSION_KEYS this excludes bookkeeping such as ``next`` so that purging a
+#: confirmed-invalid login does not discard unrelated data.
+LOGIN_SESSION_KEYS = {
+    "_user_id",
+    "_remember",
+    "_remember_seconds",
+    "_id",
+    "_fresh",
+}
+
 #: A set of HTTP methods which are exempt from `login_required` and
 #: `fresh_login_required`. By default, this is just ``OPTIONS``.
 EXEMPT_METHODS = {"OPTIONS"}

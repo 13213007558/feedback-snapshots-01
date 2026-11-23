@@ -10,6 +10,12 @@ from .config import REFRESH_MESSAGE_CATEGORY
 from .login_manager import LoginManager
 from .mixins import AnonymousUserMixin
 from .mixins import UserMixin
+from .recovery import RecoveryReason
+from .recovery import RecoveryResult
+from .recovery import RecoverySource
+from .recovery import UserDirectoryError
+from .recovery import UserDirectoryUnavailable
+from .recovery import UserNotFound
 from .signals import session_protected
 from .signals import user_accessed
 from .signals import user_loaded_from_cookie
@@ -18,6 +24,7 @@ from .signals import user_logged_in
 from .signals import user_logged_out
 from .signals import user_login_confirmed
 from .signals import user_needs_refresh
+from .signals import user_recovery_completed
 from .signals import user_unauthorized
 from .test_client import FlaskLoginClient
 from .utils import confirm_login
@@ -26,6 +33,7 @@ from .utils import decode_cookie
 from .utils import encode_cookie
 from .utils import fresh_login_required
 from .utils import login_fresh
+from .utils import login_recovery_result
 from .utils import login_remembered
 from .utils import login_required
 from .utils import login_url
@@ -47,6 +55,12 @@ __all__ = [
     "LoginManager",
     "AnonymousUserMixin",
     "UserMixin",
+    "RecoveryReason",
+    "RecoveryResult",
+    "RecoverySource",
+    "UserDirectoryError",
+    "UserDirectoryUnavailable",
+    "UserNotFound",
     "session_protected",
     "user_accessed",
     "user_loaded_from_cookie",
@@ -55,6 +69,7 @@ __all__ = [
     "user_logged_out",
     "user_login_confirmed",
     "user_needs_refresh",
+    "user_recovery_completed",
     "user_unauthorized",
     "FlaskLoginClient",
     "confirm_login",
@@ -63,6 +78,7 @@ __all__ = [
     "encode_cookie",
     "fresh_login_required",
     "login_fresh",
+    "login_recovery_result",
     "login_remembered",
     "login_required",
     "login_url",

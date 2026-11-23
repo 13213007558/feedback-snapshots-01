@@ -18,16 +18,24 @@ from .config import COOKIE_SECURE
 from .config import ID_ATTRIBUTE
 from .config import LOGIN_MESSAGE
 from .config import LOGIN_MESSAGE_CATEGORY
+from .config import LOGIN_SESSION_KEYS
 from .config import REFRESH_MESSAGE
 from .config import REFRESH_MESSAGE_CATEGORY
 from .config import SESSION_KEYS
 from .config import USE_SESSION_FOR_NEXT
 from .mixins import AnonymousUserMixin
+from .recovery import RecoveryReason
+from .recovery import RecoverySource
+from .recovery import RecoveryResult
+from .recovery import UserDirectoryError
+from .recovery import UserDirectoryUnavailable
+from .recovery import UserNotFound
 from .signals import session_protected
 from .signals import user_accessed
 from .signals import user_loaded_from_cookie
 from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
+from .signals import user_recovery_completed
 from .signals import user_unauthorized
 from .utils import _create_identifier
 from .utils import _user_context_processor
@@ -36,6 +44,13 @@ from .utils import encode_cookie
 from .utils import expand_login_view
 from .utils import login_url as make_login_url
 from .utils import make_next_param
+
+
+#: Directory verdicts that end recovery immediately, constraining the whole
+#: request even when a session and a "remember me" cookie coexist.
+_TERMINAL_DIRECTORY_REASONS = frozenset(
+    (RecoveryReason.INVALID, RecoveryReason.UNAVAILABLE)
+)
 
 
 class LoginManager:
@@ -311,29 +326,112 @@ class LoginManager:
 
         user_accessed.send(current_app._get_current_object())
 
+        sources = []
+        reasons = {}
+        user = None
+        adopted_source = None
+        terminal_reason = None
+
         # Check SESSION_PROTECTION
         if self._session_protection_failed():
+            self._finalize_recovery(sources, reasons, adopted_source, RecoveryReason.NO_CREDENTIALS)
             return self._update_request_context_with_user()
-
-        user = None
 
         # Load user from Flask Session
         user_id = session.get("_user_id")
         if user_id is not None and self._user_callback is not None:
-            user = self._user_callback(user_id)
+            sources.append(RecoverySource.SESSION)
+            user, reason = self._load_from_directory(self._user_callback, user_id)
+            reasons[RecoverySource.SESSION] = reason
+            if reason in _TERMINAL_DIRECTORY_REASONS:
+                terminal_reason = reason
+            if user is not None:
+                adopted_source = RecoverySource.SESSION
 
         # Load user from Remember Me Cookie or Request Loader
-        if user is None:
+        if user is None and terminal_reason is None:
             config = current_app.config
             cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
-            has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
+            has_cookie = (
+                cookie_name in request.cookies and session.get("_remember") != "clear"
+            )
             if has_cookie:
+                sources.append(RecoverySource.REMEMBER_COOKIE)
                 cookie = request.cookies[cookie_name]
-                user = self._load_user_from_remember_cookie(cookie)
+                user, reason = self._load_user_from_remember_cookie(cookie)
+                reasons[RecoverySource.REMEMBER_COOKIE] = reason
+                if reason in _TERMINAL_DIRECTORY_REASONS:
+                    terminal_reason = reason
+                if user is not None:
+                    adopted_source = RecoverySource.REMEMBER_COOKIE
             elif self._request_callback:
-                user = self._load_user_from_request(request)
+                sources.append(RecoverySource.REQUEST)
+                user, reason = self._load_user_from_request(request)
+                reasons[RecoverySource.REQUEST] = reason
+                if user is not None:
+                    adopted_source = RecoverySource.REQUEST
 
+        if terminal_reason is not None:
+            final_reason = terminal_reason
+        elif adopted_source is not None:
+            final_reason = RecoveryReason.SUCCESS
+        elif reasons:
+            # Every consulted source failed without a terminal directory
+            # verdict; they each recorded their own non-success reason.
+            final_reason = next(iter(reasons.values()))
+        else:
+            final_reason = RecoveryReason.NO_CREDENTIALS
+
+        self._finalize_recovery(sources, reasons, adopted_source, final_reason)
         return self._update_request_context_with_user(user)
+
+    def _load_from_directory(self, callback, identifier):
+        """Invoke a user directory callback and classify the outcome.
+
+        Returns a ``(user, reason)`` tuple. Directory errors are converted
+        into limited categories; their messages are intentionally discarded.
+        """
+        try:
+            user = callback(identifier)
+        except UserNotFound:
+            self._clear_login_state()
+            return None, RecoveryReason.INVALID
+        except UserDirectoryUnavailable:
+            # Keep the existing login material untouched so the next request
+            # can attempt recovery again, and forbid renewing the cookie now.
+            g._login_suppress_cookie_refresh = True
+            return None, RecoveryReason.UNAVAILABLE
+        except UserDirectoryError:
+            self._clear_login_state()
+            return None, RecoveryReason.INVALID
+
+        if user is None:
+            return None, RecoveryReason.NO_USER
+        return user, RecoveryReason.SUCCESS
+
+    def _clear_login_state(self):
+        """Remove the browser login state and queue the cookie for removal."""
+        for key in LOGIN_SESSION_KEYS:
+            session.pop(key, None)
+
+        config = current_app.config
+        cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+        if cookie_name in request.cookies:
+            session["_remember"] = "clear"
+
+        # A directory verdict must never be followed by a renewed cookie.
+        g._login_suppress_cookie_refresh = True
+
+    def _finalize_recovery(self, sources, reasons, adopted_source, final_reason):
+        """Store the one sanitized result for the request and publish it."""
+        result = RecoveryResult(
+            sources=tuple(sources),
+            source=adopted_source,
+            reason=final_reason,
+            reasons=dict(reasons),
+        )
+        g._login_recovery_result = result
+        user_recovery_completed.send(current_app._get_current_object(), result=result)
 
     def _session_protection_failed(self):
         sess = session._get_current_object()
@@ -365,17 +463,19 @@ class LoginManager:
 
     def _load_user_from_remember_cookie(self, cookie):
         user_id = decode_cookie(cookie)
-        if user_id is not None:
+        if user_id is None:
+            return None, RecoveryReason.NO_USER
+
+        if self._user_callback is None:
+            return None, RecoveryReason.NO_USER
+
+        user, reason = self._load_from_directory(self._user_callback, user_id)
+        if user is not None:
             session["_user_id"] = user_id
             session["_fresh"] = False
-            user = None
-            if self._user_callback:
-                user = self._user_callback(user_id)
-            if user is not None:
-                app = current_app._get_current_object()
-                user_loaded_from_cookie.send(app, user=user)
-                return user
-        return None
+            app = current_app._get_current_object()
+            user_loaded_from_cookie.send(app, user=user)
+        return user, reason
 
     def _load_user_from_request(self, request):
         if self._request_callback:
@@ -383,14 +483,21 @@ class LoginManager:
             if user is not None:
                 app = current_app._get_current_object()
                 user_loaded_from_request.send(app, user=user)
-                return user
-        return None
+                return user, RecoveryReason.SUCCESS
+        return None, RecoveryReason.NO_USER
 
     def _update_remember_cookie(self, response):
         config = current_app.config
         cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
         has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
-        refresh = current_app.config.get("REMEMBER_COOKIE_REFRESH_EACH_REQUEST") and has_cookie
+        # A temporarily unavailable directory must not be followed by a
+        # renewed cookie; keep the existing cookie untouched for next time.
+        suppress_refresh = g.get("_login_suppress_cookie_refresh", False)
+        refresh = (
+            current_app.config.get("REMEMBER_COOKIE_REFRESH_EACH_REQUEST")
+            and has_cookie
+            and not suppress_refresh
+        )
 
         operation = session.pop("_remember", None)
         if not operation and not refresh:

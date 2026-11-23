@@ -39,3 +39,10 @@ user_accessed = _signals.signal("accessed")
 #: marked non-fresh or deleted. It receives no additional arguments besides
 #: the app.
 session_protected = _signals.signal("session-protected")
+
+#: Sent once per request when the login recovery process has finished. In
+#: addition to the app (which is the sender), it is passed `result`, a
+#: sanitized `~flask_login.recovery.RecoveryResult` containing only the
+#: sources tried, the source adopted and a limited reason category. It never
+#: carries cookie values, credentials or directory exception text.
+user_recovery_completed = _signals.signal("recovery-completed")

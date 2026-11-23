@@ -137,6 +137,25 @@ def login_fresh():
     return session.get("_fresh", False)
 
 
+def login_recovery_result():
+    """Return the sanitized result of this request's login recovery.
+
+    Accessing it triggers the recovery process if it has not run yet, so it
+    is safe to call from a ``before_request`` hook, a protected view or a
+    template. The recovery runs at most once per request, and the same
+    :class:`~flask_login.recovery.RecoveryResult` is returned everywhere.
+    It only contains source/reason categories, never cookie values,
+    credentials or directory exception text.
+    """
+    if has_request_context():
+        if "_login_recovery_result" not in g:
+            current_app.login_manager._load_user()
+
+        return g.get("_login_recovery_result")
+
+    return None
+
+
 def login_remembered():
     """
     This returns ``True`` if the current login is remembered across sessions.

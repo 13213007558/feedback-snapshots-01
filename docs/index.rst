@@ -78,6 +78,45 @@ It should return `None` (**not raise an exception**) if the ID is not valid.
 (In that case, the ID will manually be removed from the session and processing
 will continue.)
 
+Reporting Directory Outcomes
+============================
+Returning `None` only says "no user was returned". When your user directory can
+distinguish a permanently invalid account from a temporary outage, it may raise
+one of the dedicated exceptions instead:
+
+- Raise `UserNotFound` to *confirm* the account no longer exists. Flask-Login
+  clears the browser login state (the session keys it owns) and deletes the
+  "remember me" cookie.
+- Raise `UserDirectoryUnavailable` to report the directory could not answer this
+  time. The protected page stays unauthorized, the existing session and
+  "remember me" cookie are left untouched so the next request can recover again,
+  and the current response never renews the "remember me" cookie.
+
+Both verdicts are terminal for the request: when a browser login state exists
+they constrain the whole recovery, so a session and a "remember me" cookie
+coexisting still produce a single outcome. Any other exception is propagated
+normally and is *not* interpreted as a directory verdict.
+
+The sanitized result of the recovery is available through
+`login_recovery_result` and is also published once per request with the
+`user_recovery_completed` signal. It only contains limited categories - the
+sources that were tried (`RecoverySource`), the source that was adopted and the
+final reason (`RecoveryReason`). It never contains cookie values, credentials or
+directory exception text, so it is safe to forward to an audit collector.
+
+For example::
+
+    from flask_login import UserNotFound, UserDirectoryUnavailable
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        try:
+            return directory.get(user_id)
+        except directory.AccountGone:
+            raise UserNotFound()
+        except directory.TemporaryError as exc:
+            raise UserDirectoryUnavailable() from exc
+
 Your User Class
 ===============
 The class that you use to represent users needs to implement these properties
@@ -570,11 +609,34 @@ Login Mechanisms
 
 .. autofunction:: login_remembered
 
+.. autofunction:: login_recovery_result
+
 .. autofunction:: login_user
 
 .. autofunction:: logout_user
 
 .. autofunction:: confirm_login
+
+
+Login Recovery
+--------------
+.. autoclass:: RecoveryResult
+   :members:
+
+.. autoclass:: RecoverySource
+   :members:
+
+.. autoclass:: RecoveryReason
+   :members:
+
+.. autoclass:: UserDirectoryError
+   :members:
+
+.. autoclass:: UserNotFound
+   :members:
+
+.. autoclass:: UserDirectoryUnavailable
+   :members:
 
 
 Protecting Views
@@ -636,6 +698,13 @@ signals in your code.
    Sent whenever session protection takes effect, and a session is either
    marked non-fresh or deleted. It receives no additional arguments besides
    the app.
+
+.. data:: user_recovery_completed
+
+   Sent once per request when login recovery finishes. In addition to the app
+   (which is the sender), it is passed `result`, a `RecoveryResult` holding only
+   the sources tried, the adopted source and a limited reason category. It never
+   carries cookie values, credentials or directory exception text.
 
 .. _source code: https://github.com/maxcountryman/flask-login/tree/main/src/flask_login
 .. _Flask documentation on signals: https://flask.palletsprojects.com/en/latest/signals/

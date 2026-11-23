@@ -18,6 +18,16 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add a sanitized login recovery result. `login_recovery_result` and the new
+  `user_recovery_completed` signal expose only the sources tried, the adopted
+  source and a limited `RecoveryReason` category, never cookie values,
+  credentials or directory exception text.
+- Let user loaders report explicit directory outcomes with `UserNotFound`
+  (clears the login state and the "remember me" cookie) and
+  `UserDirectoryUnavailable` (keeps the login material for the next attempt and
+  suppresses cookie renewal). A confirmed verdict constrains the whole request
+  even when a session and a "remember me" cookie coexist, while requests without
+  browser login state can still authenticate via the request loader.
 
 
 Version 0.6.3
