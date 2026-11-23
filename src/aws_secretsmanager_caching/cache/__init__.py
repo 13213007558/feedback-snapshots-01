@@ -17,5 +17,26 @@
 """
 from aws_secretsmanager_caching.cache.items import SecretCacheItem, SecretCacheObject, SecretCacheVersion
 from aws_secretsmanager_caching.cache.lru import LRUCache
+from aws_secretsmanager_caching.cache.secret_cache_hook import (
+    RotatingSecretCacheHook,
+    SecretCacheEnvelope,
+    SecretCacheEnvelopeFormatError,
+    SecretCacheEnvelopeIntegrityError,
+    SecretCacheHook,
+    SecretCacheHookError,
+    SecretCacheKeyUnavailableError,
+)
 
-__all__ = ["SecretCacheObject", "SecretCacheItem", "SecretCacheVersion", "LRUCache"]
+__all__ = [
+    "SecretCacheObject",
+    "SecretCacheItem",
+    "SecretCacheVersion",
+    "LRUCache",
+    "SecretCacheHook",
+    "RotatingSecretCacheHook",
+    "SecretCacheEnvelope",
+    "SecretCacheHookError",
+    "SecretCacheEnvelopeFormatError",
+    "SecretCacheEnvelopeIntegrityError",
+    "SecretCacheKeyUnavailableError",
+]

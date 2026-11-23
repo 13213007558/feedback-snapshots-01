@@ -140,6 +140,30 @@ You can configure the cache config object with the following parameters:
 - `secret_refresh_interval` - The number of seconds to wait between refreshing cached secret information. The default value is `3600.0`.
 - `secret_cache_hook` - An implementation of the SecretCacheHook abstract class. The default value is `None`.
 
+#### Rotating Envelope Keys
+
+`RotatingSecretCacheHook` is a built-in `SecretCacheHook` that wraps every cached Describe result and secret version in an authenticated envelope. It supports replacing the wrapping key while the process keeps running:
+
+```python
+from aws_secretsmanager_caching import RotatingSecretCacheHook, SecretCache, SecretCacheConfig
+
+hook = RotatingSecretCacheHook(primary_key=current_key, legacy_keys=[previous_key])
+cache = SecretCache(config=SecretCacheConfig(secret_cache_hook=hook))
+
+# Start writing new envelopes with a new key. The previous key stays readable
+# so entries cached before the rotation continue to serve reads.
+hook.rotate(new_key)
+
+# Once every entry has migrated, stop accepting the retired key.
+hook.retire_legacy_keys()
+```
+
+- New envelopes are always written with the primary key.
+- During the rotation window, `rotate(new_key, retain_previous=True)` keeps the previous key readable. Entries opened with a legacy key are re-wrapped with the primary key on the next successful read, one entry at a time.
+- If re-wrapping a single entry fails, the read still succeeds using the legacy envelope. The failure is kept separate from backend refresh retries, the plaintext value is never stored in the cache, and the next read retries the migration for that entry.
+- After `retire_legacy_keys()` or `retire_key(key_id)`, entries still wrapped with a retired key raise `SecretCacheKeyUnavailableError` instead of being served. Other entries, including any that already migrated, keep working.
+- The hook is shared by reference with the cache configuration, so a rotation performed on the hook applies to the running cache without restarting the process.
+
 #### Decorators
 
 The library also includes several decorator functions to wrap existing function calls with SecretString-based secrets:

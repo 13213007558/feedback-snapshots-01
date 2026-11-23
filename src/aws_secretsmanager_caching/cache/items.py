@@ -158,10 +158,36 @@ class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
 
     def _get_result(self):
         """Get the stored result using a hook if present"""
-        if self._config.secret_cache_hook is None:
+        hook = self._config.secret_cache_hook
+        if hook is None:
             return self._result
 
-        return self._config.secret_cache_hook.get(self._result)
+        with self._lock:
+            cached_result = self._result
+            value = hook.get(cached_result)
+            self._migrate_result(cached_result, value)
+        return value
+
+    def _migrate_result(self, cached_result, value):
+        """Rewrite a legacy envelope with the current key after a successful read.
+
+        The caller must hold self._lock. The rewrite is per cached entry. If it
+        fails, the previously wrapped value is kept so a later read can retry;
+        the decoded value is never stored in its place.
+        """
+        hook = self._config.secret_cache_hook
+        needs_rewrap = getattr(hook, "needs_rewrap", None)
+        if cached_result is None or needs_rewrap is None:
+            return
+        if not needs_rewrap(cached_result):
+            return
+        try:
+            rewrapped = hook.put(value)
+        except Exception:  # pylint: disable=broad-except
+            # Keep the original envelope. The value was read successfully and
+            # the next read will attempt the migration again.
+            return
+        self._result = rewrapped
 
     def _set_result(self, result):
         """Store the given result using a hook if present"""
@@ -169,7 +195,8 @@ class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
             self._result = result
             return
 
-        self._result = self._config.secret_cache_hook.put(result)
+        with self._lock:
+            self._result = self._config.secret_cache_hook.put(result)
 
 
 class SecretCacheItem(SecretCacheObject):
