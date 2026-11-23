@@ -3,6 +3,7 @@
 """Caching crypto material manager."""
 import logging
 import uuid
+from threading import Lock
 
 import attr
 import six
@@ -109,6 +110,15 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         if self.partition_name is None:
             self.partition_name = to_bytes(str(uuid.uuid4()))
 
+        # Maps the identity of returned encryption materials to the still-outstanding
+        # reservations held by the streams using those materials.  A stream settles its
+        # reservation exactly once, by committing on first output or releasing on cancellation.
+        self._reservation_lock = Lock()
+        self._outstanding_reservations = {}
+        # Serializes the "find an entry with headroom, otherwise create one" sequence so that
+        # concurrent streams cannot each miss the cache and overwrite the same entry.
+        self._materials_request_lock = Lock()
+
     def _cache_entry_has_encrypted_too_many_bytes(self, entry):
         """Determines if a cache entry has exceeded the max allowed bytes encrypted.
 
@@ -156,18 +166,34 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         :type request: aws_encryption_sdk.materials_managers.EncryptionMaterialsRequest
         :rtype: bool
         """
-        if request.plaintext_length is None:
-            _LOGGER.debug("Encryption materials request not cached because plaintext length is unknown")
-            return False
-
         if request.algorithm is not None and not request.algorithm.safe_to_cache():
             _LOGGER.debug("Encryption materials request not cached because algorithm suite is not safe to cache")
             return False
 
         return True
 
+    def _reservation_size(self, plaintext_length):
+        """Returns the message and byte budget a single request must reserve.
+
+        A known-length plaintext reserves exactly its size.  An unknown-length plaintext
+        cannot be measured without reading the whole stream into memory, so instead it
+        reserves the most bytes this manager will ever let a single key encrypt.  The
+        reservation is settled against real usage once the stream writes or is abandoned.
+
+        :param int plaintext_length: Declared plaintext length, or None if unknown
+        :rtype: tuple(int, int)
+        """
+        if plaintext_length is None:
+            return 1, self.max_bytes_encrypted
+        return 1, plaintext_length
+
     def get_encryption_materials(self, request):
         """Provides encryption materials appropriate for the request.
+
+        Budget for the message is reserved before the materials are handed out.  If no cache
+        entry can honor the reservation within the message and byte limits, a fresh entry is
+        created (or the request bypasses the cache entirely).  The reservation is later settled
+        by `commit_encryption_materials_usage` or `release_encryption_materials`.
 
         :param request: Encryption materials request
         :type request: aws_encryption_sdk.materials_managers.EncryptionMaterialsRequest
@@ -176,6 +202,8 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         """
         if not self._should_cache_encryption_request(request):
             return self.backing_materials_manager.get_encryption_materials(request)
+
+        reserve_messages, reserve_bytes = self._reservation_size(request.plaintext_length)
 
         # Inner request strips any information about the plaintext from the actual request.
         # This is done because the resulting encryption materials may be used to encrypt
@@ -188,33 +216,120 @@ class CachingCryptoMaterialsManager(CryptoMaterialsManager):
         )
         cache_key = build_encryption_materials_cache_key(partition=self.partition_name, request=inner_request)
 
-        # Attempt to retrieve from cache
-        try:
-            cache_entry = self.cache.get_encryption_materials(
-                cache_key=cache_key, plaintext_length=request.plaintext_length
+        with self._materials_request_lock:
+            cache_entry = self._entry_with_available_budget(
+                cache_key=cache_key, reserve_messages=reserve_messages, reserve_bytes=reserve_bytes
             )
-        except CacheKeyError:
-            pass
-        else:
-            if self._cache_entry_has_exceeded_limits(cache_entry):
-                self.cache.remove(cache_entry)
-            else:
+
+            if cache_entry is not None:
+                # An existing entry has enough headroom for the reservation, including an
+                # unknown-length request reserving the full byte allowance.
+                reservation = cache_entry.reserve(messages=reserve_messages, bytes_encrypted=reserve_bytes)
+                self._register_reservation(cache_entry.value, reservation)
                 return cache_entry.value
 
-        # Nothing found in cache: try the material manager
-        new_result = self.backing_materials_manager.get_encryption_materials(inner_request)
+            # Nothing usable in cache: ask the material manager for fresh materials.  The cache
+            # key is constant for equivalent requests, so on return we re-check whether another
+            # thread created an entry while this thread was generating the data key.
+            new_result = self.backing_materials_manager.get_encryption_materials(inner_request)
 
-        if not new_result.algorithm.safe_to_cache() or request.plaintext_length >= self.max_bytes_encrypted:
-            return new_result
+            if not new_result.algorithm.safe_to_cache() or reserve_bytes > self.max_bytes_encrypted:
+                # The request cannot live inside a reusable entry, so nothing is reserved.
+                return new_result
 
-        # Add results into cache
-        self.cache.put_encryption_materials(
-            cache_key=cache_key,
-            encryption_materials=new_result,
-            plaintext_length=request.plaintext_length,
-            entry_hints=CryptoMaterialsCacheEntryHints(lifetime=self.max_age),
-        )
-        return new_result
+            cache_entry = self._entry_with_available_budget(
+                cache_key=cache_key, reserve_messages=reserve_messages, reserve_bytes=reserve_bytes
+            )
+            if cache_entry is None:
+                cache_entry = self.cache.put_encryption_materials(
+                    cache_key=cache_key,
+                    encryption_materials=new_result,
+                    plaintext_length=request.plaintext_length,
+                    entry_hints=CryptoMaterialsCacheEntryHints(lifetime=self.max_age),
+                )
+
+            reservation = cache_entry.reserve(messages=reserve_messages, bytes_encrypted=reserve_bytes)
+            self._register_reservation(cache_entry.value, reservation)
+            return cache_entry.value
+
+    def _entry_with_available_budget(self, cache_key, reserve_messages, reserve_bytes):
+        """Returns a cache entry that can honor the requested reservation, or None.
+
+        Entries that have aged out or already exhausted their budget are removed.  An entry that
+        still exists but lacks enough free budget is left intact so its in-flight reservations
+        can settle, and the caller creates a fresh entry instead.
+
+        :param bytes cache_key: Cache identifier to look up
+        :param int reserve_messages: Message slots that must be available
+        :param int reserve_bytes: Plaintext bytes that must be available
+        :rtype: aws_encryption_sdk.caches.CryptoMaterialsCacheEntry or None
+        """
+        try:
+            cache_entry = self.cache.get_encryption_materials(
+                cache_key=cache_key, plaintext_length=reserve_bytes
+            )
+        except CacheKeyError:
+            return None
+
+        if self._cache_entry_has_exceeded_limits(cache_entry):
+            self.cache.remove(cache_entry)
+            return None
+
+        if not cache_entry.can_reserve(
+            messages=reserve_messages,
+            bytes_encrypted=reserve_bytes,
+            max_messages=self.max_messages_encrypted,
+            max_bytes=self.max_bytes_encrypted,
+        ):
+            _LOGGER.debug("Cache entry cannot reserve requested budget; obtaining fresh materials")
+            return None
+
+        return cache_entry
+
+    def _register_reservation(self, materials, reservation):
+        """Tracks an outstanding reservation keyed by the identity of the materials it covers."""
+        with self._reservation_lock:
+            self._outstanding_reservations.setdefault(id(materials), []).append(reservation)
+
+    def _pop_reservation(self, materials):
+        """Removes and returns one outstanding reservation for the provided materials."""
+        with self._reservation_lock:
+            reservations = self._outstanding_reservations.get(id(materials))
+            if not reservations:
+                return None
+            reservation = reservations.pop(0)
+            if not reservations:
+                del self._outstanding_reservations[id(materials)]
+            return reservation
+
+    def commit_encryption_materials_usage(self, materials, actual_plaintext_bytes=None):
+        """Bills the reservation behind `materials` as a real, completed message.
+
+        A stream that emitted any ciphertext must keep its budget even if it later failed,
+        because data key material was already put on the wire.  When the stream really
+        encrypted fewer bytes than it reserved (an unknown-length upper bound), the unused
+        byte budget is reconciled away.
+
+        :param materials: Encryption materials previously returned by this manager
+        :type materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
+        :param int actual_plaintext_bytes: Bytes the stream actually encrypted, when known
+        """
+        reservation = self._pop_reservation(materials)
+        if reservation is not None:
+            reservation.commit(actual_plaintext_bytes)
+
+    def release_encryption_materials(self, materials):
+        """Returns the reservation behind `materials` without billing it.
+
+        A stream cancelled before its first ciphertext byte consumed nothing, so its reserved
+        message and byte budget is made available to concurrent and future streams.
+
+        :param materials: Encryption materials previously returned by this manager
+        :type materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
+        """
+        reservation = self._pop_reservation(materials)
+        if reservation is not None:
+            reservation.release()
 
     def decrypt_materials(self, request):
         """Provides decryption materials appropriate for the request.

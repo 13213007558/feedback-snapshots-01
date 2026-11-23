@@ -46,6 +46,7 @@ def test_defaults():
 
     assert test._cache == OrderedDict()
     assert test._lre_deque == deque()
+    assert test._retired_entries == set()
     assert test._init_completed
 
 
@@ -81,7 +82,7 @@ def test_try_to_evict_one_entry_dead_reference():
 
 def test_try_to_evict_one_entry_entry_invalid():
     cache = build_lcmc()
-    mock_entry = MagicMock(cache_key=sentinel.cache_key, valid=False)
+    mock_entry = MagicMock(cache_key=sentinel.cache_key, valid=False, messages_encrypted=0)
     cache._cache[sentinel.cache_key] = sentinel.entry
     mock_reference = MagicMock(return_value=mock_entry)
     cache._lre_deque = MagicMock(pop=MagicMock(return_value=mock_reference))
@@ -95,7 +96,12 @@ def test_try_to_evict_one_entry_entry_invalid():
 
 def test_try_to_evict_one_entry_entry_too_old():
     cache = build_lcmc()
-    mock_entry = MagicMock(cache_key=sentinel.cache_key, valid=True, is_too_old=MagicMock(return_value=True))
+    mock_entry = MagicMock(
+        cache_key=sentinel.cache_key,
+        valid=True,
+        is_too_old=MagicMock(return_value=True),
+        messages_encrypted=0,
+    )
     cache._cache[sentinel.cache_key] = mock_entry
     mock_reference = MagicMock(return_value=mock_entry)
     cache._lre_deque = MagicMock(pop=MagicMock(return_value=mock_reference))
@@ -204,9 +210,8 @@ def test_put_encryption_materials(patch_add_value_to_cache, patch_try_to_evict_s
     patch_crypto_cache_entry.assert_called_once_with(
         cache_key=sentinel.cache_key, value=sentinel.encryption_materials, hints=sentinel.entry_hints
     )
-    patch_crypto_cache_entry.return_value._update_with_message_bytes_encrypted.assert_called_once_with(
-        sentinel.plaintext_length
-    )
+    # New entries start with zero billed usage; budget is reserved and settled later.
+    assert not patch_crypto_cache_entry.return_value._update_with_message_bytes_encrypted.called
     patch_try_to_evict_some_entries.assert_called_once_with()
     patch_add_value_to_cache.assert_called_once_with(patch_crypto_cache_entry.return_value)
 
@@ -226,20 +231,21 @@ def test_remove_key_not_found():
 
     assert sentinel.cache_key not in cache._cache
     with pytest.raises(CacheKeyError) as excinfo:
-        cache.remove(MagicMock(cache_key=sentinel.cache_key))
+        cache.remove(MagicMock(cache_key=sentinel.cache_key, messages_encrypted=0))
 
     excinfo.match(r"Key not found in cache")
 
 
 def test_remove_success():
     cache = build_lcmc()
-    mock_entry = MagicMock(cache_key=sentinel.cache_key)
+    mock_entry = MagicMock(cache_key=sentinel.cache_key, messages_encrypted=0)
     cache._cache[sentinel.cache_key] = mock_entry
 
     cache.remove(mock_entry)
 
     mock_entry.invalidate.assert_called_once_with()
     assert sentinel.value not in cache._cache
+    assert cache._retired_entries == set()
 
 
 @pytest.fixture
@@ -295,7 +301,8 @@ def test_get_encryption_materials(patch_get_single_entry):
     test = cache.get_encryption_materials(cache_key=sentinel.cache_key, plaintext_length=plaintext_length)
 
     patch_get_single_entry.assert_called_once_with(sentinel.cache_key)
-    patch_get_single_entry.return_value._update_with_message_bytes_encrypted.assert_called_once_with(plaintext_length)
+    # Lookup only: budget reservation and usage updates happen outside the cache.
+    assert not patch_get_single_entry.return_value._update_with_message_bytes_encrypted.called
     assert test is patch_get_single_entry.return_value
 
 
@@ -317,3 +324,79 @@ def test_clear():
 
     assert cache._cache == OrderedDict()
     assert cache._lre_deque == deque()
+
+
+def _build_real_encryption_entry(cache_key):
+    from mock import MagicMock as _MagicMock
+
+    from aws_encryption_sdk.caches import CryptoMaterialsCacheEntry
+    from aws_encryption_sdk.materials_managers import EncryptionMaterials
+
+    return CryptoMaterialsCacheEntry(
+        cache_key=cache_key,
+        value=_MagicMock(__class__=EncryptionMaterials),
+    )
+
+
+def test_adding_replacement_retires_entry_with_billed_usage():
+    cache = build_lcmc()
+    cache_key = b"shared-key"
+    exhausted = _build_real_encryption_entry(cache_key)
+    reservation = exhausted.reserve(messages=1, bytes_encrypted=10)
+    reservation.commit()
+    cache._add_value_to_cache(exhausted)
+
+    replacement = _build_real_encryption_entry(cache_key)
+    cache._add_value_to_cache(replacement)
+
+    # The replacement becomes the active entry; the billed entry is retired, not dropped.
+    assert cache._cache[cache_key] is replacement
+    assert exhausted in cache._retired_entries
+    assert cache.encryption_usage_totals() == (1, 10)
+
+
+def test_retired_entry_usage_is_counted_in_totals_after_settling():
+    cache = build_lcmc()
+    cache_key = b"shared-key"
+    exhausted = _build_real_encryption_entry(cache_key)
+    exhausted.reserve(messages=1, bytes_encrypted=10).commit()
+    cache._add_value_to_cache(exhausted)
+    replacement = _build_real_encryption_entry(cache_key)
+    cache._add_value_to_cache(replacement)
+
+    active_reservation = replacement.reserve(messages=2, bytes_encrypted=40)
+    active_reservation.commit()
+
+    messages, bytes_encrypted = cache.encryption_usage_totals()
+    assert messages == 3
+    assert bytes_encrypted == 50
+
+
+def test_adding_replacement_without_billed_usage_does_not_retire():
+    cache = build_lcmc()
+    cache_key = b"shared-key"
+    unused = _build_real_encryption_entry(cache_key)
+    cache._add_value_to_cache(unused)
+
+    replacement = _build_real_encryption_entry(cache_key)
+    cache._add_value_to_cache(replacement)
+
+    assert cache._cache[cache_key] is replacement
+    assert cache._retired_entries == set()
+
+
+def test_clear_also_empties_retired_entries():
+    cache = build_lcmc()
+    cache_key = b"shared-key"
+    billed = _build_real_encryption_entry(cache_key)
+    billed.reserve(messages=1, bytes_encrypted=10).commit()
+    cache._add_value_to_cache(billed)
+    replacement = _build_real_encryption_entry(cache_key)
+    cache._add_value_to_cache(replacement)
+    assert cache._retired_entries
+
+    cache.clear()
+
+    assert cache._cache == OrderedDict()
+    assert cache._lre_deque == deque()
+    assert cache._retired_entries == set()

@@ -8,6 +8,7 @@ import time
 from threading import Lock
 
 import attr
+import six
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 
@@ -132,6 +133,56 @@ class CryptoMaterialsCacheEntryHints(object):
 
 
 @attr.s(hash=False)
+class CacheReservation(object):
+    """A single, outstanding reservation of a cache entry's message and byte budget.
+
+    A reservation is created when an encrypting stream asks for materials.  It holds the
+    budget the stream may consume until the stream either commits the reservation (it wrote
+    at least one ciphertext byte) or releases it (it was cancelled before writing anything).
+
+    Committing or releasing a reservation more than once is a no-op so that callers do not
+    have to coordinate stream teardown paths.
+
+    :param entry: Cache entry whose budget is reserved
+    :type entry: aws_encryption_sdk.caches.CryptoMaterialsCacheEntry
+    :param int messages: Number of message slots reserved
+    :param int bytes: Number of plaintext bytes reserved
+    """
+
+    entry = attr.ib()
+    messages = attr.ib(validator=attr.validators.instance_of(six.integer_types))
+    bytes = attr.ib(validator=attr.validators.instance_of(six.integer_types))
+
+    def __attrs_post_init__(self):
+        """Prepares initial values."""
+        self._finalized = False
+
+    @property
+    def finalized(self):
+        """Returns whether this reservation has already been committed or released."""
+        return self._finalized
+
+    def commit(self, actual_bytes=None):
+        """Converts the reserved budget into real, billed usage on the entry.
+
+        :param int actual_bytes: Actual plaintext bytes encrypted.  When smaller than the
+            reserved byte amount (an unknown-length reservation against an upper bound), the
+            unused portion of the reservation is returned.
+        """
+        if self._finalized:
+            return
+        self.entry._commit_reservation(self, actual_bytes)  # pylint: disable=protected-access
+        self._finalized = True
+
+    def release(self):
+        """Returns the reserved budget to the entry without billing it."""
+        if self._finalized:
+            return
+        self.entry._release_reservation(self)  # pylint: disable=protected-access
+        self._finalized = True
+
+
+@attr.s(hash=False)
 class CryptoMaterialsCacheEntry(object):
     # pylint: disable=too-many-instance-attributes
     """Value and metadata store for cryptographic materials cache entries.
@@ -154,6 +205,11 @@ class CryptoMaterialsCacheEntry(object):
         self.creation_time = time.time()
         self.bytes_encrypted = 0
         self.messages_encrypted = 0
+        # Billed usage (messages_encrypted / bytes_encrypted) only counts reservations that
+        # were committed.  The reserved_* counters track budget promised to in-flight streams
+        # that have not yet settled, so concurrent streams cannot oversubscribe an entry.
+        self.reserved_messages = 0
+        self.reserved_bytes = 0
         self.valid = True
         self._lock = Lock()
 
@@ -196,6 +252,71 @@ class CryptoMaterialsCacheEntry(object):
             super(CryptoMaterialsCacheEntry, self).__setattr__("messages_encrypted", self.messages_encrypted + 1)
             super(CryptoMaterialsCacheEntry, self).__setattr__(
                 "bytes_encrypted", self.bytes_encrypted + bytes_encrypted
+            )
+
+    def can_reserve(self, messages, bytes_encrypted, max_messages, max_bytes):
+        """Determines whether reserving `messages` and `bytes_encrypted` stays within budget.
+
+        Billed usage and every still-outstanding reservation both count against the limits,
+        so two concurrent streams can never be promised the same final slot.
+
+        :param int messages: Message slots the caller wants to reserve
+        :param int bytes_encrypted: Plaintext bytes the caller wants to reserve
+        :param int max_messages: Maximum allowed messages for the owning caching CMM
+        :param int max_bytes: Maximum allowed bytes for the owning caching CMM
+        :rtype: bool
+        """
+        with self._lock:
+            return (
+                self.messages_encrypted + self.reserved_messages + messages <= max_messages
+                and self.bytes_encrypted + self.reserved_bytes + bytes_encrypted <= max_bytes
+            )
+
+    def reserve(self, messages, bytes_encrypted):
+        """Promises budget to an in-flight stream and returns a reservation handle.
+
+        :param int messages: Message slots to reserve
+        :param int bytes_encrypted: Plaintext bytes to reserve
+        :rtype: aws_encryption_sdk.caches.CacheReservation
+        """
+        with self._lock:
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_messages", self.reserved_messages + messages
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_bytes", self.reserved_bytes + bytes_encrypted
+            )
+        return CacheReservation(entry=self, messages=messages, bytes=bytes_encrypted)
+
+    def _commit_reservation(self, reservation, actual_bytes=None):
+        """Bills a reservation as real usage and clears its hold on the reserved budget.
+
+        When `actual_bytes` is supplied, only that many bytes are billed; any bytes reserved
+        beyond the real plaintext size (unknown-length upper bound) are released.
+        """
+        billed_bytes = reservation.bytes if actual_bytes is None else actual_bytes
+        with self._lock:
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_messages", self.reserved_messages - reservation.messages
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_bytes", self.reserved_bytes - reservation.bytes
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "messages_encrypted", self.messages_encrypted + reservation.messages
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "bytes_encrypted", self.bytes_encrypted + billed_bytes
+            )
+
+    def _release_reservation(self, reservation):
+        """Returns a reservation's budget without billing it."""
+        with self._lock:
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_messages", self.reserved_messages - reservation.messages
+            )
+            super(CryptoMaterialsCacheEntry, self).__setattr__(
+                "reserved_bytes", self.reserved_bytes - reservation.bytes
             )
 
     def invalidate(self):

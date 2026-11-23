@@ -17,6 +17,9 @@ class CryptoMaterialsCache(object):
     def put_encryption_materials(self, cache_key, encryption_materials, plaintext_length, entry_hints=None):
         """Adds encryption materials to the cache.
 
+        The new entry starts with zero billed usage.  Budget is only consumed when a caller
+        reserves it through `get_encryption_materials` and later commits that reservation.
+
         :param bytes cache_key: Identifier for entries in cache
         :param encryption_materials: Encryption materials to add to cache
         :type encryption_materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
@@ -38,8 +41,11 @@ class CryptoMaterialsCache(object):
 
     @abc.abstractmethod
     def get_encryption_materials(self, cache_key, plaintext_length):
-        """Locates exactly one available encryption materials cache entry for the specified cache_key,
-        incrementing the entry's usage stats prior to returning it to the caller.
+        """Locates exactly one available encryption materials cache entry for the specified cache_key.
+
+        This is a lookup only: it does not reserve budget or update usage stats.  Callers reserve
+        budget against the returned entry and settle that reservation once the message is either
+        written or abandoned.
 
         :param bytes cache_key: Cache ID for which to locate cache entries
         :param int plaintext_length: Bytes to be encrypted by the encryption materials

@@ -38,3 +38,25 @@ class CryptoMaterialsManager(object):
         :returns: decryption materials
         :rtype: aws_encryption_sdk.materials_managers.DecryptionMaterials
         """
+
+    def commit_encryption_materials_usage(self, materials, actual_plaintext_bytes=None):
+        """Settles a materials reservation as a completed, billed message.
+
+        Managers that do not reserve budget (everything except the caching CMM) have nothing
+        to settle, so the default behavior is a no-op.
+
+        :param materials: Encryption materials previously returned by this manager
+        :type materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
+        :param int actual_plaintext_bytes: Bytes the stream really encrypted, when known.
+            Used to reconcile an unknown-length reservation made against an upper bound.
+        """
+
+    def release_encryption_materials(self, materials):
+        """Releases a materials reservation without billing it.
+
+        Managers that do not reserve budget (everything except the caching CMM) have nothing
+        to release, so the default behavior is a no-op.
+
+        :param materials: Encryption materials previously returned by this manager
+        :type materials: aws_encryption_sdk.materials_managers.EncryptionMaterials
+        """

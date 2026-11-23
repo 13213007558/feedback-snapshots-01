@@ -148,3 +148,96 @@ def test_crypto_cache_entry_invalidate():
     entry.invalidate()
 
     assert not entry.valid
+
+
+def _build_entry():
+    return CryptoMaterialsCacheEntry(**_VALID_KWARGS["CryptoMaterialsCacheEntry"])
+
+
+def test_reservation_init_state():
+    entry = _build_entry()
+
+    assert entry.reserved_messages == 0
+    assert entry.reserved_bytes == 0
+
+
+def test_can_reserve_accounts_for_billed_and_reserved_budget():
+    entry = _build_entry()
+    super(CryptoMaterialsCacheEntry, entry).__setattr__("messages_encrypted", 1)
+    super(CryptoMaterialsCacheEntry, entry).__setattr__("bytes_encrypted", 10)
+    entry.reserve(messages=1, bytes_encrypted=10)
+
+    # 1 billed + 1 reserved already; only one message and 20 bytes of headroom remain.
+    assert entry.can_reserve(1, 20, max_messages=3, max_bytes=40)
+    assert not entry.can_reserve(1, 21, max_messages=3, max_bytes=40)
+    assert not entry.can_reserve(2, 5, max_messages=3, max_bytes=40)
+
+
+def test_reserve_tracks_outstanding_budget():
+    entry = _build_entry()
+
+    reservation = entry.reserve(messages=1, bytes_encrypted=30)
+
+    assert entry.reserved_messages == 1
+    assert entry.reserved_bytes == 30
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+    assert reservation.entry is entry
+
+
+def test_commit_moves_reservation_into_billed_usage():
+    entry = _build_entry()
+    reservation = entry.reserve(messages=1, bytes_encrypted=30)
+
+    reservation.commit()
+
+    assert entry.reserved_messages == 0
+    assert entry.reserved_bytes == 0
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 30
+    assert reservation.finalized
+
+
+def test_release_returns_reservation_without_billing():
+    entry = _build_entry()
+    reservation = entry.reserve(messages=1, bytes_encrypted=30)
+
+    reservation.release()
+
+    assert entry.reserved_messages == 0
+    assert entry.reserved_bytes == 0
+    assert entry.messages_encrypted == 0
+    assert entry.bytes_encrypted == 0
+    assert reservation.finalized
+
+
+def test_settling_a_reservation_twice_is_a_noop():
+    entry = _build_entry()
+    reservation = entry.reserve(messages=1, bytes_encrypted=30)
+
+    reservation.commit()
+    reservation.commit()
+    reservation.release()
+
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 30
+    assert entry.reserved_messages == 0
+    assert entry.reserved_bytes == 0
+
+
+def test_two_reservations_contend_for_last_message_slot():
+    entry = _build_entry()
+
+    first = entry.reserve(messages=1, bytes_encrypted=10)
+
+    # The second reservation cannot fit while the first is still outstanding.
+    assert not entry.can_reserve(1, 10, max_messages=1, max_bytes=100)
+
+    # Releasing the unused first reservation hands the slot back.
+    first.release()
+    assert entry.can_reserve(1, 10, max_messages=1, max_bytes=100)
+
+    second = entry.reserve(messages=1, bytes_encrypted=10)
+    second.commit()
+    assert entry.messages_encrypted == 1
+    assert entry.bytes_encrypted == 10

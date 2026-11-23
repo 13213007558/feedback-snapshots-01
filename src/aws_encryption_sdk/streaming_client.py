@@ -355,6 +355,11 @@ class _EncryptionStream(io.IOBase):
                     break
                 output.write(line)
 
+        if output.tell() > 0:
+            # Any returned bytes means serialized message material left the stream and the
+            # reserved key budget must be retained, even if the stream later errors.
+            self._ciphertext_emitted = True
+
         self.bytes_read += output.tell()
         _LOGGER.debug("Returning %d bytes of %d bytes requested", output.tell(), b)
         return output.getvalue()
@@ -519,6 +524,11 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
         self.__unframed_plaintext_cache = io.BytesIO()
         self.__message_complete = False
+        # Tracks whether this stream has produced any serialized message bytes.  The caching
+        # materials manager keeps the reservation of a stream that emitted ciphertext, but a
+        # stream closed before its first byte gets its reservation back.
+        self._ciphertext_emitted = False
+        self._materials_reservation_settled = False
 
     def ciphertext_length(self):
         """Returns the length of the resulting ciphertext message in bytes.
@@ -851,9 +861,29 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
                     )
                 )
 
+    def _settle_materials_reservation(self):
+        """Settles the caching materials manager's reservation for this stream.
+
+        A stream that emitted ciphertext keeps its budget (the data key was used), while a
+        stream abandoned before its first byte returns the reservation untouched.  When the
+        plaintext length was unknown up front, the committed byte count is reconciled down to
+        the bytes the stream actually encrypted rather than the reserved upper bound.
+        Settling more than once is harmless so that every teardown path can invoke it.
+        """
+        if self._materials_reservation_settled or not self._message_prepped:
+            return
+        if self._ciphertext_emitted:
+            self.config.materials_manager.commit_encryption_materials_usage(
+                self._encryption_materials, actual_plaintext_bytes=self._bytes_encrypted
+            )
+        else:
+            self.config.materials_manager.release_encryption_materials(self._encryption_materials)
+        self._materials_reservation_settled = True
+
     def close(self):
         """Closes out the stream."""
         _LOGGER.debug("Closing stream")
+        self._settle_materials_reservation()
         super(StreamEncryptor, self).close()
 
 
