@@ -164,6 +164,15 @@ def function_to_be_decorated(arg1, arg2, arg3):
     # arg2 and arg3, in this example, must still be passed when calling function_to_be_decorated().
 ```
 
+Both decorators also accept `async def` functions. When an async function is decorated, the cache is not consulted when the coroutine is created; the secret is fetched and injected only when the coroutine is actually driven, using whatever value the cache holds at that moment. A coroutine cancelled before it starts therefore never touches the cache. Each invocation resolves its own injected arguments in a local scope, so concurrent or interleaved tasks never share injected state, and the resolved secret is not retained on the wrapper or surfaced in raised errors:
+
+```python
+@InjectKeywordedSecretString(secret_id='mysecret', cache=cache, func_username='username', func_password='password')
+async def async_function_to_be_decorated(func_username, func_password):
+    # The secret is read from the cache at execution time, not when the coroutine is built.
+    ...
+```
+
 ## Getting Help
 
 Please use these community resources for getting help:
