@@ -74,6 +74,16 @@ class AxesProxyHandler(AbstractAxesHandler, AxesBaseHandler):
             username=username
         )
 
+    @classmethod
+    def convert_legacy_records(cls, *, batch_size: int = 500) -> int:
+        return cls.get_implementation().convert_legacy_records(
+            batch_size=batch_size
+        )
+
+    @classmethod
+    def clean_expired_deidentified_records(cls) -> int:
+        return cls.get_implementation().clean_expired_deidentified_records()
+
     @staticmethod
     def update_request(request):
         """

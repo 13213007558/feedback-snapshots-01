@@ -13,6 +13,12 @@ from django.utils.encoding import force_bytes
 from django.utils.module_loading import import_string
 
 from axes.conf import LockoutTier, settings
+from axes.deidentification import (
+    HASH_IDENTIFIER_FIELDS,
+    IDENTIFIER_FIELDS,
+    REDACTED,
+    hash_identifier,
+)
 from axes.models import AccessBase
 
 log = getLogger(__name__)
@@ -344,6 +350,11 @@ def get_client_parameters(
     and can so be used in e.g. the generation of hash keys or other deterministic functions.
 
     Returns list of dict, every item of list are separate parameters
+
+    When de-identification is enabled the cleartext columns are not persisted,
+    so the filters are built against the deterministic ``*_hash`` columns
+    instead. This keeps account risk correlation working without ever having
+    to store the direct identifier.
     """
     lockout_parameters = get_lockout_parameters(request_or_attempt, credentials)
 
@@ -353,15 +364,29 @@ def get_client_parameters(
         "user_agent": user_agent,
     }
 
+    if settings.AXES_DEIDENTIFY_ENABLED:
+        # Keep the canonical lockout parameter names but point them at the
+        # hash columns that hold the only persisted copy of the identifiers.
+        parameters_dict = {
+            parameter: hash_identifier(value, parameter)
+            for parameter, value in parameters_dict.items()
+        }
+        hash_suffix = "_hash"
+    else:
+        hash_suffix = ""
+
     filter_kwargs = []
 
     for parameter in lockout_parameters:
         try:
             if isinstance(parameter, str):
-                filter_kwarg = {parameter: parameters_dict[parameter]}
+                filter_kwarg = {
+                    parameter + hash_suffix: parameters_dict[parameter]
+                }
             else:
                 filter_kwarg = {
-                    combined_parameter: parameters_dict[combined_parameter]
+                    combined_parameter
+                    + hash_suffix: parameters_dict[combined_parameter]
                     for combined_parameter in parameter
                 }
             filter_kwargs.append(filter_kwarg)
@@ -458,6 +483,16 @@ def get_client_str(
         client_dict = {}
         for client in client_list:
             client_dict.update(client)
+
+    if settings.AXES_DEIDENTIFY_ENABLED:
+        # Direct identifiers (and their hashes) must never reach the
+        # application logs; correlation still happens internally.
+        client_dict = {
+            key: REDACTED
+            for key in client_dict
+            if key in IDENTIFIER_FIELDS
+            or key in HASH_IDENTIFIER_FIELDS
+        }
     client_dict = cleanse_parameters(client_dict.copy())
     # Path info is always included as last component in the client string for traceability purposes
     if path_info and isinstance(path_info, (tuple, list)):

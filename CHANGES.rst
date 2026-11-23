@@ -2,6 +2,39 @@
 Changes
 =======
 
+9.1.0 (unreleased)
+------------------
+
+Features
+~~~~~~~~
+
+- Add a configurable de-identification retention policy for the database
+  handler. When ``AXES_DEIDENTIFY_ENABLED`` is set, direct identifiers
+  (username, IP address and user agent) are replaced with deterministic keyed
+  HMAC digests while the cleartext columns are left empty. Lockout windows and
+  account risk correlation keep working because they now resolve on the hash
+  columns.
+- Add ``AXES_DEIDENTIFY_SECRET_KEY``, ``AXES_DEIDENTIFY_HASH_ALGORITHM`` and
+  ``AXES_DEIDENTIFY_RETENTION_DAYS`` settings, plus system checks that warn on
+  an unknown hash algorithm or an invalid retention period.
+- Add the ``axes_deidentify`` management command to batch-convert cleartext
+  records written before the switch. The migration is idempotent and merges
+  legacy attempts into already de-identified rows without resetting or
+  inflating an account's failure count, so it can run while new failures are
+  being recorded.
+- Add the ``axes_cleanup_deidentified`` management command and
+  ``clean_expired_deidentified_records`` handler API to hard-delete
+  de-identified records past the retention period. Repeated runs produce the
+  same result.
+- Separate audit display from account risk handling with three new
+  permissions: ``axes.view_identifier_marker``,
+  ``axes.approve_identifier_export`` and ``axes.export_audit_records``. The
+  admin redacts markers without the view permission, and the CSV export only
+  includes records explicitly approved for export.
+- New migration ``axes.0011`` adds the hash columns, de-identification
+  timestamp and export approval flag to the audit models. Run
+  ``python manage.py migrate`` after upgrading.
+
 9.0.0 (2026-10-30)
 ------------------
 

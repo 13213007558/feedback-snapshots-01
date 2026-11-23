@@ -194,3 +194,49 @@ class LockoutTiersCheckTestCase(AxesTestCase):
             id=Codes.LOCKOUT_TIERS_INVALID,
         )
         self.assertIn(warning, warnings)
+
+
+class DeidentificationCheckTestCase(AxesTestCase):
+    @override_settings(AXES_DEIDENTIFY_ENABLED=False)
+    def test_disabled_policy_produces_no_warnings(self):
+        ids = {warning.id for warning in run_checks()}
+        self.assertNotIn(Codes.DEIDENTIFY_HASH_INVALID, ids)
+        self.assertNotIn(Codes.DEIDENTIFY_RETENTION_INVALID, ids)
+
+    @override_settings(
+        AXES_DEIDENTIFY_ENABLED=True,
+        AXES_DEIDENTIFY_HASH_ALGORITHM="sha256",
+        AXES_DEIDENTIFY_RETENTION_DAYS=30,
+    )
+    def test_valid_policy_produces_no_warnings(self):
+        ids = {warning.id for warning in run_checks()}
+        self.assertNotIn(Codes.DEIDENTIFY_HASH_INVALID, ids)
+        self.assertNotIn(Codes.DEIDENTIFY_RETENTION_INVALID, ids)
+
+    @override_settings(
+        AXES_DEIDENTIFY_ENABLED=True,
+        AXES_DEIDENTIFY_HASH_ALGORITHM="not-a-real-algorithm",
+    )
+    def test_unknown_hash_algorithm_warns(self):
+        warnings = run_checks()
+        warning = Warning(
+            msg=Messages.DEIDENTIFY_HASH_INVALID.format(
+                algorithm="not-a-real-algorithm"
+            ),
+            hint=Hints.DEIDENTIFY_HASH_INVALID,
+            id=Codes.DEIDENTIFY_HASH_INVALID,
+        )
+        self.assertIn(warning, warnings)
+
+    @override_settings(
+        AXES_DEIDENTIFY_ENABLED=True,
+        AXES_DEIDENTIFY_RETENTION_DAYS=-1,
+    )
+    def test_negative_retention_warns(self):
+        warnings = run_checks()
+        warning = Warning(
+            msg=Messages.DEIDENTIFY_RETENTION_INVALID,
+            hint=Hints.DEIDENTIFY_RETENTION_INVALID,
+            id=Codes.DEIDENTIFY_RETENTION_INVALID,
+        )
+        self.assertIn(warning, warnings)

@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from axes.attempts import get_cool_off_threshold
 from axes.conf import settings
+from axes.deidentification import hash_identifier
 from axes.handlers.base import AbstractAxesHandler, AxesBaseHandler
 from axes.helpers import (
     get_client_parameters,
@@ -26,6 +27,7 @@ from axes.helpers import (
 from axes.models import (
     AccessAttempt,
     AccessAttemptExpiration,
+    AccessBase,
     AccessFailureLog,
     AccessLog,
 )
@@ -51,17 +53,284 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
     ) -> int:
         attempts = AccessAttempt.objects.all()
 
+        ip_filter, username_filter = self._identifier_filters(
+            ip_address=ip_address, username=username
+        )
+
         if ip_or_username:
-            attempts = attempts.filter(Q(ip_address=ip_address) | Q(username=username))
+            attempts = attempts.filter(Q(**ip_filter) | Q(**username_filter))
         else:
             if ip_address:
-                attempts = attempts.filter(ip_address=ip_address)
+                attempts = attempts.filter(**ip_filter)
             if username:
-                attempts = attempts.filter(username=username)
+                attempts = attempts.filter(**username_filter)
 
         count, _ = attempts.delete()
         log.info("AXES: Reset %d access attempts from database.", count)
 
+        return count
+
+    @staticmethod
+    def _identifier_filters(
+        *, ip_address: Optional[str] = None, username: Optional[str] = None
+    ) -> tuple:
+        """Build cleartext or hash lookups depending on the active policy."""
+
+        if settings.AXES_DEIDENTIFY_ENABLED:
+            return (
+                {"ip_address_hash": hash_identifier(ip_address, "ip_address")},
+                {"username_hash": hash_identifier(username, "username")},
+            )
+        return (
+            {"ip_address": ip_address},
+            {"username": username},
+        )
+
+    @staticmethod
+    def _identifier_fields(request: HttpRequest, username: Optional[str]) -> dict:
+        """
+        Return the identifier columns for a new record.
+
+        Under de-identification the direct identifier columns are stored as
+        ``None`` and only their deterministic hashes are persisted, so the
+        raw username / IP / user agent never reach the database.
+        """
+
+        if settings.AXES_DEIDENTIFY_ENABLED:
+            return {
+                "username": None,
+                "ip_address": None,
+                "user_agent": None,
+                "username_hash": hash_identifier(username, "username"),
+                "ip_address_hash": hash_identifier(
+                    request.axes_ip_address, "ip_address"
+                ),
+                "user_agent_hash": hash_identifier(
+                    request.axes_user_agent, "user_agent"
+                ),
+            }
+        return {
+            "username": username,
+            "ip_address": request.axes_ip_address,
+            "user_agent": request.axes_user_agent,
+            "username_hash": None,
+            "ip_address_hash": None,
+            "user_agent_hash": None,
+        }
+
+    @staticmethod
+    def _deidentified_metadata() -> dict:
+        """Timestamp new records as de-identified when the policy is active."""
+
+        if settings.AXES_DEIDENTIFY_ENABLED:
+            return {"deidentified_at": timezone.now()}
+        return {}
+
+    def _attempt_lookup_and_defaults(
+        self,
+        request: HttpRequest,
+        username: Optional[str],
+        get_data: str,
+        post_data: str,
+    ) -> tuple:
+        """
+        Build the lookup and default values for get_or_create of an attempt.
+
+        De-identified attempts are keyed on the hash columns; legacy attempts
+        keep using the cleartext unique key.
+        """
+
+        common_defaults = {
+            "get_data": get_data,
+            "post_data": post_data,
+            "http_accept": request.axes_http_accept,
+            "path_info": request.axes_path_info,
+            "failures_since_start": 1,
+            "attempt_time": request.axes_attempt_time,
+        }
+
+        if settings.AXES_DEIDENTIFY_ENABLED:
+            lookup = {
+                "username_hash": hash_identifier(username, "username"),
+                "ip_address_hash": hash_identifier(
+                    request.axes_ip_address, "ip_address"
+                ),
+                "user_agent_hash": hash_identifier(
+                    request.axes_user_agent, "user_agent"
+                ),
+            }
+            defaults = {
+                **common_defaults,
+                "username": None,
+                "ip_address": None,
+                "user_agent": None,
+                "deidentified_at": timezone.now(),
+            }
+            return lookup, defaults
+
+        lookup = {
+            "username": username,
+            "ip_address": request.axes_ip_address,
+            "user_agent": request.axes_user_agent,
+        }
+        defaults = {**common_defaults, "deidentified_at": None}
+        return lookup, defaults
+
+    def convert_legacy_records(self, *, batch_size: int = 500) -> int:
+        """
+        Convert cleartext audit records to de-identified markers in batches.
+
+        The conversion is safe to run while new failures are being recorded and
+        can be re-run any number of times:
+
+        * only records that still hold cleartext identifiers are touched
+          (``deidentified_at IS NULL``), so already converted records are
+          skipped;
+        * hashes are deterministic, so a record converted now and a fresh
+          failure for the same account resolve to the same markers;
+        * when a de-identified ``AccessAttempt`` for the same markers already
+          exists the legacy row is merged into it, adding its failure count
+          instead of creating a duplicate. The threshold for the account is
+          therefore never reset or inflated.
+
+        Returns the number of legacy records that were processed.
+        """
+
+        if not settings.AXES_DEIDENTIFY_ENABLED:
+            log.info(
+                "AXES: Skipping de-identification migration because "
+                "AXES_DEIDENTIFY_ENABLED is False."
+            )
+            return 0
+
+        processed = 0
+        for model in (AccessAttempt, AccessFailureLog, AccessLog):
+            processed += self._convert_model_batches(model, batch_size)
+        return processed
+
+    def _convert_model_batches(self, model, batch_size: int) -> int:
+        processed = 0
+        while True:
+            legacy_ids = list(
+                model.objects.filter(deidentified_at__isnull=True)
+                .order_by("pk")
+                .values_list("pk", flat=True)[:batch_size]
+            )
+            if not legacy_ids:
+                break
+
+            for instance in model.objects.filter(pk__in=legacy_ids):
+                self._convert_instance(instance)
+                processed += 1
+        return processed
+
+    def _convert_instance(self, instance: AccessBase) -> None:
+        with transaction.atomic(using=router.db_for_write(type(instance))):
+            # Lock the row so a concurrent failure cannot update it mid-flight.
+            locked = (
+                type(instance)
+                .objects.select_for_update()
+                .filter(pk=instance.pk)
+                .first()
+            )
+            if locked is None or locked.deidentified_at is not None:
+                # Another worker already converted this row; nothing to do.
+                return
+
+            hashes = {
+                "username_hash": hash_identifier(locked.username, "username"),
+                "ip_address_hash": hash_identifier(
+                    locked.ip_address, "ip_address"
+                ),
+                "user_agent_hash": hash_identifier(
+                    locked.user_agent, "user_agent"
+                ),
+            }
+
+            if isinstance(locked, AccessAttempt):
+                self._merge_or_pseudonymize_attempt(locked, hashes)
+            else:
+                locked.username = None
+                locked.ip_address = None
+                locked.user_agent = None
+                for field_name, digest in hashes.items():
+                    setattr(locked, field_name, digest)
+                locked.deidentified_at = timezone.now()
+                locked.save()
+
+    @staticmethod
+    def _merge_or_pseudonymize_attempt(
+        attempt: AccessAttempt, hashes: dict
+    ) -> None:
+        existing = (
+            AccessAttempt.objects.select_for_update()
+            .exclude(pk=attempt.pk)
+            .filter(**hashes)
+            .first()
+        )
+
+        if existing is None:
+            # No live de-identified row yet: pseudonymize this row in place,
+            # preserving its failure count and attempt window untouched.
+            attempt.username = None
+            attempt.ip_address = None
+            attempt.user_agent = None
+            for field_name, digest in hashes.items():
+                setattr(attempt, field_name, digest)
+            attempt.deidentified_at = timezone.now()
+            attempt.save()
+            return
+
+        # A de-identified row for the same account already exists (created by a
+        # failure that arrived after the switch). Merge the legacy failure count
+        # into it so the window keeps the true cumulative number of failures.
+        existing.failures_since_start = (
+            F("failures_since_start") + attempt.failures_since_start
+        )
+        # Keep the most recent activity so the cool-off window is not shortened.
+        if attempt.attempt_time > existing.attempt_time:
+            existing.attempt_time = attempt.attempt_time
+        if hasattr(attempt, "expiration") and attempt.expiration is not None:
+            if not hasattr(existing, "expiration") or existing.expiration is None:
+                AccessAttemptExpiration.objects.create(
+                    access_attempt=existing,
+                    expires_at=attempt.expiration.expires_at,
+                )
+            else:
+                existing.expiration.expires_at = max(
+                    existing.expiration.expires_at,
+                    attempt.expiration.expires_at,
+                )
+                existing.expiration.save()
+        existing.save()
+        # Deleting the legacy row also cascades its expiration row.
+        attempt.delete()
+
+    def clean_expired_deidentified_records(self) -> int:
+        """
+        Hard-delete de-identified audit records past the retention period.
+
+        The retention cutoff is measured against ``attempt_time`` so that the
+        real failure window, not the conversion timestamp, drives deletion.
+        Running this repeatedly yields the same end state: once the expired
+        records are gone the second run simply has nothing to delete.
+        """
+
+        retention_days = settings.AXES_DEIDENTIFY_RETENTION_DAYS
+        if retention_days is None:
+            log.debug(
+                "AXES: Skipping de-identified retention cleanup because "
+                "AXES_DEIDENTIFY_RETENTION_DAYS is not set."
+            )
+            return 0
+
+        cutoff = timezone.now() - timedelta(days=retention_days)
+        count = 0
+        for model in (AccessAttempt, AccessFailureLog, AccessLog):
+            deleted, _ = model.objects.filter(
+                deidentified_at__isnull=False, attempt_time__lte=cutoff
+            ).delete()
+            count += deleted
         return count
 
     def reset_logs(self, *, age_days: Optional[int] = None) -> int:
@@ -101,7 +370,12 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         limit: Optional[int] = settings.AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT,
     ) -> int:
         count = 0
-        failures = AccessFailureLog.objects.filter(username=username)
+        if settings.AXES_DEIDENTIFY_ENABLED:
+            failures = AccessFailureLog.objects.filter(
+                username_hash=hash_identifier(username, "username")
+            )
+        else:
+            failures = AccessFailureLog.objects.filter(username=username)
         out_of_limit_failures_logs = failures.count() - limit
         if out_of_limit_failures_logs > 0:
             for failure in failures[:out_of_limit_failures_logs]:
@@ -184,21 +458,15 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
             )
         else:
             with transaction.atomic(using=router.db_for_write(AccessAttempt)):
+                lookup, defaults = self._attempt_lookup_and_defaults(
+                    request, username, get_data, post_data
+                )
                 (
                     attempt,
                     created,
                 ) = AccessAttempt.objects.select_for_update().get_or_create(
-                    username=username,
-                    ip_address=request.axes_ip_address,
-                    user_agent=request.axes_user_agent,
-                    defaults={
-                        "get_data": get_data,
-                        "post_data": post_data,
-                        "http_accept": request.axes_http_accept,
-                        "path_info": request.axes_path_info,
-                        "failures_since_start": 1,
-                        "attempt_time": request.axes_attempt_time,
-                    },
+                    **lookup,
+                    defaults=defaults,
                 )
 
                 # Record failed attempt with all the relevant information.
@@ -274,13 +542,12 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         if settings.AXES_ENABLE_ACCESS_FAILURE_LOG:
             with transaction.atomic(using=router.db_for_write(AccessFailureLog)):
                 AccessFailureLog.objects.create(
-                    username=username,
-                    ip_address=request.axes_ip_address,
-                    user_agent=request.axes_user_agent,
+                    **self._identifier_fields(request, username),
                     http_accept=request.axes_http_accept,
                     path_info=request.axes_path_info,
                     attempt_time=request.axes_attempt_time,
                     locked_out=request.axes_locked_out,
+                    **self._deidentified_metadata(),
                 )
                 self.remove_out_of_limit_failure_logs(username=username)
 
@@ -307,15 +574,14 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         if not settings.AXES_DISABLE_ACCESS_LOG:
             # 2. database query: Insert new access logs with login time
             AccessLog.objects.create(
-                username=username,
-                ip_address=request.axes_ip_address,
-                user_agent=request.axes_user_agent,
+                **self._identifier_fields(request, username),
                 http_accept=request.axes_http_accept,
                 path_info=request.axes_path_info,
                 attempt_time=request.axes_attempt_time,
                 # evaluate session hash here to ensure having the correct
                 # value which is stored on the backend
                 session_hash=get_client_session_hash(request),
+                **self._deidentified_metadata(),
             )
 
         if settings.AXES_RESET_ON_SUCCESS:
@@ -349,8 +615,14 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
 
         if username and not settings.AXES_DISABLE_ACCESS_LOG:
             # 2. database query: Update existing attempt logs with logout time
+            if settings.AXES_DEIDENTIFY_ENABLED:
+                username_filter = {
+                    "username_hash": hash_identifier(username, "username")
+                }
+            else:
+                username_filter = {"username": username}
             AccessLog.objects.filter(
-                username=username,
+                **username_filter,
                 logout_time__isnull=True,
                 # update only access log for given session
                 session_hash=get_client_session_hash(request),

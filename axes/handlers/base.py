@@ -232,6 +232,24 @@ class AxesBaseHandler:  # pylint: disable=unused-argument
         """
         return 0
 
+    def convert_legacy_records(self, *, batch_size: int = 500) -> int:
+        """
+        Convert cleartext audit records to de-identified markers.
+
+        Only the database backend stores the audit records this migration
+        operates on, so the default implementation is a no-op.
+        """
+        return 0
+
+    def clean_expired_deidentified_records(self) -> int:
+        """
+        Hard-delete de-identified audit records past the retention period.
+
+        Only the database backend stores the audit records this cleanup
+        operates on, so the default implementation is a no-op.
+        """
+        return 0
+
 
 class AxesHandler(AbstractAxesHandler, AxesBaseHandler):
     """

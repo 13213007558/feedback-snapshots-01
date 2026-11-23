@@ -126,6 +126,80 @@ The ``AXES_USE_USER_AGENT`` setting can be used with username and IP address or 
 but does nothing when the ``AXES_ONLY_USER_FAILURES`` setting is set.
 
 
+Configuring de-identification and retention
+-------------------------------------------
+
+Regulations such as the GDPR require that login audit data does not keep the
+direct identifiers (username, IP address and user agent) in cleartext longer
+than necessary. Axes supports a configurable de-identification retention
+policy that replaces the direct identifiers with deterministic keyed digests.
+
+The digests are keyed with a deployment specific secret, so they cannot be
+reversed from the database alone. Because the digest of a given identifier is
+always the same, failures belonging to one account keep correlating with each
+other and the lockout window, cool-off and progressive tier logic keep working
+exactly as before — the security logic operates on the hashes, never on the
+cleartext.
+
+The following settings configure the policy:
+
+* ``AXES_DEIDENTIFY_ENABLED``: When ``True`` (default ``False``), new audit
+  records store only the ``*_hash`` columns and leave the cleartext identifier
+  columns empty.
+* ``AXES_DEIDENTIFY_SECRET_KEY``: The HMAC key used for the digests. Defaults
+  to Django's ``SECRET_KEY``; set a dedicated, separately guarded secret so
+  rotating the Django secret does not invalidate the audit markers.
+* ``AXES_DEIDENTIFY_HASH_ALGORITHM``: The ``hashlib`` algorithm name used for
+  the HMAC digest. Default: ``"sha256"``.
+* ``AXES_DEIDENTIFY_RETENTION_DAYS``: Number of days de-identified records are
+  retained before they are hard-deleted. ``None`` (the default) keeps them
+  indefinitely. The cutoff is measured against the original ``attempt_time``,
+  not the conversion time, so the real failure window drives deletion.
+
+Migrating records written before the switch
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Records created before enabling the policy still hold cleartext identifiers.
+Convert them in batches with the management command, which is safe to run
+while new failures are being recorded and can be re-run any number of times:
+
+.. code-block:: sh
+
+   python manage.py axes_deidentify --batch-size 500
+
+Only records that still hold cleartext identifiers are touched. When a
+de-identified attempt for the same markers already exists (because a new
+failure arrived after the switch), the legacy row is merged into it and its
+failure count is added to the existing window. The threshold for an account is
+therefore never reset or inflated by the migration.
+
+Expired de-identified records are removed with:
+
+.. code-block:: sh
+
+   python manage.py axes_cleanup_deidentified
+
+The cleanup is idempotent: running it repeatedly leaves the database in the
+same state once every expired record has been deleted.
+
+Admin display permissions and exports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Being able to inspect the audit console and being able to see the
+pseudonymized markers that re-identify an account are separate permissions:
+
+* ``axes.view_identifier_marker``: allows viewing the hash markers instead of a
+  redacted placeholder in the admin.
+* ``axes.approve_identifier_export``: allows marking records as approved for
+  export.
+* ``axes.export_audit_records``: allows running the CSV export action.
+
+An export only contains records that were explicitly approved, and even then
+the markers are redacted unless the exporting user also holds
+``axes.view_identifier_marker``. Account risk correlation and lockouts are
+unaffected by these display permissions.
+
+
 Configuring reverse proxies
 ---------------------------
 

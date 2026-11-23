@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ImproperlyConfigured
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy as _
 
@@ -106,6 +107,38 @@ settings.AXES_ENABLE_ACCESS_FAILURE_LOG = getattr(
 settings.AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT = getattr(
     settings, "AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT", 1000
 )
+
+###
+# De-identification retention policy
+#
+# When enabled, direct identifiers (username, IP address and user agent) are no
+# longer stored in cleartext. They are replaced with deterministic keyed HMAC
+# digests that still allow Axes to correlate the failures of a single account
+# for the lockout window, while the cleartext columns are cleared.
+###
+
+settings.AXES_DEIDENTIFY_ENABLED = getattr(
+    settings, "AXES_DEIDENTIFY_ENABLED", False
+)
+
+settings.AXES_DEIDENTIFY_SECRET_KEY = getattr(
+    settings, "AXES_DEIDENTIFY_SECRET_KEY", settings.SECRET_KEY
+)
+
+settings.AXES_DEIDENTIFY_HASH_ALGORITHM = getattr(
+    settings, "AXES_DEIDENTIFY_HASH_ALGORITHM", "sha256"
+)
+
+# Number of days de-identified audit records are retained. Records older than
+# this are hard-deleted by the retention cleanup. ``None`` keeps them forever.
+settings.AXES_DEIDENTIFY_RETENTION_DAYS = getattr(
+    settings, "AXES_DEIDENTIFY_RETENTION_DAYS", None
+)
+
+if settings.AXES_DEIDENTIFY_ENABLED and not settings.AXES_DEIDENTIFY_SECRET_KEY:
+    raise ImproperlyConfigured(
+        "AXES_DEIDENTIFY_SECRET_KEY must be set when AXES_DEIDENTIFY_ENABLED is True."
+    )
 
 settings.AXES_HANDLER = getattr(
     settings, "AXES_HANDLER", "axes.handlers.database.AxesDatabaseHandler"

@@ -7,6 +7,7 @@ from django.utils.module_loading import import_string
 
 from axes.backends import AxesStandaloneBackend
 from axes.conf import LockoutTier, settings
+from axes.deidentification import digest_available
 
 
 class Messages:
@@ -34,6 +35,13 @@ class Messages:
     LOCKOUT_TIERS_INVALID = (
         "AXES_LOCKOUT_TIERS must be a list of LockoutTier instances."
     )
+    DEIDENTIFY_HASH_INVALID = (
+        "AXES_DEIDENTIFY_HASH_ALGORITHM '{algorithm}' is not available "
+        "in this Python runtime."
+    )
+    DEIDENTIFY_RETENTION_INVALID = (
+        "AXES_DEIDENTIFY_RETENTION_DAYS must be a non-negative number of days."
+    )
 
 
 class Hints:
@@ -45,6 +53,10 @@ class Hints:
     LOCKOUT_PARAMETERS_INVALID = "Add 'ip_address' to AXES_LOCKOUT_PARAMETERS."
     LOCKOUT_TIERS_CONFLICT = "Remove AXES_COOLOFF_TIME when using AXES_LOCKOUT_TIERS."
     LOCKOUT_TIERS_INVALID = "Use: AXES_LOCKOUT_TIERS = [LockoutTier(failures=3, cooloff=timedelta(minutes=15)), ...]"
+    DEIDENTIFY_HASH_INVALID = "Use a hashlib algorithm name such as 'sha256'."
+    DEIDENTIFY_RETENTION_INVALID = (
+        "Set AXES_DEIDENTIFY_RETENTION_DAYS to a positive integer or None."
+    )
 
 
 class Codes:
@@ -56,6 +68,8 @@ class Codes:
     LOCKOUT_PARAMETERS_INVALID = "axes.W006"
     LOCKOUT_TIERS_CONFLICT = "axes.W007"
     LOCKOUT_TIERS_INVALID = "axes.W008"
+    DEIDENTIFY_HASH_INVALID = "axes.W009"
+    DEIDENTIFY_RETENTION_INVALID = "axes.W010"
 
 
 @register(Tags.security, Tags.caches, Tags.compatibility)
@@ -237,6 +251,41 @@ def is_valid_tiers_list(tiers) -> bool:
     if not isinstance(tiers, (list, tuple)):
         return False
     return all(isinstance(t, LockoutTier) for t in tiers)
+
+
+@register(Tags.security)
+def axes_deidentification_check(
+    app_configs, **kwargs
+):  # pylint: disable=unused-argument
+    warnings = []
+
+    if not getattr(settings, "AXES_DEIDENTIFY_ENABLED", False):
+        return warnings
+
+    if not digest_available():
+        warnings.append(
+            Warning(
+                msg=Messages.DEIDENTIFY_HASH_INVALID.format(
+                    algorithm=settings.AXES_DEIDENTIFY_HASH_ALGORITHM
+                ),
+                hint=Hints.DEIDENTIFY_HASH_INVALID,
+                id=Codes.DEIDENTIFY_HASH_INVALID,
+            )
+        )
+
+    retention_days = settings.AXES_DEIDENTIFY_RETENTION_DAYS
+    if retention_days is not None and (
+        not isinstance(retention_days, (int, float)) or retention_days < 0
+    ):
+        warnings.append(
+            Warning(
+                msg=Messages.DEIDENTIFY_RETENTION_INVALID,
+                hint=Hints.DEIDENTIFY_RETENTION_INVALID,
+                id=Codes.DEIDENTIFY_RETENTION_INVALID,
+            )
+        )
+
+    return warnings
 
 
 @register
