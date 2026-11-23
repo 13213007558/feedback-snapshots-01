@@ -1573,6 +1573,226 @@ class TestAcquireTokenSilentWithClientClaims(unittest.TestCase):
                     ["s"], account, forwarded_client_claims=bad_value)
 
 
+# Two independent authorization conditions, expressed as client-originated claims.
+# "BOTH" is the stricter requirement (it stacks on top of NBF alone).
+_NBF_ONLY = '{"access_token": {"nbf": {"essential": true}}}'
+_BOTH_CONDITIONS = (
+    '{"access_token": {"nbf": {"essential": true},'
+    ' "acr": {"essential": true}}}')
+
+
+def _tenant_aware_tenant_discovery(url, *args, **kwargs):
+    """Return OIDC metadata whose token endpoint belongs to the requested tenant.
+
+    The shared ``_OIDC_DISCOVERY_MOCK`` always points at one placeholder endpoint,
+    which collapses every authority onto the same cache realm. These regressions
+    need real per-tenant realms, so derive them from the discovery URL instead.
+    """
+    parts = url.split("/")
+    # e.g. https://login.microsoftonline.com/tenant_a/v2.0/.well-known/...
+    host, tenant = parts[2], parts[3]
+    base = "https://{}/{}/oauth2/v2.0".format(host, tenant)
+    return {
+        "authorization_endpoint": base + "/authorize",
+        "token_endpoint": base + "/token",
+        "issuer": "https://{}/{}/v2.0".format(host, tenant),
+    }
+
+
+class _TokenEndpointRecorder(object):
+    """A ``post=`` replacement that records each HTTP token request.
+
+    The queued value is popped per call and returned as the fake access token,
+    so a test can tell a cache hit (no call, no queue movement) from a real
+    re-acquire. Running out of queued values is itself a failure: it means an
+    unexpected HTTP request was made.
+    """
+
+    def __init__(self, *access_tokens):
+        self.calls = []
+        self._queue = list(access_tokens)
+
+    def __call__(self, url, headers=None, data=None, **kwargs):
+        self.calls.append({"url": url, "data": dict(data or {})})
+        if not self._queue:
+            raise AssertionError("Unexpected HTTP token request to {}".format(url))
+        return MinimalResponse(status_code=200, text=_build_user_token_response(
+            access_token=self._queue.pop(0), refresh_token="shared_rt"))
+
+    @property
+    def requests(self):
+        return len(self.calls)
+
+
+@patch(_OIDC_DISCOVERY, new=_tenant_aware_tenant_discovery)
+class TestCacheLookupHonorsAuthorizationConditionsAcrossTenants(unittest.TestCase):
+    """A cached token is only reused when it belongs to the same realm and its
+    cache entry carries the exact set of authorization conditions requested.
+
+    One home account acts in two directories with the same scopes:
+      - Directory A cached a token that already satisfies both conditions.
+      - Directory B only has an ordinary (condition-less) token.
+    Walking A -> B -> A shows that A's lookup entry hits its strict entry, B's
+    weak entry forces a re-acquire that carries the merged conditions on the
+    wire, and A keeps hitting its original token afterwards.
+    """
+
+    def _app(self, tenant, cache):
+        return ConfidentialClientApplication(
+            "client_id", client_credential="secret",
+            authority="https://login.microsoftonline.com/" + tenant,
+            token_cache=cache)
+
+    def _at_entry(self, cache, realm):
+        # Inspect the raw store rather than search(): an entry keyed by
+        # ext_cache_key is deliberately hidden from lookups that omit that key,
+        # which is exactly the difference between the strict and weak entries.
+        entries = [entry
+            for entry in cache._cache.get("AccessToken", {}).values()
+            if entry.get("realm") == realm]
+        self.assertEqual(1, len(entries),
+            "Expected exactly one AT entry for realm {}".format(realm))
+        return entries[0]
+
+    def test_weak_entry_reacquires_and_strict_entry_is_reused(self):
+        cache = msal.SerializableTokenCache()
+        recorder = _TokenEndpointRecorder(
+            "AT_A_STRICT", "AT_B_PLAIN", "AT_B_STRICT")
+        dir_a = self._app("tenant_a", cache)
+        dir_b = self._app("tenant_b", cache)
+
+        # Seed: same home account, same scopes, different tenant realms.
+        seeded_a = dir_a.acquire_token_on_behalf_of(
+            "assertion", ["s"],
+            forwarded_client_claims=_BOTH_CONDITIONS, post=recorder)
+        self.assertEqual("AT_A_STRICT", seeded_a["access_token"])
+        self.assertEqual(dir_a._TOKEN_SOURCE_IDP, seeded_a[dir_a._TOKEN_SOURCE])
+
+        seeded_b = dir_b.acquire_token_on_behalf_of(
+            "assertion", ["s"], post=recorder)
+        self.assertEqual("AT_B_PLAIN", seeded_b["access_token"])
+        self.assertEqual(dir_b._TOKEN_SOURCE_IDP, seeded_b[dir_b._TOKEN_SOURCE])
+        self.assertEqual(2, recorder.requests)
+
+        # The two realms hold separate lookup entries even with identical scopes.
+        entry_a = self._at_entry(cache, "tenant_a")
+        entry_b = self._at_entry(cache, "tenant_b")
+        self.assertEqual("AT_A_STRICT", entry_a["secret"])
+        self.assertEqual("AT_B_PLAIN", entry_b["secret"])
+        self.assertIn("ext_cache_key", entry_a,
+            "A's entry is the strict, condition-keyed one")
+        self.assertNotIn("ext_cache_key", entry_b,
+            "B's entry is the plain/weak one")
+
+        accounts = dir_a.get_accounts()
+        self.assertEqual(1, len(accounts), "A single home account should be grouped")
+        account = accounts[0]
+        self.assertEqual("user_oid.my_tenant", account["home_account_id"])
+
+        # A: the cached entry satisfies both conditions -> pure cache lookup.
+        hit_a = dir_a.acquire_token_silent(
+            ["s"], account,
+            forwarded_client_claims=_BOTH_CONDITIONS, post=recorder)
+        self.assertEqual("AT_A_STRICT", hit_a["access_token"])
+        self.assertEqual(dir_a._TOKEN_SOURCE_CACHE, hit_a[dir_a._TOKEN_SOURCE])
+        self.assertEqual(2, recorder.requests, "A's strict entry must not trigger HTTP")
+
+        # B: only an ordinary token exists, which is too weak for two conditions,
+        # so the lookup must miss and the re-request must carry both conditions.
+        strict_b = dir_b.acquire_token_silent(
+            ["s"], account,
+            forwarded_client_claims=_BOTH_CONDITIONS, post=recorder)
+        self.assertEqual("AT_B_STRICT", strict_b["access_token"])
+        self.assertEqual(dir_b._TOKEN_SOURCE_IDP, strict_b[dir_b._TOKEN_SOURCE])
+        self.assertEqual(3, recorder.requests, "B's weak entry must re-acquire")
+        self.assertIn("tenant_b/", recorder.calls[-1]["url"])
+        self.assertNotIn("client_claims", recorder.calls[-1]["data"],
+            "The cache-key pseudo-param must not reach the wire")
+        self.assertEqual(
+            {"access_token": {
+                "nbf": {"essential": True}, "acr": {"essential": True}}},
+            json.loads(recorder.calls[-1]["data"]["claims"]),
+            "B's re-request must ask for the consolidated conditions")
+
+        # A again: the cross-tenant B request must not have displaced A's entry.
+        hit_a_again = dir_a.acquire_token_silent(
+            ["s"], account,
+            forwarded_client_claims=_BOTH_CONDITIONS, post=recorder)
+        self.assertEqual("AT_A_STRICT", hit_a_again["access_token"])
+        self.assertEqual(dir_a._TOKEN_SOURCE_CACHE,
+            hit_a_again[dir_a._TOKEN_SOURCE])
+        self.assertEqual(3, recorder.requests)
+
+
+@patch(_OIDC_DISCOVERY, new=_tenant_aware_tenant_discovery)
+class TestStricterClaimsChallengeAfterCachedToken(unittest.TestCase):
+    """A claims challenge must upgrade an existing cached token.
+
+    The cache already holds an ordinary token. A stricter challenge (NBF) is
+    received, then an even stricter one (NBF + ACR). Each challenge bypasses the
+    access-token cache, so the refresh request must carry the merged conditions,
+    while ordinary calls afterwards keep hitting the upgraded token.
+    """
+
+    def _seed(self):
+        cache = msal.SerializableTokenCache()
+        app = ConfidentialClientApplication(
+            "client_id", client_credential="secret",
+            authority="https://login.microsoftonline.com/tenant_c",
+            token_cache=cache)
+        recorder = _TokenEndpointRecorder("AT_PLAIN", "AT_NBF", "AT_BOTH")
+        seeded = app.acquire_token_on_behalf_of(
+            "assertion", ["s"], post=recorder)
+        self.assertEqual("AT_PLAIN", seeded["access_token"])
+        accounts = app.get_accounts()
+        self.assertEqual(1, len(accounts))
+        return app, accounts[0], recorder
+
+    def test_challenge_upgrades_cache_and_later_plain_accesses_hit(self):
+        app, account, recorder = self._seed()
+
+        # A stricter requirement arrives while a plain token is cached.
+        nbf = app.acquire_token_silent(
+            ["s"], account, claims_challenge=_NBF_ONLY, post=recorder)
+        self.assertEqual("AT_NBF", nbf["access_token"],
+            "The plain cached token must not be returned for a challenge")
+        self.assertEqual(app._TOKEN_SOURCE_IDP, nbf[app._TOKEN_SOURCE])
+        self.assertEqual(2, recorder.requests)
+        self.assertEqual(
+            {"access_token": {"nbf": {"essential": True}}},
+            json.loads(recorder.calls[-1]["data"]["claims"]))
+
+        # That upgraded token now satisfies ordinary access.
+        plain_after_nbf = app.acquire_token_silent(
+            ["s"], account, post=recorder)
+        self.assertEqual("AT_NBF", plain_after_nbf["access_token"])
+        self.assertEqual(app._TOKEN_SOURCE_CACHE,
+            plain_after_nbf[app._TOKEN_SOURCE])
+        self.assertEqual(2, recorder.requests)
+
+        # An even stricter challenge stacks ACR on top of the existing NBF.
+        both = app.acquire_token_silent(
+            ["s"], account, claims_challenge=_BOTH_CONDITIONS, post=recorder)
+        self.assertEqual("AT_BOTH", both["access_token"])
+        self.assertEqual(app._TOKEN_SOURCE_IDP, both[app._TOKEN_SOURCE])
+        self.assertEqual(3, recorder.requests)
+        self.assertNotIn("client_claims", recorder.calls[-1]["data"])
+        self.assertEqual(
+            {"access_token": {
+                "nbf": {"essential": True}, "acr": {"essential": True}}},
+            json.loads(recorder.calls[-1]["data"]["claims"]),
+            "The stricter challenge must consolidate both conditions")
+
+        # And the fully-conditioned token keeps serving ordinary access.
+        plain_after_both = app.acquire_token_silent(
+            ["s"], account, post=recorder)
+        self.assertEqual("AT_BOTH", plain_after_both["access_token"])
+        self.assertEqual(app._TOKEN_SOURCE_CACHE,
+            plain_after_both[app._TOKEN_SOURCE])
+        self.assertEqual(3, recorder.requests,
+            "No HTTP once the cached token meets the stricter requirements")
+
+
 @patch(_OIDC_DISCOVERY, new=_OIDC_DISCOVERY_MOCK)
 class TestRemoveTokensForClient(unittest.TestCase):
     def test_remove_tokens_for_client_should_remove_client_tokens_only(self):
