@@ -9,6 +9,7 @@ Modules
 
     aws_encryption_sdk
     aws_encryption_sdk.exceptions
+    aws_encryption_sdk.file_delivery
     aws_encryption_sdk.identifiers
     aws_encryption_sdk.caches
     aws_encryption_sdk.caches.base

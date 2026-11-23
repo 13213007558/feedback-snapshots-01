@@ -2,6 +2,20 @@
 Changelog
 *********
 
+Unreleased
+==========
+
+Features
+--------
+* feat: add verified, atomic streaming decryption delivery
+
+  ``EncryptionSDKClient.decrypt_to_file`` stages a decrypted message with bounded
+  memory use and publishes it only after the whole message, including the footer
+  signature for signed suites, has been verified. Publication is atomic, and an
+  aborted delivery, a truncated message, a bad signature, or a destination write
+  failure leaves the destination unchanged. Existing ``decrypt`` and ``stream``
+  entry points are unchanged.
+
 4.0.7 -- 2026-08-31
 ===================
 

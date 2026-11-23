@@ -220,6 +220,35 @@ offering context manager and iteration support.
 
 See `examples/src/file_streaming_example.py`_ for a code example streaming data to and from files.
 
+Verified file delivery
+======================
+The streaming clients release plaintext a frame at a time. For a message that uses a signing
+algorithm suite, regular frame plaintext is available before the message-level signature in the
+footer has been verified. Callers that hand decrypted files to another service may need a stricter
+boundary: nothing should be published until the entire message has been read and authenticated.
+
+``EncryptionSDKClient.decrypt_to_file`` reads a non-rewindable source once with bounded memory and
+stages the plaintext privately. Calling ``commit()`` on the returned ``VerifiedFileDelivery``
+verifies the whole message, including the footer signature when present, and then publishes the
+complete file with a single atomic rename. Aborting the delivery, a truncated message, a bad
+signature, or a destination write failure publishes nothing and leaves the destination unchanged.
+The result distinguishes ``COMMITTED``, ``ABORTED`` (closed before completion), and ``FAILED``.
+
+.. code:: python
+
+    >>> with open(ciphertext_filename, 'rb') as ct_file:
+    ...     delivery = client.decrypt_to_file(
+    ...         source=ct_file,
+    ...         destination=decrypted_filename,
+    ...         keyring=kms_keyring,
+    ...     )
+    ...     result = delivery.commit()
+    >>> assert result.committed
+
+See `examples/src/verified_delivery/verified_file_delivery_example.py`_ for a local example.
+The existing ``decrypt`` and ``stream`` entry points are unchanged and continue to serve callers
+that authenticate a message incrementally.
+
 Performance Considerations
 ==========================
 Adjusting the frame size can significantly improve the performance of encrypt/decrypt operations with this library.
@@ -269,3 +298,4 @@ For more information, see the note on thread safety in that project's `README <h
 .. _examples/src/aws_kms_discovery_keyring_example.py: https://github.com/aws/aws-encryption-sdk-python/blob/master/examples/src/aws_kms_discovery_keyring_example.py
 .. _examples/src/: https://github.com/aws/aws-encryption-sdk-python/tree/master/examples/src/
 .. _examples/src/file_streaming_example.py: https://github.com/aws/aws-encryption-sdk-python/blob/master/examples/src/file_streaming_example.py
+.. _examples/src/verified_delivery/verified_file_delivery_example.py: https://github.com/aws/aws-encryption-sdk-python/blob/master/examples/src/verified_delivery/verified_file_delivery_example.py

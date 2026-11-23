@@ -10,6 +10,15 @@ from aws_encryption_sdk.caches.local import LocalCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.caches.null import NullCryptoMaterialsCache  # noqa
 from aws_encryption_sdk.compatability import _warn_deprecated_python
 from aws_encryption_sdk.exceptions import AWSEncryptionSDKClientError  # noqa
+from aws_encryption_sdk.file_delivery import (  # noqa
+    DeliveryAbortedError,
+    DeliveryError,
+    DeliveryResult,
+    DeliveryStatus,
+    DeliveryVerificationError,
+    DeliveryWriteError,
+    VerifiedFileDelivery,
+)
 from aws_encryption_sdk.identifiers import Algorithm, CommitmentPolicy, __version__  # noqa
 from aws_encryption_sdk.internal.utils.signature import SignaturePolicy  # noqa
 from aws_encryption_sdk.key_providers.kms import (  # noqa
@@ -217,6 +226,59 @@ class EncryptionSDKClient(object):
         with StreamDecryptor(**kwargs) as decryptor:
             plaintext = decryptor.read()
         return plaintext, decryptor.header
+
+    def decrypt_to_file(self, source, destination, **kwargs):
+        """Decrypt a message and publish it to ``destination`` only once verified.
+
+        This is a delivery-oriented entry point for callers that hand decrypted
+        files to another service.  Unlike :meth:`decrypt` and :meth:`stream`, it
+        does not return plaintext incrementally: the whole message is read from
+        the non-rewindable ``source``, staged with bounded memory use, and only
+        published to ``destination`` after it has been fully authenticated,
+        including the message footer signature when the algorithm suite is
+        signed.
+
+        Publication is atomic.  A caller observing ``destination`` either sees
+        the previous state (or no file) or the complete plaintext; a partially
+        written or unverified file is never exposed.  If the message is
+        truncated, fails authentication, or the destination cannot be written,
+        nothing is published and the destination is left unchanged.  Closing the
+        returned :class:`aws_encryption_sdk.file_delivery.VerifiedFileDelivery`
+        without committing aborts the delivery, which is reported distinctly
+        from a successful commit.
+
+        .. code:: python
+
+            >>> import aws_encryption_sdk
+            >>> client = aws_encryption_sdk.EncryptionSDKClient()
+            >>> delivery = client.decrypt_to_file(
+            ...     source=open(ciphertext_filename, 'rb'),
+            ...     destination=decrypted_filename,
+            ...     keyring=kms_keyring,
+            ... )
+            >>> result = delivery.commit()
+            >>> assert result.committed
+
+        :param source: Ciphertext source; read once and never sought
+        :type source: io.IOBase or file-like
+        :param destination: Path of the file to publish
+        :type destination: str or os.PathLike
+        :param staging_dir: Directory used for on-disk staging (optional)
+        :param int staging_memory_limit: Maximum plaintext bytes kept in memory
+        :param int destination_mode: Permission bits for the published file
+        :param **kwargs: All other parameters are passed to
+            :class:`aws_encryption_sdk.streaming_client.StreamDecryptor`
+        :returns: A verified file delivery ready to be committed or aborted
+        :rtype: aws_encryption_sdk.file_delivery.VerifiedFileDelivery
+        """
+        options = dict(kwargs)
+        self._set_config_kwargs("decrypt_to_file", options)
+        options["signature_policy"] = SignaturePolicy.ALLOW_ENCRYPT_ALLOW_DECRYPT
+        delivery_options = {}
+        for key in ("staging_dir", "staging_memory_limit", "destination_mode"):
+            if key in options:
+                delivery_options[key] = options.pop(key)
+        return VerifiedFileDelivery(source=source, destination=destination, **delivery_options, **options)
 
     def stream(self, **kwargs):
         """Provides an :py:func:`open`-like interface to the streaming encryptor/decryptor classes.
