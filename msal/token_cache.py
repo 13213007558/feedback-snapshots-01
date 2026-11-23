@@ -618,6 +618,23 @@ class SerializableTokenCache(TokenCache):
     """
     has_state_changed = False
 
+    SUPPORT_SNAPSHOT_MARKER = "msal_support_snapshot"
+    SUPPORT_SNAPSHOT_VERSION = 1
+
+    # Entity types allowed in a support snapshot, each with its approved
+    # (a.k.a. whitelisted) fields. These are non-secret, diagnostic-only
+    # fields: none of them can be used to silently acquire tokens.
+    # Anything not listed here never leaves the source cache via a snapshot.
+    _SUPPORT_SNAPSHOT_SCHEMA = {
+        TokenCache.CredentialType.ACCOUNT: frozenset({
+            "home_account_id", "environment", "realm",
+            "local_account_id", "username", "authority_type", "account_source",
+        }),
+        TokenCache.CredentialType.APP_METADATA: frozenset({
+            "client_id", "environment", "family_id",
+        }),
+    }
+
     def add(self, event, **kwargs):
         super(SerializableTokenCache, self).add(event, **kwargs)
         self.has_state_changed = True
@@ -631,7 +648,17 @@ class SerializableTokenCache(TokenCache):
         # type: (Optional[str]) -> None
         """Deserialize the cache from a state previously obtained by serialize()"""
         with self._lock:
-            self._cache = json.loads(state) if state else {}
+            new_cache = json.loads(state) if state else {}
+            if (isinstance(new_cache, dict)
+                    and self.SUPPORT_SNAPSHOT_MARKER in new_cache):
+                # Guard the type boundary: a support snapshot is NOT a full
+                # cache state. Refuse it here so it can never be mistaken for
+                # one (e.g. in a restart-recovery code path).
+                raise ValueError(
+                    "The input is an MSAL support snapshot, not a full cache "
+                    "state. Use deserialize_support_snapshot() to import it, "
+                    "or obtain a full state from serialize().")
+            self._cache = new_cache
             self.has_state_changed = False  # reset
 
     def serialize(self):
@@ -640,4 +667,86 @@ class SerializableTokenCache(TokenCache):
         with self._lock:
             self.has_state_changed = False
             return json.dumps(self._cache, indent=4)
+
+    @classmethod
+    def is_support_snapshot(cls, state):
+        """Return True if *state* is a support snapshot document.
+
+        Useful for routing a persisted blob to either :func:`~deserialize`
+        or :func:`~deserialize_support_snapshot`.
+        """
+        try:
+            payload = json.loads(state) if state else {}
+        except ValueError:
+            return False
+        return isinstance(payload, dict) and cls.SUPPORT_SNAPSHOT_MARKER in payload
+
+    def serialize_support_snapshot(self):
+        # type: () -> str
+        """Export a support snapshot: a diagnostic, secret-free account view.
+
+        The snapshot contains only approved (whitelisted) fields of
+        non-credential entity types (accounts and app metadata), so the same
+        person shows up as one entry per tenant (distinguished by ``realm``).
+        It contains no access tokens, refresh tokens, id tokens, secrets, or
+        any other material usable for silent token acquisition, and is
+        therefore safe to attach to a support ticket.
+
+        The output is intentionally NOT interchangeable with
+        :func:`~serialize`: it carries a marker, and :func:`~deserialize`
+        rejects it. Import it with :func:`~deserialize_support_snapshot`.
+        """
+        with self._lock:
+            payload = {
+                self.SUPPORT_SNAPSHOT_MARKER: {
+                    "version": self.SUPPORT_SNAPSHOT_VERSION,
+                    "exported_at": int(time.time()),
+                },
+            }
+            for section, approved_fields in self._SUPPORT_SNAPSHOT_SCHEMA.items():
+                entries = {}
+                for key, entry in self._cache.get(section, {}).items():
+                    sanitized = {
+                        field: value for field, value in entry.items()
+                        if field in approved_fields
+                    }
+                    if sanitized:
+                        entries[key] = sanitized
+                if entries:
+                    payload[section] = entries
+            # Note: has_state_changed is deliberately left untouched;
+            # a snapshot does not capture the full cache state.
+            return json.dumps(payload, indent=4, sort_keys=True)
+
+    def deserialize_support_snapshot(self, state):
+        # type: (str) -> None
+        """Import a support snapshot, restoring a minimal account view.
+
+        Only approved fields of non-credential entity types are imported;
+        any credential sections (tokens) or unexpected fields found in the
+        input are ignored, so the resulting cache can never be used for
+        authorized refresh (e.g. ``acquire_token_silent`` will find no
+        tokens and will not emit any network request). Existing content of
+        this cache is kept, so this can also merge a snapshot into a live
+        cache; the snapshot-derived entries remain plain account/metadata
+        entries and will never gain secrets through re-serialization.
+        """
+        payload = json.loads(state) if state else {}
+        if not (isinstance(payload, dict)
+                and self.SUPPORT_SNAPSHOT_MARKER in payload):
+            raise ValueError(
+                "The input is not an MSAL support snapshot. "
+                "Use deserialize() for a full cache state from serialize().")
+        with self._lock:
+            for section, approved_fields in self._SUPPORT_SNAPSHOT_SCHEMA.items():
+                for key, entry in payload.get(section, {}).items():
+                    if not isinstance(entry, dict):
+                        continue
+                    sanitized = {
+                        field: value for field, value in entry.items()
+                        if field in approved_fields
+                    }
+                    if sanitized:
+                        self._cache.setdefault(section, {})[key] = sanitized
+            self.has_state_changed = True
 
