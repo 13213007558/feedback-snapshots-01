@@ -216,3 +216,59 @@ the admin application index page, nor the ``Poll`` changelist.
     user.user_permissions.add(
         Permission.objects.get(codename="view_historicalpoll"),
     )
+
+Auditing history access and reverts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``SimpleHistoryAdmin`` can optionally emit audit events describing who saw or
+restored which historical version. Events carry only minimal identifiers -
+the operator, the object and the history version ids - and never contain
+historical field values. Denied or failed operations record the event category
+only.
+
+Configure a collector (any object with a ``record(event)`` method) to enable
+auditing:
+
+.. code-block:: python
+
+    SIMPLE_HISTORY_AUDIT_COLLECTOR = "myapp.audit.collector"
+
+The following event categories are emitted (see
+``simple_history.audit.AuditCategory``):
+
+* ``history_list`` - a page of the history list was successfully rendered;
+  the event records the page number and the ids of the versions on that page.
+* ``history_version_view`` - the revert form for one version was displayed
+  (GET); recorded separately from an actual revert.
+* ``history_revert`` - a revert was committed; the event links the source
+  history version (``source_history_id``) to the historical record created by
+  the write (``result_history_id``).
+* ``history_list_denied``, ``history_version_denied`` and
+  ``history_revert_failed`` - access was denied or the operation failed;
+  these events record the category only.
+
+For compliance-sensitive setups, atomic revert auditing can be enabled:
+
+.. code-block:: python
+
+    SIMPLE_HISTORY_AUDIT_ATOMIC_REVERT = True
+
+With this setting, the revert, its historical record and a
+``PendingAuditEvent`` outbox record are written in one database transaction on
+the same database, and the event is handed to the collector only after the
+transaction commits. If the collector is temporarily unavailable, the pending
+record is kept and can be re-sent later with the same event id:
+
+.. code-block:: python
+
+    from simple_history.audit import flush_pending_audit_events
+
+    flush_pending_audit_events()
+
+The outbox requires the ``simple_history_pendingauditevent`` table, created by
+the migration shipped with ``simple_history``. When the audited models are
+routed to a non-default database, route ``PendingAuditEvent`` (and its
+migrations) to the same database so the transaction stays atomic.
+
+Both the collector and the atomic behavior can also be set per admin class via
+the ``history_audit_collector`` and ``history_audit_atomic_revert`` attributes.

@@ -6,6 +6,13 @@ Unreleased
 
 **New features:**
 
+- Added an optional audit integration for ``SimpleHistoryAdmin``: history list
+  views, version form views and reverts emit identifier-only audit events to a
+  configurable collector, and an opt-in atomic mode stores the revert event in
+  a ``PendingAuditEvent`` outbox within the same database transaction as the
+  revert for reliable, retryable delivery (see "Auditing history access and
+  reverts" in ``docs/admin.rst``)
+
 
 **Breaking changes:**
 

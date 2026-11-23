@@ -1235,3 +1235,8 @@ class ModelDelta:
     changed_fields: Sequence[str]
     old_record: HistoricalChanges
     new_record: HistoricalChanges
+
+
+# Imported here so that the audit outbox model is registered with the app
+# whenever ``simple_history.models`` is loaded.
+from .audit import PendingAuditEvent  # noqa: F401 E402

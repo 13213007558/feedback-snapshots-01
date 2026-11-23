@@ -47,6 +47,13 @@ class ExternalModelWithCustomUserIdField(models.Model):
     history = HistoricalRecords(history_user_id_field=models.IntegerField(null=True))
 
 
+class AuditedArchive(models.Model):
+    """Synthetic sensitive-record model used by the admin audit tests."""
+
+    title = models.CharField(max_length=100)
+    history = HistoricalRecords(history_user_id_field=models.IntegerField(null=True))
+
+
 class Poll(models.Model):
     """Test model for same-named historical models
 

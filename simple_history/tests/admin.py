@@ -3,7 +3,10 @@ from django.utils.safestring import SafeString, mark_safe
 
 from simple_history.admin import SimpleHistoryAdmin
 from simple_history.template_utils import HistoricalRecordContextHelper
-from simple_history.tests.external.models import ExternalModelWithCustomUserIdField
+from simple_history.tests.external.models import (
+    AuditedArchive,
+    ExternalModelWithCustomUserIdField,
+)
 
 from .models import (
     Book,
@@ -80,3 +83,9 @@ admin.site.register(Employee, SimpleHistoryAdmin)
 admin.site.register(ExternalModelWithCustomUserIdField, SimpleHistoryAdmin)
 admin.site.register(Paper, SimpleHistoryAdmin)
 admin.site.register(Poll, SimpleHistoryAdmin)
+
+
+@admin.register(AuditedArchive)
+class AuditedArchiveAdmin(SimpleHistoryAdmin):
+    # Small page size so the audit tests get two history pages.
+    history_list_per_page = 2

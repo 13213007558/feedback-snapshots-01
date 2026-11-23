@@ -11,6 +11,7 @@ from django.contrib.admin.views.main import PAGE_VAR
 from django.contrib.auth import get_permission_codename, get_user_model
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
+from django.db import DEFAULT_DB_ALIAS, router, transaction
 from django.db.models import QuerySet
 from django.shortcuts import get_object_or_404, render
 from django.urls import re_path, reverse
@@ -19,6 +20,14 @@ from django.utils.html import mark_safe
 from django.utils.text import capfirst
 from django.utils.translation import gettext as _
 
+from .audit import (
+    AuditCategory,
+    AuditEvent,
+    PendingAuditEvent,
+    dispatch_pending_audit_event,
+    emit_audit_event,
+    get_audit_collector,
+)
 from .manager import HistoricalQuerySet, HistoryManager
 from .models import HistoricalChanges
 from .template_utils import HistoricalRecordContextHelper
@@ -34,6 +43,11 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
     object_history_list_template = "simple_history/object_history_list.html"
     object_history_form_template = "simple_history/object_history_form.html"
     history_list_per_page = 100
+
+    # Audit integration: falls back to SIMPLE_HISTORY_AUDIT_COLLECTOR and
+    # SIMPLE_HISTORY_AUDIT_ATOMIC_REVERT when left as None.
+    history_audit_collector = None
+    history_audit_atomic_revert = None
 
     def get_urls(self):
         """Returns the additional urls used by the Reversion admin."""
@@ -73,6 +87,9 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
                 raise http.Http404
 
         if not self.has_view_history_or_change_history_permission(request, obj):
+            self.emit_history_audit_event(
+                AuditEvent(category=AuditCategory.HISTORY_LIST_DENIED)
+            )
             raise PermissionDenied
 
         # Use the same pagination as in Django admin, with history_list_per_page items
@@ -116,9 +133,23 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         context.update(self.admin_site.each_context(request))
         context.update(extra_context or {})
         extra_kwargs = {}
-        return self.render_history_view(
+        response = self.render_history_view(
             request, self.object_history_template, context, **extra_kwargs
         )
+        # Only a successfully rendered page counts as a disclosure.
+        self.emit_history_audit_event(
+            AuditEvent(
+                category=AuditCategory.HISTORY_LIST,
+                actor=self.get_history_audit_actor(request),
+                object_label=opts.label,
+                object_id=str(obj.pk),
+                page=page_obj.number,
+                history_ids=tuple(
+                    str(record.history_id) for record in page_obj.object_list
+                ),
+            )
+        )
+        return response
 
     def get_history_queryset(
         self, request, history_manager: HistoryManager, pk_name: str, object_id: Any
@@ -222,6 +253,9 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         obj._state.adding = False
 
         if not self.has_view_history_or_change_history_permission(request, obj):
+            self.emit_history_audit_event(
+                AuditEvent(category=AuditCategory.HISTORY_VERSION_DENIED)
+            )
             raise PermissionDenied
 
         if SIMPLE_HISTORY_EDIT:
@@ -238,16 +272,9 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         if request.method == "POST":
             form = form_class(request.POST, request.FILES, instance=obj)
             if form.is_valid():
-                new_object = self.save_form(request, form, change=True)
-                self.save_model(request, new_object, form, change=True)
-                form.save_m2m()
-
-                self.log_change(
-                    request,
-                    new_object,
-                    self.construct_change_message(request, form, formsets),
+                return self.revert_object_from_history(
+                    request, form, version_id, formsets
                 )
-                return self.response_change(request, new_object)
 
         else:
             form = form_class(instance=obj)
@@ -298,9 +325,124 @@ class SimpleHistoryAdmin(admin.ModelAdmin):
         context.update(self.admin_site.each_context(request))
         context.update(extra_context or {})
         extra_kwargs = {}
-        return self.render_history_view(
+        response = self.render_history_view(
             request, self.object_history_form_template, context, **extra_kwargs
         )
+        if request.method == "GET":
+            self.emit_history_audit_event(
+                AuditEvent(
+                    category=AuditCategory.HISTORY_VERSION_VIEW,
+                    actor=self.get_history_audit_actor(request),
+                    object_label=original_opts.label,
+                    object_id=str(obj.pk),
+                    source_history_id=str(version_id),
+                )
+            )
+        return response
+
+    def revert_object_from_history(self, request, form, version_id, formsets):
+        """
+        Save the object reverted to the historical version ``version_id`` and
+        return the change response.
+
+        When an audit collector is configured, a ``history_revert`` audit event
+        is emitted - linking the source history version to the write result.
+        With atomic revert auditing enabled, the event is stored as a
+        ``PendingAuditEvent`` in the same database transaction as the revert
+        itself and is handed to the collector only after the transaction
+        commits.
+        """
+        collector = self.get_history_audit_collector()
+        atomic_audit = collector is not None and self.get_history_audit_atomic_revert()
+        audit_db = router.db_for_write(self.model) or DEFAULT_DB_ALIAS
+        event = None
+        try:
+            if atomic_audit:
+                with transaction.atomic(using=audit_db):
+                    new_object = self.save_reverted_object(request, form, formsets)
+                    event = self.build_revert_audit_event(
+                        request, new_object, version_id
+                    )
+                    PendingAuditEvent.objects.using(audit_db).create(
+                        event_id=event.event_id,
+                        category=event.category,
+                        payload=event.as_dict(),
+                    )
+            else:
+                new_object = self.save_reverted_object(request, form, formsets)
+                if collector is not None:
+                    event = self.build_revert_audit_event(
+                        request, new_object, version_id
+                    )
+        except Exception:
+            # Failures record the category only.
+            self.emit_history_audit_event(
+                AuditEvent(category=AuditCategory.HISTORY_REVERT_FAILED)
+            )
+            raise
+        if atomic_audit:
+            transaction.on_commit(
+                lambda: dispatch_pending_audit_event(event.event_id, using=audit_db),
+                using=audit_db,
+            )
+        elif event is not None:
+            emit_audit_event(event, collector=collector)
+        return self.response_change(request, new_object)
+
+    def save_reverted_object(self, request, form, formsets):
+        new_object = self.save_form(request, form, change=True)
+        self.save_model(request, new_object, form, change=True)
+        form.save_m2m()
+
+        self.log_change(
+            request,
+            new_object,
+            self.construct_change_message(request, form, formsets),
+        )
+        return new_object
+
+    def build_revert_audit_event(self, request, new_object, version_id):
+        history_manager = getattr(
+            new_object, new_object._meta.simple_history_manager_attribute
+        )
+        result_history_id = (
+            history_manager.filter(**{new_object._meta.pk.attname: new_object.pk})
+            .order_by("-history_id")
+            .values_list("history_id", flat=True)
+            .first()
+        )
+        return AuditEvent(
+            category=AuditCategory.HISTORY_REVERT,
+            actor=self.get_history_audit_actor(request),
+            object_label=self.model._meta.label,
+            object_id=str(new_object.pk),
+            source_history_id=str(version_id),
+            result_history_id=(
+                None if result_history_id is None else str(result_history_id)
+            ),
+        )
+
+    def get_history_audit_collector(self):
+        if self.history_audit_collector is not None:
+            return self.history_audit_collector
+        return get_audit_collector()
+
+    def get_history_audit_atomic_revert(self):
+        if self.history_audit_atomic_revert is not None:
+            return self.history_audit_atomic_revert
+        return getattr(settings, "SIMPLE_HISTORY_AUDIT_ATOMIC_REVERT", False)
+
+    def get_history_audit_actor(self, request):
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return None
+        return user.get_username()
+
+    def emit_history_audit_event(self, event):
+        collector = self.get_history_audit_collector()
+        if collector is None:
+            return
+        emit_audit_event(event, collector=collector)
 
     def history_form_view_title(self, request, obj):
         if self.revert_disabled(request, obj):
