@@ -4,11 +4,14 @@ from unittest.mock import Mock
 import pytest
 from django.conf import settings
 from django.contrib.auth.middleware import AuthenticationMiddleware
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
+from django.dispatch import receiver
 from django.test import RequestFactory
 from django_cas_ng.models import ProxyGrantingTicket, SessionTicket
-from django_cas_ng.utils import RedirectException
+from django_cas_ng.signals import cas_user_logout
+from django_cas_ng.utils import RedirectException, get_user_from_session
 from django_cas_ng.views import CallbackView, LoginView, LogoutView, is_local_url, clean_next_page
 
 SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
@@ -167,6 +170,181 @@ def test_login_post_logout(django_user_model, settings):
                                               pgt='fake-ticket').exists() is False
     assert SessionTicket.objects.filter(session_key=session.session_key,
                                         ticket='fake-ticket').exists() is False
+
+
+@pytest.mark.django_db
+def test_slo_cleans_rotated_session_but_keeps_new_login(
+    monkeypatch, django_user_model, settings,
+):
+    """
+    SLO must end the session that the service ticket authenticated even after
+    the Django session key was rotated, and it must not touch a newer login.
+    Repeated notifications report each authentication session only once.
+    """
+    settings.CAS_VERSION = 'CAS_2_SAML_1_0'
+    settings.CAS_LOGIN_MSG = None
+    settings.CAS_LOGGED_MSG = None
+    settings.AUTHENTICATION_BACKENDS = ['django_cas_ng.backends.CASBackend']
+
+    def mock_verify(ticket, service=None):
+        return 'test@example.com', {'ticket': ticket}, None
+
+    mock_client = Mock()
+    mock_client.verify_ticket.side_effect = mock_verify
+    monkeypatch.setattr('django_cas_ng.backends.get_cas_client',
+                        lambda *args, **kwargs: mock_client)
+
+    # 1. Create the first authenticated session.
+    factory = RequestFactory()
+    request = factory.get('/login/', {'ticket': 'old-ticket'})
+    process_request_for_middleware(request, SessionMiddleware)
+    process_request_for_middleware(request, AuthenticationMiddleware)
+    LoginView().get(request)
+    old_session_key = request.session.session_key
+    old_auth_session_id = request.session['cas_auth_session_id']
+    assert SessionStore(session_key=old_session_key).exists(old_session_key)
+
+    # 2. Rotate the Django session key while keeping the same authentication.
+    request.session.cycle_key()
+    request.session.save()
+    rotated_session_key = request.session.session_key
+    assert rotated_session_key != old_session_key
+    assert SessionStore().exists(old_session_key) is False
+    assert SessionStore().exists(rotated_session_key) is True
+
+    # A separate, deliberate login creates an independent authentication
+    # session that the old service ticket must not affect.
+    new_request = factory.get('/login/', {'ticket': 'new-ticket'})
+    process_request_for_middleware(new_request, SessionMiddleware)
+    process_request_for_middleware(new_request, AuthenticationMiddleware)
+    LoginView().get(new_request)
+    new_session_key = new_request.session.session_key
+    new_auth_session_id = new_request.session['cas_auth_session_id']
+    assert new_auth_session_id != old_auth_session_id
+
+    # The proxy granting ticket belongs to the rotated authentication session.
+    pgt = ProxyGrantingTicket.objects.create(
+        session_key=rotated_session_key,
+        auth_session_id=old_auth_session_id,
+        user=django_user_model.objects.get(username='test@example.com'),
+        pgtiou='old-pgtiou', pgt='old-pgt')
+
+    # 3. Deliver the logout notification for the old service ticket.
+    logout_data = {
+        'logoutRequest': '<samlp:LogoutRequest '
+                         'xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">'
+                         '<samlp:SessionIndex>old-ticket'
+                         '</samlp:SessionIndex></samlp:LogoutRequest>'
+    }
+    logout_signals = []
+
+    @receiver(cas_user_logout)
+    def collect_logout(sender, user, session, ticket, **kwargs):
+        logout_signals.append({
+            'sender': sender,
+            'user': user,
+            'ticket': ticket,
+            'auth_session_id': kwargs.get('auth_session_id'),
+        })
+
+    logout_request = factory.post('/login/', logout_data)
+    logout_request.session = {}
+    LoginView().post(logout_request)
+
+    assert SessionTicket.objects.filter(ticket='old-ticket').exists() is False
+    assert ProxyGrantingTicket.objects.filter(pk=pgt.pk).exists() is False
+    assert SessionStore().exists(rotated_session_key) is False
+    assert len(logout_signals) == 1
+    assert logout_signals[0]['sender'] == 'slo'
+    assert logout_signals[0]['ticket'] == 'old-ticket'
+    assert logout_signals[0]['auth_session_id'] == old_auth_session_id
+    assert str(logout_signals[0]['user'].pk) == str(
+        django_user_model.objects.get(username='test@example.com').pk)
+
+    # The new login continues to work.
+    assert SessionTicket.objects.filter(ticket='new-ticket').exists() is True
+    new_session = SessionStore(session_key=new_session_key)
+    assert SessionStore().exists(new_session_key) is True
+    assert get_user_from_session(new_session).username == 'test@example.com'
+
+    # A redelivered notification is a no-op.
+    redelivered_request = factory.post('/login/', logout_data)
+    redelivered_request.session = {}
+    LoginView().post(redelivered_request)
+    assert SessionTicket.objects.filter(
+        auth_session_id=old_auth_session_id).exists() is False
+    assert len(logout_signals) == 1
+
+
+@pytest.mark.django_db
+def test_slo_arriving_after_relogin_in_same_session(
+    monkeypatch, django_user_model, settings,
+):
+    """
+    A logout notice may arrive on another request after a fresh login has
+    replaced the authentication session.  The old ticket must not end the new
+    authentication session, and the notice itself must still be reported once.
+    """
+    settings.CAS_VERSION = 'CAS_2_SAML_1_0'
+    settings.CAS_LOGIN_MSG = None
+    settings.CAS_LOGGED_MSG = None
+    settings.AUTHENTICATION_BACKENDS = ['django_cas_ng.backends.CASBackend']
+
+    def mock_verify(ticket, service=None):
+        return 'test@example.com', {'ticket': ticket}, None
+
+    mock_client = Mock()
+    mock_client.verify_ticket.side_effect = mock_verify
+    monkeypatch.setattr('django_cas_ng.backends.get_cas_client',
+                        lambda *args, **kwargs: mock_client)
+
+    factory = RequestFactory()
+    request = factory.get('/login/', {'ticket': 'old-ticket'})
+    process_request_for_middleware(request, SessionMiddleware)
+    process_request_for_middleware(request, AuthenticationMiddleware)
+    LoginView().get(request)
+    old_auth_session_id = request.session['cas_auth_session_id']
+
+    # The same browser performs a new login before the old logout is handled.
+    # The authentication middleware has not associated the request yet, just
+    # like a request that arrives while authentication is being re-established.
+    relogin_request = factory.get('/login/', {'ticket': 'new-ticket'})
+    relogin_request.session = request.session
+    relogin_request.user = AnonymousUser()
+    LoginView().get(relogin_request)
+    new_auth_session_id = relogin_request.session['cas_auth_session_id']
+    session_key = relogin_request.session.session_key
+    assert new_auth_session_id != old_auth_session_id
+
+    logout_signals = []
+
+    @receiver(cas_user_logout)
+    def collect_logout(sender, user, session, ticket, **kwargs):
+        logout_signals.append(kwargs.get('auth_session_id'))
+
+    logout_data = {
+        'logoutRequest': '<samlp:LogoutRequest '
+                         'xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">'
+                         '<samlp:SessionIndex>old-ticket'
+                         '</samlp:SessionIndex></samlp:LogoutRequest>'
+    }
+    logout_request = factory.post('/login/', logout_data)
+    logout_request.session = {}
+    LoginView().post(logout_request)
+
+    # The old notice is consumed once and reported for the old session; the
+    # newer login keeps its session and ticket.
+    assert logout_signals == [old_auth_session_id]
+    assert SessionStore().exists(session_key) is True
+    assert SessionTicket.objects.filter(
+        session_key=session_key, ticket='new-ticket',
+        auth_session_id=new_auth_session_id).exists() is True
+
+    # A redelivered notice is still ignored.
+    redelivered_request = factory.post('/login/', logout_data)
+    redelivered_request.session = {}
+    LoginView().post(redelivered_request)
+    assert logout_signals == [old_auth_session_id]
 
 
 @pytest.mark.django_db

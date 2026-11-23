@@ -6,6 +6,17 @@ Listed are the high-level, notable changes for each django-cas-ng release.
 Backwards incompatible changes or other upgrade issues are also described
 here. For additional detail, read the complete `commit history`_.
 
+**django-cas-ng unreleased**
+
+* Track each successful CAS login as an authentication session so Single
+  Logout still finds and removes the session, service ticket and proxy
+  granting ticket after the Django session key was rotated.
+* Ignore repeated or concurrent logout notifications for the same ticket, so
+  each authentication session is reported to ``cas_user_logout`` once.
+* Add ``auth_session_id`` to the ``cas_user_logout`` signal for audit
+  consumers.
+* Requires the ``0004`` migration.
+
 **django-cas-ng 5.1.2** ``[2026-10-28]``
 * Updated homepage and doc links
 * Update docs to encourage minimum version Django 5.2.

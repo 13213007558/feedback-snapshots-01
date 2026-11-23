@@ -11,6 +11,32 @@ SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
 
 
 @pytest.mark.django_db
+def test_command_clean_session_keeps_rotated_session(django_user_model):
+    """Cleanup must keep tickets whose authentication session rotated keys."""
+    from django_cas_ng.utils import AUTH_SESSION_ID_KEY
+
+    session = SessionStore()
+    session[AUTH_SESSION_ID_KEY] = 'auth-session-id'
+    session.save()
+    session.cycle_key()
+    session.save()
+
+    SessionTicket.objects.create(
+        session_key='stale-session-key',
+        auth_session_id='auth-session-id',
+        ticket='rotated-ticket')
+    SessionTicket.objects.create(
+        session_key='gone-session-key',
+        auth_session_id='gone-auth-session-id',
+        ticket='dead-ticket')
+
+    management.call_command('django_cas_ng_clean_sessions')
+
+    assert SessionTicket.objects.filter(ticket='rotated-ticket').exists() is True
+    assert SessionTicket.objects.filter(ticket='dead-ticket').exists() is False
+
+
+@pytest.mark.django_db
 def test_command_clean_session(django_user_model):
     # Use the configured session store to generate a fake session
     session = SessionStore()

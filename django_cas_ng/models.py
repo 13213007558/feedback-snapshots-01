@@ -5,12 +5,18 @@ from django.conf import settings
 from django.db import models
 from django.http import HttpRequest
 
-from .utils import get_cas_client, get_user_from_session
+from .utils import (
+    get_auth_session_id,
+    get_cas_client,
+    get_user_from_session,
+    live_auth_session_ids,
+)
 
 SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
 
 
 SESSION_KEY_MAXLENGTH = 736
+AUTH_SESSION_ID_MAXLENGTH = 64
 
 
 class ProxyError(ValueError):
@@ -23,6 +29,9 @@ class ProxyGrantingTicket(models.Model):
     session_key = models.CharField(
         max_length=SESSION_KEY_MAXLENGTH,
         blank=True, null=True)
+    auth_session_id = models.CharField(
+        max_length=AUTH_SESSION_ID_MAXLENGTH,
+        blank=True, null=True, db_index=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         related_name="+",
@@ -36,7 +45,15 @@ class ProxyGrantingTicket(models.Model):
 
     @classmethod
     def clean_deleted_sessions(cls) -> None:
+        # Build the set of live authentication sessions once for the table
+        # instead of resolving every ticket separately.
+        live_ids = live_auth_session_ids()
         for pgt in cls.objects.all():
+            if pgt.auth_session_id:
+                if pgt.auth_session_id in live_ids:
+                    continue
+                pgt.delete()
+                continue
             session = SessionStore(session_key=pgt.session_key)
             user = get_user_from_session(session)
             if not user.is_authenticated:
@@ -49,11 +66,18 @@ class ProxyGrantingTicket(models.Model):
         retrieve a ticket.
         The function return a Proxy Ticket or raise `ProxyError`
         """
+        auth_session_id = get_auth_session_id(request.session)
         try:
-            pgt = cls.objects.get(
-                user=request.user,
-                session_key=request.session.session_key[:SESSION_KEY_MAXLENGTH]
-            ).pgt
+            if auth_session_id:
+                pgt = cls.objects.get(
+                    user=request.user,
+                    auth_session_id=auth_session_id,
+                ).pgt
+            else:
+                pgt = cls.objects.get(
+                    user=request.user,
+                    session_key=request.session.session_key[:SESSION_KEY_MAXLENGTH]
+                ).pgt
         except cls.DoesNotExist:
             raise ProxyError(
                 "INVALID_TICKET",
@@ -73,11 +97,20 @@ class ProxyGrantingTicket(models.Model):
 
 class SessionTicket(models.Model):
     session_key = models.CharField(max_length=SESSION_KEY_MAXLENGTH)
+    auth_session_id = models.CharField(
+        max_length=AUTH_SESSION_ID_MAXLENGTH,
+        blank=True, null=True, db_index=True)
     ticket = models.CharField(max_length=1024)
 
     @classmethod
     def clean_deleted_sessions(cls) -> None:
+        live_ids = live_auth_session_ids()
         for st in cls.objects.all():
+            if st.auth_session_id:
+                if st.auth_session_id in live_ids:
+                    continue
+                st.delete()
+                continue
             session = SessionStore(session_key=st.session_key)
             user = get_user_from_session(session)
             if not user.is_authenticated:

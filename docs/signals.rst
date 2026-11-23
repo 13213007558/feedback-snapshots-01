@@ -58,6 +58,18 @@ Sent on user logout. Will be fired over manual logout or logout via CAS SingleLo
   [str] The ticket used to authenticate the user with the CAS.
   (if found, else value if set to ``None``)
 
+**auth_session_id**
+  [str] Identity of the CAS authentication session that ended, if known.
+  This value is stable across Django session key rotation, so audit consumers
+  can use it to identify the authentication session even when the browser
+  session key has changed. It is ``None`` for sessions authenticated by a
+  version of django-cas-ng that did not record it.
+
+The signal is sent once per authentication session. A repeated or concurrent
+notification for the same service ticket is ignored. For a CAS SingleLogOut,
+the service ticket, proxy granting ticket and session data are removed before
+the signal is sent.
+
 
 Receiver Example
 ----------------
@@ -101,10 +113,12 @@ You can also check
         user: %s
         session: %s
         ticket: %s
+        auth_session_id: %s
         ''' % (
             args.get('user'),
             args.get('session'),
-            args.get('ticket')))
+            args.get('ticket'),
+            args.get('auth_session_id')))
 
 Test cases
 ----------
