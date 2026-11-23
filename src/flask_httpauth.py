@@ -673,3 +673,119 @@ class MultiAuth:
         """The authenticated user."""
         if hasattr(g, 'flask_httpauth_user'):  # pragma: no cover
             return g.flask_httpauth_user
+
+
+class JointAuth:
+    """Create a joint authentication object.
+
+    The arguments are two or more instances of ``HTTPBasicAuth``,
+    ``HTTPDigestAuth`` or ``HTTPTokenAuth``. A route protected with this
+    authentication method requires all the given authentication objects to
+    authenticate the request. Each authentication object keeps using its own
+    credential source and its own verify and role callbacks, which receive
+    the corresponding principal as usual.
+
+    After all the authentications succeed, an optional joint authorization
+    callback registered with the ``authorize`` decorator is invoked with the
+    authenticated users, in the order the authentication objects were given.
+    The route only executes when this callback returns a true value. This is
+    the place to implement authorization decisions that depend on more than
+    one identity, such as verifying and consuming a credential that binds
+    the authenticated parties to a specific resource and action.
+    """
+    def __init__(self, *auths):
+        if len(auths) < 2:
+            raise ValueError(
+                'JointAuth requires at least two authentication objects')
+        self.auths = auths
+        self.main_auth = auths[0]
+        self.authorize_callback = None
+
+    def authorize(self, f):
+        """Decorator for a callback function that will be called by the
+        framework after all the authentication objects have authenticated
+        the request. The callback receives the authenticated users as
+        arguments, in the order the authentication objects were given, and
+        must return ``True`` to authorize the request. Any other return
+        value results in a 403 error response. The callback can be a
+        standard or a coroutine function. Example::
+
+            @joint_auth.authorize
+            def authorize(service, operator):
+                return approvals.consume(service, operator,
+                                         request.view_args['ticket'])
+        """
+        self.authorize_callback = f
+        return f
+
+    def login_required(self, f=None, role=None):
+        """Decorator for a function that will be called when all the
+        authentication objects have authenticated the request and the joint
+        authorization callback, if defined, has authorized it. This will
+        typically be a Flask view function.
+
+        An optional ``role`` argument can be given to further restrict
+        access by roles. The role check is applied by each authentication
+        object to its own authenticated user.
+        """
+        if f is not None and role is not None:  # pragma: no cover
+            raise ValueError('role is the only supported argument')
+
+        def login_required_internal(f):
+            @wraps(f)
+            def decorated(*args, **kwargs):
+                users = []
+
+                def authorized_view(*args, **kwargs):
+                    if self.authorize_callback is not None and \
+                            not self.main_auth.ensure_sync(
+                                self.authorize_callback)(*users):
+                        try:
+                            return self.main_auth.auth_error_callback(403)
+                        except TypeError:  # pragma: no cover
+                            return self.main_auth.auth_error_callback()
+                    g.flask_httpauth_joint_users = list(users)
+                    g.flask_httpauth_user = users[0]
+                    return self.main_auth.ensure_sync(f)(*args, **kwargs)
+
+                handler = authorized_view
+                for auth in reversed(self.auths):
+                    handler = self._authenticated(auth, users, handler, role)
+                return handler(*args, **kwargs)
+            return decorated
+
+        if f:
+            return login_required_internal(f)
+        return login_required_internal
+
+    def _authenticated(self, auth, users, handler, role):
+        # run one authentication object, record its authenticated user and
+        # then continue with the next handler in the chain
+        def step(*args, **kwargs):
+            users.append(g.flask_httpauth_user)
+            return handler(*args, **kwargs)
+        return auth.login_required(role=role)(step)
+
+    def current_user(self, auth=None):
+        """The user object authenticated by one of the authentication
+        objects. The desired authentication object must be passed in the
+        ``auth`` argument. If the argument is omitted, the user authenticated
+        by the first authentication object is returned. Example::
+
+            @app.route('/tickets/<ticket>/approve')
+            @joint_auth.login_required
+            def approve(ticket):
+                service = joint_auth.current_user(service_auth)
+                operator = joint_auth.current_user(operator_auth)
+                return f'{service} approved {ticket} on behalf of {operator}'
+        """
+        users = getattr(g, 'flask_httpauth_joint_users', None)
+        if users is None:
+            return None
+        if auth is None:
+            return users[0]
+        if auth not in self.auths:
+            raise ValueError(
+                'auth must be one of the authentication objects of this '
+                'JointAuth instance')
+        return users[self.auths.index(auth)]

@@ -163,6 +163,44 @@ party API clients use a JWS or JWT bearer token. The `MultiAuth` class allows yo
 
 In the examples directory you can find a complete example that uses basic and token authentication.
 
+Requiring Multiple Authentication Schemes
+-----------------------------------------
+
+Some routes need more than one party to be authenticated before they can
+execute. For example, an approval endpoint may require a service identity
+and a human operator identity at the same time. The ``JointAuth`` class
+protects a route with two or more authentication objects and only grants
+access when all of them validate. Each authentication object keeps using
+its own credential source and its own verify and role callbacks::
+
+    service_auth = HTTPTokenAuth(header='X-Service-Token')
+    operator_auth = HTTPTokenAuth(header='X-Operator-Token')
+    joint_auth = JointAuth(service_auth, operator_auth)
+
+    @app.route('/tickets/<ticket>/approve')
+    @joint_auth.login_required
+    def approve(ticket):
+        service = joint_auth.current_user(service_auth)
+        operator = joint_auth.current_user(operator_auth)
+        return f'{service} approved {ticket} on behalf of {operator}'
+
+An optional authorization callback decorated with ``joint_auth.authorize``
+runs after all the authentications succeed. It receives the authenticated
+users in the order the authentication objects were given, and the route
+only executes when it returns a true value. This is the place to implement
+authorization decisions that involve more than one identity, such as
+verifying and atomically consuming an approval credential that binds the
+authenticated parties to a specific resource and action::
+
+    @joint_auth.authorize
+    def authorize_approval(service, operator):
+        return approvals.consume(service, operator,
+                                 request.view_args['ticket'])
+
+When the joint authorization callback rejects the request, a 403 error
+response is returned. A missing or failed authentication on any of the
+authentication objects produces that object's own 401 error response.
+
 User Roles
 ----------
 

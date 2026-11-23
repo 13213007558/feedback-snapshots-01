@@ -1,5 +1,9 @@
 # Flask-HTTPAuth change log
 
+**Unreleased**
+
+- Add `JointAuth` class to require multiple authentication objects on a route, with an optional joint authorization callback
+
 **Release 4.8.1** - 2026-03-28
 
 - Do not accept empty or missing tokens ([commit](https://github.com/miguelgrinberg/flask-httpauth/commit/b15ffe9e50e110d7174ccd944f642079e1dcf9ee))
