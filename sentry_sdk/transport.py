@@ -467,6 +467,20 @@ class HttpTransportCore(Transport):
 
         return _disabled(category) or _disabled(None)
 
+    def _drop_expired_attachment(
+        self: "Self",
+        item: "Item",
+    ) -> None:
+        # Record the loss before releasing so the byte quantity can still be
+        # measured. The expiry decision itself is timestamp-only and never
+        # reads (or opens) the attachment content.
+        self.record_lost_event("expired_attachment", item=item)
+        item.release()
+        logger.info(
+            "Dropping expired attachment %r",
+            item.headers.get("filename"),
+        )
+
     def _is_rate_limited(self: "Self") -> bool:
         return any(
             ts > datetime.now(timezone.utc) for ts in self._disabled_until.values()
@@ -481,9 +495,17 @@ class HttpTransportCore(Transport):
     def _prepare_envelope(
         self: "Self", envelope: "Envelope"
     ) -> "Optional[Tuple[Envelope, io.BytesIO, Dict[str, str]]]":
-        # remove all items from the envelope which are over quota
         new_items = []
         for item in envelope.items:
+            # One-shot attachment expiry: the deadline was fixed when the
+            # attachment was created. An envelope that crossed the deadline in
+            # the queue cannot regain permission, so re-check on every send
+            # attempt (initial, retry or re-batch) without touching content.
+            if item.type == "attachment" and item.is_expired():
+                self._drop_expired_attachment(item)
+                continue
+
+            # remove all items from the envelope which are over quota
             if self._check_disabled(item.data_category):
                 if item.data_category in ("transaction", "error", "default", "statsd"):
                     self.on_dropped_event("self_rate_limits")

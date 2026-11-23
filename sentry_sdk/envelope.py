@@ -1,6 +1,7 @@
 import io
 import json
 import mimetypes
+import time
 from typing import TYPE_CHECKING
 
 from sentry_sdk.session import Session
@@ -10,6 +11,17 @@ if TYPE_CHECKING:
     from typing import Any, Dict, Iterator, List, Optional, Union
 
     from sentry_sdk._types import Event, EventDataCategory
+
+
+def _now() -> float:
+    """Monotonic clock used for one-shot attachment expiry.
+
+    Lives at module level so tests can swap it out for a fake clock. The value
+    is only ever compared against deadlines produced by the same function, so
+    a monotonic source is the right choice (it is unaffected by wall-clock
+    adjustments while an envelope sits in the queue).
+    """
+    return time.monotonic()
 
 
 def parse_json(data: "Union[bytes, str]") -> "Any":
@@ -165,12 +177,36 @@ class PayloadRef:
         bytes: "Optional[bytes]" = None,
         path: "Optional[Union[bytes, str]]" = None,
         json: "Optional[Any]" = None,
+        expires_at: "Optional[float]" = None,
     ) -> None:
         self.json = json
         self.bytes = bytes
         self.path = path
+        # One-shot deadline (monotonic timestamp). ``None`` means the payload
+        # never expires. Once set it is immutable: queueing, retrying or
+        # re-batching the envelope never restarts the clock.
+        self.expires_at = expires_at
+        # Set once the payload has been released after expiry. After this point
+        # the backing file must never be opened (or the bytes callable invoked)
+        # again, even on a retry.
+        self._released = False
+
+    def is_expired(self, now: "Optional[float]" = None) -> bool:
+        """Whether the one-shot deadline has passed.
+
+        This only compares timestamps; it never opens a file or reads the
+        payload, so logging/telemetry code can call it safely.
+        """
+        if self.expires_at is None:
+            return False
+        if now is None:
+            now = _now()
+        return now >= self.expires_at
 
     def get_bytes(self) -> bytes:
+        # A released, expired payload must not lazily re-open its file.
+        if self._released:
+            return b""
         if self.bytes is None:
             if self.path is not None:
                 with capture_internal_exceptions():
@@ -179,6 +215,19 @@ class PayloadRef:
             elif self.json is not None:
                 self.bytes = json_dumps(self.json)
         return self.bytes or b""
+
+    def release(self) -> None:
+        """Drop any held resources after the payload has expired.
+
+        Idempotent: only the first call performs the cleanup. The backing path
+        is retained for diagnostics but the cached bytes/json are cleared and
+        the payload is marked released so it can never be opened again.
+        """
+        if self._released:
+            return
+        self._released = True
+        self.bytes = None
+        self.json = None
 
     @property
     def inferred_content_type(self) -> str:
@@ -270,6 +319,12 @@ class Item:
 
     def get_bytes(self) -> bytes:
         return self.payload.get_bytes()
+
+    def is_expired(self, now: "Optional[float]" = None) -> bool:
+        return self.payload.is_expired(now)
+
+    def release(self) -> None:
+        self.payload.release()
 
     def get_event(self) -> "Optional[Event]":
         """

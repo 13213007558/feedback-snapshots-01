@@ -2,7 +2,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from sentry_sdk.envelope import Item, PayloadRef
+from sentry_sdk.envelope import Item, PayloadRef, _now
 
 if TYPE_CHECKING:
     from typing import Callable, Optional, Union
@@ -26,6 +26,10 @@ class Attachment:
     :param content_type: The content type of the attachment. If not provided, it will be guessed from the ``filename``
                          parameter, if available, or the ``path`` parameter if ``filename`` is ``None``.
     :param add_to_transactions: Whether to add this attachment to transactions. Defaults to ``False``.
+    :param ttl: Time to live, in monotonic seconds, for this attachment. When set, the attachment is only sent if the
+                envelope reaches the transport before the deadline. The deadline is computed once, here, so queueing,
+                retrying or re-batching the envelope never extends or resets it. ``None`` (the default) means the
+                attachment never expires.
     """
 
     def __init__(
@@ -35,6 +39,7 @@ class Attachment:
         path: "Optional[str]" = None,
         content_type: "Optional[str]" = None,
         add_to_transactions: bool = False,
+        ttl: "Optional[float]" = None,
     ) -> None:
         if bytes is None and path is None:
             raise TypeError("path or raw bytes required for attachment")
@@ -49,17 +54,23 @@ class Attachment:
         self.path = path
         self.content_type = content_type
         self.add_to_transactions = add_to_transactions
+        # Compute the absolute deadline exactly once. Every envelope item
+        # produced from this attachment inherits the same deadline, so the
+        # attachment's permission cannot be renewed while it sits in the queue.
+        self.expires_at = (_now() + ttl) if ttl is not None else None
 
     def to_envelope_item(self) -> "Item":
         """Returns an envelope item for this attachment."""
-        payload: "Union[None, PayloadRef, bytes]" = None
+        payload: "Union[PayloadRef, bytes]"
         if self.bytes is not None:
             if callable(self.bytes):
-                payload = self.bytes()
+                payload = PayloadRef(
+                    bytes=self.bytes(), expires_at=self.expires_at
+                )
             else:
-                payload = self.bytes
+                payload = PayloadRef(bytes=self.bytes, expires_at=self.expires_at)
         else:
-            payload = PayloadRef(path=self.path)
+            payload = PayloadRef(path=self.path, expires_at=self.expires_at)
         return Item(
             payload=payload,
             type="attachment",
