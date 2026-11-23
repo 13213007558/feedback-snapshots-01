@@ -3,6 +3,20 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Features
+
+  * Add :meth:`~flask_limiter.Limiter.multi_limit` to declare a group of budgets
+    that are reserved atomically for each request. A request is only admitted when
+    every budget can pay; a rejected request consumes none of them. Budgets are
+    deduplicated by storage key so route and inherited blueprint declarations that
+    reference the same budget are charged once.
+  * Add an atomic reservation backend for the ``memory://`` storage and a
+    ``ConfigurationError`` when grouped admission is enabled on a storage without
+    atomic multi-budget support.
+
 v4.1.1
 ------
 Release Date: 2025-12-06

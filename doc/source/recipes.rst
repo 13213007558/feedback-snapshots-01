@@ -37,6 +37,57 @@ Rate limiting all requests by country::
 
 
 
+Joint admission across independent budgets
+-------------------------------------------
+Use :meth:`~Limiter.multi_limit` when one request must spend from several budgets
+that are keyed by different business identities. Every applicable budget is reserved
+atomically: if any of them cannot pay, none of them is charged and the view is not
+invoked::
+
+    from flask import g, request
+    from flask_limiter import Limiter, RateLimitExceeded
+
+    limiter = Limiter(get_remote_address, app=app)
+
+    def employee_id():
+        return g.current_employee.id
+
+    def authorized_project():
+        # only trust the project after the application checked access
+        project = request.view_args["project"]
+        return project if g.current_employee.can_access(project) else ""
+
+    claim_limit = limiter.multi_limit(
+        [
+            ("employee", "20/hour", employee_id),
+            ("project", "2/hour", authorized_project),
+        ],
+        name="claim-submit",
+        scope="claims",
+    )
+
+    @app.post("/projects/<project>/claims")
+    @claim_limit
+    def submit_claim(project):
+        ...
+
+Budgets that reference the same identity are charged once even when a route rule
+and an inherited blueprint rule both declare them. A rejected request can report the
+budget that rejected it and the remaining allowance of the others::
+
+    @app.errorhandler(RateLimitExceeded)
+    def rejected(exc):
+        return {
+            "rule": exc.rejected_rule,
+            "budget": exc.rejected_dimension,
+            "remaining": exc.remaining_by_dimension(),
+            "reset": exc.reset_at_by_dimension(),
+        }, 429
+
+.. note:: Atomic grouped admission is available with ``memory://``. Other storages
+   raise :class:`limits.errors.ConfigurationError` at startup unless they implement
+   ``AtomicReservationStorage.reserve_many()``.
+
 Custom Rate limit exceeded responses
 ------------------------------------
 The default configuration results in a :exc:`RateLimitExceeded` exception being

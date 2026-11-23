@@ -23,6 +23,24 @@ for decorating routes or blueprints.
 
 .. autoclass:: RouteLimit
 
+Joint admission
+---------------
+.. autoclass:: MultiLimit
+.. automethod:: Limiter.multi_limit
+
+Atomic storage integration
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Grouped declarations reserve every budget in one storage transaction. The built-in
+``memory://`` storage implements this. Third party storages can participate by
+implementing:
+
+.. autoclass:: AtomicReservationStorage
+   :members: reserve_many
+
+.. autoclass:: AtomicBudget
+
+.. autoclass:: ReservationResult
+
 Utilities
 ---------
 .. autoclass:: ExemptionScope

@@ -25,11 +25,19 @@ from limits.strategies import STRATEGIES, RateLimiter
 from ordered_set import OrderedSet
 from werkzeug.http import http_date, parse_date
 
+from ._atomic import (
+    AtomicBudget,
+    _MemoryAtomicBackend,
+    _ProtocolAtomicBackend,
+    atomic_backend_for,
+    require_atomic_backend,
+)
 from ._compat import request_context
 from ._limits import (
     ApplicationLimit,
     Limit,
     MetaLimit,
+    MultiLimit,
     RouteLimit,
     RuntimeLimit,
 )
@@ -70,6 +78,12 @@ class RequestLimit:
         request_args: list[str],
         breached: bool,
         shared: bool,
+        *,
+        rule_id: str | None = None,
+        rule_name: str | None = None,
+        dimension: str | None = None,
+        source: RuntimeLimit | None = None,
+        window: WindowStats | None = None,
     ) -> None:
         self.extension: weakref.ProxyType[Limiter] = weakref.proxy(extension)
         self.limit = limit
@@ -77,7 +91,18 @@ class RequestLimit:
         self.key = limit.key_for(*request_args)
         self.breached = breached
         self.shared = shared
-        self._window: WindowStats | None = None
+        #: Identity of the joint admission declaration this limit belongs to.
+        self.rule_id = rule_id
+        #: Human readable name of the joint admission declaration.
+        self.rule_name = rule_name
+        #: Name of the budget dimension (``None`` for a plain limit).
+        self.dimension = dimension
+        #: The runtime rule that produced this request limit.
+        self.source = source
+        #: Window captured by the grouped admission decision. When present, the
+        #: remaining/reset values report exactly the state used to decide this request.
+        self._decision_window = window
+        self._window: WindowStats | None = window
 
     @property
     def limiter(self) -> RateLimiter:
@@ -108,12 +133,16 @@ class LimiterContext:
     view_rate_limit: RequestLimit | None = None
     view_rate_limits: list[RequestLimit] = dataclasses.field(default_factory=list)
     conditional_deductions: dict[RuntimeLimit, list[str]] = dataclasses.field(default_factory=dict)
+    conditional_admissions: list[
+        tuple[list[AtomicBudget], Callable[[flask.wrappers.Response], bool]]
+    ] = dataclasses.field(default_factory=list)
     seen_limits: OrderedSet[RuntimeLimit] = dataclasses.field(default_factory=OrderedSet)
 
     def reset(self) -> None:
         self.view_rate_limit = None
         self.view_rate_limits.clear()
         self.conditional_deductions.clear()
+        self.conditional_admissions.clear()
         self.seen_limits.clear()
 
 
@@ -302,6 +331,8 @@ class Limiter:
 
         self._storage: Storage | None = None
         self._limiter: RateLimiter | None = None
+        self._atomic_backend: _MemoryAtomicBackend | _ProtocolAtomicBackend | None = None
+        self._grouped_admission = False
         self._storage_dead = False
         self._fallback_limiter: RateLimiter | None = None
 
@@ -379,6 +410,7 @@ class Limiter:
         if self._strategy not in STRATEGIES:
             raise ConfigurationError("Invalid rate limiting strategy %s" % self._strategy)
         self._limiter = STRATEGIES[self._strategy](self._storage)
+        self._atomic_backend = atomic_backend_for(self._storage, self._limiter)
 
         self._header_mapping = {
             HeaderNames.RESET: self._header_mapping.get(
@@ -487,6 +519,7 @@ class Limiter:
         self._on_meta_breach = self._on_meta_breach or config.get(ConfigVars.ON_META_BREACH, None)
 
         self.__configure_fallbacks(app, self._strategy)
+        self._ensure_grouped_admission_capability()
 
         if self not in app.extensions.setdefault("limiter", set()):
             app.before_request(self._check_request_limit)
@@ -641,6 +674,109 @@ class Limiter:
             limiter=self,
             key_function=key_func or self._key_func,
             shared=True,
+            scope=scope,
+            per_method=per_method,
+            methods=methods,
+            error_message=error_message,
+            exempt_when=exempt_when,
+            override_defaults=override_defaults,
+            deduct_when=deduct_when,
+            on_breach=on_breach,
+            cost=cost,
+            meta_limits=meta_limits,
+        )
+
+    def multi_limit(
+        self,
+        dimensions: Sequence[
+            tuple[str, str | Callable[[], str]]
+            | tuple[str, str | Callable[[], str], Callable[[], str] | None]
+            | tuple[
+                str,
+                str | Callable[[], str],
+                Callable[[], str] | None,
+                Callable[[], bool] | None,
+            ]
+        ],
+        *,
+        name: str | None = None,
+        key_func: Callable[[], str] | None = None,
+        shared: bool = True,
+        per_method: bool = False,
+        methods: list[str] | None = None,
+        error_message: str | Callable[[], str] | None = None,
+        exempt_when: Callable[[], bool] | None = None,
+        override_defaults: bool = True,
+        deduct_when: Callable[[flask.wrappers.Response], bool] | None = None,
+        on_breach: None | (Callable[[RequestLimit], flask.wrappers.Response | None]) = None,
+        cost: int | Callable[[], int] = 1,
+        scope: str | Callable[[str], str] | None = None,
+        meta_limits: Sequence[str | Callable[[], str] | MetaLimit] | None = None,
+    ) -> MultiLimit:
+        """
+        Declare a group of budgets that must all be able to pay for a request before
+        any of them is charged.
+
+        Each budget is declared as ``(name, rate_limit, key_func?, when?)``. ``name``
+        identifies the dimension (for example ``"employee"`` or ``"project"``),
+        ``rate_limit`` is a limit string or a callable returning one, ``key_func``
+        extracts that budget's business identity and ``when`` optionally disables the
+        budget for the current request.
+
+        All applicable budgets are reserved atomically. If any of them has
+        insufficient allowance, none of them is charged and the request is rejected
+        with :class:`~flask_limiter.RateLimitExceeded`, which reports the rejecting
+        declaration/dimension and the remaining allowance of every budget that was
+        part of the decision. Budgets resolving to the same storage key are only
+        charged once, so a route rule and an inherited blueprint rule that reference
+        the same employee budget do not pay twice.
+
+        :param dimensions: ``(name, rate_limit, key_func?, when?)`` declarations.
+        :param name: optional name for the declaration reported by
+         :attr:`~flask_limiter.RateLimitExceeded.rejected_rule`.
+        :param key_func: identity used by dimensions declared without one.
+        :param shared: whether the declared ``scope`` is shared between routes.
+        :param per_method: whether budgets are sub categorized by HTTP method.
+        :param methods: if specified, only these HTTP methods are limited.
+        :param error_message: message used when a budget of this group is exhausted.
+        :param exempt_when: function/lambda used to skip the whole declaration.
+        :param override_defaults: whether this declaration overrides default limits.
+        :param deduct_when: decides after the response whether the group is charged.
+        :param on_breach: callback invoked when a budget of this group is exhausted.
+        :param cost: cost charged to each budget (or a callable returning it).
+        :param scope: further categorizes every budget's scope.
+        :param meta_limits: meta limits charged when this declaration is breached.
+
+        Example::
+
+            claim_limit = limiter.multi_limit(
+                [
+                    ("employee", "5/hour", lambda: g.employee_id),
+                    ("project", "20/hour", project_key, can_access_project),
+                ],
+                name="claim-submit",
+                scope="claims",
+            )
+
+            @app.post("/claims")
+            @claim_limit
+            def submit_claim():
+                ...
+
+        .. note:: Grouped admission requires a storage backend that can reserve
+           several budgets atomically. The built-in ``memory://`` storage supports
+           this; other storages raise :class:`limits.errors.ConfigurationError` when a
+           grouped declaration is evaluated unless they implement
+           ``AtomicReservationStorage.reserve_many()``.
+        """
+
+        return MultiLimit(
+            "",
+            limiter=self,
+            name=name,
+            dimensions=dimensions,
+            key_function=key_func or self._key_func,
+            shared=shared,
             scope=scope,
             per_method=per_method,
             methods=methods,
@@ -887,6 +1023,21 @@ class Limiter:
                     else:
                         raise err
 
+        for budgets, deduct_when in self.context.conditional_admissions:
+            if not deduct_when(response):
+                continue
+
+            try:
+                backend = self._atomic_backend or require_atomic_backend(self.storage, self.limiter)
+                backend.reserve_many(budgets)
+            except Exception as err:
+                if self._swallow_errors:
+                    self.logger.exception(
+                        "Failed to deduct joint admission budgets. Swallowing error"
+                    )
+                else:
+                    raise err
+
     def __inject_headers(self, response: flask.wrappers.Response) -> flask.wrappers.Response:
         self.__check_conditional_deductions(response)
         header_limit = self.current_limit
@@ -1051,10 +1202,19 @@ class Limiter:
                                 raise err
                     raise RateLimitExceeded(lim, response=meta_breach_response)
 
+        grouped: list[RuntimeLimit] = []
+        plain_limits: list[RuntimeLimit] = []
+
         for lim in sorted(limits, key=lambda x: x.limit):
             if lim.is_exempt or lim.method_exempt:
                 continue
 
+            if lim.rule_id:
+                grouped.append(lim)
+            else:
+                plain_limits.append(lim)
+
+        for lim in plain_limits:
             limit_scope = lim.scope_for(endpoint, flask.request.method)
             limit_key = lim.key_func()
             args = [limit_key, limit_scope]
@@ -1092,22 +1252,52 @@ class Limiter:
                 if self._fail_on_first_breach:
                     break
 
+        if not (self._fail_on_first_breach and limit_for_header):
+            if grouped:
+                group_failed = self.__evaluate_group(endpoint, grouped, view_limits)
+                if group_failed:
+                    failed_limits.extend(group_failed)
+                    failed_keys = {lim.limit.key_for(*args) for lim, args in group_failed}
+                    limit_for_header = next(
+                        (
+                            request_limit
+                            for request_limit in reversed(view_limits)
+                            if request_limit.key in failed_keys
+                        ),
+                        view_limits[-1],
+                    )
+
         if not limit_for_header and view_limits:
             # Pick a non shared limit over a shared one if possible
             # when no rate limit has been hit. This should be the best hint
             # for the client.
             explicit = [limit for limit in view_limits if not limit.shared]
-            limit_for_header = explicit[0] if explicit else view_limits[0]
+            candidates = explicit or view_limits
+            dimensional = [limit for limit in candidates if limit.rule_id]
+            # For a joint admission declaration report the tightest budget rather
+            # than whichever dimension happened to be declared first.
+            limit_for_header = (
+                min(dimensional, key=lambda limit: limit.remaining)
+                if dimensional
+                else candidates[0]
+            )
 
         self.context.view_rate_limit = limit_for_header or None
         self.context.view_rate_limits = view_limits
 
         on_breach_response = None
 
-        for limit in failed_limits:
-            request_limit = RequestLimit(self, limit[0].limit, limit[1], True, limit[0].shared)
+        for lim, args in failed_limits:
+            request_limit = next(
+                (
+                    request_limit
+                    for request_limit in view_limits
+                    if request_limit.key == lim.limit.key_for(*args)
+                ),
+                RequestLimit(self, lim.limit, args, True, lim.shared),
+            )
 
-            for cb in dict.fromkeys([self._on_breach, limit[0].on_breach]):
+            for cb in dict.fromkeys([self._on_breach, lim.on_breach]):
                 if cb:
                     try:
                         cb_response = cb(request_limit)
@@ -1137,7 +1327,142 @@ class Limiter:
             raise RateLimitExceeded(
                 sorted(failed_limits, key=lambda x: x[0].limit)[0][0],
                 response=on_breach_response,
+                limits=view_limits,
             )
+
+    def __evaluate_group(
+        self,
+        endpoint: str,
+        group: list[RuntimeLimit],
+        view_limits: list[RequestLimit],
+    ) -> list[tuple[RuntimeLimit, list[str]]]:
+        """
+        Atomically reserve every applicable budget of all joint admission declarations.
+
+        Budgets from the same request are reserved in one storage transaction, so one
+        declaration being exhausted cannot charge another declaration's budgets. If any
+        budget lacks allowance nothing is charged. Budgets resolving to the same storage
+        key (for example because a route and an inherited blueprint reference the same
+        employee budget) are only charged once. Plain single-key limits are unaffected.
+        """
+        backend = self._atomic_backend or require_atomic_backend(self.storage, self.limiter)
+
+        budgets: list[tuple[RuntimeLimit, list[str], AtomicBudget]] = []
+        seen_keys: set[str] = set()
+
+        for lim in group:
+            limit_scope = lim.scope_for(endpoint, flask.request.method)
+            limit_key = lim.key_func()
+            args = [limit_key, limit_scope]
+
+            if not all(args):
+                self.logger.error(f"Skipping limit: {lim.limit}. Empty value found in parameters.")
+
+                continue
+
+            if self._key_prefix:
+                args = [self._key_prefix, *args]
+
+            budget = AtomicBudget(lim.limit, tuple(args), lim.deduction_amount)
+
+            if budget.key in seen_keys:
+                # This budget was already referenced by an evaluated declaration.
+                continue
+
+            seen_keys.add(budget.key)
+            budgets.append((lim, args, budget))
+
+        if not budgets:
+            return []
+
+        conditional = [entry for entry in budgets if entry[0].deduct_when]
+
+        if conditional:
+            # The application decides after the response whether the group is charged;
+            # budget state is reported without consuming anything before that decision.
+            if not all(entry[0].deduct_when for entry in budgets):
+                raise ConfigurationError(
+                    "All budgets of a joint admission group must use the same "
+                    "deduct_when behavior."
+                )
+            deduct_when = conditional[0][0].deduct_when
+            assert deduct_when
+            self.context.conditional_admissions.append(
+                ([budget for _, _, budget in budgets], deduct_when)
+            )
+            for lim, args, budget in budgets:
+                window = self.limiter.get_window_stats(lim.limit, *args)
+                view_limits.append(
+                    RequestLimit(
+                        self,
+                        lim.limit,
+                        args,
+                        False,
+                        lim.shared,
+                        rule_id=lim.rule_id,
+                        rule_name=lim.rule_name,
+                        dimension=lim.dimension,
+                        source=lim,
+                        window=window,
+                    )
+                )
+            return []
+
+        results = backend.reserve_many([budget for _, _, budget in budgets])
+        by_key = {result.key: result for result in results}
+        failed = []
+
+        for lim, args, budget in budgets:
+            result = by_key[budget.key]
+            request_limit = RequestLimit(
+                self,
+                lim.limit,
+                args,
+                not result.granted,
+                lim.shared,
+                rule_id=lim.rule_id,
+                rule_name=lim.rule_name,
+                dimension=lim.dimension,
+                source=lim,
+                window=result.window,
+            )
+            view_limits.append(request_limit)
+
+            if not result.granted:
+                self.logger.info(
+                    "ratelimit %s (%s) exceeded at endpoint: %s",
+                    lim.limit,
+                    lim.key_func(),
+                    lim.scope_for(endpoint, flask.request.method),
+                )
+                failed.append((lim, args))
+
+        return failed
+
+    def _require_atomic_admission(self) -> None:
+        """
+        Validate that the configured storage can reserve several budgets atomically.
+
+        Decorators can run before ``init_app``, in which case the check is repeated
+        there. Calling it again after initialization is harmless.
+        """
+        if not self.initialized:
+            return
+
+        require_atomic_backend(self.storage, self.limiter)
+
+    def _ensure_grouped_admission_capability(self) -> None:
+        """
+        Raise a configuration error when a grouped admission declaration is registered
+        on a storage that cannot reserve several budgets atomically.
+
+        The check runs when the extension is initialized so a misconfiguration is
+        reported at startup instead of on the first request. Declarations are registered
+        by decorators (which run while the application module is imported, usually
+        before ``init_app``).
+        """
+        if self._grouped_admission:
+            require_atomic_backend(self.storage, self.limiter)
 
     def _check_request_limit(
         self, callable_name: str | None = None, in_middleware: bool = True

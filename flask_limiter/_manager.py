@@ -215,6 +215,10 @@ class LimitManager:
                                         limit.on_breach,
                                         limit.cost,
                                         limit.shared,
+                                        limit.meta_limits,
+                                        limit.rule_id,
+                                        limit.rule_name,
+                                        limit.dimension,
                                     )
                                     for limit in limit_group
                                 ]

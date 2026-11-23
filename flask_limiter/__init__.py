@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from . import _version
+from ._atomic import (
+    AtomicBudget,
+    AtomicReservationStorage,
+    ReservationResult,
+)
 from ._extension import Limiter, RequestLimit
 from ._limits import (
     ApplicationLimit,
     Limit,
     MetaLimit,
+    MultiLimit,
     RouteLimit,
 )
 from .constants import ExemptionScope, HeaderNames
@@ -19,8 +25,12 @@ __all__ = [
     "Limiter",
     "Limit",
     "RouteLimit",
+    "MultiLimit",
     "ApplicationLimit",
     "MetaLimit",
+    "AtomicBudget",
+    "AtomicReservationStorage",
+    "ReservationResult",
     "RateLimitExceeded",
     "RequestLimit",
 ]

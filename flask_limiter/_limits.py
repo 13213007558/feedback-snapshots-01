@@ -12,6 +12,7 @@ import flask
 from flask import request
 from flask.wrappers import Response
 from limits import RateLimitItem, parse_many
+from limits.errors import ConfigurationError
 
 from ._typing import Callable, Iterable, Iterator, P, R, Self, Sequence
 from .util import get_qualified_name
@@ -39,6 +40,15 @@ class RuntimeLimit:
     cost: Callable[[], int] | int = 1
     shared: bool = False
     meta_limits: tuple[RuntimeLimit, ...] | None = None
+    #: Identity of the joint admission declaration this limit belongs to.
+    #:
+    #: All budgets of one :class:`MultiLimit` share this identity so a request can
+    #: report which declaration rejected it. Plain limits leave it as ``None``.
+    rule_id: str | None = None
+    #: Human readable name of the joint admission declaration.
+    rule_name: str | None = None
+    #: Name of the budget dimension within the declaration (for example ``"employee"``).
+    dimension: str | None = None
 
     def __post_init__(self) -> None:
         if self.methods:
@@ -83,6 +93,11 @@ class RuntimeLimit:
         if self.per_method:
             assert method
             scope += f":{method.upper()}"
+
+        # Budgets of a joint admission declaration keep their own namespace so an
+        # employee id and a project id with the same string value never share a bucket.
+        if self.dimension:
+            scope += f":dimension={self.dimension}"
 
         return scope
 
@@ -272,6 +287,9 @@ class RouteLimit(Limit):
         tb = traceback.extract_stack(limit=2)
         qualified_location = f"{tb[0].filename}:{tb[0].name}:{tb[0].lineno}"
 
+        if isinstance(self, MultiLimit):
+            self.limiter._grouped_admission = True
+
         # TODO: if use as a context manager becomes interesting/valuable
         #  a less hacky approach than using the traceback and piggy backing
         #  on the limit manager's knowledge of decorated limits might be worth it.
@@ -281,6 +299,7 @@ class RouteLimit(Limit):
             self.limiter.identify_request(), qualified_location
         )
 
+        self.limiter._require_atomic_admission()
         self.limiter._check_request_limit(in_middleware=False, callable_name=qualified_location)
 
     def __exit__(
@@ -302,13 +321,18 @@ class RouteLimit(Limit):
         else:
             name = get_qualified_name(obj)
 
+        if isinstance(self, MultiLimit):
+            self.limiter._grouped_admission = True
+
         if isinstance(obj, flask.Blueprint):
             self.limiter.limit_manager.add_blueprint_limit(name, self)
+            self.limiter._require_atomic_admission()
 
             return None
         else:
             self.limiter._marked_for_limiting.add(name)
             self.limiter.limit_manager.add_decorated_limit(name, self)
+            self.limiter._require_atomic_admission()
 
             @wraps(obj)
             def __inner(*a: P.args, **k: P.kwargs) -> R:
@@ -334,6 +358,154 @@ class RouteLimit(Limit):
             setattr(__inner, "__wrapper-limiter-instance", self.limiter)
 
             return __inner
+
+
+@dataclasses.dataclass(unsafe_hash=True, kw_only=True)
+class MultiLimit(RouteLimit):
+    """
+    A declaration of several budgets that must all be able to pay for a request
+    before any of them is charged.
+
+    :meth:`Limiter.limit` evaluates every rule with the same key function, which makes
+    it unsuitable when one request must be counted in more than one domain (for
+    example once per employee and once per project). A :class:`MultiLimit` accepts a
+    sequence of ``(dimension, budget, key_func?, when?)`` pairs. The budgets of one
+    declaration form a single admission group::
+
+        submit_limit = limiter.multi_limit(
+            [
+                ("employee", "5/hour", lambda: g.employee_id),
+                ("project", "20/hour", project_key, project_is_authorized),
+            ],
+            name="claim-submit",
+            scope="claims",
+        )
+
+        @app.post("/claims")
+        @submit_limit
+        def submit():
+            ...
+
+    All budgets that are applicable to the request are reserved atomically: if any of
+    them has insufficient allowance, none of them is charged and the request is
+    rejected. A budget that is referenced more than once (for example because both a
+    route and an inherited blueprint declare the same dimension and identity) is only
+    charged once.
+
+    A dimension whose identity cannot be resolved (for example a project that the
+    authenticated employee cannot access) can be disabled with ``when``. Such a
+    dimension is skipped and the remaining budgets are still evaluated together.
+
+    ``key_func`` is only used as the identity for dimensions declared without one.
+    """
+
+    #: Optional human readable name for this declaration. Reported by
+    #: :attr:`~flask_limiter.RateLimitExceeded.rejected_rule`.
+    name: str | None = None
+    #: A declared ``scope`` is shared between all routes using this declaration,
+    #: mirroring :meth:`Limiter.shared_limit`. Without a ``scope`` every route keeps
+    #: its own bucket.
+    shared: bool = True
+    #: ``(dimension_name, rate_limit, key_func?, when?)`` declarations.
+    dimensions: Sequence[
+        tuple[str, "str | Callable[[], str]"]
+        | tuple[str, "str | Callable[[], str]", "Callable[[], str] | None"]
+        | tuple[
+            str,
+            "str | Callable[[], str]",
+            "Callable[[], str] | None",
+            "Callable[[], bool] | None",
+        ]
+    ] = ()
+
+    def __post_init__(self, limiter: Limiter) -> None:
+        self.dimensions = tuple(self.dimensions)
+
+        for dimension in self.dimensions:
+            if not 2 <= len(dimension) <= 4 or not dimension[0]:
+                raise ConfigurationError(
+                    "Each multi-dimensional limit must be declared as "
+                    "'(name, rate_limit, key_func?, when?)' with a non-empty name."
+                )
+
+        super().__post_init__(limiter)
+
+    def _exempt_when_for(
+        self, enabled_when: Callable[[], bool] | None
+    ) -> Callable[[], bool] | None:
+        """
+        Combine a dimension's ``when`` predicate with the declaration's ``exempt_when``.
+
+        :meta private:
+        """
+        if enabled_when is None:
+            return self.exempt_when
+
+        exempt = self.exempt_when
+
+        if exempt is None:
+
+            def dimension_disabled() -> bool:
+                return not enabled_when()
+
+            return dimension_disabled
+
+        def dimension_disabled_or_exempt() -> bool:
+            return not enabled_when() or exempt()
+
+        return dimension_disabled_or_exempt
+
+    def __iter__(self) -> Iterator[RuntimeLimit]:
+        meta_limits: tuple[RuntimeLimit, ...] = ()
+
+        if self.meta_limits:
+            meta_limits = tuple(
+                itertools.chain(
+                    *[
+                        list(
+                            MetaLimit(meta_limit).bind_parent(self)
+                            if not isinstance(meta_limit, MetaLimit)
+                            else meta_limit
+                        )
+                        for meta_limit in self.meta_limits
+                    ]
+                )
+            )
+
+        rule_id = f"multi_limit:{id(self)}"
+        rule_name = self.name or rule_id
+
+        for dimension in self.dimensions:
+            name, limit_provider = dimension[0], dimension[1]
+            key_function = cast(
+                "Callable[[], str] | None", dimension[2] if len(dimension) > 2 else None
+            )
+            enabled_when = cast(
+                "Callable[[], bool] | None", dimension[3] if len(dimension) > 3 else None
+            )
+            limit_str = limit_provider() if callable(limit_provider) else limit_provider
+            limit_items = parse_many(limit_str) if limit_str else []
+            exempt_when = self._exempt_when_for(enabled_when)
+
+            for limit in limit_items:
+                yield RuntimeLimit(
+                    limit,
+                    key_function or self.limit_by,
+                    scope=self.scope,
+                    per_method=self.per_method,
+                    methods=self.methods,
+                    error_message=self.error_message,
+                    exempt_when=exempt_when,
+                    deduct_when=self.deduct_when,
+                    override_defaults=self.override_defaults,
+                    on_breach=self.on_breach,
+                    cost=self.cost or 1,
+                    shared=self.shared,
+                    meta_limits=meta_limits,
+                    rule_id=rule_id,
+                    rule_name=rule_name,
+                    dimension=name,
+                )
 
 
 @dataclasses.dataclass(kw_only=True, unsafe_hash=True)
