@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from http.cookies import SimpleCookie
 from unittest.mock import ANY
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -1237,6 +1238,388 @@ class LoginViaRequestTestCase(unittest.TestCase):
             url = "/username"
             result = c.get(url)
             self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+
+class LogoutHandoffTestCase(unittest.TestCase):
+    """Tests the authorization handoff around a completed logout request.
+
+    A logout has to coordinate several observations that do not all happen at
+    the same time: the logout signal reports the user being logged out, the
+    request-scoped user is reset immediately, and ``after_request`` callbacks
+    decide whether to send a remember cookie. These tests use one test client
+    to receive the logout response and then issue the next request, so the
+    cookie jar is the real one Flask will use.
+    """
+
+    cookie_name = "remember"
+    cookie_domain = "localhost"
+    cookie_path = "/auth"
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.app.config["REMEMBER_COOKIE_NAME"] = self.cookie_name
+        self.app.config["REMEMBER_COOKIE_DOMAIN"] = self.cookie_domain
+        self.app.config["REMEMBER_COOKIE_PATH"] = self.cookie_path
+
+        self.login_manager = LoginManager()
+        self.observations = []
+        self.signal_observations = []
+        # Track after_request handlers and their order relative to the
+        # LoginManager handler, which is installed by init_app below.
+        self._register_observer("registered_before_login_manager")
+        self.login_manager.init_app(self.app)
+        self._register_observer("registered_after_login_manager")
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS[int(user_id)]
+
+        @self.app.route("/auth/login-session")
+        def login_session():
+            return str(login_user(notch))
+
+        @self.app.route("/auth/login-remember")
+        def login_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/auth/logout")
+        def logout():
+            before = self._user_text(current_user)
+            logout_user()
+            # Business code reading after logout_user must already see the
+            # logged-out state, not the identity carried by the signal.
+            after = self._user_text(current_user)
+            return f"before={before};after={after}"
+
+        @self.app.route("/auth/whoami")
+        def whoami():
+            return self._user_text(current_user)
+
+        @self.app.route("/auth/read-user")
+        def read_user():
+            return self._user_text(current_user)
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+    def _register_observer(self, label):
+        def observe(response):
+            self.observations.append(
+                {
+                    "label": label,
+                    "user": self._user_snapshot(current_user),
+                    "session": dict(session),
+                    "set_cookies": self._set_cookie_headers(response),
+                }
+            )
+            return response
+
+        self.app.after_request(observe)
+
+    @staticmethod
+    def _user_snapshot(user):
+        if user.is_authenticated:
+            return ("authenticated", user.name, str(user.get_id()))
+        return ("anonymous", None, None)
+
+    @classmethod
+    def _user_text(cls, user):
+        state, name, user_id = cls._user_snapshot(user)
+        if state == "authenticated":
+            return f"authenticated:{name}:{user_id}"
+        return "anonymous:None:None"
+
+    def _set_cookie_headers(self, response):
+        return [
+            header
+            for header in response.headers.getlist("Set-Cookie")
+            if header.startswith(f"{self.cookie_name}=")
+        ]
+
+    def _record_logout_signal(self):
+        def observe(sender, user, **kwargs):
+            self.signal_observations.append(self._user_snapshot(user))
+
+        user_logged_out.connect(observe, self.app)
+        self.addCleanup(user_logged_out.disconnect, observe, self.app)
+
+    def _cookie_action(self, response):
+        """Classify the remember cookie the response actually sends."""
+        headers = self._set_cookie_headers(response)
+        if not headers:
+            return "unchanged"
+        cookie = SimpleCookie()
+        cookie.load(headers[-1])
+        morsel = cookie[self.cookie_name]
+        if morsel["max-age"] == "0" or morsel["expires"].startswith("Thu, 01 Jan 1970"):
+            return "cleared"
+        return "set"
+
+    def _assert_after_request_saw_anonymous(self):
+        self.assertGreaterEqual(len(self.observations), 2)
+        for observation in self.observations:
+            self.assertEqual(("anonymous", None, None), observation["user"])
+            self.assertNotIn("_user_id", observation["session"])
+            self.assertNotIn("_fresh", observation["session"])
+
+    def _assert_cleared(self, response):
+        self.assertEqual("cleared", self._cookie_action(response))
+        self.assertIsNone(
+            self._client.get_cookie(
+                self.cookie_name, domain=self.cookie_domain, path=self.cookie_path
+            )
+        )
+
+    def _assert_set(self, response):
+        self.assertEqual("set", self._cookie_action(response))
+        self.assertIsNotNone(
+            self._client.get_cookie(
+                self.cookie_name, domain=self.cookie_domain, path=self.cookie_path
+            )
+        )
+
+    def _logout(self):
+        self._record_logout_signal()
+        self.observations.clear()
+        self.signal_observations.clear()
+        return self._client.get("/auth/logout")
+
+    def _login_with_remember_cookie(self):
+        response = self._client.get("/auth/login-remember")
+        self._assert_set(response)
+
+    def _restore_from_remember_cookie(self):
+        with self._client.session_transaction() as sess:
+            sess.clear()
+        self.assertEqual(
+            "authenticated:Notch:1",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_session_logout_signal_and_next_request(self):
+        self._client = self.app.test_client()
+        login_response = self._client.get("/auth/login-session")
+        self.assertEqual("unchanged", self._cookie_action(login_response))
+
+        response = self._logout()
+
+        self.assertEqual([("authenticated", "Notch", "1")], self.signal_observations)
+        self._assert_after_request_saw_anonymous()
+        # A session-only login has no remember cookie to clear.
+        self.assertEqual("unchanged", self._cookie_action(response))
+        self.assertEqual(
+            "before=authenticated:Notch:1;after=anonymous:None:None",
+            response.data.decode("utf-8"),
+        )
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/read-user").data.decode("utf-8"),
+        )
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_remembered_session_logout_signal_and_next_request(self):
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self.assertEqual([("authenticated", "Notch", "1")], self.signal_observations)
+        self._assert_after_request_saw_anonymous()
+        self._assert_cleared(response)
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_remembered_cookie_does_not_resurrect_after_logout(self):
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+        self._logout()
+
+        # Simulate the browser dropping the (cleared) session cookie while
+        # keeping whatever the remember cookie jar now holds.
+        with self._client.session_transaction() as sess:
+            sess.clear()
+
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+        self.assertIsNone(
+            self._client.get_cookie(
+                self.cookie_name, domain=self.cookie_domain, path=self.cookie_path
+            )
+        )
+
+    def test_normal_request_is_control_for_logout_handoff(self):
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        self.observations.clear()
+        response = self._client.get("/auth/whoami")
+
+        self.assertEqual(
+            [("authenticated", "Notch", "1")] * 2,
+            [obs["user"] for obs in self.observations],
+        )
+        # Without a logout, the request must not clear the remember cookie.
+        self.assertEqual("unchanged", self._cookie_action(response))
+        self.assertEqual(
+            "authenticated:Notch:1",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_logout_after_callbacks_see_anonymous_even_when_order_reversed(self):
+        # Flask runs after_request handlers in reverse registration order, so
+        # the observer registered second runs first here. Both orderings are
+        # exercised by this class; neither may observe the logged-out user.
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self.assertEqual(
+            {"registered_before_login_manager", "registered_after_login_manager"},
+            {obs["label"] for obs in self.observations},
+        )
+        self._assert_after_request_saw_anonymous()
+        self._assert_cleared(response)
+
+    def test_cookie_actions_follow_config_regardless_of_observer_order(self):
+        # A remember cookie loaded from the request is eligible for refresh.
+        # Disabling refresh must suppress a set even though the request was
+        # served for an authenticated (remembered) subject.
+        self.app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] = False
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        self.observations.clear()
+        response = self._client.get("/auth/whoami")
+
+        self.assertEqual(
+            {"registered_before_login_manager", "registered_after_login_manager"},
+            {obs["label"] for obs in self.observations},
+        )
+        self.assertEqual("unchanged", self._cookie_action(response))
+        for observation in self.observations:
+            self.assertEqual(("authenticated", "Notch", "1"), observation["user"])
+
+    def test_refresh_each_request_sets_cookie_despite_observer_order(self):
+        # The same observer layout, with refresh enabled, must actually send a
+        # refreshed cookie while every observer still sees the authenticated
+        # subject.
+        self.app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] = True
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        self.observations.clear()
+        response = self._client.get("/auth/whoami")
+
+        # Exactly one observer sits after the LoginManager handler, so the
+        # "set" header must come from the configured refresh, not from the
+        # subject view. The pre-existing cookie is replaced with a fresh one.
+        self.assertEqual(
+            ["registered_after_login_manager", "registered_before_login_manager"],
+            [obs["label"] for obs in self.observations],
+        )
+        self.assertEqual([], self.observations[0]["set_cookies"])
+        self.assertEqual(1, len(self.observations[1]["set_cookies"]))
+        self.assertEqual("set", self._cookie_action(response))
+        for observation in self.observations:
+            self.assertEqual(("authenticated", "Notch", "1"), observation["user"])
+        self.assertIsNotNone(
+            self._client.get_cookie(
+                self.cookie_name, domain=self.cookie_domain, path=self.cookie_path
+            )
+        )
+
+    def test_cookie_refresh_config_does_not_change_logout_clear(self):
+        self.app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] = True
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self._assert_cleared(response)
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_session_only_logout_does_not_send_cookie(self):
+        self._client = self.app.test_client()
+        self._client.get("/auth/login-session")
+
+        response = self._logout()
+
+        self.assertEqual("unchanged", self._cookie_action(response))
+        self.assertEqual(
+            "anonymous:None:None",
+            self._client.get("/auth/whoami").data.decode("utf-8"),
+        )
+
+    def test_after_request_sees_anonymous_on_both_sides_of_cookie_clear(self):
+        # The LoginManager's handler sits between the two observers. The one
+        # that runs before it sees no cookie header yet; the one that runs
+        # after sees the cleared header. Both must see the logged-out subject.
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self.assertEqual(
+            ["registered_after_login_manager", "registered_before_login_manager"],
+            [obs["label"] for obs in self.observations],
+        )
+        self.assertEqual([], self.observations[0]["set_cookies"])
+        self.assertEqual(1, len(self.observations[1]["set_cookies"]))
+        self.assertEqual("cleared", self._cookie_action(response))
+        for observation in self.observations:
+            self.assertEqual(("anonymous", None, None), observation["user"])
+
+    def test_logout_signal_user_is_not_business_current_user(self):
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self.assertEqual([("authenticated", "Notch", "1")], self.signal_observations)
+        self.assertEqual(
+            "before=authenticated:Notch:1;after=anonymous:None:None",
+            response.data.decode("utf-8"),
+        )
+        for observation in self.observations:
+            self.assertEqual(("anonymous", None, None), observation["user"])
+
+    def test_remember_cookie_clear_is_not_replaced_by_session_clear(self):
+        self._client = self.app.test_client()
+        self._login_with_remember_cookie()
+        self._restore_from_remember_cookie()
+
+        response = self._logout()
+
+        self.assertEqual("cleared", self._cookie_action(response))
+        cookie = SimpleCookie()
+        cookie.load(self._set_cookie_headers(response)[-1])
+        morsel = cookie[self.cookie_name]
+        self.assertEqual(self.cookie_path, morsel["path"])
+        self.assertEqual(self.cookie_domain, morsel["domain"])
+        self.assertEqual("0", morsel["max-age"])
 
 
 class TestLoginUrlGeneration(unittest.TestCase):
