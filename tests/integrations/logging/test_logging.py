@@ -72,7 +72,9 @@ def test_logging_extra_data(sentry_init, capture_events):
     assert event["level"] == "fatal"
     assert event["extra"] == {"bar": 69}
     assert any(
-        crumb["message"] == "bread" and crumb["data"] == {"foo": 42}
+        crumb["message"] == "bread"
+        and crumb["data"]["foo"] == 42
+        and "sentry.breadcrumb.policy" in crumb["data"]
         for crumb in event["breadcrumbs"]["values"]
     )
 

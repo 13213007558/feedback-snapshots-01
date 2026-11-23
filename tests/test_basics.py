@@ -246,7 +246,12 @@ def test_option_before_breadcrumb(sentry_init, capture_events, monkeypatch):
     (crumb,) = normal["breadcrumbs"]["values"]
     assert "timestamp" in crumb
     assert crumb["message"] == "Hello"
-    assert crumb["data"] == {"foo": "bar"}
+    # The retention policy records provenance alongside user data without
+    # overwriting what `before_breadcrumb` put there.
+    assert crumb["data"]["foo"] == "bar"
+    assert (
+        crumb["data"]["sentry.breadcrumb.policy"]["source"] == "default"
+    )
     assert crumb["type"] == "default"
 
 

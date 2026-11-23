@@ -14,6 +14,11 @@ from typing import TYPE_CHECKING, cast
 import sentry_sdk
 from sentry_sdk._types import AnnotatedValue
 from sentry_sdk.attachments import Attachment
+from sentry_sdk.breadcrumb_policy import (
+    BREADCRUMB_POLICY_DROP_REASON,
+    PROVENANCE_DATA_KEY,
+    BreadcrumbRetentionPolicy,
+)
 from sentry_sdk.consts import (
     DEFAULT_MAX_BREADCRUMBS,
     FALSE_VALUES,
@@ -224,6 +229,7 @@ class Scope:
         "_extras",
         "_breadcrumbs",
         "_n_breadcrumbs_truncated",
+        "_breadcrumb_policy",
         "_gen_ai_original_message_count",
         "_gen_ai_conversation_id",
         "_event_processors",
@@ -292,6 +298,7 @@ class Scope:
 
         rv._breadcrumbs = copy(self._breadcrumbs)
         rv._n_breadcrumbs_truncated = self._n_breadcrumbs_truncated
+        rv._breadcrumb_policy = copy(self._breadcrumb_policy)
         rv._gen_ai_original_message_count = self._gen_ai_original_message_count.copy()
         rv._event_processors = self._event_processors.copy()
         rv._error_processors = self._error_processors.copy()
@@ -435,25 +442,53 @@ class Scope:
         final_scope = copy(_global_scope) if _global_scope is not None else Scope()
         final_scope._type = ScopeType.MERGED
 
+        client = self.get_client()
+        global_max_breadcrumbs = client.options.get(
+            "max_breadcrumbs", DEFAULT_MAX_BREADCRUMBS
+        )
+        # An approved diagnostic scope is allowed to keep a longer trail than
+        # the external-request default, so the merged event uses the widest
+        # effective quota among contributing scopes. Every retained crumb
+        # still carries the provenance of the tier that actually stored it,
+        # and evicted entries are never brought back by a wider quota.
+        widest_limit = final_scope._breadcrumb_policy.effective_limit(
+            global_max_breadcrumbs
+        )
+
+        def _collect_scope(contributing_scope: "Optional[Scope]") -> None:
+            nonlocal widest_limit
+            if contributing_scope is None:
+                return
+            widest_limit = max(
+                widest_limit,
+                contributing_scope._breadcrumb_policy.effective_limit(
+                    global_max_breadcrumbs
+                ),
+            )
+            final_scope.update_from_scope(contributing_scope)
+
         isolation_scope = _isolation_scope.get()
-        if isolation_scope is not None:
-            final_scope.update_from_scope(isolation_scope)
+        _collect_scope(isolation_scope)
 
         current_scope = _current_scope.get()
-        if current_scope is not None:
-            final_scope.update_from_scope(current_scope)
+        _collect_scope(current_scope)
 
         if self != current_scope and self != isolation_scope:
-            final_scope.update_from_scope(self)
+            _collect_scope(self)
 
         if additional_scope is not None:
             if callable(additional_scope):
                 additional_scope(final_scope)
             else:
-                final_scope.update_from_scope(additional_scope)
+                _collect_scope(additional_scope)
 
         elif additional_scope_kwargs:
             final_scope.update_from_kwargs(**additional_scope_kwargs)
+
+        final_scope._breadcrumb_policy.apply_tier(
+            final_scope._breadcrumb_policy.source, widest_limit
+        )
+        final_scope._trim_breadcrumbs_to_limit(widest_limit)
 
         return final_scope
 
@@ -1041,6 +1076,7 @@ class Scope:
         """Clears breadcrumb buffer."""
         self._breadcrumbs: "Deque[Breadcrumb]" = deque()
         self._n_breadcrumbs_truncated = 0
+        self._breadcrumb_policy = BreadcrumbRetentionPolicy()
 
     def add_attachment(
         self,
@@ -1085,7 +1121,14 @@ class Scope:
             return
 
         before_breadcrumb = client.options.get("before_breadcrumb")
-        max_breadcrumbs = client.options.get("max_breadcrumbs", DEFAULT_MAX_BREADCRUMBS)
+        global_max_breadcrumbs = client.options.get(
+            "max_breadcrumbs", DEFAULT_MAX_BREADCRUMBS
+        )
+        # The per-scope policy can only tighten retention; the client-wide
+        # `max_breadcrumbs` option remains the hard upper limit.
+        max_breadcrumbs = self._breadcrumb_policy.effective_limit(
+            global_max_breadcrumbs
+        )
 
         crumb = dict(crumb or ())
         crumb.update(kwargs)
@@ -1105,13 +1148,56 @@ class Scope:
                 new_crumb = before_breadcrumb(crumb, hint)
 
         if new_crumb is not None:
+            new_crumb = dict(new_crumb)
+            new_crumb.setdefault("data", {})
+            # Record provenance and the quota in force when the breadcrumb
+            # was retained, so late-arriving events stay explainable.
+            if isinstance(new_crumb.get("data"), dict):
+                new_crumb["data"].setdefault(
+                    PROVENANCE_DATA_KEY,
+                    self._breadcrumb_policy.provenance(global_max_breadcrumbs),
+                )
             self._breadcrumbs.append(new_crumb)
         else:
             logger.info("before breadcrumb dropped breadcrumb (%s)", crumb)
 
+        self._trim_breadcrumbs_to_limit(max_breadcrumbs)
+
+    def _trim_breadcrumbs_to_limit(self, max_breadcrumbs: int) -> None:
+        """Evict oldest breadcrumbs until the buffer fits the effective limit."""
+        evicted = 0
         while len(self._breadcrumbs) > max_breadcrumbs:
             self._breadcrumbs.popleft()
             self._n_breadcrumbs_truncated += 1
+            evicted += 1
+
+        if evicted:
+            self._breadcrumb_policy.mark_evicted(evicted)
+            client = self.get_client()
+            if client.is_active():
+                client.transport.record_lost_event(
+                    BREADCRUMB_POLICY_DROP_REASON,
+                    data_category="default",
+                    quantity=evicted,
+                )
+
+    def _enforce_breadcrumb_policy(self) -> None:
+        """Re-apply the current per-scope policy to the existing buffer.
+
+        Tightening the allowance evicts overflowing breadcrumbs immediately;
+        raising it never restores previously evicted entries.
+        """
+        client = self.get_client()
+        if not client.is_active():
+            return
+
+        global_max_breadcrumbs = client.options.get(
+            "max_breadcrumbs", DEFAULT_MAX_BREADCRUMBS
+        )
+        max_breadcrumbs = self._breadcrumb_policy.effective_limit(
+            global_max_breadcrumbs
+        )
+        self._trim_breadcrumbs_to_limit(max_breadcrumbs)
 
     def start_transaction(
         self,
@@ -1708,6 +1794,23 @@ class Scope:
         if not isinstance(event["breadcrumbs"], AnnotatedValue):
             event["breadcrumbs"].setdefault("values", [])
             event["breadcrumbs"]["values"].extend(self._breadcrumbs)
+
+            # The client-wide max_breadcrumbs stays the hard upper limit even
+            # when several scopes contributed breadcrumbs to a merged event.
+            global_max_breadcrumbs = (options or {}).get(
+                "max_breadcrumbs", DEFAULT_MAX_BREADCRUMBS
+            )
+            values = event["breadcrumbs"]["values"]
+            overflow = len(values) - global_max_breadcrumbs
+            if overflow > 0:
+                del values[:overflow]
+                client = self.get_client()
+                if client.is_active():
+                    client.transport.record_lost_event(
+                        BREADCRUMB_POLICY_DROP_REASON,
+                        data_category="default",
+                        quantity=overflow,
+                    )
 
         # Attempt to sort timestamps
         try:

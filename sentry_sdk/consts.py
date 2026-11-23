@@ -97,6 +97,14 @@ if TYPE_CHECKING:
 
 DEFAULT_QUEUE_SIZE = 100
 DEFAULT_MAX_BREADCRUMBS = 100
+
+# Per-scope breadcrumb retention policy. Breadcrumbs added by hosted
+# integrations on behalf of external requests default to a short trail; code
+# running inside an approved diagnostic scope may temporarily keep more.
+# The client-wide ``max_breadcrumbs`` option remains the hard upper limit.
+DEFAULT_EXTERNAL_REQUEST_MAX_BREADCRUMBS = 5
+DEFAULT_DIAGNOSTIC_MAX_BREADCRUMBS = 25
+
 MATCH_ALL = r".*"
 
 FALSE_VALUES = [

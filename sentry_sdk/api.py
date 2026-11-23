@@ -5,6 +5,11 @@ from typing import TYPE_CHECKING
 
 from sentry_sdk import Client, tracing_utils
 from sentry_sdk._init_implementation import init
+from sentry_sdk.breadcrumb_policy import (
+    apply_breadcrumb_limit,
+    apply_external_request_policy,
+    diagnostic_breadcrumbs_scope,
+)
 from sentry_sdk.consts import INSTRUMENTER
 from sentry_sdk.crons import monitor
 from sentry_sdk.scope import Scope, _ScopeManager, isolation_scope, new_scope
@@ -55,6 +60,9 @@ __all__ = [
     "init",
     "add_attachment",
     "add_breadcrumb",
+    "apply_breadcrumb_limit",
+    "apply_external_request_policy",
+    "diagnostic_breadcrumbs_scope",
     "capture_event",
     "capture_exception",
     "capture_message",
