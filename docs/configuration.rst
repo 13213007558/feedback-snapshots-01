@@ -275,6 +275,10 @@ The attributes are saved to the database only when ``CAS_CREATE_USER`` is ``True
 ``CAS_CREATE_USER`` is ``False``, they update the authenticated User instance for the current login
 but are not persisted by the CAS backend.
 
+Attributes are applied only after ``CASBackend.user_can_authenticate`` approves the account. If the
+hook rejects the attempt, attribute and affiliation writes made during that attempt are rolled back,
+and nothing is stored in the session.
+
 The default is ``False``.
 
 

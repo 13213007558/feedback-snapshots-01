@@ -6,6 +6,10 @@ Listed are the high-level, notable changes for each django-cas-ng release.
 Backwards incompatible changes or other upgrade issues are also described
 here. For additional detail, read the complete `commit history`_.
 
+**Unreleased**
+* Publish CAS attributes and the login session only after the account hook
+  approves, and roll back new users, groups and attribute writes when it rejects.
+
 **django-cas-ng 5.1.2** ``[2026-10-28]``
 * Updated homepage and doc links
 * Update docs to encourage minimum version Django 5.2.

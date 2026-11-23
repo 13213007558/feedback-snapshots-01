@@ -10,6 +10,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -23,7 +24,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import SESSION_KEY_MAXLENGTH, ProxyGrantingTicket, SessionTicket
-from .signals import cas_user_logout
+from .signals import cas_user_authenticated, cas_user_logout
 from .utils import (
     RedirectException,
     get_cas_client,
@@ -133,49 +134,80 @@ class LoginView(View):
                 request.session['CASNEXT'] = next_page
             return HttpResponseRedirect(client.get_login_url())
 
-        user = authenticate(ticket=ticket,
-                            service=service_url,
-                            request=request)
-        pgtiou = request.session.get("pgtiou")
-        if user is not None:
-            auth_login(request, user)
+        request._cas_deferred_authenticated_signal = None
+        request._cas_defer_authenticated_signal = True
+        try:
+            # Account creation, approval, attribute writes, login session and
+            # ticket bookkeeping form one unit: if any step fails, none of the
+            # user or login state survives.
+            with transaction.atomic():
+                user = authenticate(ticket=ticket,
+                                    service=service_url,
+                                    request=request)
+                pgtiou = request.session.get("pgtiou")
+                if user is not None:
+                    auth_login(request, user)
 
-            # from https://code.djangoproject.com/ticket/19147
-            if not request.session.session_key:
-                request.session.save()
+                    # from https://code.djangoproject.com/ticket/19147
+                    if not request.session.session_key:
+                        request.session.save()
 
-            # Truncate session key to a max of its value length.
-            # When using the signed_cookies session backend, the
-            # session key can potentially be longer than this.
-            session_key = request.session.session_key[:SESSION_KEY_MAXLENGTH]
+                    # Truncate session key to a max of its value length.
+                    # When using the signed_cookies session backend, the
+                    # session key can potentially be longer than this.
+                    session_key = request.session.session_key[:SESSION_KEY_MAXLENGTH]
 
-            if not request.session.exists(session_key):
-                request.session.create()
+                    if not request.session.exists(session_key):
+                        request.session.create()
 
+                    try:
+                        st = SessionTicket.objects.get(session_key=session_key)
+                        st.ticket = ticket
+                        st.save()
+                    except SessionTicket.DoesNotExist:
+                        SessionTicket.objects.create(
+                            session_key=session_key,
+                            ticket=ticket
+                        )
+
+                    if pgtiou and settings.CAS_PROXY_CALLBACK:
+                        # Delete old PGT
+                        ProxyGrantingTicket.objects.filter(
+                            user=user,
+                            session_key=session_key
+                        ).delete()
+                        # Set new PGT ticket
+                        try:
+                            pgt = ProxyGrantingTicket.objects.get(pgtiou=pgtiou)
+                            pgt.user = user
+                            pgt.session_key = session_key
+                            pgt.save()
+                        except ProxyGrantingTicket.DoesNotExist:
+                            pass
+
+                    # Persist the logged-in session as part of the same unit,
+                    # so a storage failure also rolls back a new account.
+                    request.session.save()
+        except Exception:
+            # Don't leave an authenticated session behind if the account or
+            # login bookkeeping could not be saved.
             try:
-                st = SessionTicket.objects.get(session_key=session_key)
-                st.ticket = ticket
-                st.save()
-            except SessionTicket.DoesNotExist:
-                SessionTicket.objects.create(
-                    session_key=session_key,
-                    ticket=ticket
-                )
+                if request.session.session_key:
+                    request.session.delete()
+            except Exception:
+                pass
+            request.session.clear()
+            request._cas_deferred_authenticated_signal = None
+            raise
+        finally:
+            request._cas_defer_authenticated_signal = False
 
-            if pgtiou and settings.CAS_PROXY_CALLBACK:
-                # Delete old PGT
-                ProxyGrantingTicket.objects.filter(
-                    user=user,
-                    session_key=session_key
-                ).delete()
-                # Set new PGT ticket
-                try:
-                    pgt = ProxyGrantingTicket.objects.get(pgtiou=pgtiou)
-                    pgt.user = user
-                    pgt.session_key = session_key
-                    pgt.save()
-                except ProxyGrantingTicket.DoesNotExist:
-                    pass
+        if user is not None:
+            # Publish the completed event only after every write succeeded.
+            deferred_signal = request._cas_deferred_authenticated_signal
+            if deferred_signal:
+                sender, signal_kwargs = deferred_signal
+                cas_user_authenticated.send(sender=sender, **signal_kwargs)
 
             if settings.CAS_LOGIN_MSG is not None:
                 name = user.get_username()

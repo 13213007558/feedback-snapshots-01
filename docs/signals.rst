@@ -14,6 +14,11 @@ django_cas_ng.signals.cas_user_authenticated
 
 Sent on successful authentication, the ``CASBackend`` will fire the ``cas_user_authenticated`` signal.
 
+Receivers only run once the account has been approved by
+``CASBackend.user_can_authenticate`` and all local writes have completed. When authentication
+happens through ``LoginView``, the signal is sent after the login session and ticket bookkeeping
+have been saved.
+
 **Arguments sent with this signal**
 
 **sender**

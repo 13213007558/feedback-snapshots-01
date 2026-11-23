@@ -1,7 +1,7 @@
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import RequestFactory
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
 from django_cas_ng import backends
 
 
@@ -588,3 +588,100 @@ def test_backend_user_can_map_cas_affils(monkeypatch, settings):
     group_names = [g.name for g in user.groups.all()]
     assert 'affil_group1' in group_names
     assert 'affil_group2' in group_names
+
+
+class _FakeCASClient:
+    """Return fixed attributes, including ones that map onto User fields."""
+
+    def verify_ticket(self, ticket):
+        return (
+            'test@example.com',
+            {
+                'first_name': 'Grace',
+                'last_name': 'Hopper',
+                'is_staff': 'True',
+                'affiliation': ['faculty'],
+            },
+            None,
+        )
+
+
+def _register_reject_then_allow_backend(monkeypatch):
+    """Fake CAS hook that rejects the first approval and allows the next."""
+    approvals = []
+
+    class ApprovingBackend(backends.CASBackend):
+        def user_can_authenticate(self, user):
+            approvals.append(user.pk)
+            if len(approvals) == 1:
+                return False
+            return super().user_can_authenticate(user)
+
+    monkeypatch.setattr(
+        'django_cas_ng.backends.get_cas_client',
+        lambda *args, **kwargs: _FakeCASClient(),
+    )
+    return ApprovingBackend(), approvals
+
+
+@pytest.mark.django_db
+def test_rejected_existing_account_keeps_stored_attributes(
+    monkeypatch, settings, django_user_model
+):
+    """
+    A rejected login must not publish partial attribute updates on an
+    existing account.
+    """
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_MAP_AFFILIATIONS = True
+    existing = django_user_model.objects.create_user('test@example.com', '')
+    existing.first_name = 'Existing'
+    existing.save()
+
+    backend, approvals = _register_reject_then_allow_backend(monkeypatch)
+    user = backend.authenticate(None, ticket='fake-ticket', service='fake-service')
+
+    assert user is None
+    assert approvals == [existing.pk]
+    stored = django_user_model.objects.get(pk=existing.pk)
+    assert stored.first_name == 'Existing'
+    assert stored.last_name == ''
+    assert stored.is_staff is False
+    assert stored.groups.count() == 0
+
+
+@pytest.mark.django_db
+def test_rejected_new_account_is_rolled_back(monkeypatch, settings, django_user_model):
+    """
+    A rejected first login must not leave a half-created user or group behind.
+    """
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_MAP_AFFILIATIONS = True
+
+    backend, approvals = _register_reject_then_allow_backend(monkeypatch)
+    user = backend.authenticate(None, ticket='fake-ticket', service='fake-service')
+
+    assert user is None
+    assert len(approvals) == 1
+    assert not django_user_model.objects.filter(username='test@example.com').exists()
+    assert not Group.objects.filter(name='faculty').exists()
+
+
+@pytest.mark.django_db
+def test_approved_retry_publishes_attributes_and_user(monkeypatch, settings, django_user_model):
+    """
+    Once the hook approves, the account writes become visible exactly once.
+    """
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_MAP_AFFILIATIONS = True
+
+    backend, approvals = _register_reject_then_allow_backend(monkeypatch)
+    assert backend.authenticate(None, ticket='t', service='s') is None
+    user = backend.authenticate(None, ticket='t', service='s')
+
+    assert user is not None
+    assert len(approvals) == 2
+    stored = django_user_model.objects.get(username='test@example.com')
+    assert stored.first_name == 'Grace'
+    assert stored.is_staff is True
+    assert list(stored.groups.values_list('name', flat=True)) == ['faculty']

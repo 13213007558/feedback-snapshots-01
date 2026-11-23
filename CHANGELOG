@@ -1,3 +1,8 @@
+Unreleased
+==========
+* Publish CAS attributes and the login session only after the account hook
+  approves, and roll back new users, groups and attribute writes when it rejects.
+
 5.1.2 (2026-10-28)
 ==================
 * Updated homepage and doc links

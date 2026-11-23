@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.models import User, Group
 from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from django.http import HttpRequest
 
 from django_cas_ng.signals import cas_user_authenticated
@@ -27,8 +28,6 @@ class CASBackend(ModelBackend):
         """
         client = get_cas_client(service_url=service, request=request)
         username, attributes, pgtiou = client.verify_ticket(ticket)
-        if attributes and request:
-            request.session['attributes'] = attributes
 
         if settings.CAS_USERNAME_ATTRIBUTE != 'cas:user' and settings.CAS_VERSION != 'CAS_2_SAML_1_0':
             if attributes:
@@ -55,112 +54,132 @@ class CASBackend(ModelBackend):
 
         UserModel = get_user_model()
 
-        # Note that this could be accomplished in one try-except clause, but
-        # instead we use get_or_create when creating unknown users since it has
-        # built-in safeguards for multiple threads.
-        if settings.CAS_CREATE_USER:
-            user_kwargs = {
-                UserModel.USERNAME_FIELD: username
-            }
-            if settings.CAS_CREATE_USER_WITH_ID:
-                user_kwargs['id'] = self.get_user_id(attributes)
+        # The account hook is the final gate before a user or their CAS
+        # attributes become visible. Keep all local writes in a transaction so
+        # a rejection leaves neither a half-created user nor stale attributes.
+        with transaction.atomic():
+            # Note that this could be accomplished in one try-except clause, but
+            # instead we use get_or_create when creating unknown users since it has
+            # built-in safeguards for multiple threads.
+            if settings.CAS_CREATE_USER:
+                user_kwargs = {
+                    UserModel.USERNAME_FIELD: username
+                }
+                if settings.CAS_CREATE_USER_WITH_ID:
+                    user_kwargs['id'] = self.get_user_id(attributes)
 
-            user, created = UserModel._default_manager.get_or_create(**user_kwargs)
-            if created:
-                user = self.configure_user(user)
-        else:
-            created = False
-            try:
-                if settings.CAS_LOCAL_NAME_FIELD:
-                    user_kwargs = {
-                        settings.CAS_LOCAL_NAME_FIELD: username
+                user, created = UserModel._default_manager.get_or_create(**user_kwargs)
+                if created:
+                    user = self.configure_user(user)
+            else:
+                created = False
+                try:
+                    if settings.CAS_LOCAL_NAME_FIELD:
+                        user_kwargs = {
+                            settings.CAS_LOCAL_NAME_FIELD: username
 
-                    }
-                    user = UserModel._default_manager.get(**user_kwargs)
-                else:
-                    user = UserModel._default_manager.get_by_natural_key(username)
-            except UserModel.DoesNotExist:
-                pass
+                        }
+                        user = UserModel._default_manager.get(**user_kwargs)
+                    else:
+                        user = UserModel._default_manager.get_by_natural_key(username)
+                except UserModel.DoesNotExist:
+                    pass
 
-        if not self.user_can_authenticate(user):
+            # The account hook is the final gate. Run it before affiliations
+            # and attributes are applied, so a rejection leaves no attribute
+            # writes or handler side effects; a user created above is rolled
+            # back with this block.
+            if not self.user_can_authenticate(user):
+                transaction.set_rollback(True)
+                return None
+
+            # Map CAS affiliations to Django groups
+            if settings.CAS_MAP_AFFILIATIONS and user and attributes:
+                affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
+                for affil in affils:
+                    if affil:
+                        g, _ = Group.objects.get_or_create(name=affil)
+                        user.groups.add(g)
+
+            if settings.CAS_AFFILIATIONS_HANDLERS and user and attributes:
+                affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
+                for handler in settings.CAS_AFFILIATIONS_HANDLERS:
+                    if (callable(handler)):
+                        handler(user, affils)
+
+            if settings.CAS_STAFF_AFFILIATION and user and attributes:
+                affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
+                staff_status = settings.CAS_STAFF_AFFILIATION in affils
+                if user.is_staff != staff_status:
+                    user.is_staff = staff_status
+                    user.save()
+
+            if settings.CAS_ADMIN_AFFILIATION and user and attributes:
+                affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
+                admin_status = settings.CAS_ADMIN_AFFILIATION in affils
+                if user.is_superuser != admin_status:
+                    user.is_superuser = admin_status
+                    user.save()
+
+            if settings.CAS_APPLY_ATTRIBUTES_TO_USER and user and attributes:
+                # If we are receiving None for any values which cannot be NULL
+                # in the User model, set them to an empty string instead.
+                # Possibly it would be desirable to let these throw an error
+                # and push the responsibility to the CAS provider or remove
+                # them from the dictionary entirely instead. Handling these
+                # is a little ambiguous.
+                user_model_fields = UserModel._meta.fields
+                for field in user_model_fields:
+                    # Handle null -> '' conversions mentioned above
+                    if not field.null:
+                        try:
+                            if attributes[field.name] is None:
+                                attributes[field.name] = ''
+                        except KeyError:
+                            continue
+                    # Coerce boolean strings into true booleans
+                    if field.get_internal_type() == 'BooleanField':
+                        try:
+                            boolean_value = attributes[field.name] == 'True'
+                            attributes[field.name] = boolean_value
+                        except KeyError:
+                            continue
+
+                for k, v in attributes.items():
+                    # CAS_APPLY_ATTRIBUTES_TO_USER ignores setting the
+                    # user's username attribute, as this can get
+                    # problematic when used with other options such as
+                    # CAS_FORCE_CHANGE_USERNAME_CASE, and is not what this
+                    # option is intended for.
+                    # Groups are also ignored, because they cannot be
+                    # assigned directly, and automatically adopting groups
+                    # is not a feature at this point.
+                    if k not in ['username', 'groups']:
+                        setattr(user, k, v)
+
+                # If we are keeping a local copy of the user model we
+                # should save these attributes which have a corresponding
+                # instance in the DB.
+                if settings.CAS_CREATE_USER:
+                    user.save()
+
+        # Only publish session data and notify receivers after every local
+        # write has succeeded and the account hook has approved the login.
+        # A missing local account (CAS_CREATE_USER=False) is not a completed
+        # authentication, so nothing is published for it.
+        if user is None:
             return None
+
+        if attributes and request:
+            request.session['attributes'] = attributes
 
         if pgtiou and settings.CAS_PROXY_CALLBACK and request:
             request.session['pgtiou'] = pgtiou
 
-        # Map CAS affiliations to Django groups
-        if settings.CAS_MAP_AFFILIATIONS and user and attributes:
-            affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
-            for affil in affils:
-                if affil:
-                    g, created = Group.objects.get_or_create(name=affil)
-                    user.groups.add(g)
-
-        if settings.CAS_AFFILIATIONS_HANDLERS and user and attributes:
-            affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
-            for handler in settings.CAS_AFFILIATIONS_HANDLERS:
-                if (callable(handler)):
-                    handler(user, affils)
-
-        if settings.CAS_STAFF_AFFILIATION and user and attributes:
-            affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
-            staff_status = settings.CAS_STAFF_AFFILIATION in affils
-            if user.is_staff != staff_status:
-                user.is_staff = staff_status
-                user.save()
-
-        if settings.CAS_ADMIN_AFFILIATION and user and attributes:
-            affils = attributes.get(settings.CAS_AFFILIATIONS_KEY, [])
-            admin_status = settings.CAS_ADMIN_AFFILIATION in affils
-            if user.is_superuser != admin_status:
-                user.is_superuser = admin_status
-                user.save()
-
-        if settings.CAS_APPLY_ATTRIBUTES_TO_USER and attributes:
-            # If we are receiving None for any values which cannot be NULL
-            # in the User model, set them to an empty string instead.
-            # Possibly it would be desirable to let these throw an error
-            # and push the responsibility to the CAS provider or remove
-            # them from the dictionary entirely instead. Handling these
-            # is a little ambiguous.
-            user_model_fields = UserModel._meta.fields
-            for field in user_model_fields:
-                # Handle null -> '' conversions mentioned above
-                if not field.null:
-                    try:
-                        if attributes[field.name] is None:
-                            attributes[field.name] = ''
-                    except KeyError:
-                        continue
-                # Coerce boolean strings into true booleans
-                if field.get_internal_type() == 'BooleanField':
-                    try:
-                        boolean_value = attributes[field.name] == 'True'
-                        attributes[field.name] = boolean_value
-                    except KeyError:
-                        continue
-
-            for k, v in attributes.items():
-                # CAS_APPLY_ATTRIBUTES_TO_USER ignores setting the
-                # user's username attribute, as this can get
-                # problematic when used with other options such as
-                # CAS_FORCE_CHANGE_USERNAME_CASE, and is not what this
-                # option is intended for.
-                # Groups are also ignored, because they cannot be
-                # assigned directly, and automatically adopting groups
-                # is not a feature at this point.
-                if k not in ['username', 'groups']:
-                    setattr(user, k, v)
-
-            # If we are keeping a local copy of the user model we
-            # should save these attributes which have a corresponding
-            # instance in the DB.
-            if settings.CAS_CREATE_USER:
-                user.save()
-
-        # send the `cas_user_authenticated` signal
-        cas_user_authenticated.send(
-            sender=self,
+        # send the `cas_user_authenticated` signal once every local write has
+        # succeeded and the account hook has approved the login
+        self._send_authenticated_signal(
+            request=request,
             user=user,
             created=created,
             username=username,
@@ -168,9 +187,22 @@ class CASBackend(ModelBackend):
             pgtiou=pgtiou,
             ticket=ticket,
             service=service,
-            request=request
         )
         return user
+
+    def _send_authenticated_signal(self, request: HttpRequest, **kwargs) -> None:
+        """
+        Publish ``cas_user_authenticated`` after all local writes completed.
+
+        ``LoginView`` sets ``_cas_defer_authenticated_signal`` so receivers only
+        run after the login session and ticket bookkeeping have been saved.
+        """
+        if request is not None and getattr(
+                request, '_cas_defer_authenticated_signal', False):
+            request._cas_deferred_authenticated_signal = (
+                self, dict(kwargs, request=request))
+            return
+        cas_user_authenticated.send(sender=self, request=request, **kwargs)
 
     def get_user_id(self, attributes: Mapping[str, str]) -> str:
         """

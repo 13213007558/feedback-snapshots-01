@@ -29,6 +29,10 @@ these attributes or methods:
     however, django-cas-ng will prevent users with ``is_active=False`` from
     authenticating.
     See also `django.contrib.auth.backends.RemoteUserBackend`_.
+    This hook is the final gate: if it returns ``False``, a user created during
+    this attempt is rolled back and no CAS attributes are applied. Session
+    attributes, the login session and the ``cas_user_authenticated`` signal are
+    only published after this hook approves.
 - CASBackend.configure_user(user)
 - CASBackend.bad_attributes_reject(request, username, attributes)
 

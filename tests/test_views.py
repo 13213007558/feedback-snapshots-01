@@ -3,15 +3,55 @@ from unittest.mock import Mock
 
 import pytest
 from django.conf import settings
+from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.middleware import AuthenticationMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
+from django.db import DatabaseError
+from django.dispatch import receiver
 from django.test import RequestFactory
+from django_cas_ng.backends import CASBackend
 from django_cas_ng.models import ProxyGrantingTicket, SessionTicket
+from django_cas_ng.signals import cas_user_authenticated
 from django_cas_ng.utils import RedirectException
 from django_cas_ng.views import CallbackView, LoginView, LogoutView, is_local_url, clean_next_page
 
 SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
+
+
+class FakeCASClient:
+    """Return a fixed set of approved-looking CAS attributes."""
+
+    def verify_ticket(self, ticket):
+        return (
+            'test@example.com',
+            {
+                'first_name': 'Grace',
+                'is_staff': 'True',
+                'affiliation': ['faculty'],
+            },
+            None,
+        )
+
+
+class AllowAllHookBackend(CASBackend):
+    """Fake project hook that approves immediately."""
+
+
+class RetryingHookBackend(CASBackend):
+    """Fake project hook: reject the first approval, allow the next."""
+
+    approvals = []
+
+    def user_can_authenticate(self, user):
+        self.approvals.append(user.pk)
+        if len(self.approvals) == 1:
+            return False
+        return ModelBackend.user_can_authenticate(self, user)
+
+
+def _get_fake_cas_client(*args, **kwargs):
+    return FakeCASClient()
 
 
 # function takes a request and applies a middleware process
@@ -508,3 +548,186 @@ def test_callback_post_logout(django_user_model, settings):
                                               pgt='fake-ticket').exists() is False
     assert SessionTicket.objects.filter(session_key=session.session_key,
                                         ticket='fake-ticket').exists() is False
+
+
+@pytest.mark.django_db
+def test_login_view_rejected_hook_then_approved_existing_account(
+    monkeypatch, settings, django_user_model
+):
+    """
+    Drive LoginView with a fake CAS for an existing account whose approval hook
+    rejects once and then allows. Only the approved attempt should update the
+    account, establish the session and notify subscribers.
+    """
+    settings.AUTHENTICATION_BACKENDS = ['tests.test_views.RetryingHookBackend']
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_MAP_AFFILIATIONS = True
+    settings.CAS_LOGIN_MSG = None
+    monkeypatch.setattr(
+        'django_cas_ng.backends.get_cas_client', _get_fake_cas_client)
+
+    existing = django_user_model.objects.create_user('test@example.com', '')
+    existing.first_name = 'Existing'
+    existing.save()
+
+    events = []
+
+    @receiver(cas_user_authenticated)
+    def callback(sender, request, user, created, **kwargs):
+        events.append({
+            'user_id': user.pk,
+            'created': created,
+            'first_name': user.first_name,
+            'logged_in': bool(request.session.get('_auth_user_id')),
+            'ticket_saved': SessionTicket.objects.filter(
+                session_key=request.session.session_key,
+                ticket='fake-ticket',
+            ).exists(),
+        })
+
+    RetryingHookBackend.approvals = []
+    login = LoginView()
+
+    def build_request():
+        request = RequestFactory().get(
+            '/login/', {'ticket': 'fake-ticket', 'service': 'fake-service'})
+        process_request_for_middleware(request, SessionMiddleware)
+        process_request_for_middleware(request, AuthenticationMiddleware)
+        return request
+
+    rejected = build_request()
+    with pytest.raises(PermissionDenied):
+        login.get(rejected)
+
+    rejected.session.save()
+    stored = django_user_model.objects.get(pk=existing.pk)
+    assert RetryingHookBackend.approvals == [existing.pk]
+    assert stored.first_name == 'Existing'
+    assert events == []
+    assert rejected.session.get('_auth_user_id') is None
+    assert 'attributes' not in rejected.session
+
+    approved = build_request()
+    response = login.get(approved)
+
+    assert response.status_code == 302
+    assert RetryingHookBackend.approvals == [existing.pk, existing.pk]
+    stored = django_user_model.objects.get(pk=existing.pk)
+    assert stored.first_name == 'Grace'
+    assert events == [{
+        'user_id': existing.pk,
+        'created': False,
+        'first_name': 'Grace',
+        'logged_in': True,
+        'ticket_saved': True,
+    }]
+    assert approved.session['_auth_user_id'] == str(existing.pk)
+    assert approved.session['attributes']['first_name'] == 'Grace'
+
+
+@pytest.mark.django_db
+def test_login_view_rejected_new_account_leaves_no_user_or_login(
+    monkeypatch, settings, django_user_model
+):
+    """
+    Same fake CAS reject-then-allow drive for a brand-new account: the rejected
+    attempt must leave no user, no session login and no notification; the
+    approved retry publishes all three together.
+    """
+    settings.AUTHENTICATION_BACKENDS = ['tests.test_views.RetryingHookBackend']
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_LOGIN_MSG = None
+    monkeypatch.setattr(
+        'django_cas_ng.backends.get_cas_client', _get_fake_cas_client)
+
+    events = []
+
+    @receiver(cas_user_authenticated)
+    def callback(sender, request, user, created, **kwargs):
+        events.append({
+            'created': created,
+            'stored': django_user_model.objects.filter(pk=user.pk).exists(),
+            'logged_in': bool(request.session.get('_auth_user_id')),
+            'ticket_saved': SessionTicket.objects.filter(
+                session_key=request.session.session_key,
+                ticket='fake-ticket',
+            ).exists(),
+        })
+
+    RetryingHookBackend.approvals = []
+    login = LoginView()
+
+    def build_request():
+        request = RequestFactory().get(
+            '/login/', {'ticket': 'fake-ticket', 'service': 'fake-service'})
+        process_request_for_middleware(request, SessionMiddleware)
+        process_request_for_middleware(request, AuthenticationMiddleware)
+        return request
+
+    rejected = build_request()
+    with pytest.raises(PermissionDenied):
+        login.get(rejected)
+
+    rejected.session.save()
+    assert events == []
+    assert not django_user_model.objects.filter(username='test@example.com').exists()
+    assert rejected.session.get('_auth_user_id') is None
+    assert 'attributes' not in rejected.session
+    assert not SessionTicket.objects.exists()
+
+    approved = build_request()
+    response = login.get(approved)
+
+    assert response.status_code == 302
+    created = django_user_model.objects.get(username='test@example.com')
+    assert events == [{
+        'created': True,
+        'stored': True,
+        'logged_in': True,
+        'ticket_saved': True,
+    }]
+    assert approved.session['_auth_user_id'] == str(created.pk)
+    assert approved.session['attributes']['first_name'] == 'Grace'
+    assert SessionTicket.objects.get().ticket == 'fake-ticket'
+
+
+@pytest.mark.django_db
+def test_login_view_storage_failure_rolls_back_new_account(
+    monkeypatch, settings, django_user_model
+):
+    """
+    If login bookkeeping cannot be saved, the freshly-created account, session
+    login, ticket row and notification must all be absent.
+    """
+    from django.db import DatabaseError
+
+    settings.AUTHENTICATION_BACKENDS = ['tests.test_views.AllowAllHookBackend']
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    settings.CAS_LOGIN_MSG = None
+    monkeypatch.setattr(
+        'django_cas_ng.backends.get_cas_client', _get_fake_cas_client)
+
+    events = []
+
+    @receiver(cas_user_authenticated)
+    def callback(sender, **kwargs):
+        events.append(kwargs)
+
+    monkeypatch.setattr(
+        'django_cas_ng.views.SessionTicket.objects.create',
+        Mock(side_effect=DatabaseError('storage unavailable')),
+    )
+
+    request = RequestFactory().get(
+        '/login/', {'ticket': 'fake-ticket', 'service': 'fake-service'})
+    process_request_for_middleware(request, SessionMiddleware)
+    process_request_for_middleware(request, AuthenticationMiddleware)
+
+    with pytest.raises(DatabaseError):
+        LoginView().get(request)
+
+    assert events == []
+    assert not django_user_model.objects.filter(username='test@example.com').exists()
+    assert request.session.get('_auth_user_id') is None
+    assert 'attributes' not in request.session
+    assert not SessionTicket.objects.exists()

@@ -216,3 +216,48 @@ def test_signal_not_fired_if_auth_fails(monkeypatch, django_user_model):
 
     assert user is None
     assert callback_values == {}
+
+
+def _install_fake_cas(monkeypatch):
+    """Fake CAS client returning attributes that map onto User fields."""
+
+    class FakeCASClient:
+        def verify_ticket(self, ticket):
+            return (
+                'test@example.com',
+                {'first_name': 'Grace', 'is_staff': 'True'},
+                None,
+            )
+
+    monkeypatch.setattr(
+        'django_cas_ng.backends.get_cas_client',
+        lambda *args, **kwargs: FakeCASClient(),
+    )
+
+
+@pytest.mark.django_db
+def test_direct_backend_call_publishes_signal_after_user_stored(
+    monkeypatch, settings, django_user_model
+):
+    """
+    Callers that use CASBackend directly still get the documented synchronous
+    signal, but only after the user row and attributes are stored.
+    """
+    settings.CAS_APPLY_ATTRIBUTES_TO_USER = True
+    _install_fake_cas(monkeypatch)
+
+    observed = []
+
+    @receiver(cas_user_authenticated)
+    def callback(sender, user, created, **kwargs):
+        observed.append((
+            created,
+            django_user_model.objects.filter(pk=user.pk).exists(),
+            user.first_name,
+        ))
+
+    user = CASBackend().authenticate(
+        None, ticket='fake-ticket', service='fake-service')
+
+    assert user is not None
+    assert observed == [(True, True, 'Grace')]
