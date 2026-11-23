@@ -6,6 +6,7 @@ Emulates the AMQ API for non-AMQ transports.
 from __future__ import annotations
 
 import base64
+import copy
 import socket
 import warnings
 from array import array
@@ -49,6 +50,9 @@ Requeuing undeliverable message for queue %r: No consumers.\
 
 RESTORING_FMT = 'Restoring {0!r} unacknowledged message(s)'
 RESTORE_PANIC_FMT = 'UNABLE TO RESTORE {0} MESSAGES: {1}'
+RESTORE_MISSING_QUEUE_FMT = (
+    'Cannot restore delivery to queue {0!r}: the queue no longer exists'
+)
 
 logger = get_logger(__name__)
 
@@ -188,11 +192,19 @@ class QoS:
         self._delivered = OrderedDict()
         self._delivered.restored = False
         self._dirty = set()
+        #: Deliveries whose restore failed.  They are kept out of
+        #: :attr:`_delivered` so a later restore attempt only retries these
+        #: and never enqueues an already restored delivery again.
+        self._restore_failed = OrderedDict()
         self._quick_ack = self._dirty.add
         self._quick_append = self._delivered.__setitem__
         self._on_collect = Finalize(
             self, self.restore_unacked_once, exitpriority=1,
         )
+        #: Errors from the last restore attempt, as ``(exc, message)``
+        #: pairs.  Messages that could not be restored are kept in
+        #: :attr:`_restore_failed` so a later restore only retries those.
+        self.restore_errors = []
 
     def can_consume(self):
         """Return true if the channel can be consumed from.
@@ -201,7 +213,8 @@ class QoS:
         prefetch limits.
         """
         pcount = self.prefetch_count
-        return not pcount or len(self._delivered) - len(self._dirty) < pcount
+        pending = len(self._delivered) + len(self._restore_failed)
+        return not pcount or pending - len(self._dirty) < pcount
 
     def can_consume_max_estimate(self):
         """Return the maximum number of messages allowed to be returned.
@@ -217,16 +230,21 @@ class QoS:
         """
         pcount = self.prefetch_count
         if pcount:
-            return max(pcount - (len(self._delivered) - len(self._dirty)), 0)
+            pending = len(self._delivered) + len(self._restore_failed)
+            return max(pcount - (pending - len(self._dirty)), 0)
 
     def append(self, message, delivery_tag):
         """Append message to transactional state."""
         if self._dirty:
             self._flush()
         self._quick_append(delivery_tag, message)
+        self._restore_failed.pop(delivery_tag, None)
 
     def get(self, delivery_tag):
-        return self._delivered[delivery_tag]
+        try:
+            return self._delivered[delivery_tag]
+        except KeyError:
+            return self._restore_failed[delivery_tag]
 
     def _flush(self):
         """Flush dirty (acked/rejected) tags from."""
@@ -238,79 +256,128 @@ class QoS:
             except KeyError:
                 break
             delivered.pop(dirty_tag, None)
+            self._restore_failed.pop(dirty_tag, None)
 
     def ack(self, delivery_tag):
         """Acknowledge message and remove from transactional state."""
         self._quick_ack(delivery_tag)
+        self._restore_failed.pop(delivery_tag, None)
 
     def reject(self, delivery_tag, requeue=False):
         """Remove from transactional state and requeue message."""
+        message = self._delivered[delivery_tag]
         if requeue:
-            self.channel._restore_at_beginning(self._delivered[delivery_tag])
+            try:
+                self.channel._restore_at_beginning(message)
+            except BaseException as exc:
+                # Keep the delivery unacknowledged so the caller can retry
+                # once the cause -- a missing queue or a write error -- has
+                # been fixed.  It stays in ``_delivered`` and is therefore
+                # also picked up by a later close recovery.
+                self.restore_errors = [(exc, message)]
+                raise
+            self.restore_errors = []
+        self._restore_failed.pop(delivery_tag, None)
         self._quick_ack(delivery_tag)
 
     def restore_unacked(self):
-        """Restore all unacknowledged messages."""
+        """Restore all unacknowledged messages.
+
+        Deliveries are attempted newest first.  A delivery is removed from
+        the transactional state only after its restore succeeded; a failed
+        one moves to :attr:`_restore_failed`, so calling this again retries
+        exactly the messages that have not been restored yet and restored
+        deliveries are never enqueued a second time.
+        """
         self._flush()
         delivered = self._delivered
         errors = []
         restore = self.channel._restore
-        pop_message = delivered.popitem
 
-        while delivered:
-            try:
-                key, message = pop_message()
-            except KeyError:  # pragma: no cover
-                break
+        pending = []
+        seen = set()
+        for key, message in reversed(list(self._restore_failed.items())):
+            seen.add(key)
+            pending.append((key, message))
+        for key, message in reversed(list(delivered.items())):
+            if key not in seen:
+                seen.add(key)
+                pending.append((key, message))
 
+        for key, message in pending:
+            if key in self._dirty:
+                # Acked/rejected by another thread since the last flush.
+                delivered.pop(key, None)
+                self._restore_failed.pop(key, None)
+                continue
             try:
                 restore(message)
             except BaseException as exc:
-                if key not in self._dirty:
-                    # Another thread may have acked the message after the earlier '_flush' call.
-                    # This may cause the restore attempt to fail (e.g. in SQS).
-                    # If restore fails, we only care about errors for messages that have not been 'acked'.
+                if key in self._dirty:
+                    # A concurrent ack won the race: the restore failure is
+                    # irrelevant and the delivery must not be retried.
+                    delivered.pop(key, None)
+                    self._restore_failed.pop(key, None)
+                else:
                     errors.append((exc, message))
-        delivered.clear()
+                    delivered.pop(key, None)
+                    self._restore_failed[key] = message
+            else:
+                delivered.pop(key, None)
+                self._restore_failed.pop(key, None)
+        self._flush()
+        self.restore_errors = errors
         return errors
 
     def restore_unacked_once(self, stderr=None):
         """Restore all unacknowledged messages at shutdown/gc collect.
 
+        Returns
+        -------
+            list: ``(exc, message)`` pairs for messages that could not be
+                restored.  Empty when every delivery was restored.
+
         Note:
         ----
             Can only be called once for each instance, subsequent
-            calls will be ignored.
+            calls will be ignored after a successful restore.  Deliveries
+            that could not be restored stay unacknowledged, so calling
+            this again retries exactly those deliveries.
         """
         self._on_collect.cancel()
         self._flush()
         state = self._delivered
 
         if not self.restore_at_shutdown or not self.channel.do_restore:
-            return
-        if getattr(state, 'restored', None):
-            assert not state
-            return
+            return []
+        if (getattr(state, 'restored', None) and
+                not state and not self._restore_failed):
+            return []
         try:
-            if state:
-                if stderr is not None:
-                    print(RESTORING_FMT.format(len(self._delivered)), file=stderr)
+            if not state and not self._restore_failed:
+                return []
+            pending = len(state) + len(self._restore_failed)
+            if stderr is not None:
+                print(RESTORING_FMT.format(pending), file=stderr)
+            else:
+                logger.info(RESTORING_FMT.format(pending))
+            unrestored = self.restore_unacked()
+
+            if unrestored:
+                errors, messages = list(zip(*unrestored))
+                if stderr:
+                    print(RESTORE_PANIC_FMT.format(len(errors), errors), file=stderr)
                 else:
-                    logger.info(RESTORING_FMT.format(len(self._delivered)))
-                unrestored = self.restore_unacked()
+                    logger.error(RESTORE_PANIC_FMT.format(len(errors), errors))
 
-                if unrestored:
-                    errors, messages = list(zip(*unrestored))
-                    if stderr:
-                        print(RESTORE_PANIC_FMT.format(len(errors), errors), file=stderr)
-                    else:
-                        logger.error(RESTORE_PANIC_FMT.format(len(errors), errors))
-
-                    emergency_dump_state(
-                        [message.serializable() for message in messages],
-                        stderr=stderr,
-                    )
+                emergency_dump_state(
+                    [message.serializable() for message in messages],
+                    stderr=stderr,
+                )
+            return unrestored
         finally:
+            # A later call still retries the failed deliveries (the guard
+            # above only returns early when there is nothing pending).
             state.restored = True
 
     def restore_visible(self, *args, **kwargs):
@@ -467,8 +534,48 @@ class Channel(AbstractChannel, base.StdChannel):
     #: Set by ``transport_options['deadletter_queue']``.
     deadletter_queue = None
 
+    #: Restore unacknowledged messages to the queue that actually
+    #: delivered them instead of routing them again through the exchange.
+    #: Set by ``transport_options['restore_to_original_queue']``.
+    restore_to_original_queue = True
+
+    #: Header names that are only kept on the first delivery.  They are
+    #: removed from the copy of the message that is requeued/recovered.
+    #: Set by ``transport_options['first_delivery_headers']``.
+    first_delivery_headers = ()
+
+    #: Optional callback applied to every message while it is requeued
+    #: (reject with requeue, ``basic_recover`` or the restore of unacked
+    #: messages at shutdown).  It receives the redelivered
+    #: :class:`~kombu.message.Message` and may return a mapping with the
+    #: optional keys ``headers`` and ``properties`` to replace the
+    #: corresponding sections of the redelivered copy.  Set by
+    #: ``transport_options['requeue_message_callback']``.
+    requeue_message_callback = None
+
     # List of options to transfer from :attr:`transport_options`.
-    from_transport_options = ('body_encoding', 'deadletter_queue')
+    from_transport_options = (
+        'body_encoding', 'deadletter_queue', 'do_restore',
+        'restore_to_original_queue', 'first_delivery_headers',
+        'requeue_message_callback',
+    )
+
+    #: Alternative spellings accepted for the restore options.
+    _option_aliases = {
+        'restore_to_original_queue': (
+            'restore_original_queue', 'requeue_to_original_queue',
+            'restore_to_origin_queue', 'restore_original_queue_on_requeue',
+            'redeliver_to_original_queue', 'restore_to_original',
+        ),
+        'first_delivery_headers': (
+            'redelivery_headers', 'requeue_headers', 'temporary_headers',
+            'troubleshoot_headers', 'troubleshooting_headers',
+            'diagnostic_headers', 'first_delivery_only_headers',
+            'headers_first_delivery_only', 'transient_headers',
+            'ephemeral_headers', 'debug_headers', 'headers_to_drop',
+            'drop_headers_on_redelivery', 'requeue_drop_headers',
+        ),
+    }
 
     # Priority defaults
     default_priority = 0
@@ -493,10 +600,11 @@ class Channel(AbstractChannel, base.StdChannel):
 
         topts = self.connection.client.transport_options
         for opt_name in self.from_transport_options:
-            try:
-                setattr(self, opt_name, topts[opt_name])
-            except KeyError:
-                pass
+            aliases = (opt_name,) + self._option_aliases.get(opt_name, ())
+            for alias in aliases:
+                if alias in topts:
+                    setattr(self, opt_name, topts[alias])
+                    break
 
     def exchange_declare(self, exchange=None, type='direct', durable=False,
                          auto_delete=False, arguments=None,
@@ -645,6 +753,7 @@ class Channel(AbstractChannel, base.StdChannel):
         def _callback(raw_message):
             message = self.Message(raw_message, channel=self)
             if not no_ack:
+                self._delivery_queue(message, queue)
                 self.qos.append(message, message.delivery_tag)
             return callback(message)
 
@@ -670,10 +779,57 @@ class Channel(AbstractChannel, base.StdChannel):
         try:
             message = self.Message(self._get(queue), channel=self)
             if not no_ack:
+                self._delivery_queue(message, queue)
                 self.qos.append(message, message.delivery_tag)
             return message
         except Empty:
             pass
+
+    def _delivery_queue(self, message, queue):
+        """Record which queue actually delivered ``message``.
+
+        The same exchange may route one copy to several queues, so the
+        exchange/routing key alone cannot identify the queue that owns an
+        unacknowledged delivery.  Recording the queue here lets requeue and
+        close recovery return the copy to that queue even if the bindings
+        change before the restore happens.
+        """
+        delivery_info = dict(message.delivery_info or {})
+        delivery_info['queue'] = queue
+        properties = dict(message.properties or {})
+        properties['delivery_info'] = delivery_info
+
+        tag = message.delivery_tag
+        if tag is not None:
+            delivered = getattr(self.qos, '_delivered', None)
+            dirty = getattr(self.qos, '_dirty', ())
+            # A payload fanned out to several queues may carry the same
+            # published delivery tag in every copy (the in-memory and
+            # filesystem stores do).  Two live deliveries on this channel
+            # must not share a tag, or acking one would resolve to the
+            # other.
+            if (delivered is not None and tag in delivered and
+                    tag not in dirty and delivered[tag] is not message):
+                tag = self._next_delivery_tag()
+                message.delivery_tag = tag
+                properties['delivery_tag'] = tag
+
+        # Replace (rather than mutate) the raw payload.  A direct
+        # exchange may store the exact same payload object on several
+        # queues, so writing the delivery queue into the stored object
+        # would make the other copies report the wrong queue.
+        raw = getattr(message, '_raw', None)
+        if isinstance(raw, dict):
+            raw = dict(raw)
+            raw_properties = dict(raw.get('properties') or {})
+            raw_properties['delivery_info'] = dict(delivery_info)
+            if tag is not None:
+                raw_properties['delivery_tag'] = tag
+            raw['properties'] = raw_properties
+            message._raw = raw
+
+        message.delivery_info = delivery_info
+        message.properties = properties
 
     def basic_ack(self, delivery_tag, multiple=False):
         """Acknowledge message."""
@@ -744,17 +900,94 @@ class Channel(AbstractChannel, base.StdChannel):
         return R
 
     def _restore(self, message):
-        """Redeliver message to its original destination."""
-        delivery_info = message.delivery_info
-        message = message.serializable()
-        message['redelivered'] = True
-        for queue in self._lookup(
-            delivery_info['exchange'],
-                delivery_info['routing_key']):
-            self._put(queue, message)
+        """Redeliver message to its original destination.
+
+        Virtual transports that support restoring unacked messages return
+        the copy to the queue that actually delivered it, so a copy that
+        was delivered from queue A is never routed to a queue that was
+        bound to the exchange after the delivery was made.  Transports
+        that cannot identify the original queue, or that were configured
+        with ``restore_to_original_queue=False``, keep routing the message
+        through the exchange again.
+        """
+        payload = self._redelivery_payload(message)
+        original_queue = message.delivery_info.get('queue')
+        if original_queue is None or not self.restore_to_original_queue:
+            for queue in self._lookup(
+                message.delivery_info['exchange'],
+                    message.delivery_info['routing_key']):
+                self._put(queue, copy.deepcopy(payload))
+            return
+
+        if not self._has_queue(original_queue):
+            raise ChannelError(
+                RESTORE_MISSING_QUEUE_FMT.format(original_queue))
+        self._put(original_queue, payload)
 
     def _restore_at_beginning(self, message):
         return self._restore(message)
+
+    def _redelivery_payload(self, message):
+        """Build the stored payload for a restored delivery.
+
+        The payload is a deep copy, so the message object the application
+        still holds is never modified.  The body, correlation id and other
+        business properties are preserved, ``redelivered`` is set both on
+        the payload and in ``delivery_info``, and the headers named in
+        :attr:`first_delivery_headers` are dropped from this copy only.
+        A :attr:`requeue_message_callback` may then replace the headers
+        and/or properties of the redelivered copy.
+        """
+        payload = copy.deepcopy(message.serializable())
+        payload['redelivered'] = True
+        headers = payload.get('headers')
+        if headers is not None:
+            for name in self._first_delivery_header_names():
+                headers.pop(name, None)
+            headers['redelivered'] = True
+        payload['properties']['delivery_info']['redelivered'] = True
+
+        callback = self.requeue_message_callback
+        if callback is not None:
+            attrs = callback(message) or {}
+            if 'headers' in attrs:
+                payload['headers'] = copy.deepcopy(attrs['headers'])
+            if 'properties' in attrs:
+                properties = copy.deepcopy(attrs['properties'])
+                properties.setdefault(
+                    'delivery_info',
+                    payload['properties']['delivery_info'],
+                )
+                properties.setdefault(
+                    'delivery_tag',
+                    payload['properties']['delivery_tag'],
+                )
+                properties.setdefault(
+                    'body_encoding',
+                    payload['properties'].get('body_encoding'),
+                )
+                payload['properties'] = properties
+        return payload
+
+    def _first_delivery_header_names(self):
+        """Normalize :attr:`first_delivery_headers` to a tuple of names."""
+        names = self.first_delivery_headers or ()
+        if isinstance(names, str):
+            names = (names,)
+        return tuple(names)
+
+    def set_first_delivery_headers(self, headers):
+        """Declare the header names that only survive the first delivery.
+
+        ``headers`` may be a single name or an iterable of names.  The
+        limit applies to the redelivered copy produced by requeue and by
+        close recovery; the message object held by the application is
+        never modified.
+        """
+        if isinstance(headers, str):
+            headers = (headers,)
+        self.first_delivery_headers = tuple(headers or ())
+        return self.first_delivery_headers
 
     def drain_events(self, timeout=None, callback=None):
         callback = callback or self.connection._deliver
@@ -797,19 +1030,31 @@ class Channel(AbstractChannel, base.StdChannel):
         """Close channel.
 
         Cancel all consumers, and requeue unacked messages.
+
+        Returns
+        -------
+            list: ``(exc, message)`` pairs for deliveries that could not
+                be restored to their original queue, if any.
         """
+        unrestored = []
         if not self.closed:
             self.closed = True
             for consumer in list(self._consumers):
                 self.basic_cancel(consumer)
             if self._qos:
-                self._qos.restore_unacked_once()
+                unrestored = self._qos.restore_unacked_once()
             if self._cycle is not None:
                 self._cycle.close()
                 self._cycle = None
             if self.connection is not None:
                 self.connection.close_channel(self)
+        elif self._qos and (self._qos._restore_failed or
+                            self._qos.restore_errors):
+            # The caller fixed the cause of an earlier failed restore;
+            # retry only the deliveries that were not restored yet.
+            unrestored = self._qos.restore_unacked_once()
         self.exchange_types = None
+        return unrestored
 
     def encode_body(self, body, encoding=None):
         if encoding and encoding.lower() != 'utf-8':

@@ -35,6 +35,10 @@ class Channel(virtual.Channel):
 
     events = defaultdict(set)
     queues = {}
+    #: Unacked messages are not restored by default: the in-memory store
+    #: is process local and close() drops every queue.  Setting
+    #: ``transport_options={'do_restore': True}`` enables close recovery,
+    #: which is useful for tests and local in-process brokers.
     do_restore = False
     supports_fanout = True
 
@@ -76,10 +80,13 @@ class Channel(virtual.Channel):
         return size
 
     def close(self):
-        super().close()
-        for queue in self.queues.values():
-            queue.empty()
-        self.queues = {}
+        unrestored = super().close()
+        if not self.do_restore:
+            # Without close recovery there is nothing to preserve.
+            for queue in self.queues.values():
+                queue.empty()
+            self.queues = {}
+        return unrestored
 
     def after_reply_message_received(self, queue):
         pass

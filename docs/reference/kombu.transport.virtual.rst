@@ -52,6 +52,12 @@
 
         .. autoattribute:: do_restore
 
+        .. autoattribute:: restore_to_original_queue
+
+        .. autoattribute:: first_delivery_headers
+
+        .. autoattribute:: requeue_message_callback
+
         .. autoattribute:: exchange_types
 
         .. automethod:: exchange_declare
@@ -119,3 +125,39 @@
         :members:
         :undoc-members:
         :inherited-members:
+
+Restoring unacknowledged deliveries
+-----------------------------------
+
+Virtual transports that implement unacknowledged message recovery return a
+delivery to the queue that actually delivered it.  The queue is recorded in
+``message.delivery_info['queue']`` by both :meth:`Channel.basic_consume` and
+:meth:`Channel.basic_get`, and is used by explicit requeue and by close
+recovery.  A copy that was delivered from one binding therefore never moves
+to a queue bound to the same exchange later, even if the bindings change in
+between.
+
+Two transport options configure the behaviour:
+
+.. code-block:: python
+
+    Connection('memory://', transport_options={
+        # Enable close recovery (the memory transport keeps it off by default).
+        'do_restore': True,
+        # Restore to the delivering queue (default); set False to route again.
+        'restore_to_original_queue': True,
+        # These headers stay on the first delivery only.
+        'first_delivery_headers': ['x-debug-trace', 'x-request-start'],
+    })
+
+The redelivered copy keeps the body, the correlation id and the other
+business properties, and is marked with ``redelivered`` in both
+``delivery_info`` and the headers.  Only the copy that is requeued loses the
+headers listed in ``first_delivery_headers``; the message object still held
+by the application is not modified.
+
+If the original queue no longer exists, or the transport raises while
+writing the redelivered copy, :meth:`Channel.close` and
+:meth:`QoS.restore_unacked` return the ``(exc, message)`` pairs that were not
+restored.  A later restore attempt only retries those deliveries, so an
+already restored delivery is never enqueued twice.
