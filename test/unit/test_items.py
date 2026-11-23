@@ -223,3 +223,92 @@ class TestSecretCacheItem(unittest.TestCase):
         self.assertGreaterEqual(secret_cache_item._next_refresh_time, t_before)
         t_max_after = t_after + timedelta(seconds=config.secret_refresh_interval)
         self.assertLessEqual(secret_cache_item._next_refresh_time, t_max_after)
+
+
+class TestSecretCacheRotationCutover(unittest.TestCase):
+    """Hard-cutover scenario across two stage-label generations.
+
+    The default stage entry and the explicit historical stage entry must
+    keep independent read access: a missing new value surfaces as the
+    fetch exception on the default entry only, while a revoked stage
+    reads as None.
+    """
+
+    class FakeClock:
+        """Controllable drop-in for the datetime class used by the items module."""
+
+        def __init__(self, start):
+            self._now = start
+
+        def now(self, tz=None):
+            return self._now
+
+        def advance(self, **kwargs):
+            self._now += timedelta(**kwargs)
+
+    def test_hard_cutover_keeps_stage_entries_independent(self):
+        clock = self.FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        config = SecretCacheConfig(secret_refresh_interval=60,
+                                   exception_retry_delay_base=1,
+                                   exception_retry_growth_factor=2)
+        old_version = "0000000000000000000000000000000o"
+        new_version = "0000000000000000000000000000000n"
+        historical_stage = "AWSPREVIOUS"
+
+        describe_response = {
+            "VersionIdsToStages": {old_version: ["AWSCURRENT", historical_stage]}
+        }
+        blocked_fetches = []
+
+        client_mock = Mock()
+        client_mock.describe_secret = Mock(side_effect=lambda **kwargs: describe_response)
+
+        def get_secret_value(SecretId, VersionId):
+            if VersionId == old_version:
+                return {"SecretString": "old-secret", "VersionId": old_version}
+            if not blocked_fetches:
+                # Freeze exactly one fetch of the new version (network jitter).
+                blocked_fetches.append(VersionId)
+                raise ConnectionError("network jitter: new version fetch blocked")
+            return {"SecretString": "new-secret", "VersionId": new_version}
+
+        client_mock.get_secret_value = Mock(side_effect=get_secret_value)
+
+        with patch("aws_secretsmanager_caching.cache.items.datetime", clock):
+            item = SecretCacheItem(config, client_mock, "test")
+
+            # Before the cutover both entries read the in-window version.
+            self.assertEqual("old-secret", item.get_secret_value()["SecretString"])
+            self.assertEqual("old-secret", item.get_secret_value(historical_stage)["SecretString"])
+
+            # On-call declares the hard cutover: the default stage is remapped
+            # to the new version, the old version keeps the approved stage.
+            describe_response = {
+                "VersionIdsToStages": {
+                    new_version: ["AWSCURRENT"],
+                    old_version: [historical_stage],
+                }
+            }
+            clock.advance(seconds=120)
+
+            # Default entry: the new mapping is visible but the new value is
+            # missing, so the fetch failure surfaces to the caller.
+            self.assertRaises(ConnectionError, item.get_secret_value)
+            self.assertEqual([new_version], blocked_fetches)
+
+            # Explicit entry: the approved historical version is served from
+            # its own cached version object, unaffected by the default entry.
+            self.assertEqual("old-secret", item.get_secret_value(historical_stage)["SecretString"])
+
+            # The new version reads through once the retry backoff has passed.
+            clock.advance(seconds=10)
+            self.assertEqual("new-secret", item.get_secret_value()["SecretString"])
+            self.assertEqual("old-secret", item.get_secret_value(historical_stage)["SecretString"])
+
+            # The historical version is revoked: its stage leaves the mapping.
+            describe_response = {"VersionIdsToStages": {new_version: ["AWSCURRENT"]}}
+            clock.advance(seconds=120)
+
+            # Revoked reads as None, clearly distinct from a missing value.
+            self.assertIsNone(item.get_secret_value(historical_stage))
+            self.assertEqual("new-secret", item.get_secret_value()["SecretString"])
