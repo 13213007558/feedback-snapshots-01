@@ -11,7 +11,12 @@ from django.core.checks import Error, register
 
 from packaging.version import Version
 
-from csp.constants import NONCE
+from csp.constants import (
+    NONCE,
+    UNKNOWN_MEDIA_TYPE,
+    UNKNOWN_MEDIA_TYPE_DEFAULT,
+    UNKNOWN_MEDIA_TYPE_SKIP,
+)
 
 if TYPE_CHECKING:
     from django.apps.config import AppConfig
@@ -125,5 +130,29 @@ def check_exclude_url_prefixes_is_not_string(app_configs: Sequence[AppConfig] | 
                     id="csp.E002",
                 )
             )
+
+    return errors
+
+
+@register(checks.Tags.security)
+def check_unknown_media_type_value(app_configs: Sequence[AppConfig] | None, **kwargs: Any) -> list[Error]:
+    """Validate the value of the optional ``UNKNOWN_MEDIA_TYPE`` policy setting."""
+    errors = []
+    valid_values = (UNKNOWN_MEDIA_TYPE_DEFAULT, UNKNOWN_MEDIA_TYPE_SKIP)
+    keys = (
+        "CONTENT_SECURITY_POLICY",
+        "CONTENT_SECURITY_POLICY_REPORT_ONLY",
+    )
+    for key in keys:
+        config = getattr(settings, key, {})
+        if isinstance(config, dict):
+            value = config.get(UNKNOWN_MEDIA_TYPE)
+            if value is not None and value not in valid_values:
+                errors.append(
+                    Error(
+                        f"{UNKNOWN_MEDIA_TYPE} in {key} settings must be one of {valid_values!r}, got {value!r}.",
+                        id="csp.E003",
+                    )
+                )
 
     return errors

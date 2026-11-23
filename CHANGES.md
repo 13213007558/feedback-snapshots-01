@@ -1,6 +1,29 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+## Features
+
+- **Per media type policies**: `CONTENT_SECURITY_POLICY` and
+  `CONTENT_SECURITY_POLICY_REPORT_ONLY` accept an optional `MEDIA_TYPE_POLICIES` mapping that
+  selects a policy from the response's *final* media type. This allows strict policies on HTML
+  documents while using different or no policy on API and file download responses. The media type
+  is read only from the `Content-Type` header, so streaming and file responses are never consumed
+  or rendered early. A value of `None` disables the header for a media type. Configurations without
+  `MEDIA_TYPE_POLICIES` keep the existing response-level behaviour unchanged.
+- **Unknown media type handling**: the optional `UNKNOWN_MEDIA_TYPE` setting (`"default"` or
+  `"skip"`) controls whether a response without a usable media type falls back to the default
+  policy or gets no header. A `csp.E003` system check validates the setting.
+
+## Notes
+
+- The enforced and report-only headers continue to be resolved independently. A header already
+  present on the response is always preserved, and per-view decorator declarations
+  (`@csp`, `@csp_update`, `@csp_replace`, `@csp_exempt`) take precedence over the media-type
+  selected base policy.
+
 4.0
 ===
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from django.conf import settings
 
 from csp.middleware import CSPMiddleware, PolicyParts
+from csp.utils import DIRECTIVES_T
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -15,8 +16,14 @@ class RateLimitedCSPMiddleware(CSPMiddleware):
     """A CSP middleware that rate-limits the number of violation reports sent
     to report-uri by excluding it from some requests."""
 
-    def get_policy_parts(self, request: HttpRequest, response: HttpResponseBase, report_only: bool = False) -> PolicyParts:
-        policy_parts = super().get_policy_parts(request, response, report_only)
+    def get_policy_parts(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        report_only: bool = False,
+        config: DIRECTIVES_T | None = None,
+    ) -> PolicyParts:
+        policy_parts = super().get_policy_parts(request, response, report_only, config)
 
         csp_setting_name = "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY"
         policy = getattr(settings, csp_setting_name, None)

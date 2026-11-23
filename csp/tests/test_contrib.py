@@ -81,3 +81,29 @@ def test_no_csp_ro() -> None:
     response = HttpResponse()
     mw.process_response(request, response)
     assert HEADER_REPORT_ONLY not in response
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={
+        "DIRECTIVES": {"default-src": ["'self'"], "report-uri": "x"},
+        "MEDIA_TYPE_POLICIES": {
+            "text/html": {"DIRECTIVES": {"default-src": ["'html.example'"], "report-uri": "x"}},
+            "application/octet-stream": None,
+        },
+        "REPORT_PERCENTAGE": 100,
+    }
+)
+def test_rate_limited_uses_media_type_routing() -> None:
+    from django.http import StreamingHttpResponse
+
+    request = rf.get("/")
+
+    html = HttpResponse(content_type="text/html")
+    mw.process_response(request, html)
+    assert html[HEADER] == "default-src 'html.example'; report-uri x"
+
+    download = StreamingHttpResponse(iter([b"a"]), content_type="application/octet-stream")
+    mw.process_response(request, download)
+    assert HEADER not in download
+    # The stream must remain unconsumed.
+    assert list(download.streaming_content) == [b"a"]

@@ -1,7 +1,12 @@
 from django.test.utils import override_settings
 
-from csp.checks import check_django_csp_lt_4_0, check_exclude_url_prefixes_is_not_string, migrate_settings
-from csp.constants import NONCE
+from csp.checks import (
+    check_django_csp_lt_4_0,
+    check_exclude_url_prefixes_is_not_string,
+    check_unknown_media_type_value,
+    migrate_settings,
+)
+from csp.constants import NONCE, UNKNOWN_MEDIA_TYPE, UNKNOWN_MEDIA_TYPE_SKIP
 
 
 @override_settings(
@@ -72,3 +77,23 @@ def test_check_exclude_url_prefixes_ro_is_not_string() -> None:
     error = errors[0]
     assert error.id == "csp.E002"
     assert error.msg == "EXCLUDE_URL_PREFIXES in CONTENT_SECURITY_POLICY_REPORT_ONLY settings must be a list or tuple."
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={UNKNOWN_MEDIA_TYPE: "bogus"},
+)
+def test_check_unknown_media_type_invalid() -> None:
+    errors = check_unknown_media_type_value(None)
+    assert len(errors) == 1
+    assert errors[0].id == "csp.E003"
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={UNKNOWN_MEDIA_TYPE: UNKNOWN_MEDIA_TYPE_SKIP},
+)
+def test_check_unknown_media_type_valid() -> None:
+    assert check_unknown_media_type_value(None) == []
+
+
+def test_check_unknown_media_type_unset() -> None:
+    assert check_unknown_media_type_value(None) == []

@@ -14,7 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.utils import DIRECTIVES_T, build_policy, default_config, resolve_config
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -79,29 +79,8 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
-        policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
-        if csp:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt", False) is False
-            no_header = HEADER not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER] = csp
-
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
-        if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
-            no_header = HEADER_REPORT_ONLY not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER_REPORT_ONLY] = csp_ro
+        self._add_csp_header(request=request, response=response, report_only=False)
+        self._add_csp_header(request=request, response=response, report_only=True)
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -110,6 +89,39 @@ class CSPMiddleware(MiddlewareMixin):
             setattr(request, "csp_nonce", CheckableLazyObject(self._csp_nonce_post_response))
 
         return response
+
+    def _add_csp_header(self, request: HttpRequest, response: HttpResponseBase, report_only: bool) -> None:
+        header = HEADER_REPORT_ONLY if report_only else HEADER
+        setting_name = "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY"
+
+        # Respect a header the view (or another piece of middleware) already set.
+        if header in response:
+            return
+
+        exempt_attr = "_csp_exempt_ro" if report_only else "_csp_exempt"
+        if getattr(response, exempt_attr, False):
+            return
+
+        policy = getattr(settings, setting_name, None) or {}
+        prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
+        if request.path_info.startswith(tuple(prefixes)):
+            return
+
+        # Select the base configuration based on the response's *final* media type. This never
+        # reads the response body, so streaming and file responses are not consumed or rendered.
+        routed_config, skip = resolve_config(response, policy)
+        if skip:
+            return
+
+        policy_parts = self.get_policy_parts(
+            request=request,
+            response=response,
+            report_only=report_only,
+            config=default_config(routed_config),
+        )
+        csp = build_policy(**asdict(policy_parts), report_only=report_only)
+        if csp:
+            response[header] = csp
 
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
@@ -126,15 +138,23 @@ class CSPMiddleware(MiddlewareMixin):
         request: HttpRequest,
         response: HttpResponseBase,
         report_only: bool = False,
+        config: DIRECTIVES_T | None = None,
     ) -> PolicyParts:
         if report_only:
-            config = getattr(response, "_csp_config_ro", None)
+            # A view-level declaration (decorator/response attribute) wins over the config the
+            # middleware selected from the response's media type.
+            view_config = getattr(response, "_csp_config_ro", None)
             update = getattr(response, "_csp_update_ro", None)
             replace = getattr(response, "_csp_replace_ro", None)
         else:
-            config = getattr(response, "_csp_config", None)
+            view_config = getattr(response, "_csp_config", None)
             update = getattr(response, "_csp_update", None)
             replace = getattr(response, "_csp_replace", None)
+
+        # An explicitly declared (even empty) view config always takes precedence over the routed
+        # media-type config. Only fall back when the view declares nothing at all.
+        if view_config is not None:
+            config = view_config
 
         nonce = getattr(request, "_csp_nonce", None)
 

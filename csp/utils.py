@@ -3,12 +3,23 @@ from __future__ import annotations
 import copy
 import re
 from itertools import chain
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from django.conf import settings
 from django.utils.encoding import force_str
 
-from csp.constants import NONCE, SELF
+from csp.constants import (
+    DIRECTIVES,
+    MEDIA_TYPE_POLICIES,
+    NONCE,
+    SELF,
+    UNKNOWN_MEDIA_TYPE,
+    UNKNOWN_MEDIA_TYPE_DEFAULT,
+    UNKNOWN_MEDIA_TYPE_SKIP,
+)
+
+if TYPE_CHECKING:
+    from django.http import HttpResponseBase
 
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
@@ -62,6 +73,61 @@ def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     for key, value in DEFAULT_DIRECTIVES.items():
         config[key] = csp.get(key, value)
     return config
+
+
+def get_response_media_type(response: HttpResponseBase) -> str | None:
+    """
+    Return the final media type of a response without touching its body.
+
+    The media type is derived solely from the ``Content-Type`` header, so streaming and
+    file responses never have their content consumed or rendered early. Parameters such as
+    ``charset`` are stripped and the type is normalised to lower case.
+
+    Returns ``None`` when the response carries no usable media type.
+    """
+    content_type = response.headers.get("Content-Type")
+    if not content_type:
+        return None
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type or None
+
+
+def resolve_config(
+    response: HttpResponseBase,
+    policy: DIRECTIVES_T | None,
+) -> tuple[DIRECTIVES_T | None, bool]:
+    """
+    Pick the directive configuration that applies to a response.
+
+    Selection is based on the response's *final* media type. The returned tuple is
+    ``(config, skip)`` where ``config`` is the directives to use and ``skip`` indicates that
+    no header should be written at all (an explicitly disabled media type, or an unknown
+    media type configured to be skipped).
+
+    A policy without ``MEDIA_TYPE_POLICIES`` keeps the historical response-level behaviour:
+    the top-level ``DIRECTIVES`` apply to every response regardless of media type.
+    """
+    if policy is None:
+        return None, False
+
+    media_type_policies = policy.get(MEDIA_TYPE_POLICIES)
+    if not media_type_policies:
+        return policy.get(DIRECTIVES), False
+
+    media_type = get_response_media_type(response)
+    if media_type is None:
+        unknown_behavior = policy.get(UNKNOWN_MEDIA_TYPE, UNKNOWN_MEDIA_TYPE_DEFAULT)
+        if unknown_behavior == UNKNOWN_MEDIA_TYPE_SKIP:
+            return None, True
+        return policy.get(DIRECTIVES), False
+
+    if media_type in media_type_policies:
+        media_config = media_type_policies[media_type]
+        # An explicit ``None`` disables the header for this media type.
+        return (None, True) if media_config is None else (media_config.get(DIRECTIVES), False)
+
+    # No route for this media type: fall back to the default policy.
+    return policy.get(DIRECTIVES), False
 
 
 def build_policy(

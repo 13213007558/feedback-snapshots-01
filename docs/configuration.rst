@@ -98,6 +98,55 @@ Policy Settings
 At the top level of the policy dictionary, these are the keys that can be used to configure the
 policy.
 
+``MEDIA_TYPE_POLICIES``
+    A dictionary mapping a response media type (the ``Content-Type`` header with any parameters
+    such as ``charset`` removed) to a policy for that media type. This lets a site enforce a strict
+    policy on HTML documents while using different, looser, or no policy on API and file download
+    responses.
+
+    The policy is selected from the **final** response media type, so a view that normally returns
+    JSON but whose exceptions Django renders as an HTML error page will receive the HTML policy.
+    The media type is read from the response header only; the response body is never inspected, so
+    streaming and file responses are not consumed or rendered early.
+
+    Each value is itself a policy dictionary containing ``DIRECTIVES``. A value of ``None``
+    disables the header entirely for that media type. Media types that have no entry, and any
+    response without a usable media type, fall back to the top-level ``DIRECTIVES``.
+
+    .. code-block:: python
+
+        CONTENT_SECURITY_POLICY = {
+            # Used for any media type without a specific route (and unknown media types).
+            "DIRECTIVES": {"default-src": [SELF]},
+            "MEDIA_TYPE_POLICIES": {
+                "text/html": {"DIRECTIVES": {"default-src": [SELF, "strict-dynamic"]}},
+                "application/json": {"DIRECTIVES": {"default-src": [NONE]}},
+                # Downloads and other binary responses get no enforced header at all.
+                "application/octet-stream": None,
+            },
+        }
+
+    Omitting ``MEDIA_TYPE_POLICIES`` keeps the historical behaviour where the top-level
+    ``DIRECTIVES`` are applied to every response regardless of media type.
+
+``UNKNOWN_MEDIA_TYPE``
+    Controls what happens when ``MEDIA_TYPE_POLICIES`` is configured but the response has no usable
+    media type (for example a missing or empty ``Content-Type`` header). One of:
+
+    * ``"default"`` (the default): fall back to the top-level ``DIRECTIVES``. This matches the
+      historical behaviour.
+    * ``"skip"``: do not add a header to the response.
+
+    .. code-block:: python
+
+        from csp.constants import UNKNOWN_MEDIA_TYPE_SKIP
+
+        CONTENT_SECURITY_POLICY = {
+            "DIRECTIVES": {"default-src": [SELF]},
+            "UNKNOWN_MEDIA_TYPE": UNKNOWN_MEDIA_TYPE_SKIP,
+            "MEDIA_TYPE_POLICIES": {"text/html": {"DIRECTIVES": {"default-src": [SELF]}}},
+        }
+
 ``EXCLUDE_URL_PREFIXES``
     A ``tuple`` or ``list`` of URL prefixes to exclude from CSP protection. URLs beginning with any
     of these strings will not get the Content-Security-Policy response headers at all.
@@ -123,7 +172,6 @@ policy.
     A dictionary of policy directives. Each key in the dictionary is a directive and the value is a
     list of sources for that directive. The following is a list of all the directives that can be
     configured.
-
     .. note::
 
        The CSP keyword values of ``'self'``, ``'unsafe-inline'``, ``'strict-dynamic'``, etc. must be
