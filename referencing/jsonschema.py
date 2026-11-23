@@ -50,6 +50,22 @@ def _dollar_id(contents: Schema) -> URI | None:
     return contents.get("$id")
 
 
+def _references_of(*keywords: str):
+    """
+    Create a callable returning JSON Schema references in the given keywords.
+    """
+
+    def references_of(contents: Schema) -> Iterable[URI]:
+        if not isinstance(contents, Mapping):
+            return
+        for keyword in keywords:
+            ref = contents.get(keyword)
+            if isinstance(ref, str):
+                yield ref
+
+    return references_of
+
+
 def _legacy_dollar_id(contents: Schema) -> URI | None:
     if isinstance(contents, bool) or "$ref" in contents:
         return
@@ -384,6 +400,7 @@ DRAFT202012 = Specification(
         },
     ),
     anchors_in=_anchor,
+    references_of=_references_of("$ref", "$dynamicRef"),
     maybe_in_subresource=_maybe_in_subresource(
         in_value={
             "additionalProperties",
@@ -436,6 +453,11 @@ DRAFT201909 = Specification(
         },
     ),
     anchors_in=_anchor_2019,
+    references_of=_references_of(
+        "$ref",
+        "$recursiveRef",
+        "$dynamicRef",
+    ),
     maybe_in_subresource=_maybe_in_subresource_crazy_items(
         in_value={
             "additionalItems",
@@ -479,6 +501,7 @@ DRAFT7 = Specification(
         in_subvalues={"definitions", "patternProperties", "properties"},
     ),
     anchors_in=_legacy_anchor_in_dollar_id,
+    references_of=_references_of("$ref"),
     maybe_in_subresource=_maybe_in_subresource_crazy_items_dependencies(
         in_value={
             "additionalItems",
@@ -510,6 +533,7 @@ DRAFT6 = Specification(
         in_subvalues={"definitions", "patternProperties", "properties"},
     ),
     anchors_in=_legacy_anchor_in_dollar_id,
+    references_of=_references_of("$ref"),
     maybe_in_subresource=_maybe_in_subresource_crazy_items_dependencies(
         in_value={
             "additionalItems",
@@ -532,6 +556,7 @@ DRAFT4 = Specification(
         in_subvalues={"definitions", "patternProperties", "properties"},
     ),
     anchors_in=_legacy_anchor_in_id,
+    references_of=_references_of("$ref"),
     maybe_in_subresource=_maybe_in_subresource_crazy_items_dependencies(
         in_value={"additionalItems", "additionalProperties", "not"},
         in_subarray={"allOf", "anyOf", "oneOf"},
@@ -547,6 +572,7 @@ DRAFT3 = Specification(
         in_subvalues={"definitions", "patternProperties", "properties"},
     ),
     anchors_in=_legacy_anchor_in_id,
+    references_of=_references_of("$ref"),
     maybe_in_subresource=_maybe_in_subresource_crazy_items_dependencies(
         in_value={"additionalItems", "additionalProperties"},
         in_subarray={"extends"},

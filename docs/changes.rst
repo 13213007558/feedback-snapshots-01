@@ -2,6 +2,12 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Add ``referencing.bundle`` (and ``Registry.bundle`` / ``Registry.export``) for exporting an explicitly approved, offline subset of a registry.
+  Exported bundles never retain a retrieval callback, explain nested identifiers and anchors, and report missing dependencies along with the approved root which needs them.
+
 v0.37.0
 -------
 

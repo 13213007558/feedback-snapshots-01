@@ -4,6 +4,7 @@ Errors, oh no!
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import attrs
@@ -163,3 +164,111 @@ class InvalidAnchor(Unresolvable):
             f"to use '#/{self.anchor}', as the slash is required *before each "
             "segment* of a JSON pointer."
         )
+
+
+class MissingDependencyKind(str, Enum):
+    """
+    The category of a dependency which could not be included in a bundle.
+    """
+
+    RESOURCE = "resource"
+    """
+    The referenced resource does not exist in the source registry.
+    """
+
+    ANCHOR = "anchor"
+    """
+    The referenced resource exists, but has no such anchor.
+    """
+
+    POINTER = "pointer"
+    """
+    The referenced resource exists, but its contents have no such location.
+    """
+
+    RESTRICTED = "restricted"
+    """
+    The referenced resource exists but was not approved for delivery.
+    """
+
+    UNAVAILABLE = "unavailable"
+    """
+    Retrieving the referenced resource failed.
+    """
+
+    # Convenient aliases for common terminology.
+    MISSING = "resource"
+    INTERNAL = "restricted"
+    DENIED = "restricted"
+    EXCLUDED = "restricted"
+    NOT_FOUND = "resource"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@frozen
+class MissingDependency:
+    """
+    A dependency which could not be included in a bundle.
+
+    :ivar kind: the category of the missing dependency
+    :ivar uri: the (resolved) URI of the resource which was needed
+    :ivar ref: the reference, as written, which caused the dependency
+    :ivar root: the URI of the approved root which (transitively) needed it
+    """
+
+    kind: MissingDependencyKind
+    uri: URI
+    ref: URI
+    root: URI
+
+    @property
+    def category(self) -> str:
+        """
+        The missing dependency's category as a plain string.
+        """
+        return self.kind.value
+
+    def __str__(self) -> str:
+        return (
+            f"{self.root!r} needs {self.uri!r} "
+            f"({self.kind.value}, via {self.ref!r})"
+        )
+
+
+@frozen
+class MissingDependencies(Exception):
+    """
+    One or more dependencies of a bundle's roots could not be exported.
+
+    The ``missing`` attribute contains one `MissingDependency` for each
+    dependency which could not be included, in discovery order.
+    """
+
+    missing: tuple[MissingDependency, ...] = attrs.field(converter=tuple)
+    bundle: Any = attrs.field(default=None, repr=False, eq=False)
+
+    @property
+    def by_root(self) -> dict[URI, tuple[MissingDependency, ...]]:
+        """
+        The missing dependencies, grouped by the root which needs them.
+        """
+        grouped: dict[URI, list[MissingDependency]] = {}
+        for each in self.missing:
+            grouped.setdefault(each.root, []).append(each)
+        return {root: tuple(each) for root, each in grouped.items()}
+
+    def __attrs_post_init__(self) -> None:
+        Exception.__init__(self, self.missing)
+
+    def __str__(self) -> str:
+        return "; ".join(str(each) for each in self.missing)
+
+    def __eq__(self, other: object) -> bool:
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return self.missing == other.missing
+
+    def __hash__(self) -> int:
+        return hash(self.missing)

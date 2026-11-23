@@ -66,6 +66,14 @@ referencing.exceptions
    :undoc-members:
 
 
+referencing.bundle
+^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.bundle
+   :members:
+   :undoc-members:
+
+
 referencing.retrieval
 ^^^^^^^^^^^^^^^^^^^^^
 

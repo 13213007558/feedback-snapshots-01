@@ -36,6 +36,13 @@ class _MaybeInSubresource(Protocol[D]):
     ) -> Resolver[D]: ...
 
 
+def _no_references(contents: D) -> Iterable[URI]:
+    """
+    A reference extractor for specifications which have no references.
+    """
+    return ()
+
+
 def _detect_or_error(contents: D) -> Specification[D]:
     if not isinstance(contents, Mapping):
         raise exceptions.CannotDetermineSpecification(contents)
@@ -111,6 +118,16 @@ class Specification(Generic[D]):
         Iterable[AnchorType[D]],
     ] = field(alias="anchors_in")
 
+    #: Retrieve the references contained directly in the given document.
+    #:
+    #: Each reference is returned as written in the document, i.e. before
+    #: being resolved against the base URI, so callers can decide how to
+    #: interpret relative references.
+    _references_of: Callable[[D], Iterable[URI]] = field(
+        default=_no_references,
+        alias="references_of",
+    )
+
     #: An opaque specification where resources have no subresources
     #: nor internal identifiers.
     OPAQUE: ClassVar[Specification[Any]]
@@ -156,6 +173,33 @@ class Specification(Generic[D]):
         Retrieve the anchors contained in the given document.
         """
         return self._anchors_in(self, contents)
+
+    def references_of(self, contents: D) -> Iterable[URI]:
+        """
+        Retrieve the references contained directly in the given document.
+
+        References are returned as written, i.e. unresolved. Specifications
+        without a notion of references return nothing.
+        """
+        return self._references_of(contents)
+
+    def has_anchor(self, contents: D, name: str) -> bool:
+        """
+        Check whether the given document has an anchor with the given name.
+
+        This includes anchors within subresources of the document.
+        """
+        seen: set[int] = set()
+
+        def search(current: D) -> bool:
+            if id(current) in seen:
+                return False
+            seen.add(id(current))
+            if any(each.name == name for each in self.anchors_in(current)):
+                return True
+            return any(search(each) for each in self.subresources_of(current))
+
+        return search(contents)
 
     def create_resource(self, contents: D) -> Resource[D]:
         """
@@ -587,6 +631,34 @@ class Registry(Mapping[URI, Resource[D]]):
             base_uri=uri,
             registry=self.with_resource(uri, resource),
         )
+
+    def bundle(
+        self,
+        roots: URI | Iterable[URI],
+        **kwargs: Any,
+    ):
+        """
+        Export an offline bundle of the given roots and approved dependencies.
+
+        See `referencing.bundle.bundle` for the full set of options.
+        """
+        from referencing.bundle import bundle as _bundle
+
+        return _bundle(self, roots, **kwargs)
+
+    def export(
+        self,
+        roots: URI | Iterable[URI],
+        **kwargs: Any,
+    ) -> Registry[D]:
+        """
+        Export an offline registry of the given roots and dependencies.
+
+        Unlike `Registry.bundle`, this returns only the standalone `Registry`.
+        Pass ``strict=False`` to obtain a partial registry instead of raising
+        `referencing.exceptions.MissingDependencies`.
+        """
+        return self.bundle(roots, **kwargs).registry
 
 
 #: An anchor or resource.
