@@ -6,8 +6,16 @@ Unreleased
 
 **New features:**
 
+- Added controlled pseudonymization of historical user links through
+  ``Model.history.anonymize_user()`` and the ``anonymize_history`` management
+  command. Severed rows keep their date, operation type and tracked values, and
+  expose a stable keyed pseudonym instead of the account.
+
 
 **Breaking changes:**
+
+- Historical models gained a nullable ``history_user_pseudonym`` field. Run
+  ``makemigrations`` after upgrading.
 
 
 **Bug fixes:**

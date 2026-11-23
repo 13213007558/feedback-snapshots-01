@@ -1082,3 +1082,69 @@ class TestHistoricParticipantToHistoricOrganizationOneToOne(
         related_name="historic_participant",
     )
     history = HistoricalRecords()
+
+
+class PseudonymAuditRecord(models.Model):
+    """A model whose history is used to exercise pseudonymization of FK users."""
+
+    subject = models.CharField(max_length=100)
+    history = HistoricalRecords()
+
+    def __str__(self):
+        return self.subject
+
+
+class PseudonymExternalAuditRecord(models.Model):
+    """A model whose history tracks an externally managed identity string."""
+
+    subject = models.CharField(max_length=100)
+    history = HistoricalRecords(
+        history_user_id_field=models.CharField(max_length=64, null=True)
+    )
+
+    def __str__(self):
+        return self.subject
+
+
+pseudonym_external_getter_calls = []
+
+
+def pseudonym_external_getter(historical_instance):
+    """Getter that records whether a severable identity was looked up again."""
+    pseudonym_external_getter_calls.append(historical_instance.history_user_id)
+    return None
+
+
+class PseudonymExternalResolution:
+    """Lightweight external identity object used to test false associations."""
+
+    def __init__(self, pk):
+        self.pk = pk
+
+
+class PseudonymExternalResolvingRecord(models.Model):
+    """External identity history whose getter can return a wrong account."""
+
+    subject = models.CharField(max_length=100)
+    history = HistoricalRecords(
+        history_user_id_field=models.CharField(max_length=64, null=True),
+        history_user_getter=lambda historical_instance: (
+            PseudonymExternalResolution(
+                pseudonym_external_resolution_override
+                or historical_instance.history_user_id
+            )
+        ),
+    )
+
+
+pseudonym_external_resolution_override = None
+
+
+class PseudonymExternalGetterRecord(models.Model):
+    """External identity history with an application-supplied getter."""
+
+    subject = models.CharField(max_length=100)
+    history = HistoricalRecords(
+        history_user_id_field=models.CharField(max_length=64, null=True),
+        history_user_getter=pseudonym_external_getter,
+    )

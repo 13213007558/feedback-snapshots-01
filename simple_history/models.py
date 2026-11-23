@@ -39,6 +39,7 @@ from .manager import (
     HistoryDescriptor,
     HistoryManager,
 )
+from .pseudonym import PSEUDONYM_FIELD_NAME, PSEUDONYM_MAX_LENGTH, pseudonym_label
 from .signals import (
     post_create_historical_m2m_records,
     post_create_historical_record,
@@ -74,6 +75,81 @@ def _history_user_getter(historical_instance):
         return User.objects.get(pk=historical_instance.history_user_id)
     except User.DoesNotExist:
         return None
+
+
+def _is_pseudonymized(historical_instance):
+    """
+    Return whether a historical row has been severed from its user account.
+
+    A non-empty pseudonym is authoritative even if an older row still happens to
+    carry an identity value: the row must not be resolved through the account or
+    through a custom identity getter again.
+    """
+    return bool(getattr(historical_instance, PSEUDONYM_FIELD_NAME, None))
+
+
+def _wrapped_history_user_getter(getter):
+    """
+    Wrap a custom ``history_user_getter`` so that a severed link is reportable
+    without asking the custom getter to resolve it again.
+
+    Once ``history_user_id`` has been cleared by pseudonymization, there is no
+    account to look up. Calling the project's getter in that state could trigger
+    an external identity lookup for ``None`` and fabricate an association (or
+    return an unrelated object), so the wrapper short-circuits to ``None``.
+    """
+
+    def wrapper(historical_instance):
+        if _is_pseudonymized(historical_instance):
+            return None
+        identity = getattr(historical_instance, "history_user_id", None)
+        if identity is None:
+            return None
+        user = getter(historical_instance)
+        if user is None:
+            return None
+        # An identity service may answer with a placeholder or an unrelated
+        # person for an identifier it no longer knows. Only accept an object
+        # whose primary key matches the identity stored on this row; otherwise
+        # the caller would see a fabricated association.
+        returned_pk = getattr(user, "pk", None)
+        if returned_pk is None or str(returned_pk) != str(identity):
+            return None
+        return user
+
+    return wrapper
+
+
+class HistoricalUserAccessor(ForwardManyToOneDescriptor):
+    """
+    Forward descriptor for the historical ``history_user`` foreign key.
+
+    For ordinary history rows this behaves exactly like Django's descriptor.
+    For pseudonymized rows it returns ``None`` *without touching the related
+    user table*, so neither an ordinary history view nor an admin page can turn
+    a stored identity back into an account.
+    """
+
+    def __get__(self, instance, cls=None):
+        if instance is None:
+            return self
+        if _is_pseudonymized(instance):
+            return None
+        return super().__get__(instance, cls)
+
+
+class HistoricalUserForeignKey(models.ForeignKey):
+    """``ForeignKey`` used for ``history_user`` with pseudonym-aware reads."""
+
+    forward_related_accessor_class = HistoricalUserAccessor
+
+    def deconstruct(self):
+        # The database representation is an ordinary ``ForeignKey``; report it
+        # as such so adding pseudonymization does not churn every project's
+        # migrations just because the read accessor differs.
+        name, path, args, kwargs = super().deconstruct()
+        path = "django.db.models.ForeignKey"
+        return name, path, args, kwargs
 
 
 def _history_user_setter(historical_instance, user):
@@ -439,7 +515,9 @@ class HistoricalRecords:
         if self.user_id_field is not None:
             # Tracking user using explicit id rather than Django ForeignKey
             history_user_fields = {
-                "history_user": property(self.user_getter, self.user_setter),
+                "history_user": property(
+                    _wrapped_history_user_getter(self.user_getter), self.user_setter
+                ),
                 "history_user_id": self.user_id_field,
             }
         else:
@@ -448,7 +526,7 @@ class HistoricalRecords:
             )
 
             history_user_fields = {
-                "history_user": models.ForeignKey(
+                "history_user": HistoricalUserForeignKey(
                     user_model,
                     null=True,
                     related_name=self.user_related_name,
@@ -563,6 +641,34 @@ class HistoricalRecords:
             """
             return self.get_history_user(instance)
 
+        def get_history_user_label(self):
+            """
+            Return the public label for the acting identity of this record.
+
+            A live association renders the account's string form, while a severed
+            association renders only the stored pseudonym label. The account is
+            never consulted once the link has been cleared, so this is safe to
+            use in ordinary history views.
+            """
+            stored_pseudonym = getattr(self, PSEUDONYM_FIELD_NAME, None)
+            if stored_pseudonym:
+                return pseudonym_label(stored_pseudonym)
+            if self.history_user_id is not None:
+                user = self.history_user
+                if user is not None:
+                    return str(user)
+                return None
+            return None
+
+        def _is_pseudonymized_method(self):
+            """
+            Return whether this row's account link has been severed.
+
+            Rows without a pseudonym are ordinary (possibly legacy) history rows
+            and may still carry a live ``history_user`` association.
+            """
+            return bool(getattr(self, PSEUDONYM_FIELD_NAME, None))
+
         extra_fields = {
             "history_id": self._get_history_id_field(),
             "history_date": models.DateTimeField(db_index=self._date_indexing is True),
@@ -583,6 +689,16 @@ class HistoricalRecords:
                 self.history_object, self.history_date
             ),
             "get_default_history_user": staticmethod(get_default_history_user),
+            "get_history_user_label": get_history_user_label,
+            "is_pseudonymized": property(_is_pseudonymized_method),
+            PSEUDONYM_FIELD_NAME: models.CharField(
+                max_length=PSEUDONYM_MAX_LENGTH,
+                null=True,
+                blank=True,
+                default=None,
+                editable=False,
+                db_index=True,
+            ),
         }
 
         extra_fields.update(self._get_history_related_field(model))

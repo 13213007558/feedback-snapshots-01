@@ -114,6 +114,7 @@ class TestTrackingInheritance(TestCase):
                     "history_change_reason",
                     "history_date",
                     "history_user_id",
+                    "history_user_pseudonym",
                     "history_type",
                 ]
             ),
@@ -132,6 +133,7 @@ class TestTrackingInheritance(TestCase):
                     "history_change_reason",
                     "history_date",
                     "history_user_id",
+                    "history_user_pseudonym",
                     "history_type",
                 ]
             ),
@@ -156,6 +158,7 @@ class TestTrackingInheritance(TestCase):
                     "history_change_reason",
                     "history_date",
                     "history_user_id",
+                    "history_user_pseudonym",
                     "history_type",
                 ]
             ),
@@ -172,6 +175,7 @@ class TestTrackingInheritance(TestCase):
                     "history_change_reason",
                     "history_date",
                     "history_user_id",
+                    "history_user_pseudonym",
                     "history_type",
                 ]
             ),
@@ -188,6 +192,7 @@ class TestTrackingInheritance(TestCase):
                     "history_change_reason",
                     "history_date",
                     "history_user_id",
+                    "history_user_pseudonym",
                     "history_type",
                 ]
             ),

@@ -31,7 +31,9 @@
         <td>{{ record.history_date }}</td>
         <td>{{ record.get_history_type_display }}</td>
         <td>
-          {% if record.history_user %}
+          {% if record.is_pseudonymized %}
+            {{ record.get_history_user_label }}
+          {% elif record.history_user %}
             {% url admin_user_view record.history_user_id as admin_user_url %}
             {% if admin_user_url %}
               <a href="{{ admin_user_url }}">{{ record.history_user }}</a>

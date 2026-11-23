@@ -258,6 +258,51 @@ class HistoryManager(models.Manager):
             historical_instances, batch_size=batch_size
         )
 
+    def anonymize_user(
+        self,
+        *,
+        user=None,
+        users=None,
+        identity=None,
+        identities=None,
+        subject=None,
+        namespace="default",
+        secret=None,
+        watermark=None,
+        cutoff=None,
+        dry_run=False,
+    ):
+        """
+        Sever the user link on the historical rows managed by this manager and
+        replace it with a stable pseudonym.
+
+        When called on an instance's history manager, only that instance's rows
+        are considered. When called on a model's history manager, all rows are,
+        subject to ``watermark``/``cutoff``. See
+        :func:`simple_history.pseudonym.anonymize_history_user` for the full
+        semantics.
+        """
+        from .pseudonym import anonymize_history_user
+
+        queryset = None
+        if self.instance is not None:
+            queryset = self.get_queryset()
+        return anonymize_history_user(
+            self.model.instance_type,
+            user=user,
+            users=users,
+            identity=identity,
+            identities=identities,
+            subject=subject,
+            namespace=namespace,
+            secret=secret,
+            watermark=watermark,
+            cutoff=cutoff,
+            using=self.db,
+            queryset=queryset,
+            dry_run=dry_run,
+        )
+
 
 class HistoryDescriptor:
     def __init__(self, model, manager=HistoryManager, queryset=HistoricalQuerySet):
