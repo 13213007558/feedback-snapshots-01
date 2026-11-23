@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from csp.constants import NONCE, SELF
 
 CONTENT_SECURITY_POLICY = {
@@ -5,6 +7,14 @@ CONTENT_SECURITY_POLICY = {
         "default-src": [SELF, NONCE],
     }
 }
+
+MIDDLEWARE = [
+    "csp.middleware.CSPMiddleware",
+]
+
+ROOT_URLCONF = "csp.tests.urls"
+
+TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 DATABASES = {
     "default": {
@@ -27,17 +37,20 @@ SECRET_KEY = "csp-test-key"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.jinja2.Jinja2",
-        "DIRS": [],
+        "DIRS": [TEMPLATE_DIR],
         "APP_DIRS": True,
         "OPTIONS": {
             "environment": "csp.tests.environment.environment",
             "extensions": ["csp.extensions.NoncedScript"],
+            "context_processors": ["django.template.context_processors.request"],
         },
     },
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [TEMPLATE_DIR],
         "APP_DIRS": True,
-        "OPTIONS": {},
+        "OPTIONS": {
+            "context_processors": ["django.template.context_processors.request"],
+        },
     },
 ]

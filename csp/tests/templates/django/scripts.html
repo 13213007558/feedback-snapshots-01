@@ -1,0 +1,7 @@
+{% load csp %}{% script src="https://cdn.example.com/app.js" type="application/javascript" async=True defer=True integrity="sha384-base64digest" %}
+// this body must be dropped because src is set
+{% endscript %}
+{% script %}
+console.log('django inline script');
+var answer = 42;
+{% endscript %}
