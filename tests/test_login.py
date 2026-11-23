@@ -835,7 +835,8 @@ class DatabaseLoginTestCase(AxesTestCase):
 class CacheLoginTestCase(DatabaseLoginTestCase):
     def attempt_count(self):
         cache = get_cache()
-        keys = cache._cache
+        # reset-on-success boundary markers (keys ending in -reset) are not failures
+        keys = [key for key in cache._cache if not key.endswith("-reset")]
         return len(keys)
 
     def reset(self, **kwargs):

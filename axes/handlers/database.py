@@ -3,7 +3,7 @@ from logging import getLogger
 from typing import List, Optional
 
 from django.db import router, transaction
-from django.db.models import F, Q, QuerySet, Sum, Value
+from django.db.models import F, Max, Q, QuerySet, Sum, Value
 from django.db.models.functions import Concat
 from django.http import HttpRequest
 from django.http.multipartparser import MultiPartParserError
@@ -122,6 +122,41 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         )
         return attempt_count
 
+    def get_reset_time(self, request, credentials: Optional[dict] = None):
+        """
+        Get the attempt time of the latest successful login for the client.
+
+        When ``settings.AXES_RESET_ON_SUCCESS`` is enabled the returned time
+        is the boundary of the current lockout round: failures initiated at
+        or before it were already reset by the success and must not count
+        towards a new round. The boundary is read from the access log, so it
+        is unavailable when ``settings.AXES_DISABLE_ACCESS_LOG`` is enabled.
+        """
+
+        if not settings.AXES_RESET_ON_SUCCESS:
+            return None
+
+        username = get_client_username(request, credentials)
+        filter_kwargs_list = get_client_parameters(
+            username,
+            request.axes_ip_address,
+            request.axes_user_agent,
+            request,
+            credentials,
+        )
+
+        reset_time = None
+        for filter_kwargs in filter_kwargs_list:
+            attempt_time = AccessLog.objects.filter(**filter_kwargs).aggregate(
+                Max("attempt_time")
+            )["attempt_time__max"]
+            if attempt_time is not None and (
+                reset_time is None or attempt_time > reset_time
+            ):
+                reset_time = attempt_time
+
+        return reset_time
+
     def user_login_failed(self, sender, credentials: dict, request=None, **kwargs):
         """
         When user login fails, save AccessFailureLog record in database,
@@ -174,6 +209,23 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
 
         if self.is_whitelisted(request, credentials):
             log.info("AXES: Login failed from whitelisted client %s.", client_str)
+            return
+
+        # If the failure was initiated before the last successful login but
+        # reported after it, it belongs to the round that the success already
+        # reset and must not be recorded as a new failure.
+        reset_time = self.get_reset_time(request, credentials)
+        attempt_time = getattr(request, "axes_attempt_time", None)
+        if (
+            reset_time is not None
+            and attempt_time is not None
+            and attempt_time <= reset_time
+        ):
+            log.info(
+                "AXES: Ignoring late login failure by %s that was initiated before the last successful login.",
+                client_str,
+            )
+            request.axes_failures_since_start = self.get_failures(request, credentials)
             return
 
         # 2. database query: Get or create access record with the new failure data
@@ -391,13 +443,29 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
             log.debug(
                 "AXES: Getting all access attempts from database because no AXES_COOLOFF_TIME is configured"
             )
-            return attempts_list
+        else:
+            threshold = get_cool_off_threshold(request)
+            log.debug("AXES: Getting access attempts that are newer than %s", threshold)
+            attempts_list = [
+                attempts.filter(attempt_time__gte=threshold)
+                for attempts in attempts_list
+            ]
 
-        threshold = get_cool_off_threshold(request)
-        log.debug("AXES: Getting access attempts that are newer than %s", threshold)
-        return [
-            attempts.filter(attempt_time__gte=threshold) for attempts in attempts_list
-        ]
+        # Only count failures from the current lockout round so that readers
+        # such as the authentication backend and the admin site agree with
+        # the write path on the lockout state after a reset on success.
+        reset_time = self.get_reset_time(request, credentials)
+        if reset_time is not None:
+            log.debug(
+                "AXES: Getting access attempts that are newer than the last reset on success at %s",
+                reset_time,
+            )
+            attempts_list = [
+                attempts.filter(attempt_time__gt=reset_time)
+                for attempts in attempts_list
+            ]
+
+        return attempts_list
 
     def clean_expired_user_attempts(
         self,

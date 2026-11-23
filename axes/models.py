@@ -1,5 +1,18 @@
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+
+
+def get_default_attempt_time():
+    """
+    Get the default attempt time for access records.
+
+    Defined as a module level function so that the field default is
+    serializable in migrations and ``django.utils.timezone.now`` lookups
+    happen at call time.
+    """
+
+    return timezone.now()
 
 
 class AccessBase(models.Model):
@@ -13,7 +26,9 @@ class AccessBase(models.Model):
 
     path_info = models.CharField(_("Path"), max_length=255)
 
-    attempt_time = models.DateTimeField(_("Attempt Time"), auto_now_add=True)
+    attempt_time = models.DateTimeField(
+        _("Attempt Time"), default=get_default_attempt_time
+    )
 
     class Meta:
         app_label = "axes"

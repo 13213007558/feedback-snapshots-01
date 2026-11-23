@@ -13,7 +13,7 @@ from django.urls import reverse
 
 from axes.conf import settings
 from axes.handlers.proxy import AxesProxyHandler
-from axes.helpers import get_client_str
+from axes.helpers import get_client_str, get_failure_limit
 from tests.base import AxesTestCase
 
 
@@ -600,6 +600,108 @@ class AxesCacheHandlerTestCase(AxesHandlerBaseTestCase):
         # The count is re-seeded with its timeout, so touch is not needed.
         self.assertEqual(cache_add.call_count, 2)
         self.assertFalse(cache_touch.called)
+
+
+class AxesOutOfOrderResetTestCaseMixin:
+    """
+    Check reset-on-success behaviour with out-of-order authentication signals.
+
+    A failure that was initiated before a successful login but reported after
+    it (e.g. due to a slow authentication backend) must not start a new
+    lockout round when AXES_RESET_ON_SUCCESS is enabled, while failures
+    initiated after the success must still be counted.
+
+    Uses a fake clock by stamping each request with an explicit
+    ``axes_attempt_time`` instead of sleeping.
+    """
+
+    def set_attempt_time(self, attempt_time):
+        self.request.axes_attempt_time = attempt_time
+        self.request.axes_locked_out = False
+        self.request.axes_updated = True
+
+    def get_remaining_attempts(self):
+        return get_failure_limit(
+            self.request, self.credentials
+        ) - AxesProxyHandler.get_failures(self.request, self.credentials)
+
+    def test_out_of_order_failure_around_reset_on_success(self):
+        failure_limit = get_failure_limit(self.request, self.credentials)
+        start = timezone.now()
+
+        # Two genuine failures before the successful login.
+        self.set_attempt_time(start)
+        AxesProxyHandler.user_login_failed(None, self.credentials, self.request)
+        self.set_attempt_time(start + timedelta(seconds=1))
+        AxesProxyHandler.user_login_failed(None, self.credentials, self.request)
+        self.assertEqual(
+            2, AxesProxyHandler.get_failures(self.request, self.credentials)
+        )
+        self.assertEqual(failure_limit - 2, self.get_remaining_attempts())
+
+        # A successful login resets the failure count.
+        success_time = start + timedelta(seconds=2)
+        self.set_attempt_time(success_time)
+        AxesProxyHandler.user_logged_in(None, self.request, self.user)
+        self.assertEqual(
+            0, AxesProxyHandler.get_failures(self.request, self.credentials)
+        )
+        self.assertEqual(failure_limit, self.get_remaining_attempts())
+        self.assertFalse(AxesProxyHandler.is_locked(self.request, self.credentials))
+
+        # A slow failure that was initiated before the success arrives late
+        # and must not count as a failure of the new round.
+        self.set_attempt_time(start + timedelta(seconds=1, milliseconds=500))
+        AxesProxyHandler.user_login_failed(None, self.credentials, self.request)
+        self.assertEqual(
+            0, AxesProxyHandler.get_failures(self.request, self.credentials)
+        )
+        self.assertEqual(failure_limit, self.get_remaining_attempts())
+        self.assertFalse(AxesProxyHandler.is_locked(self.request, self.credentials))
+
+        # A genuine failure initiated after the success counts normally.
+        self.set_attempt_time(success_time + timedelta(seconds=1))
+        AxesProxyHandler.user_login_failed(None, self.credentials, self.request)
+        self.assertEqual(
+            1, AxesProxyHandler.get_failures(self.request, self.credentials)
+        )
+        self.assertEqual(failure_limit - 1, self.get_remaining_attempts())
+        self.assertFalse(AxesProxyHandler.is_locked(self.request, self.credentials))
+
+        # Further genuine failures accumulate into a new lockout.
+        for step in range(2, failure_limit + 1):
+            self.set_attempt_time(success_time + timedelta(seconds=step))
+            AxesProxyHandler.user_login_failed(None, self.credentials, self.request)
+        self.assertEqual(
+            failure_limit,
+            AxesProxyHandler.get_failures(self.request, self.credentials),
+        )
+        self.assertEqual(0, self.get_remaining_attempts())
+        self.assertTrue(AxesProxyHandler.is_locked(self.request, self.credentials))
+
+
+@override_settings(
+    AXES_HANDLER="axes.handlers.database.AxesDatabaseHandler",
+    AXES_RESET_ON_SUCCESS=True,
+    AXES_FAILURE_LIMIT=3,
+    AXES_COOLOFF_TIME=timedelta(hours=1),
+)
+class AxesDatabaseHandlerOutOfOrderResetTestCase(
+    AxesOutOfOrderResetTestCaseMixin, AxesTestCase
+):
+    pass
+
+
+@override_settings(
+    AXES_HANDLER="axes.handlers.cache.AxesCacheHandler",
+    AXES_RESET_ON_SUCCESS=True,
+    AXES_FAILURE_LIMIT=3,
+    AXES_COOLOFF_TIME=timedelta(hours=1),
+)
+class AxesCacheHandlerOutOfOrderResetTestCase(
+    AxesOutOfOrderResetTestCaseMixin, AxesTestCase
+):
+    pass
 
 
 @override_settings(AXES_HANDLER="axes.handlers.dummy.AxesDummyHandler")

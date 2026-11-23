@@ -416,6 +416,27 @@ def get_client_cache_keys(
     return make_cache_key_list(filter_kwargs_list)
 
 
+def get_client_reset_cache_keys(
+    request_or_attempt: Union[HttpRequest, AccessBase],
+    credentials: Optional[dict] = None,
+) -> List[str]:
+    """
+    Build cache key names that store the time of the last reset-on-success for the client.
+
+    The keys are derived from the client failure cache keys so that the reset
+    boundary is tracked with the same lockout parameters as the failures.
+
+    :param request_or_attempt: HttpRequest or AccessAttempt object
+    :param credentials: credentials containing user information
+    :return cache_key: Hash key that is usable for Django cache backends
+    """
+
+    return [
+        f"{cache_key}-reset"
+        for cache_key in get_client_cache_keys(request_or_attempt, credentials)
+    ]
+
+
 def get_client_str(
     username: str,
     ip_address: str,

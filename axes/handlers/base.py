@@ -1,5 +1,6 @@
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Optional
 from warnings import warn
 
@@ -178,6 +179,21 @@ class AxesBaseHandler:  # pylint: disable=unused-argument
             return not re.match(f"^{admin_url}", request.path)
 
         return False
+
+    def get_reset_time(
+        self, request, credentials: Optional[dict] = None
+    ) -> Optional[datetime]:
+        """
+        Get the time of the last successful login that reset the failure count for the client, if any.
+
+        The reset time acts as a boundary between lockout rounds when
+        ``settings.AXES_RESET_ON_SUCCESS`` is enabled: failures that were
+        initiated before the boundary but reported after it belong to the
+        previous round and must not be counted again.
+
+        Please overwrite it on each specialized handler as needed.
+        """
+        return None
 
     def reset_attempts(
         self,

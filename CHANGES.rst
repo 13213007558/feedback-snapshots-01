@@ -2,6 +2,22 @@
 Changes
 =======
 
+9.0.1 (unreleased)
+------------------
+
+- Ignore late login failures that were initiated before a successful login
+  but reported after it, e.g. due to a slow authentication backend, when
+  ``AXES_RESET_ON_SUCCESS`` is enabled. Out-of-order authentication signals no
+  longer start a new lockout round in the database and cache handlers, while
+  failures initiated after the success are still counted. With the database
+  handler the reset boundary is tracked in the access log, so the protection
+  requires ``AXES_DISABLE_ACCESS_LOG`` to be ``False`` there.
+- Store the attempt time recorded at the start of the request on access
+  attempt, access log, and access failure log records instead of the record
+  creation time, so that records reflect when authentication was initiated.
+  Run ``python manage.py migrate`` to apply the new
+  ``axes.0011_alter_accessattempt_attempt_time_and_more`` migration.
+
 9.0.0 (2026-10-30)
 ------------------
 

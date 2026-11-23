@@ -7,6 +7,7 @@ from axes.helpers import (
     get_cache,
     get_cache_timeout,
     get_client_cache_keys,
+    get_client_reset_cache_keys,
     get_client_str,
     get_client_username,
     get_credentials,
@@ -65,6 +66,31 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
         )
         return failure_count
 
+    def get_reset_time(self, request, credentials: Optional[dict] = None):
+        """
+        Get the attempt time of the latest successful login for the client.
+
+        When ``settings.AXES_RESET_ON_SUCCESS`` is enabled the returned time
+        is the boundary of the current lockout round: failures initiated at
+        or before it were already reset by the success and must not count
+        towards a new round.
+        """
+
+        if not settings.AXES_RESET_ON_SUCCESS:
+            return None
+
+        reset_cache_keys = get_client_reset_cache_keys(request, credentials)
+        reset_times = [
+            reset_time
+            for reset_time in (
+                self.cache.get(reset_cache_key) for reset_cache_key in reset_cache_keys
+            )
+            if reset_time is not None
+        ]
+        if not reset_times:
+            return None
+        return max(reset_times)
+
     def user_login_failed(self, sender, credentials: dict, request=None, **kwargs):
         """
         When user login fails, save attempt record in cache and lock user out if necessary.
@@ -110,6 +136,23 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
 
         if self.is_whitelisted(request, credentials):
             log.info("AXES: Login failed from whitelisted client %s.", client_str)
+            return
+
+        # If the failure was initiated before the last successful login but
+        # reported after it, it belongs to the round that the success already
+        # reset and must not be recorded as a new failure.
+        reset_time = self.get_reset_time(request, credentials)
+        attempt_time = getattr(request, "axes_attempt_time", None)
+        if (
+            reset_time is not None
+            and attempt_time is not None
+            and attempt_time <= reset_time
+        ):
+            log.info(
+                "AXES: Ignoring late login failure by %s that was initiated before the last successful login.",
+                client_str,
+            )
+            request.axes_failures_since_start = self.get_failures(request, credentials)
             return
 
         cache_keys = get_client_cache_keys(request, credentials)
@@ -184,9 +227,16 @@ class AxesCacheHandler(AbstractAxesHandler, AxesBaseHandler):
 
         if settings.AXES_RESET_ON_SUCCESS:
             cache_keys = get_client_cache_keys(request, credentials)
-            for cache_key in cache_keys:
+            reset_cache_keys = get_client_reset_cache_keys(request, credentials)
+            cache_timeout = get_cache_timeout(request)
+            reset_time = getattr(request, "axes_attempt_time", None)
+            for cache_key, reset_cache_key in zip(cache_keys, reset_cache_keys):
                 failures_since_start = self.cache.get(cache_key, default=0)
                 self.cache.delete(cache_key)
+                # Remember the reset boundary so that late failures that were
+                # initiated before this success can be discarded, and expire
+                # it together with the failure counts after the cool off.
+                self.cache.set(reset_cache_key, reset_time, timeout=cache_timeout)
                 log.info(
                     "AXES: Deleted %d failed login attempts by %s from cache.",
                     failures_since_start,
