@@ -217,6 +217,30 @@ def _preferred_browser():
 def _is_ssh_cert_or_pop_request(token_type, auth_scheme) -> bool:
     return token_type == "ssh-cert" or token_type == "pop" or isinstance(auth_scheme, msal.auth_scheme.PopAuthScheme)
 
+def _describe_pop_binding(auth_scheme):
+    """Render the per-request PoP binding as human-readable context.
+
+    A Proof-of-Possession token is bound to one concrete HTTP request (verb,
+    URL, server nonce). When a broker-backed PoP request has to fall back, the
+    fallback must never silently hand out an unbound bearer token instead.
+    Including the original binding in the controlled error lets a caller prove
+    which operation an outcome (or failure) belonged to, even when responses
+    for concurrent operations arrive out of order.
+    """
+    if not isinstance(auth_scheme, msal.auth_scheme.PopAuthScheme):
+        return ""
+    return (
+        " The requested Proof-of-Possession binding was "
+        "{method} {url} (nonce={nonce}).".format(
+            method=auth_scheme._http_method,
+            url=auth_scheme._url.geturl(),
+            nonce=auth_scheme._nonce))
+
+def _pop_unsupported_error(auth_scheme):
+    return ValueError(
+        ClientApplication._AUTH_SCHEME_UNSUPPORTED
+        + _describe_pop_binding(auth_scheme))
+
 class _ClientWithCcsRoutingInfo(Client):
 
     def initiate_auth_code_flow(self, **kwargs):
@@ -1815,7 +1839,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                         return self._process_broker_response(response, scopes, data)
 
             if auth_scheme:
-                raise ValueError(self._AUTH_SCHEME_UNSUPPORTED)
+                raise _pop_unsupported_error(auth_scheme)
             if account:
                 result = self._acquire_token_silent_by_finding_rt_belongs_to_me_or_my_family(
                     authority, self._decorate_scope(scopes), account,
@@ -2074,7 +2098,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             return self._process_broker_response(response, scopes, kwargs.get("data", {}))
 
         if auth_scheme:
-            raise ValueError(self._AUTH_SCHEME_UNSUPPORTED)
+            raise _pop_unsupported_error(auth_scheme)
         scopes = self._decorate_scope(scopes)
         telemetry_context = self._build_telemetry_context(
             self.ACQUIRE_TOKEN_BY_USERNAME_PASSWORD_ID)
@@ -2424,9 +2448,10 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             return self._process_broker_response(response, scopes, data)
 
         if isinstance(auth_scheme, msal.auth_scheme.PopAuthScheme) and sys.platform == "linux":
-            raise ValueError("POP is not supported on Linux")
+            raise ValueError(
+                "POP is not supported on Linux" + _describe_pop_binding(auth_scheme))
         elif auth_scheme:
-            raise ValueError(self._AUTH_SCHEME_UNSUPPORTED)
+            raise _pop_unsupported_error(auth_scheme)
         on_before_launching_ui(ui="browser")
         telemetry_context = self._build_telemetry_context(
             self.ACQUIRE_TOKEN_INTERACTIVE)
