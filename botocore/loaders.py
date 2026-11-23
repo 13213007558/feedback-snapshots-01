@@ -100,8 +100,28 @@ applied to the model after it is loaded. Data in these files might represent
 information that doesn't quite fit in the original models, but is still needed
 for the sdk. For instance, additional operation parameters might be added here
 which don't represent the actual service api.
+
+
+Supplemental Service Models
+===========================
+
+By default, the first service model found on the search path is used as-is.
+Teams that keep local service models to supplement documentation and other
+non security related fields can opt in to a layered loading mode via the
+``allow_supplemental_models`` argument to ``Loader``.  In this mode, the
+model shipped with the release package is used as the base and every
+supplemental model found on the extra search paths is merged over it in
+search path precedence order.
+
+The merge is audited: changes a supplemental model attempts to make to
+security sensitive operation declarations (``auth``/``authtype``) of
+operations that exist in the released model are blocked and recorded in
+``Loader.supplemental_audit_log`` with the operation name and the source
+path of the supplemental model.  All other supplemental data, including
+new operations, is merged normally.
 """
 
+import copy
 import logging
 import os
 
@@ -198,7 +218,7 @@ class JSONFileLoader:
         return None
 
 
-def create_loader(search_path_string=None):
+def create_loader(search_path_string=None, allow_supplemental_models=False):
     """Create a Loader class.
 
     This factory function creates a loader given a search string path.
@@ -209,17 +229,24 @@ def create_loader(search_path_string=None):
         which is typically ``:`` on POSIX platforms and ``;`` on
         windows.
 
+    :type allow_supplemental_models: bool
+    :param allow_supplemental_models: Whether or not service models found
+        on the extra search paths are merged over the released service
+        model with security sensitive changes audited and blocked.  See
+        ``Loader`` for more details.
+
     :return: A ``Loader`` instance.
 
     """
+    loader_kwargs = {'allow_supplemental_models': allow_supplemental_models}
     if search_path_string is None:
-        return Loader()
+        return Loader(**loader_kwargs)
     paths = []
     extra_paths = search_path_string.split(os.pathsep)
     for path in extra_paths:
         path = os.path.expanduser(os.path.expandvars(path))
         paths.append(path)
-    return Loader(extra_search_paths=paths)
+    return Loader(extra_search_paths=paths, **loader_kwargs)
 
 
 class Loader:
@@ -240,6 +267,11 @@ class Loader:
         os.path.expanduser('~'), '.aws', 'models'
     )
     BUILTIN_EXTRAS_TYPES = ['sdk']
+    # Operation model keys that declaratively control how requests for an
+    # operation are authenticated.  Supplemental service models are never
+    # allowed to change these values for operations that already exist in
+    # the released model.
+    SECURITY_SENSITIVE_OPERATION_KEYS = frozenset(['auth', 'authtype'])
 
     def __init__(
         self,
@@ -248,6 +280,7 @@ class Loader:
         cache=None,
         include_default_search_paths=True,
         include_default_extras=True,
+        allow_supplemental_models=False,
     ):
         self._cache = {}
         if file_loader is None:
@@ -267,6 +300,8 @@ class Loader:
             self._extras_types.extend(self.BUILTIN_EXTRAS_TYPES)
 
         self._extras_processor = ExtrasProcessor()
+        self._allow_supplemental_models = allow_supplemental_models
+        self._supplemental_audit_log = []
 
     @property
     def search_paths(self):
@@ -275,6 +310,21 @@ class Loader:
     @property
     def extras_types(self):
         return self._extras_types
+
+    @property
+    def supplemental_audit_log(self):
+        """Audit records of blocked supplemental model changes.
+
+        Each record is a dict identifying a security sensitive change that
+        a supplemental service model attempted to make and that was blocked
+        during the merge.  Records contain the ``service_name``,
+        ``api_version``, ``operation_name`` and ``key`` that were targeted,
+        the ``source_path`` of the supplemental model, the ``blocked_value``
+        that was attempted and the ``retained_value`` from the released
+        model.  Records are created when a model is actually loaded and are
+        kept as-is when the merged model is served from the loader's cache.
+        """
+        return list(self._supplemental_audit_log)
 
     @instance_cache
     def list_available_services(self, type_name):
@@ -415,13 +465,113 @@ class Loader:
                 service_name, type_name
             )
         full_path = os.path.join(service_name, api_version, type_name)
-        model = self.load_data(full_path)
+        if self._allow_supplemental_models and type_name == 'service-2':
+            model = self._load_layered_service_model(
+                service_name, api_version, type_name
+            )
+        else:
+            model = self.load_data(full_path)
 
         # Load in all the extras
         extras_data = self._find_extras(service_name, type_name, api_version)
         self._extras_processor.process(model, extras_data)
 
         return model
+
+    def _load_layered_service_model(
+        self, service_name, api_version, type_name
+    ):
+        """Load a service model merging supplemental models over the release.
+
+        The model shipped with the release package (the lowest precedence
+        match on the search path) is used as the base.  Every supplemental
+        model found on the search path is then merged over it, lowest
+        precedence first, with security sensitive operation changes blocked
+        and audited.
+        """
+        full_path = os.path.join(service_name, api_version, type_name)
+        candidates = []
+        for possible_path in self._potential_locations(full_path):
+            data = self.file_loader.load_file(possible_path)
+            if data is not None:
+                candidates.append((possible_path, data))
+        if not candidates:
+            raise DataNotFoundError(data_path=full_path)
+        if len(candidates) == 1:
+            return candidates[0][1]
+        # Candidates are ordered by search path precedence, highest first.
+        base_path, base_model = candidates[-1]
+        logger.debug(
+            "Using service model from %s as the merge base.", base_path
+        )
+        # Copy the base model so the merged result never mutates data
+        # shared with other loader caches.
+        model = copy.deepcopy(base_model)
+        for source_path, supplemental in reversed(candidates[:-1]):
+            self._merge_supplemental_model(
+                model, supplemental, service_name, api_version, source_path
+            )
+        return model
+
+    def _merge_supplemental_model(
+        self, model, supplemental, service_name, api_version, source_path
+    ):
+        """Merge a single supplemental model into the base model."""
+        logger.debug("Merging supplemental service model: %s", source_path)
+        # Copy the supplemental data so blocked keys can be stripped without
+        # mutating data shared with other loader caches.
+        supplemental = copy.deepcopy(supplemental)
+        self._block_security_sensitive_changes(
+            model, supplemental, service_name, api_version, source_path
+        )
+        deep_merge(model, supplemental)
+
+    def _block_security_sensitive_changes(
+        self, model, supplemental, service_name, api_version, source_path
+    ):
+        """Strip security sensitive operation changes from a supplemental.
+
+        Any attempt by the supplemental model to change a security
+        sensitive key (``auth``/``authtype``) of an operation that already
+        exists in the base model is removed from the supplemental data and
+        recorded in the supplemental audit log.  Operations introduced by
+        the supplemental model itself are ordinary extensions and are left
+        untouched.
+        """
+        operations = supplemental.get('operations', {})
+        base_operations = model.get('operations', {})
+        for operation_name, operation in operations.items():
+            base_operation = base_operations.get(operation_name)
+            if base_operation is None:
+                continue
+            for key in self.SECURITY_SENSITIVE_OPERATION_KEYS:
+                if key not in operation:
+                    continue
+                attempted_value = operation[key]
+                retained_value = base_operation.get(key)
+                if attempted_value == retained_value:
+                    continue
+                self._supplemental_audit_log.append(
+                    {
+                        'service_name': service_name,
+                        'api_version': api_version,
+                        'operation_name': operation_name,
+                        'key': key,
+                        'source_path': source_path,
+                        'blocked_value': attempted_value,
+                        'retained_value': retained_value,
+                    }
+                )
+                logger.warning(
+                    "Blocked supplemental model change to %r on operation "
+                    "%s.%s from %s; keeping released value %r.",
+                    key,
+                    service_name,
+                    operation_name,
+                    source_path,
+                    retained_value,
+                )
+                del operation[key]
 
     def _find_extras(self, service_name, type_name, api_version):
         """Creates an iterator over all the extras data."""

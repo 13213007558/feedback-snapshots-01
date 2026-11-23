@@ -21,7 +21,10 @@
 
 import contextlib
 import copy
+import json
 import os
+import shutil
+import tempfile
 
 from botocore.exceptions import DataNotFoundError, UnknownServiceError
 from botocore.loaders import (
@@ -242,6 +245,197 @@ class TestLoader(BaseEnvVar):
         path_elsewhere = __file__
         self.assertTrue(loader.is_builtin_path(path_in_builtins))
         self.assertFalse(loader.is_builtin_path(path_elsewhere))
+
+
+class TestSupplementalServiceModels(BaseEnvVar):
+    def setUp(self):
+        super().setUp()
+        self.tempdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tempdir)
+        self.release_path = os.path.join(self.tempdir, 'release')
+        self.docs_path = os.path.join(self.tempdir, 'docs')
+        self.auth_path = os.path.join(self.tempdir, 'auth')
+        self.service_name = 'myservice'
+        self.api_version = '2020-01-01'
+        self._write_model(
+            self.release_path,
+            {
+                'version': '2.0',
+                'metadata': {
+                    'apiVersion': self.api_version,
+                    'endpointPrefix': 'myservice',
+                    'protocol': 'json',
+                    'serviceId': 'MyService',
+                    'signatureVersion': 'v4',
+                },
+                'operations': {
+                    'DescribeThing': {
+                        'name': 'DescribeThing',
+                        'http': {'method': 'POST', 'requestUri': '/'},
+                        'documentation': '<p>release docs</p>',
+                        'authtype': 'v4',
+                    },
+                },
+                'shapes': {},
+            },
+        )
+        self._write_model(
+            self.docs_path,
+            {
+                'operations': {
+                    'DescribeThing': {
+                        'documentation': '<p>team docs</p>',
+                    },
+                },
+            },
+        )
+
+    def _write_model(self, root, model):
+        dirname = os.path.join(root, self.service_name, self.api_version)
+        os.makedirs(dirname)
+        full_path = os.path.join(dirname, 'service-2.json')
+        with open(full_path, 'w') as f:
+            json.dump(model, f)
+        return full_path
+
+    def _write_auth_override(self, authtype='none'):
+        return self._write_model(
+            self.auth_path,
+            {
+                'operations': {
+                    'DescribeThing': {
+                        'authtype': authtype,
+                    },
+                },
+            },
+        )
+
+    def create_loader(self, search_paths, **kwargs):
+        kwargs.setdefault('include_default_search_paths', False)
+        kwargs.setdefault('include_default_extras', False)
+        return Loader(extra_search_paths=search_paths, **kwargs)
+
+    def load_model(self, loader):
+        return loader.load_service_model(
+            self.service_name, 'service-2', self.api_version
+        )
+
+    def test_supplemental_models_not_merged_without_opt_in(self):
+        loader = self.create_loader([self.docs_path, self.release_path])
+        model = self.load_model(loader)
+        operation = model['operations']['DescribeThing']
+        # Without the opt-in, the first match on the search path is used
+        # as-is and nothing is merged or audited.
+        self.assertEqual(operation['documentation'], '<p>team docs</p>')
+        self.assertNotIn('metadata', model)
+        self.assertNotIn('authtype', operation)
+        self.assertEqual(loader.supplemental_audit_log, [])
+
+    def test_docs_merged_and_auth_change_blocked(self):
+        self._write_auth_override()
+        loader = self.create_loader(
+            [self.docs_path, self.auth_path, self.release_path],
+            allow_supplemental_models=True,
+        )
+        model = self.load_model(loader)
+        operation = model['operations']['DescribeThing']
+        self.assertEqual(operation['documentation'], '<p>team docs</p>')
+        self.assertEqual(operation['authtype'], 'v4')
+        self.assertEqual(model['metadata']['signatureVersion'], 'v4')
+
+        audit_log = loader.supplemental_audit_log
+        self.assertEqual(len(audit_log), 1)
+        record = audit_log[0]
+        self.assertEqual(record['service_name'], self.service_name)
+        self.assertEqual(record['api_version'], self.api_version)
+        self.assertEqual(record['operation_name'], 'DescribeThing')
+        self.assertEqual(record['key'], 'authtype')
+        self.assertEqual(record['blocked_value'], 'none')
+        self.assertEqual(record['retained_value'], 'v4')
+        self.assertTrue(record['source_path'].startswith(self.auth_path))
+
+    def test_new_operations_from_supplement_are_allowed(self):
+        self._write_model(
+            self.auth_path,
+            {
+                'operations': {
+                    'NewThing': {
+                        'name': 'NewThing',
+                        'http': {'method': 'POST', 'requestUri': '/'},
+                        'authtype': 'none',
+                    },
+                },
+            },
+        )
+        loader = self.create_loader(
+            [self.auth_path, self.release_path],
+            allow_supplemental_models=True,
+        )
+        model = self.load_model(loader)
+        self.assertEqual(model['operations']['NewThing']['authtype'], 'none')
+        self.assertEqual(loader.supplemental_audit_log, [])
+
+    def test_provenance_maintained_on_cache_hit_and_reload(self):
+        self._write_auth_override()
+        search_paths = [self.docs_path, self.auth_path, self.release_path]
+        loader = self.create_loader(
+            search_paths, allow_supplemental_models=True
+        )
+        first = self.load_model(loader)
+        second = self.load_model(loader)
+        # A cache hit returns the same merged model without duplicating
+        # audit records.
+        self.assertIs(first, second)
+        self.assertEqual(len(loader.supplemental_audit_log), 1)
+
+        # Reloading with a fresh loader reproduces the same merged model
+        # and the same provenance.
+        reloaded_loader = self.create_loader(
+            search_paths, allow_supplemental_models=True
+        )
+        reloaded_model = self.load_model(reloaded_loader)
+        self.assertEqual(reloaded_model, first)
+        self.assertEqual(
+            reloaded_loader.supplemental_audit_log,
+            loader.supplemental_audit_log,
+        )
+
+    def test_higher_precedence_supplement_wins(self):
+        other_path = os.path.join(self.tempdir, 'other')
+        self._write_model(
+            other_path,
+            {
+                'operations': {
+                    'DescribeThing': {
+                        'documentation': '<p>other docs</p>',
+                    },
+                },
+            },
+        )
+        loader = self.create_loader(
+            [self.docs_path, other_path, self.release_path],
+            allow_supplemental_models=True,
+        )
+        model = self.load_model(loader)
+        self.assertEqual(
+            model['operations']['DescribeThing']['documentation'],
+            '<p>team docs</p>',
+        )
+
+    def test_supplemental_model_data_not_mutated_by_merge(self):
+        auth_model_path = self._write_auth_override()
+        loader = self.create_loader(
+            [self.docs_path, self.auth_path, self.release_path],
+            allow_supplemental_models=True,
+        )
+        self.load_model(loader)
+        with open(auth_model_path) as f:
+            on_disk = json.load(f)
+        # The blocked key is only stripped from the merged copy; the
+        # supplemental model on disk is left untouched.
+        self.assertEqual(
+            on_disk['operations']['DescribeThing']['authtype'], 'none'
+        )
 
 
 class TestMergeExtras(BaseEnvVar):
