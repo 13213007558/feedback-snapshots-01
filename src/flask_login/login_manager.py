@@ -10,6 +10,10 @@ from flask import redirect
 from flask import request
 from flask import session
 
+from .config import CONTINUATION_ENABLED
+from .config import CONTINUATION_ENTRY_PARAM
+from .config import CONTINUATION_PARAM
+from .config import CONTINUATION_SAFE_HOME
 from .config import COOKIE_DURATION
 from .config import COOKIE_HTTPONLY
 from .config import COOKIE_NAME
@@ -22,6 +26,13 @@ from .config import REFRESH_MESSAGE
 from .config import REFRESH_MESSAGE_CATEGORY
 from .config import SESSION_KEYS
 from .config import USE_SESSION_FOR_NEXT
+from .continuation import add_query_param
+from .continuation import build_continuation
+from .continuation import MemoryContinuationStore
+from .continuation import policy_for
+from .continuation import remember_in_session
+from .continuation import safe_home
+from .continuation import SESSION_CONTINUATION_ENTRY
 from .mixins import AnonymousUserMixin
 from .signals import session_protected
 from .signals import user_accessed
@@ -100,6 +111,26 @@ class LoginManager:
 
         self._session_identifier_generator = _create_identifier
 
+        #: Whether continuation records are registered when redirecting to
+        #: a login or confirmation page. Also enabled by the
+        #: ``CONTINUATION_ENABLED`` config value.
+        self.continuation_enabled = CONTINUATION_ENABLED
+
+        #: Storage used for continuation records. The default in-process
+        #: store is shared by every request handled by this manager.
+        self.continuation_store = MemoryContinuationStore()
+
+        #: Per-entry continuation policies. Either a mapping keyed by entry
+        #: (usually a blueprint name, ``None`` for the app-wide entry, or
+        #: ``"*"``), a single :class:`~flask_login.continuation.ContinuationPolicy`,
+        #: or a callable that takes an entry and returns one of those. Also
+        #: settable through the ``CONTINUATION_POLICY`` config value.
+        self.continuation_policy = None
+
+        #: The entry used when the current request has no blueprint. Defaults
+        #: to ``None`` which is treated as its own entry.
+        self.continuation_default_entry = None
+
         if app is not None:
             self.init_app(app, add_context_processor)
 
@@ -168,16 +199,130 @@ class LoginManager:
             else:
                 flash(self.login_message, category=self.login_message_category)
 
+        return redirect(self._authentication_redirect(login_view))
+
+    def continuation_config(self):
+        """Return the configured continuation policy source, if any."""
         config = current_app.config
+        value = config.get("CONTINUATION_POLICY")
+        if value is None:
+            value = self.continuation_policy
+        return value
+
+    def continuation_is_enabled(self):
+        """Return whether continuation registration is enabled."""
+        config = current_app.config
+        return bool(
+            config.get(
+                "CONTINUATION_ENABLED",
+                self.continuation_enabled,
+            )
+        )
+
+    def register_continuation(self, target=None, entry=None, user=None, endpoint=None):
+        """Register the current navigation as a continuation candidate.
+
+        :param target: The relative landing path, including query string.
+            Defaults to the current request URL reduced to a path.
+        :param entry: The entry point the navigation belongs to. Defaults to
+            the current blueprint.
+        :param user: The subject the record is bound to. Defaults to
+            ``current_user`` if authenticated.
+        :param endpoint: The endpoint the navigation was heading to.
+        :return: The stored :class:`~flask_login.continuation.Continuation`.
+        """
+        if entry is None:
+            entry = request.blueprint
+        if entry is None:
+            entry = self.continuation_default_entry
+        if target is None:
+            target = make_next_param(request.host_url, request.url)
+            if not target:
+                target = request.path
+                if request.query_string:
+                    target += "?" + request.query_string.decode()
+        if endpoint is None:
+            endpoint = request.endpoint
+
+        subject_id = None
+        if user is None:
+            from .utils import _get_user
+
+            user = _get_user()
+        if user is not None and getattr(user, "is_authenticated", False):
+            attribute = self.id_attribute
+            identifier = getattr(user, attribute, None)
+            if callable(identifier):
+                identifier = identifier()
+            subject_id = identifier
+
+        policy = policy_for(self.continuation_config(), entry)
+        continuation = build_continuation(
+            target,
+            entry=entry,
+            endpoint=endpoint,
+            subject_id=subject_id,
+            policy=policy,
+            clock=self.continuation_store.now,
+        )
+        self.continuation_store.issue(continuation)
+        return continuation
+
+    def _continuation_redirect_url(self, login_view, entry):
+        """Build a login redirect that hands the flow identifier to the page."""
+        config = current_app.config
+
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
             login_url = expand_login_view(login_view)
             session["_id"] = self._session_identifier_generator()
             session["next"] = make_next_param(login_url, request.url)
-            redirect_url = make_login_url(login_view)
-        else:
-            redirect_url = make_login_url(login_view, next_url=request.url)
+            continuation = self.register_continuation(entry=entry)
+            remember_in_session(continuation.token, entry)
+            return make_login_url(login_view)
 
-        return redirect(redirect_url)
+        continuation = self.register_continuation(entry=entry)
+        if entry is None:
+            session.pop(SESSION_CONTINUATION_ENTRY, None)
+        else:
+            session[SESSION_CONTINUATION_ENTRY] = entry
+        param = config.get("CONTINUATION_PARAM", CONTINUATION_PARAM)
+        entry_param = config.get("CONTINUATION_ENTRY_PARAM", CONTINUATION_ENTRY_PARAM)
+        redirect_url = make_login_url(
+            login_view,
+            next_url=request.url,
+            next_field="next",
+            extra={entry_param: entry} if entry is not None else None,
+        )
+        return add_query_param(redirect_url, param, continuation.token)
+
+    def _authentication_redirect(self, login_view):
+        """Return the redirect response for login or confirmation."""
+        entry = request.blueprint
+        if entry is None:
+            entry = self.continuation_default_entry
+
+        if not self.continuation_is_enabled():
+            config = current_app.config
+            if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
+                login_url = expand_login_view(login_view)
+                session["_id"] = self._session_identifier_generator()
+                session["next"] = make_next_param(login_url, request.url)
+                redirect_url = make_login_url(login_view)
+            else:
+                redirect_url = make_login_url(login_view, next_url=request.url)
+            return redirect_url
+
+        return self._continuation_redirect_url(login_view, entry)
+
+    def continuation_home(self, entry=None):
+        """Return the safe home URL for an entry."""
+        if entry is None:
+            entry = request.blueprint
+            if entry is None:
+                entry = self.continuation_default_entry
+        config = current_app.config
+        fallback = config.get("CONTINUATION_SAFE_HOME", CONTINUATION_SAFE_HOME)
+        return safe_home(policy_for(self.continuation_config(), entry), fallback, entry)
 
     def user_loader(self, callback):
         """
@@ -279,17 +424,7 @@ class LoginManager:
                     category=self.needs_refresh_message_category,
                 )
 
-        config = current_app.config
-        if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
-            login_url = expand_login_view(self.refresh_view)
-            session["_id"] = self._session_identifier_generator()
-            session["next"] = make_next_param(login_url, request.url)
-            redirect_url = make_login_url(self.refresh_view)
-        else:
-            login_url = self.refresh_view
-            redirect_url = make_login_url(login_url, next_url=request.url)
-
-        return redirect(redirect_url)
+        return redirect(self._authentication_redirect(self.refresh_view))
 
     def _update_request_context_with_user(self, user=None):
         """Store the given user as ctx.user."""

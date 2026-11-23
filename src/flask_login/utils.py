@@ -97,7 +97,7 @@ def expand_login_view(login_view):
     return url_for(login_view)
 
 
-def login_url(login_view, next_url=None, next_field="next"):
+def login_url(login_view, next_url=None, next_field="next", extra=None):
     """
     Creates a URL for redirecting to a login page. If only `login_view` is
     provided, this will just return the URL for it. If `next_url` is provided,
@@ -116,15 +116,25 @@ def login_url(login_view, next_url=None, next_field="next"):
     :param next_field: What field to store the next URL in. (It defaults to
                        ``next``.)
     :type next_field: str
+    :param extra: Additional query string fields to set on the login URL.
+    :type extra: dict
     """
     base = expand_login_view(login_view)
 
-    if next_url is None:
-        return base
-
     parsed_result = urlsplit(base)
     md = parse_qs(parsed_result.query, keep_blank_values=True)
-    md[next_field] = make_next_param(base, next_url)
+
+    if next_url is not None:
+        md[next_field] = make_next_param(base, next_url)
+
+    if extra:
+        for field, value in extra.items():
+            if value is not None:
+                md[field] = value
+
+    if next_url is None and not extra:
+        return base
+
     netloc = current_app.config.get("FORCE_HOST_FOR_REDIRECTS") or parsed_result.netloc
     parsed_result = parsed_result._replace(netloc=netloc, query=urlencode(md, doseq=True))
     return urlunsplit(parsed_result)

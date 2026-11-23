@@ -217,6 +217,65 @@ In your API (blueprint named as api) you don't wanna redirect to login page but 
         return redirect(url_for('site.login'))
 
 
+Parallel Login Flows
+====================
+When several protected pages are open at once (for example an employee site
+and a vendor site served by different blueprints), each navigation can carry
+its own continuation. A continuation records the relative landing path when
+the user is redirected to authenticate, and is redeemed once the login or
+confirmation succeeds. This is opt-in::
+
+    app.config["CONTINUATION_ENABLED"] = True
+
+    login_manager = LoginManager()
+    login_manager.init_app(app)
+    login_manager.login_view = "login"
+    login_manager.refresh_view = "confirm"
+
+    login_manager.continuation_policy = {
+        "employee": ContinuationPolicy(
+            ttl=timedelta(minutes=10),
+            allowed_endpoints={"employee.orders", "employee.*"},
+            safe_home="/employee/",
+            authorizer=lambda user, record: user.can_reach(record.endpoint),
+        ),
+        "vendor": ContinuationPolicy(
+            ttl=timedelta(minutes=10),
+            safe_home="/vendor/",
+            authorizer=lambda user, record: user.can_reach(record.endpoint),
+        ),
+    }
+
+The login page receives the flow identifier in the ``continuation`` query
+string, or from the session under ``continuation`` (and
+``continuation_entries`` per entry) when ``USE_SESSION_FOR_NEXT`` is enabled.
+``continuation_token()`` exposes whichever one applies. After authenticating
+or confirming, call :func:`consume_continuation`::
+
+    @app.post("/login")
+    def login():
+        user = authenticate(...)
+        login_user(user)
+        return redirect(consume_continuation())
+
+    @app.post("/confirm")
+    def confirm():
+        confirm_login()
+        return redirect(consume_continuation())
+
+``consume_continuation`` looks the record up by token, checks that it belongs
+to the subject completing the flow, and re-evaluates ``allowed_endpoints`` and
+``authorizer`` against the current request. When the record is missing,
+expired, consumed, or no longer authorized, it returns the entry's
+``safe_home`` instead. Consumption is atomic: concurrent confirmations of the
+same record produce at most one landing redirect, while other pending flows
+remain redeemable.
+
+The default :class:`~flask_login.continuation.MemoryContinuationStore` is
+per-process. Subclass :class:`~flask_login.continuation.ContinuationStore` (or
+provide a compatible object) and assign it to
+``login_manager.continuation_store`` for shared, multi-process storage.
+
 Custom Login using Request Loader
 =================================
 Sometimes you want to login users without using cookies, such as using header
@@ -559,6 +618,42 @@ Configuring Login
 
    .. automethod:: needs_refresh_handler
 
+
+Continuation Configuration
+--------------------------
+
+.. automethod:: LoginManager.register_continuation
+
+.. automethod:: LoginManager.continuation_home
+
+.. attribute:: LoginManager.continuation_enabled
+
+   Whether continuation records are registered. The ``CONTINUATION_ENABLED``
+   config value takes precedence.
+
+.. attribute:: LoginManager.continuation_store
+
+   Storage for continuation records. Defaults to
+   :class:`~flask_login.continuation.MemoryContinuationStore`.
+
+.. attribute:: LoginManager.continuation_policy
+
+   Per-entry policies. The ``CONTINUATION_POLICY`` config value takes
+   precedence.
+
+.. autofunction:: consume_continuation
+
+.. autofunction:: continuation_token
+
+.. autofunction:: pending_continuations
+
+.. autoclass:: ContinuationPolicy
+
+.. autoclass:: Continuation
+
+.. autoclass:: ContinuationStore
+
+.. autoclass:: MemoryContinuationStore
 
 Login Mechanisms
 ----------------

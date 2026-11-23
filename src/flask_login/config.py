@@ -40,6 +40,10 @@ SESSION_KEYS = {
     "_id",
     "_fresh",
     "next",
+    "continuation",
+    "continuation_tokens",
+    "continuation_entries",
+    "continuation_entry",
 }
 
 #: A set of HTTP methods which are exempt from `login_required` and
@@ -50,3 +54,23 @@ EXEMPT_METHODS = {"OPTIONS"}
 #: rather than a url parameter when redirecting to the login view; defaults to
 #: ``False``.
 USE_SESSION_FOR_NEXT = False
+
+#: The default query string / form field used to carry a continuation flow
+#: identifier to the login page.
+CONTINUATION_PARAM = "continuation"
+
+#: The default query string / form field used to carry the entry point of a
+#: continuation to the login page. This lets a losing concurrent confirmation
+#: fall back to the right entry's safe home.
+CONTINUATION_ENTRY_PARAM = "continuation_entry"
+
+#: The default lifetime of a continuation record. ``None`` disables expiry
+#: (records remain single-use).
+CONTINUATION_TTL = timedelta(minutes=30)
+
+#: The default landing page used when a continuation is missing, expired, or
+#: no longer authorized.
+CONTINUATION_SAFE_HOME = "/"
+
+#: Whether the optional continuation mechanism is enabled.
+CONTINUATION_ENABLED = False

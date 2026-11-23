@@ -18,6 +18,11 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add an opt-in continuation mechanism for parallel login flows. Navigations
+  register a per-entry relative landing path; the login page receives a flow
+  identifier through the query string or session and calls
+  `consume_continuation` to redeem it. Redemption re-checks the subject and
+  current entry permissions and is single-use.
 
 
 Version 0.6.3
