@@ -20,7 +20,27 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from random import randint
 
+from botocore.exceptions import ClientError
+
 from .lru import LRUCache
+
+
+def is_access_denied(exception):
+    """Determine whether an exception reports revoked authorization.
+
+    :type exception: Exception
+    :param exception: The exception raised by the Secrets Manager client.
+
+    :rtype: bool
+    :return: True if the backend denied access to the requested secret.
+    """
+    if not isinstance(exception, ClientError):
+        return False
+    response = exception.response or {}
+    error_code = response.get("Error", {}).get("Code", "")
+    if error_code.startswith("AccessDenied"):
+        return True
+    return response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 403
 
 
 class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
@@ -105,6 +125,9 @@ class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
             return True
         except Exception as e:  # pylint: disable=broad-except
             self._exception = e
+            if is_access_denied(e):
+                # A revoked value must not be served from a stale cache entry.
+                self._invalidate()
             delay = self._config.exception_retry_delay_base * (
                 self._config.exception_retry_growth_factor ** self._exception_count
             )
@@ -112,6 +135,14 @@ class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
             delay = min(delay, self._config.exception_retry_delay_max)
             self._next_retry_time = datetime.now(timezone.utc) + timedelta(seconds=delay)
             return False
+
+    def _invalidate(self):
+        """Discard the cached result so it can no longer be served.
+
+        The caller must hold self._lock.
+        """
+        self._result = None
+        self._refresh_needed = False
 
     def get_secret_value(self, version_stage=None):
         """Get the cached secret value for the given version stage.
@@ -158,6 +189,8 @@ class SecretCacheObject:  # pylint: disable=too-many-instance-attributes
 
     def _get_result(self):
         """Get the stored result using a hook if present"""
+        if self._result is None:
+            return None
         if self._config.secret_cache_hook is None:
             return self._result
 
@@ -260,7 +293,7 @@ class SecretCacheItem(SecretCacheObject):
 class SecretCacheVersion(SecretCacheObject):
     """Secret cache object for a secret version."""
 
-    def __init__(self, config, client, secret_id, version_id):
+    def __init__(self, config, client, secret_id, version_id, revalidate=False):
         """Construct the cache object for a secret version.
 
         :type config: aws_secretsmanager_caching.SecretCacheConfig
@@ -274,9 +307,30 @@ class SecretCacheVersion(SecretCacheObject):
 
         :type version_id: str
         :param version_id: The version identifier.
+
+        :type revalidate: bool
+        :param revalidate: Whether the value must be re-read after
+            secret_refresh_interval. Version-pinned reads enable this so a
+            revoked authorization is observed without an explicit refresh.
         """
         super(SecretCacheVersion, self).__init__(config, client, secret_id)
         self._version_id = version_id
+        self._revalidate = revalidate
+        self._next_refresh_time = datetime.now(timezone.utc)
+
+    def _is_refresh_needed(self):
+        """Determine if the cached version should be refreshed.
+
+        :rtype: bool
+        :return: True if a refresh is needed.
+        """
+        if super(SecretCacheVersion, self)._is_refresh_needed():
+            return True
+        if not self._revalidate:
+            return False
+        if self._exception:
+            return False
+        return self._next_refresh_time <= datetime.now(timezone.utc)
 
     def _execute_refresh(self):
         """Perform the actual refresh of the cached secret version.
@@ -284,7 +338,16 @@ class SecretCacheVersion(SecretCacheObject):
         :rtype: dict
         :return: The result of GetSecretValue for the version.
         """
-        return self._client.get_secret_value(SecretId=self._secret_id, VersionId=self._version_id)
+        result = self._client.get_secret_value(SecretId=self._secret_id, VersionId=self._version_id)
+        returned_version = result.get("VersionId") if result else None
+        if returned_version is not None and returned_version != self._version_id:
+            raise ValueError(
+                f"Requested version {self._version_id} but received {returned_version}"
+            )
+        if self._revalidate:
+            ttl = self._config.secret_refresh_interval
+            self._next_refresh_time = datetime.now(timezone.utc) + timedelta(seconds=randint(round(ttl / 2), ttl))
+        return result
 
     def _get_version(self, version_stage):
         """Get the cached version information for the given stage.

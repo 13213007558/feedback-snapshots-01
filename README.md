@@ -128,6 +128,20 @@ secret = cache.get_secret_string('mysecret')
 
 This call blocks for a few seconds before it retrieves the secret. If a recent refresh failed, the call also waits for the pending retry delay, up to a maximum of 10 seconds.
 
+#### Reading a Pinned Version Without DescribeSecret
+
+Some processes are only allowed to read a specific version listed in a deployment manifest and are not granted `secretsmanager:DescribeSecret`. Pass `version_id` to read that exact version with `GetSecretValue` only; `DescribeSecret` is never called for a pinned read.
+
+```python
+secret = cache.get_secret_string('mysecret', version_id='01234567890123456789012345678901')
+```
+
+Stage-based reads (`get_secret_string('mysecret')`, `version_stage='AWSPREVIOUS'`, and the decorators) keep working unchanged for operator tooling.
+
+Pinned reads and stage-based reads are cached separately. A value warmed by an operator through a stage is never served to a pinned read for the same secret and version. Cache entries are also partitioned by authorization context, which defaults to the injected client, so two roles with different clients never share cached values. When several roles share one `SecretCache` instance, pass an explicit `authorization_context` so a role switch uses a distinct scope even if the secret id and version text are identical.
+
+When the backend reports that access has been revoked (`AccessDenied`), the cached value is discarded and is no longer returned. Pinned values are re-checked after `secret_refresh_interval`, so a revocation is observed on the next refresh.
+
 #### Cache Configuration
 
 You can configure the cache config object with the following parameters:
