@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"><title>manual nonce page</title></head>
+  <body>
+    <script nonce="{{ request.csp_nonce }}">var hello = "world";</script>
+  </body>
+</html>

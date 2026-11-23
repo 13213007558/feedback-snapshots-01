@@ -10,6 +10,19 @@ from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
 
+# Matches the value of a `nonce` attribute in rendered markup, e.g. nonce="abc123".
+_nonce_attr_re = re.compile(
+    r"""(?:\s|^)nonce\s*=\s*               # the nonce attribute
+        (?P<quoted>["'])(?P<qvalue>.*?)(?P=quoted)  # a quoted value
+        |
+        (?:\s|^)nonce\s*=\s*(?P<bare>[^\s>]+)       # or an unquoted value
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Matches the value of a `'nonce-...'` source inside a serialized CSP header.
+_nonce_header_re = re.compile(r"'nonce-(?P<nonce>[^']+)'")
+
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
     "child-src": None,
@@ -216,3 +229,26 @@ def build_script_tag(content: str | None = None, **kwargs: Any) -> str:
     c = _unwrap_script(content) if content and not kwargs.get("src") else ""
     attrs = ATTR_FORMAT_STR.format(**data).rstrip()
     return f"<script{attrs}>{c}</script>".strip()
+
+
+def get_nonces_from_body(body: str | bytes) -> set[str]:
+    """Return the distinct nonce values used in the rendered markup.
+
+    Only the body that has already been rendered is inspected; callers must not
+    use this on a lazy or streaming response whose content would otherwise be
+    consumed early.
+    """
+    text = force_str(body)
+    nonces: set[str] = set()
+    for match in _nonce_attr_re.finditer(text):
+        value = match.group("qvalue") if match.group("quoted") else match.group("bare")
+        if value:
+            nonces.add(value)
+    return nonces
+
+
+def get_nonces_from_policy(policy: str | None) -> set[str]:
+    """Return the distinct nonce values advertised by a serialized CSP header."""
+    if not policy:
+        return set()
+    return set(_nonce_header_re.findall(policy))

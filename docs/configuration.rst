@@ -119,6 +119,12 @@ policy.
        instead of ``csp.middleware.CSPMiddleware``.
        See :ref:`violation reporting <reports-chapter>` for more details.
 
+``UPSTREAM_NONCE_HEADER``
+    The name of a trusted request header from which a reverse proxy supplies the CSP nonce when the
+    proxy, rather than Django, owns the nonce. Only this explicitly named header is read; generic or
+    untrusted request fields are never used as a nonce. When the header is absent Django generates a
+    nonce itself. See :ref:`nonce reconciliation <nonce-chapter>` for details.
+
 ``DIRECTIVES``
     A dictionary of policy directives. Each key in the dictionary is a directive and the value is a
     list of sources for that directive. The following is a list of all the directives that can be

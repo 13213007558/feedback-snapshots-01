@@ -1,3 +1,5 @@
+.. _nonce-chapter:
+
 ==============================
 Using the generated CSP nonce
 ==============================
@@ -104,6 +106,51 @@ occurrences of script tags.
     	var hello="world";
     </script>
 
+
+Reconciling the rendered nonce with the policy
+==============================================
+Some deployments generate the Content-Security-Policy header in Django, while others put a reverse
+proxy in front that mints the nonce and writes the header. The middleware records which party owns
+the nonce for a request and, after the view renders, reconciles the nonce actually present in the
+response body with the nonce advertised by the final enforced policy.
+
+For an ordinary, fully rendered response the middleware reads ``response.content`` (which never
+triggers lazy work), extracts every ``nonce="..."`` value from the markup, and compares it with the
+``'nonce-...'`` sources in the ``Content-Security-Policy`` header:
+
+* When the two match, the page is released and the result is recorded on
+  ``response._csp_nonce_reconciled`` as a mapping with ``status="released"``, the nonce ``owner``
+  (``"Django"`` or ``"upstream proxy"``), plus the body and enforced nonce sets.
+* When they do not match, the middleware raises
+  ``csp.exceptions.CSPNonceConflictError`` before the page is delivered, so a response can never be
+  released that merely *looks* approved. The response is marked
+  ``response._csp_nonce_reconciled = "conflict"``.
+* ``StreamingHttpResponse`` bodies are never read to perform this check, because doing so would
+  consume the iterator. They are marked ``"skipped-streaming"`` and passed through untouched.
+* A body that contains no ``nonce`` attribute is marked ``"no-nonce-in-body"`` and is left alone.
+
+The ``Content-Security-Policy-Report-Only`` header is reconciled independently. A report-only
+mismatch only logs a warning and never blocks delivery; the enforced header remains the one that
+fails closed.
+
+Trusted upstream nonce
+----------------------
+To let a reverse proxy own the nonce, name the request header it sends in the
+``UPSTREAM_NONCE_HEADER`` policy setting. Only this explicitly configured header is ever consulted,
+so the nonce is never guessed from generic request fields or an untrusted header:
+
+.. code-block:: python
+
+    CONTENT_SECURITY_POLICY = {
+        "UPSTREAM_NONCE_HEADER": "X-CSP-Nonce",
+        "DIRECTIVES": {
+            "default-src": ["'self'", NONCE],
+        },
+    }
+
+When that header is present on the request, its value is pinned onto ``request.csp_nonce`` so the
+template and the policy builder use exactly the proxy's value, and the request is flagged with an
+upstream owner. When the header is absent, Django generates its own nonce as usual.
 
 ``Django Template Tag/Jinja Extension``
 =======================================
